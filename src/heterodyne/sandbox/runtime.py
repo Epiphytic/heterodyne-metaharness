@@ -38,6 +38,7 @@ from heterodyne.harness.selection import InstallPin
 from heterodyne.harness.store import Store
 from heterodyne.sandbox import sessiongit
 from heterodyne.sandbox.backend import Backend, BackendError, BackendUnavailable, ExecResult, Watch
+from heterodyne.sandbox.events import EventLog
 from heterodyne.sandbox.selftest import ProbeContext, SelfTest, SelfTestFailed
 from heterodyne.sandbox.settings import SandboxSettings, WsSandbox
 from heterodyne.sandbox.spec import (
@@ -57,10 +58,11 @@ from heterodyne.sandbox.spec import (
     short_id,
 )
 from heterodyne.session import shim
-from heterodyne.session.server import SessionServer
-from heterodyne.tmux import Tmux, TmuxError
+from heterodyne.session.server import BoundaryBusy, BoundaryUncertain, BoundaryUnmarked, SessionServer
+from heterodyne.tmux import Tmux, TmuxError, TmuxPasteUncertain, has_controls
 from heterodyne.wsd import gitwip, ids
 from heterodyne.wsd.accounts import Accounts
+from heterodyne.wsd.brief import BRIEF_MAX
 from heterodyne.wsd.checkpoints import Checkpoint, nothing
 from heterodyne.wsd.credlock import CredentialBusy, credential_lock
 from heterodyne.wsd.runtime import (
@@ -72,6 +74,7 @@ from heterodyne.wsd.runtime import (
     Action,
     EndCause,
     Ended,
+    EventBatch,
     ExecDirCleared,
     InstallTainted,
     LaunchFailed,
@@ -84,8 +87,11 @@ from heterodyne.wsd.runtime import (
     ResolveRefused,
     RuntimeUnavailable,
     Session,
+    SessionEvent,
     Signal,
     Started,
+    SteerRefused,
+    SteerUncertain,
     UnlandedView,
     UsageSeen,
 )
@@ -94,6 +100,12 @@ DEFAULT_ACCOUNT = "default"
 TRUST_SECONDS = 90
 SERVER_SECONDS = 20
 POLL_SECONDS = 0.1
+STEER_MAX = 16384       # UTF-8 bytes of one steer (plan 5i)
+BRIEF_SECONDS = 60.0    # the probe turn's end, then the brief's prompt (plan 5i T4)
+STEER_SECONDS = 5.0     # the most a steer's paste may take; never more than half the session's hook wait
+STEER_MIN_SECONDS = 1.0     # less than this leaves too little for a paste and its settle
+STEER_UNCERTAIN = ("a steer may have been delivered; nothing more is pasted into this generation, and "
+                   "its note must not be delivered again without an operator")
 TMUX_ERRORS = (TmuxError, OSError, subprocess.TimeoutExpired)
 SHIM_SOURCE = Path(shim.__file__)
 WIP_FAILED = "the lifetime WIP commit failed; it is retried before the next launch"
@@ -326,6 +338,10 @@ class SandboxRuntime:
         self.polled: dict[tuple[str, int], int] = {}      # (key, generation) -> when its read last ran
         self.walked: dict[tuple[str, str], int] = {}      # (adapter, install) -> when its last walk passed
         self.walk_lock = threading.Lock()                  # one taint walk at a time: expire's and the ends'
+        self.logs: dict[str, EventLog] = {}               # key -> its running generation's event log
+        self.logs_lock = threading.Lock()                 # the lanes swap logs while session_events reads
+        self.wake: Callable[[str], None] = lambda _ws: None
+        self.ops: Mapping[str, frozenset[str]] = {}       # ws -> the ws-request ops its handlers take (D6)
 
     # --- names ---
 
@@ -504,6 +520,111 @@ class SandboxRuntime:
                 self._poll(rec)
         with self.queue_lock:
             return [*self.queued.pop(ws, []), *self.notices.pop(ws, {}).values()]
+
+    def session_events(self, ws: str, since: Mapping[str, tuple[int, int]], limit: int) -> EventBatch:
+        """Plan 5i: each of the workstream's sessions' events after its cursor, from the cursor's generation
+        up to the record's, at most `limit` per key. A generation is final once a later one exists or the
+        record has ENDED, and its socket is closed (its log is no longer live). The running generation is
+        read from memory, the rest from disk, complete lines only (Codex cycle 1 #3: no generation is
+        skipped, however many started since the cursor)."""
+        records = [r for r in self._records() if r.ws == ws]       # RuntimeUnavailable propagates
+        found: list[SessionEvent] = []
+        ends: dict[tuple[str, int], int] = {}
+        more = False
+        for rec in records:
+            gen, n = since.get(rec.key, (1, 0))
+            taken = 0
+            for g in range(gen, rec.generation + 1):
+                with self.logs_lock:
+                    live = self.logs.get(rec.key)
+                if live is not None and live.generation == g:
+                    lg = live
+                else:
+                    try:
+                        lg = EventLog.read(self.layout(rec.key).session_events(g), rec.ws, rec.bead,
+                                           rec.key, g)
+                    except OSError:
+                        raise RuntimeUnavailable("a session event log can't be read") from None
+                page = lg.after(n if g == gen else 0, limit - taken)
+                found += page
+                taken += len(page)
+                if lg is not live and (g < rec.generation or rec.phase is Phase.ENDED):
+                    ends[(rec.key, g)] = lg.last
+                if taken >= limit:
+                    more = True
+                    break
+        return EventBatch(tuple(found), ends, more)
+
+    def steer(self, session_key: str, generation: int, text: str) -> None:
+        """D4: paste into the session's pane, only at a turn boundary this process's socket has seen. After
+        a restart the turn state is empty, so the next turn end must come first. The socket spends the
+        boundary before the paste and holds back turn events until it is over (`at_boundary`), so a boundary
+        a steer (even an uncertain one) pasted at is spent until the next turn end, and concurrent steers
+        can't share one. Text must be valid UTF-8 with no terminal controls but tab and newline. After an
+        uncertain steer nothing more is pasted into that generation (`BoundaryUncertain`): tmux may still
+        run the paste or its Enter late, and no later Enter may submit what it left or deliver it twice. The
+        mark is durable (`steer_inflight`, `steer_uncertain` beside the record), so a restart, a rebind or
+        a crash mid-steer keeps the generation refusing.
+
+        Turn events wait for the paste, and their hooks' shim gives up after the hook wait and lets the turn
+        go on, so the paste is bounded to half of it: a prompt hook that arrives during a paste is still
+        answered, and recorded, in time. The wait is the one installed in the generation's shim.json, which a
+        rebind keeps, not the settings' hook_wait_seconds now."""
+        try:
+            rec = read_record(self.layout(session_key))
+        except RuntimeUnavailable:
+            raise SteerRefused("the session record can't be read") from None
+        if rec is None or rec.phase is not Phase.RUNNING:
+            raise SteerRefused("the session is not running")
+        if rec.generation != generation:
+            raise SteerRefused("the session is running another generation")
+        try:
+            size = len(text.encode("utf-8"))
+        except UnicodeEncodeError:
+            raise SteerRefused("the text is not valid UTF-8") from None
+        if has_controls(text):
+            raise SteerRefused("the text has terminal control characters")
+        if size > STEER_MAX:
+            raise SteerRefused("the text is too long to steer")
+        server = self.servers.get(session_key)
+        if server is None:
+            raise SteerRefused("the session is mid-turn")
+        try:        # the generation's own: a rebind keeps the shim.json it was launched with
+            wait = shim.installed_wait(self.layout(session_key).run(generation))
+        except (OSError, ValueError):
+            raise SteerRefused("the session's hook wait can't be read") from None
+        seconds = min(STEER_SECONDS, wait / 2)
+        if seconds < STEER_MIN_SECONDS:
+            raise SteerRefused("the hook wait is too short to steer")
+        failed = False
+
+        def deliver() -> bool:
+            nonlocal failed
+            try:
+                self.c.tmux.paste(rec.tmux_session, text, seconds=seconds)
+            except TmuxPasteUncertain:
+                raise                       # it may have landed: the boundary stays spent
+            except TmuxError:
+                failed = True               # nothing reached the pane: the boundary is given back
+                return False
+            return True
+
+        try:
+            server.at_boundary(deliver)
+        except BoundaryUncertain:
+            raise SteerRefused("an earlier steer to this session is uncertain") from None
+        except BoundaryUnmarked:
+            raise SteerRefused("the steer can't be marked in flight") from None
+        except BoundaryBusy:
+            raise SteerRefused("the session is mid-turn") from None
+        except TmuxPasteUncertain:
+            log.warning("%s: %s", session_key, STEER_UNCERTAIN)
+            raise SteerUncertain("the steer may have been delivered") from None
+        if failed:
+            raise SteerRefused("the paste failed before reaching the session")
+
+    def subscribe(self, wake: Callable[[str], None], ops: Mapping[str, frozenset[str]]) -> None:
+        self.wake, self.ops = wake, dict(ops)
 
     def ended(self, session_key: str) -> Ended | None:
         """g08sd: the latest generation's end, from its record (`_end_of`)."""
@@ -733,7 +854,7 @@ class SandboxRuntime:
                 spec.session_key, gen, adapter.name, str(cleared.path), cleared.files, cleared.links,
                 cleared.dirs, cleared.bytes, cleared.names))         # B2: wsd journals it
         ws = c.settings.workstreams.get(spec.ws, WsSandbox())
-        token = secrets.token_hex(16)
+        token = secrets.token_hex(shim.TOKEN_HEX // 2)
         shim_config = {"wait_seconds": c.settings.hook_wait_seconds,
                        "local_classes": sorted(ws.local_classes), "worktree": str(spec.worktree)}
         caps = self._caps(spec.profile)
@@ -746,7 +867,9 @@ class SandboxRuntime:
         for fname, text in files.items():
             write_private(run / fname, text)
         (run / REQUEST_INSIDE.name).chmod(0o700)
-        server = self._server(rec, adapter, token, caps)
+        events_log = EventLog.open(layout.session_events(gen), rec.ws, rec.bead, rec.key, gen)
+        self._live(rec.key, events_log)
+        server = self._server(rec, adapter, token, caps, events_log)
         self.servers[spec.session_key] = server     # before start: an end closes even a half-started one
         server.start()
         git_binds = sessiongit.seed(pinned, layout.git, read_only=spec.role in READ_ONLY_ROLES)
@@ -801,9 +924,51 @@ class SandboxRuntime:
         if now >= rec.deadline - c.settings.stop_margin_seconds:
             raise _StepFailed("the launch outlasted its login's lifetime window; "
                               "refresh the login on the host")
+        if spec.brief:
+            self._check_brief(spec.brief)
+        self._forward(events_log)
+        if spec.brief:
+            self._brief(server, rec, spec.brief)
         rec = self._phase(layout, rec, phase=Phase.RUNNING, ran=True, native_id=native, started_at=now,
                           error="")
         return Started(rec.tmux_session, pane, pid, native)
+
+    def _check_brief(self, text: str) -> None:
+        """D5: like a steer a brief may carry no terminal control (`has_controls`; compose escapes the bead's
+        text and the notes), so one paste is one prompt; and it must fit BRIEF_MAX."""
+        if has_controls(text):
+            raise _StepFailed("the brief has terminal control characters")
+        try:
+            size = len(text.encode("utf-8"))
+        except UnicodeEncodeError:
+            raise _StepFailed("the brief is not valid UTF-8") from None
+        if size > BRIEF_MAX:
+            raise _StepFailed("the brief is too long")
+
+    def _forward(self, log: EventLog) -> None:
+        """The event log forwards from the self-test's probe turn's end, brief or none: the hook that ends
+        it starts forwarding (`EventLog.start`, in `_server`'s callback, before the hook is answered), so
+        the probe's turn is never an event and every turn after it is, even one that ends before this
+        wait sees it (a brief's is the first otherwise)."""
+        def forwarding() -> bool:
+            with log.lock:
+                return log.forwarding
+
+        if not self._until(forwarding, BRIEF_SECONDS):
+            raise _StepFailed("the agent's first turn did not end")
+
+    def _brief(self, server: SessionServer, rec: SessionRecord, text: str) -> None:
+        """D5: the brief (checked by `_check_brief`) is pasted once the probe turn has ended (`_forward`),
+        and is confirmed by the next UserPromptSubmit."""
+        before = server.turns().prompts
+        try:
+            self.c.tmux.paste(rec.tmux_session, text)
+        except TmuxPasteUncertain:
+            pass                        # confirmed or not by the prompt count below
+        except TmuxError:
+            raise _StepFailed("the brief could not be pasted") from None
+        if not self._until(lambda: server.turns().prompts > before, BRIEF_SECONDS):
+            raise _StepFailed("the agent did not take its brief")
 
     def _phase(self, layout: SessionLayout, rec: SessionRecord, **changes: Any) -> SessionRecord:
         rec = msgspec.structs.replace(rec, **changes)
@@ -836,16 +1001,35 @@ class SandboxRuntime:
         `_pinned` reads one, under its lock."""
         return self.c.accounts.capabilities_of(profile)
 
-    def _server(self, rec: SessionRecord, adapter: Adapter, token: str, caps: Capabilities) -> SessionServer:
-        """The generation's socket: it counts the adapter's turn ends and hands each hook payload to the
-        adapter's parser, attributed to this generation (E8, E14)."""
+    def _server(self, rec: SessionRecord, adapter: Adapter, token: str, caps: Capabilities,
+                events_log: EventLog) -> SessionServer:
+        """The generation's socket: it counts the adapter's turn ends, hands each hook payload to the
+        adapter's parser, and logs Stops and requests (plan 5i), all attributed to this generation (E8,
+        E14). A Stop that can't be logged is dropped (D3); a request that can't be logged is refused. Only a
+        new event wakes wsd: a resent request is answered from the log and wakes nothing."""
         layout, key, gen = self.layout(rec.key), rec.key, rec.generation
 
         def heard(payload: dict[str, Any]) -> None:
+            event = payload.get("hook_event_name")
+            if event in adapter.turn_end_events and events_log.start():
+                pass                        # the probe's end: never an event, and forwarding starts here
+            elif event == "Stop" and events_log.stop(payload) is not None:
+                self._woke(rec.ws)
             self._report(rec.ws, key, gen, caps, adapter.usage_from_event(payload))
 
+        def asked(payload: dict[str, Any]) -> dict[str, Any]:
+            new, answer = events_log.request(payload, self.ops.get(rec.ws, frozenset()))
+            if new is not None:
+                self._woke(rec.ws)
+            return answer
+
         return SessionServer(layout.socket(gen), token, layout.events(gen), turn_ends=adapter.turn_end_events,
-                             on_event=heard)
+                             on_event=heard, on_request=asked, inflight=layout.steer_inflight(gen),
+                             uncertain=layout.steer_uncertain(gen))
+
+    def _woke(self, ws: str) -> None:
+        with contextlib.suppress(Exception):      # a wake is a hint: the next pickup reads the log anyway
+            self.wake(ws)
 
     def _report(self, ws: str, key: str, gen: int, caps: Capabilities, report: UsageReport | None) -> None:
         if report is None:
@@ -965,15 +1149,28 @@ class SandboxRuntime:
         try:
             token = (layout.run(rec.generation) / shim.TOKEN_FILE).read_text().strip()
             adapter = self.c.adapters[rec.adapter]
-            server = self._server(rec, adapter, token, self._caps(rec.profile))
+            events_log = EventLog.open(layout.session_events(rec.generation), rec.ws, rec.bead, rec.key,
+                                       rec.generation)
+            events_log.forwarding = True        # the session is running, so its brief was taken
+            server = self._server(rec, adapter, token, self._caps(rec.profile), events_log)
         except (OSError, KeyError):
             raise RuntimeUnavailable("a live session's socket can't be served") from None
         try:
             server.start()
         except OSError:
             server.close()
+            events_log.close()
             raise RuntimeUnavailable("a live session's socket can't be served") from None
         self.servers[rec.key] = server
+        self._live(rec.key, events_log)
+
+    def _live(self, key: str, events_log: EventLog) -> None:
+        """The key's running generation's log; one it replaces (an end that never closed its socket) takes
+        no more appends, so its generation can be read as final."""
+        with self.logs_lock:
+            old, self.logs[key] = self.logs.get(key), events_log
+        if old is not None and old is not events_log:
+            old.close()
 
     def _end(self, rec: SessionRecord, *, interrupt: bool, lifetime: bool = False,
              cause: EndCause = EndCause.DIED) -> bool:
@@ -1085,6 +1282,10 @@ class SandboxRuntime:
                 socket_gone = False             # kept, so the next end closes it again
             else:
                 del self.servers[rec.key]
+                with self.logs_lock:
+                    done = self.logs.pop(rec.key, None)
+                if done is not None:
+                    done.close()            # its generation is final now
         for path in (self.layout(rec.key).socket(rec.generation),
                      self.layout(rec.key).probe_socket(rec.generation)):
             try:

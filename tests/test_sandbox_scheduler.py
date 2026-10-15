@@ -7,7 +7,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, replace
 
 import pytest
-from sandbox_env import RuntimeRig, fresh_logins, runtime_rig, short_dir
+from sandbox_env import RuntimeRig, fresh_logins, runtime_rig, short_dir, wait_for
 from tmux_guard import new_test_tmux
 from wsd_env import WS, Rig, make_rig, on_profile
 
@@ -18,10 +18,11 @@ from heterodyne.wsd import gitwip
 from heterodyne.wsd.beads import NEEDS_HUMAN
 from heterodyne.wsd.park import Parker
 from heterodyne.wsd.recovery import recover
-from heterodyne.wsd.runtime import Liveness, RuntimeUnavailable
+from heterodyne.wsd.runtime import Liveness, RuntimeUnavailable, SessionEvent
 from heterodyne.wsd.scheduler import Outcome, Scheduler
+from heterodyne.wsd.session_events import SURFACE, dispatch, ingest
 from heterodyne.wsd.states import BeadState, Reason
-from heterodyne.wsd.workstream import Limits
+from heterodyne.wsd.workstream import Limits, SessionHandler
 
 pytestmark = pytest.mark.skipif(shutil.which("tmux") is None or shutil.which("setsid") is None,
                                 reason="tmux and setsid are needed")
@@ -46,6 +47,7 @@ def both(request: pytest.FixtureRequest) -> Iterator[Both]:
         rig = make_rig(root / "w", limits=limits)
         try:            # the Journal closes whatever fails below: an open one breaks test_wsd_gate's fd count
             rt = runtime_rig(root / "x", tmux, rig.clock)
+            rt.backend.env_extra["HZ_FAKE_BRACKETED"] = "1"     # D5: the brief arrives as one prompt
             rig.ws = replace(rig.ws, accounts=rt.runtime.c.accounts)   # one Accounts, as in wsd
             rig.selections = lambda adapter: rt.installs[adapter].pin  # the runtime's store: one selection
             rig.deps = replace(rig.deps, runtime=rt.runtime, selections=rig.selections)
@@ -104,8 +106,7 @@ def test_the_lifetime_stop_relaunches_the_same_session(both: Both, profile: str)
     rig.world.add("btq-1")
     on_profile(rig, "btq-1", profile)
     assert rig.pickup() is Outcome.STARTED
-    first = both.record("btq-1")
-    rig.clock.advance(first.deadline - rt.runtime.c.settings.stop_margin_seconds - rig.clock())
+    first = stop_window(both, "btq-1")
     assert rig.pickup() is Outcome.BUSY             # stopped, resumed and relaunched in one pickup
     second = both.record("btq-1")
     assert (second.phase, second.generation, second.native_id) == (Phase.RUNNING, 2, first.native_id)
@@ -131,7 +132,7 @@ def test_a_relaunch_the_gate_refuses_needs_a_human(both: Both) -> None:
     first = both.record("btq-1")
     # Valid for this generation, but not for another full lifetime from the stop window.
     fresh_logins(rt.home, first.started_at + s.max_lifetime_seconds + s.stop_margin_seconds + 600)
-    rig.clock.advance(first.deadline - s.stop_margin_seconds - rig.clock())
+    stop_window(both, "btq-1")
     rig.pickup()
     rec = both.record("btq-1")
     assert rec.phase is Phase.ENDED and rec.generation == 1     # generation 2 never got a record write
@@ -142,7 +143,10 @@ def test_a_relaunch_the_gate_refuses_needs_a_human(both: Both) -> None:
 
 
 def stop_window(both: Both, bead: str) -> SessionRecord:
-    """Move the shared clock to the start of the bead's stop window. Returns its record from before."""
+    """Move the shared clock to the start of the bead's stop window, once the session is at a turn boundary
+    (a launch returns when the agent has taken its brief, with the brief's turn still running; a soft stop
+    waits for its end). Returns its record from before."""
+    wait_for(lambda: both.rt.runtime.servers[both.rig.key(bead)].turns().idle)
     rec = both.record(bead)
     both.rig.clock.advance(rec.deadline - both.rt.runtime.c.settings.stop_margin_seconds - both.rig.clock())
     return rec
@@ -340,9 +344,72 @@ def test_a_credential_named_leftover_is_journaled_redacted(both: Both) -> None:
     packages = rt.runtime.layout(first.key).home / ".codex" / "packages"
     packages.mkdir(mode=0o700, parents=True, exist_ok=True)
     (packages / secret).write_bytes(b"x")  # what generation 1 left behind
-    rig.clock.advance(first.deadline - rt.runtime.c.settings.stop_margin_seconds - rig.clock())
+    stop_window(both, "btq-1")             # once generation 1's brief turn has ended
     assert rig.pickup() is Outcome.BUSY    # stopped and relaunched: generation 2's launch clears it
     assert both.record("btq-1").generation == 2 and not any(packages.iterdir())
     rig.pickup()                           # the notice is drained and journaled
     [event] = [e for e in rig.journal.events_since(0) if e.kind == "exec_dir_cleared"]
     assert secret not in event.detail and json.loads(event.detail)["files"] == 1
+
+
+# --- plan 5i part 1 integration: wsd's ingest against the real runtime and EventLog ---
+
+class Seen:
+    """A stop handler that records the IDs it was given."""
+
+    def __init__(self) -> None:
+        self.ids: list[str] = []
+
+    def __call__(self, parker: Parker, event: SessionEvent) -> None:
+        del parker
+        self.ids.append(event.event_id)
+
+
+def _with_handlers(both: Both, handlers: dict[str, SessionHandler]) -> None:
+    rig = both.rig
+    rig.deps = replace(rig.deps, session_handlers=handlers)
+    rig.parker = Parker(rig.ws, rig.deps)
+    rig.sched = Scheduler(rig.ws, rig.deps, rig.parker)
+
+
+def test_a_briefed_stop_reaches_its_handler_through_a_pickup(both: Both) -> None:
+    seen = Seen()
+    _with_handlers(both, {"stop": seen})
+    rig = both.rig
+    rig.world.add("btq-1")
+    assert rig.pickup() is Outcome.STARTED
+    key = rig.key("btq-1")
+    wait_for(lambda: both.rt.runtime.logs[key].last >= 1)      # the brief's turn ended
+    rig.pickup()
+    assert seen.ids == [f"{key}:g1:e1"]
+    assert rig.journal.session_cursors(WS) == {key: (1, 1)}
+    rows = rig.journal.db.execute("SELECT status FROM inbox WHERE surface = ?", (SURFACE,)).fetchall()
+    assert [r[0] for r in rows] == ["committed"]
+
+
+def test_a_missing_run_in_an_ended_generation_is_one_damaged_row_and_later_events_run(
+        both: Both) -> None:
+    seen = Seen()
+    _with_handlers(both, {"stop": seen})
+    rig, rt = both.rig, both.rt
+    rig.world.add("btq-1")
+    assert rig.pickup() is Outcome.STARTED
+    key = rig.key("btq-1")
+    lg = rt.runtime.logs[key]
+    wait_for(lambda: lg.last >= 1)
+    rt.runtime.stop(key)                                     # generation 1 ends: read from disk now
+    row = json.loads(lg.path.read_text().splitlines()[0])
+    row.update(n=5, turn=2)                                  # e2..e4 lost: a missing run
+    with lg.path.open("a") as fh:
+        fh.write(json.dumps(row) + "\n")
+    got = rt.runtime.session_events(WS, {}, 1024)
+    assert [(e.seq, e.kind) for e in got.events] == [(1, "stop"), (4, "damaged"), (5, "stop")]
+    assert got.ends == {(key, 1): 5}
+    ingest(rig.journal, rt.runtime, WS)
+    dispatch(rig.parker, rig.deps.session_handlers, 3)
+    rows = rig.journal.db.execute("SELECT event_id, status FROM inbox WHERE surface = ? ORDER BY seq",
+                                  (SURFACE,)).fetchall()
+    assert [(r[0].rsplit(":", 1)[1], r[1]) for r in rows] == [
+        ("e1", "committed"), ("e4", "needs_human"), ("e5", "committed")]
+    assert seen.ids == [f"{key}:g1:e1", f"{key}:g1:e5"]
+    assert rig.journal.session_cursors(WS) == {key: (2, 0)}

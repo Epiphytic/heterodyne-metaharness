@@ -33,6 +33,8 @@ import hashlib
 import json
 import math
 import os
+import re
+import secrets
 import select
 import socket
 import stat
@@ -62,6 +64,11 @@ HOOK_INPUT_WAIT = 5.0           # the CLI writes from memory at spawn: only a st
 DRAIN_CHUNK = 64 * 1024         # past the bound, input is read into a fixed scratch buffer and dropped
 KNOWN_EVENTS = frozenset({"SessionStart", "UserPromptSubmit", "Stop", "StopFailure", "PreToolUse"})
 REQUEST_WRAPPER = '#!/bin/sh\nexec python3 -I /run/hz/shim.py request "$@"\n'
+REQUEST_OPS = ("close", "ask", "question")
+CLOSE_EVIDENCE_MAX = 32768      # UTF-8 bytes of `ws-request close --evidence-file F` (plan 5i)
+REQUEST_BODY_MAX = 32768        # an ask's or a question's JSON object, encoded
+RID = re.compile(r"[0-9a-f]{16}")
+TOKEN_HEX = 32                  # the launch token's length: the runtime makes it, token_hex(TOKEN_HEX // 2)
 
 Clock = Callable[[], float]
 Sleep = Callable[[float], None]
@@ -89,6 +96,15 @@ def _wait(cfg: Mapping[str, Any]) -> float:
     if isinstance(wait, int | float) and not isinstance(wait, bool) and math.isfinite(wait) and wait >= 0:
         return float(wait)
     return DEFAULT_WAIT
+
+
+def installed_wait(run: Path) -> float:
+    """The hook wait a run directory's shim uses: its CONFIG_FILE's, as `_wait` reads it. Raises OSError or
+    ValueError if the file can't be read or isn't an object."""
+    cfg: Any = json.loads((run / CONFIG_FILE).read_text())
+    if not isinstance(cfg, dict):
+        raise ValueError("the shim config is not an object")
+    return _wait(cast(dict[str, Any], cfg))
 
 
 def _exchange(sock: Path, line: bytes, end: float, clock: Clock) -> Any:
@@ -282,14 +298,79 @@ def _decide(fields: dict[str, Any], tool_call: bool, env: Mapping[str, str], clo
         return 0, _deny(reason if isinstance(reason, str) and reason else REFUSED_REASON)
     return 0, ""
 
+def _refused(code: str) -> tuple[int, str]:
+    return 2, json.dumps({"ok": False, "error": code})
+
+
+def _read_text(path: str, limit: int) -> str | tuple[int, str]:
+    try:
+        with Path(path).open("rb") as fh:
+            raw = fh.read(limit + 1)
+    except OSError:
+        return _refused("unreadable")
+    if len(raw) > limit:
+        return _refused("too_large")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return _refused("bad_utf8")
+
+
+def _request_payload(words: Sequence[str]) -> dict[str, Any] | tuple[int, str]:
+    """Plan 5i: `close --evidence-file F`, `ask|question --file F` or `ask|question <json>`; any other
+    first word is sent as plain text, which wsd answers `unsupported`. The rid is fixed here, so every
+    resend of the line carries it and the runtime answers a resend with the first event."""
+    if not words or words[0] not in REQUEST_OPS:
+        return {"text": " ".join(words)}
+    op, rest, rid = words[0], list(words[1:]), secrets.token_hex(8)
+    if op == "close":
+        if len(rest) != 2 or rest[0] != "--evidence-file":
+            return _refused("usage")
+        text = _read_text(rest[1], CLOSE_EVIDENCE_MAX)
+        if isinstance(text, tuple):
+            return text
+        if not text:
+            return _refused("usage")
+        return {"op": op, "rid": rid, "evidence": text}
+    if not rest:
+        return _refused("usage")
+    if rest[0] == "--file":
+        if len(rest) != 2:
+            return _refused("usage")
+        raw = _read_text(rest[1], REQUEST_BODY_MAX)
+        if isinstance(raw, tuple):
+            return raw
+    else:
+        raw = " ".join(rest)
+    if json_depth(raw.encode()) > MAX_DEPTH:
+        return _refused("bad_json")
+    try:
+        body: Any = json.loads(raw)
+    except ValueError:
+        return _refused("bad_json")
+    if not isinstance(body, dict):
+        return _refused("bad_json")
+    if len(_encode(body)) > REQUEST_BODY_MAX:
+        return _refused("too_large")
+    return {"op": op, "rid": rid, "body": body}
+
+
 def run_request(words: Sequence[str], env: Mapping[str, str], *, clock: Clock = time.monotonic,
                 sleep: Sleep = time.sleep) -> tuple[int, str]:
+    """Arguments are checked before wsd is asked, so a usage error is reported even with wsd down."""
+    payload = _request_payload(words)
+    if isinstance(payload, tuple):
+        return payload
+    if len(_encode({"token": "0" * TOKEN_HEX, "type": "ws_request", "payload": payload})) + 1 > MAX_LINE:
+        return _refused("too_large")            # Codex T2 c1 B2: the caller's error, even with wsd away
     found = _config(env)
     if found is None:
         return EX_TEMPFAIL, DENY_REASON
     sock, token, cfg = found
-    reply = _ask(sock, {"token": token, "type": "ws_request", "payload": {"text": " ".join(words)}},
-                 _wait(cfg), clock, sleep)
+    message = {"token": token, "type": "ws_request", "payload": payload}
+    if len(_encode(message)) + 1 > MAX_LINE:
+        return _refused("too_large")
+    reply = _ask(sock, message, _wait(cfg), clock, sleep)
     if reply is None:
         return EX_TEMPFAIL, DENY_REASON
     return (0 if reply.get("ok") is True else 1), json.dumps(reply)

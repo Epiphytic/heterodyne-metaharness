@@ -6,10 +6,11 @@ runtime is wired in, `NoRuntime` reports itself unavailable, and wsd holds every
 claim work it can't run.
 """
 
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 
 from heterodyne.wsd.beads import BeadsAdapter
 from heterodyne.wsd.usage import Observation
@@ -77,6 +78,7 @@ class LaunchSpec:
     # selection; the runtime verifies exactly this pin, and refuses an empty one (INSTALL_UNPINNED).
     install: str = ""
     install_digest: str = ""
+    brief: str = ""         # plan 5i: pasted once the self-test's turn has ended
 
 
 @dataclass(frozen=True)
@@ -133,6 +135,61 @@ class ExecDirCleared:
 
 
 type Signal = UsageSeen | LimitSeen | InstallTainted | ExecDirCleared
+
+
+SessionEventKind = Literal["stop", "close", "ask", "question", "damaged"]
+
+
+@dataclass(frozen=True)
+class SessionEvent:
+    """A Stop or a `ws-request` a session sent through its own socket (plan 5i part 1). The runtime
+    attributes it to the launch whose socket carried it (`ws`, `bead`, `session_key`, `generation`); every
+    other field is untrusted. `event_id` comes from the generation's event log on the host
+    (`<key>:g<gen>:e<n>`, `n` from 1, with no gaps but a damaged run's), so it is the same after a wsd restart
+    and wsd dedupes on it. `turn` is durable too: a Stop's ordinal among the generation's forwarded Stops
+    (from 1), or for a request the turn it was sent in. `text` is a Stop's last message (cut, None when
+    absent) or a close's evidence; `body` is an ask's or a question's JSON object. `close_requested` marks a
+    Stop after a close accepted in the same generation. A `damaged` event marks log lines lost after they were
+    accepted: every number after the event before it, up to its own; it carries nothing else."""
+    event_id: str
+    kind: SessionEventKind
+    ws: str
+    bead: str
+    session_key: str
+    generation: int
+    turn: int
+    text: str | None = None
+    body: dict[str, Any] = field(default_factory=lambda: cast(dict[str, Any], {}))
+    close_requested: bool = False
+
+    @property
+    def seq(self) -> int:
+        """`n`: the event's place in its generation's log."""
+        return int(self.event_id.rsplit(":e", 1)[1])
+
+
+@dataclass(frozen=True)
+class EventBatch:
+    """What `session_events` read: events ordered by (key, generation, n) after each key's cursor. Ordinary
+    events are contiguous; only a `damaged` event may follow a gap, since it stands for every number after
+    the event before it (or the cursor) up to its own. `ends[(key, g)] = n`: generation g's log is final at
+    n (nothing will follow it). `more`: a key had more events than the limit."""
+    events: tuple[SessionEvent, ...] = ()
+    ends: Mapping[tuple[str, int], int] = field(
+        default_factory=lambda: cast(Mapping[tuple[str, int], int], {}))
+    more: bool = False
+
+
+class SteerRefused(Exception):
+    """Nothing was delivered: the session isn't running that generation, is mid-turn, or the paste failed
+    before anything reached its pane. Safe to retry later or to deliver another way."""
+
+
+class SteerUncertain(Exception):
+    """The text may have reached the session (a paste that failed part way), maybe later and mid-turn. The
+    caller counts it as delivered, uncertain: it never steers the same note again or puts it on a resume
+    brief without an operator, and it alerts the operator as for any other uncertain delivery. Nothing
+    more is pasted into that generation (later steers are SteerRefused)."""
 
 
 Action = Literal["land", "keep", "discard"]
@@ -253,6 +310,25 @@ class AgentRuntime(Protocol):
         the runtime can't attribute is never queued."""
         ...
 
+    def session_events(self, ws: str, since: Mapping[str, tuple[int, int]], limit: int) -> EventBatch:
+        """Plan 5i: the accepted events of the workstream's sessions after each key's cursor
+        `since[key] = (generation, n)` (default `(1, 0)`), from the cursor's generation up to the session's
+        current one, at most `limit` per key. Raises RuntimeUnavailable when the sessions can't be read;
+        never drops or reorders an event."""
+        ...
+
+    def steer(self, session_key: str, generation: int, text: str) -> None:
+        """Paste `text` into the session, only at a turn boundary its socket has seen (plan 5i, ADR
+        §5.6). Raises SteerRefused when nothing was delivered and SteerUncertain when it may have been
+        (see SteerUncertain for what the caller owes)."""
+        ...
+
+    def subscribe(self, wake: Callable[[str], None], ops: Mapping[str, frozenset[str]]) -> None:
+        """Called once by wsd before its first pickup: `wake(ws)` is called, from any thread, after a
+        session event is logged, and a session of workstream `ws` may use only the `ws-request` ops in
+        `ops[ws]` (the rest stay unsupported; a workstream not in `ops` has none). `wake` must not block."""
+        ...
+
     def unlanded(self, ws: str) -> list[UnlandedView]:
         """Each of the workstream's sessions whose commits were not landed (docs/wsd.md §5). A failure on
         one is shown on it. Raises RuntimeUnavailable if the sessions can't be listed."""
@@ -296,6 +372,15 @@ class NoRuntime:
 
     def signals(self, ws: str) -> list[Signal]:
         return []                    # it runs nothing
+
+    def session_events(self, ws: str, since: Mapping[str, tuple[int, int]], limit: int) -> EventBatch:
+        return EventBatch()          # it runs nothing
+
+    def steer(self, session_key: str, generation: int, text: str) -> None:
+        raise SteerRefused("no agent runtime is configured")
+
+    def subscribe(self, wake: Callable[[str], None], ops: Mapping[str, frozenset[str]]) -> None:
+        return None
 
     def unlanded(self, ws: str) -> list[UnlandedView]:
         return []

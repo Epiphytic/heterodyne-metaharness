@@ -14,16 +14,13 @@ import math
 import re
 from collections.abc import Callable
 from pathlib import Path
-from typing import Literal
 
 from heterodyne.config.secret_scan import sensitive_kind
 from heterodyne.wsd import relay
 from heterodyne.wsd.checkpoints import Checkpoint, nothing
 from heterodyne.wsd.journal import Journal, NoticeRow
 from heterodyne.wsd.states import BeadState
-
-# Part 1 T6 owns this (`workstream.NoticeKind`); a copy until part 1 is on this branch, then imported.
-NoticeKind = Literal["stuck", "waiting", "closed", "review"]
+from heterodyne.wsd.workstream import NoticeKind
 
 REF_MAX = 128
 TITLE_MAX = 200                 # admind's notices.MAX_TITLE

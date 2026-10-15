@@ -2,6 +2,7 @@ import asyncio
 import concurrent.futures as cf
 import contextlib
 import gc
+import logging
 import os
 import signal
 import sqlite3
@@ -16,23 +17,25 @@ from typing import Any
 
 import msgspec
 import pytest
+from fake_ask_sock import FakeAskSock
 from fakes.checkpoints import CrashAt, Recorder, SimulatedCrash
 from fakes.fake_btq import World, factory
 from fakes.fake_runtime import FakeRuntime
+from sandbox_env import short_dir
 from wsd_env import PROFILES, WS, Clock, accounts_at, git_repo, login_home, repoint_codex_at, selected_config
 
 from heterodyne.config import ConfigError
 from heterodyne.harness import selection
 from heterodyne.harness.selection import InstallPin, Selection
 from heterodyne.sandbox.spec import short_id
-from heterodyne.wsd import cli, ctl, daemon, ids, journal, park, scheduler
+from heterodyne.wsd import cli, ctl, daemon, ids, journal, notices, park, scheduler
 from heterodyne.wsd.daemon import NEEDS_A_HUMAN, Wsd, assemble
 from heterodyne.wsd.gate import AlreadyRunning, instance_lock
 from heterodyne.wsd.headroom import Mark
 from heterodyne.wsd.journal import Journal, JournalBusy
 from heterodyne.wsd.runtime import EndCause, Ended, ResolveFailed, ResolveRefused, Session, UnlandedView
 from heterodyne.wsd.scheduler import Outcome, Trigger, TriggerKind
-from heterodyne.wsd.settings import CTL_SOCKET, WsdSettings, resolve
+from heterodyne.wsd.settings import CTL_SOCKET, RelaySettings, WsdSettings, resolve
 from heterodyne.wsd.states import BeadState, Reason, WsState
 from heterodyne.wsd.usage import NoUsageReader
 from heterodyne.wsd.workstream import NoHarness, WorkstreamSettings
@@ -2447,6 +2450,43 @@ def test_a_disconnected_callers_resolve_still_completes(tmp_path: Path,
     assert len(resolved_events(wsd.parts.journal)) == 1
 
 
+def test_a_resolve_takes_the_sessions_events_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Plan 5i T6: a resolve moves the session's folder, and its event logs with it, so wsd reads the logs
+    into the inbox before it resolves."""
+    wsd, runtime, _, _ = held_wsd(tmp_path, monkeypatch)
+    order: list[str] = []
+    read, resolve = runtime.session_events, runtime.resolve_unlanded
+
+    def reading(*args: Any) -> Any:
+        order.append("read")
+        return read(*args)
+
+    def resolving(*args: Any) -> Any:
+        order.append("resolve")
+        return resolve(*args)
+
+    monkeypatch.setattr(runtime, "session_events", reading)
+    monkeypatch.setattr(runtime, "resolve_unlanded", resolving)
+    assert wsd.resolve_one(WS, SID, 1, "discard", None).result == "ok"
+    assert order == ["read", "resolve"]
+
+
+def test_a_resolve_whose_events_cant_be_read_resolves_nothing(tmp_path: Path,
+                                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    wsd, runtime, _, _ = held_wsd(tmp_path, monkeypatch)
+
+    def down(*args: object) -> Any:
+        raise daemon.RuntimeUnavailable("the log can't be read")
+
+    monkeypatch.setattr(runtime, "session_events", down)
+    reply = wsd.resolve_one(WS, SID, 1, "discard", None)
+    assert reply.result == "failed" and "RuntimeUnavailable" in reply.message and "again" in reply.message
+    assert "the log can't be read" not in reply.message                 # named by type, never by text
+    assert runtime.resolves == [] and (SID, 1) not in runtime.intents
+    monkeypatch.undo()
+    assert wsd.resolve_one(WS, SID, 1, "discard", None).result == "ok"
+
+
 def test_emit_once_writes_one_event(tmp_path: Path) -> None:
     j = Journal(tmp_path / "j.db")
     assert j.emit_once(WS, "btq-1", "unlanded_resolved", "action=land tip=none", f"{SID}-g1")
@@ -2638,3 +2678,83 @@ def test_resolve_takes_the_config_directory_for_selections(tmp_path: Path,
     selection.write(d, {"codex": Selection("codex", pin)})
     chosen = assemble(s, Journal(s.journal), factory(World(tmp_path / "btq-state")), FakeRuntime())
     assert chosen.schedulers["alpha"].d.selections("codex") == pin
+
+
+# --- notices (plan 5i part 2 T3): Deps.notices from [wsd.relay] -------------------------------------
+def with_relay(tmp_path: Path, enabled: bool = True) -> WsdSettings:
+    relay = RelaySettings(enabled, tmp_path / "admind" / "ask.sock", 2, 6, 90.0)
+    return replace(settings(tmp_path), relay=relay)
+
+
+@pytest.mark.parametrize("relay", ["absent", "disabled"])
+def test_assemble_wires_no_notices_without_an_enabled_relay(tmp_path: Path, relay: str) -> None:
+    s = settings(tmp_path) if relay == "absent" else with_relay(tmp_path, enabled=False)
+    parts = assemble(s, Journal(s.journal), factory(World(tmp_path / "w")), FakeRuntime())
+    assert [sch.d.notices for sch in parts.schedulers.values()] == [None]
+
+
+def test_assemble_wires_one_notices_client_from_the_relay_settings(tmp_path: Path) -> None:
+    s = with_relay(tmp_path)
+    assert s.relay is not None
+    cp = Recorder()
+    parts = assemble(s, Journal(s.journal), factory(World(tmp_path / "w")), FakeRuntime(), cp=cp)
+    (sch,) = parts.schedulers.values()
+    n = sch.d.notices
+    assert isinstance(n, notices.Notices)
+    assert (n.journal, n.sock, n.backoff, n.owed_hours) == (parts.journal, s.relay.ask_socket, 90.0, 6)
+    assert n.clock is sch.d.clock and n.cp is cp
+
+
+def test_assemble_recovers_a_notice_cut_off_in_flight_before_any_pickup(tmp_path: Path) -> None:
+    s = with_relay(tmp_path)
+    j = Journal(s.journal)
+    with j.transaction():
+        j.notice_add("stuck:ws-1:1", WS, None, "stuck", "t", "b", "sending", None, 1)
+    assemble(s, j, factory(World(tmp_path / "w")), FakeRuntime())
+    row = j.notice("stuck:ws-1:1")
+    assert row is not None and row.state == "uncertain"
+
+
+def test_a_failed_notices_recovery_is_logged_and_wsd_still_starts(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    row_text = "row text that must not reach the log"
+
+    def failing(_self: notices.Notices) -> None:
+        exc = sqlite3.OperationalError(row_text)
+        exc.sqlite_errorcode = sqlite3.SQLITE_IOERR
+        raise exc
+
+    monkeypatch.setattr(notices.Notices, "recover", failing)
+    with short_dir() as d:
+        s = replace(with_relay(tmp_path), relay=RelaySettings(True, d / "ask.sock", 2, 6, 90.0))
+        fake = FakeAskSock(d / "ask.sock")
+        fake.start()
+        try:
+            j = Journal(s.journal)
+            with j.transaction():
+                j.notice_add("stuck:ws-1:1", WS, None, "stuck", "t", "b", "sending", None, 1)
+            with caplog.at_level(logging.ERROR, logger=daemon.__name__):
+                parts = assemble(s, j, factory(World(tmp_path / "w")), FakeRuntime())
+            (sch,) = parts.schedulers.values()
+            assert isinstance(sch.d.notices, notices.Notices)        # still wired
+            wsd = Wsd(s, parts)
+
+            async def scenario() -> ctl.CtlReply:
+                stop = asyncio.Event()
+                task = asyncio.create_task(wsd.serve(stop))
+                await until(s.socket.exists)
+                reply = await ctl.request(s.socket, ctl.CtlRequest("status"))
+                stop.set()
+                await task
+                return reply
+
+            assert asyncio.run(scenario()).result == "ok"
+            sch.d.notices.retry_owed(sch.d.clock() + 100 * 3600)
+            row = j.notice("stuck:ws-1:1")
+            assert row is not None and row.state == "sending"       # left for a later start's recover
+            assert fake.frames == []
+        finally:
+            fake.stop()
+    records = [r for r in caplog.records if r.name == daemon.__name__]
+    assert [r.getMessage() for r in records] == [daemon.NOTICES_RECOVERY_FAILED % "OperationalError"]
+    assert all(r.exc_info is None and row_text not in r.getMessage() for r in records)
