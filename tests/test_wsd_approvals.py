@@ -1,7 +1,8 @@
 """Plan 4c Task 10, shared with plan 5i part 2: the approval bead's composition and its verdict
 (`heterodyne.wsd.approvals`). `compose` builds the bead's title, description and `metadata.ask`; `verdict`
 applies E13's predicates 2-10 to a readout. Predicate 1 (`Busy`) is the caller's: a `Busy` reply is never
-given to `verdict`. Part 2 adds its own deny-reason test (`view.answers`); here `view` is None."""
+given to `verdict`. Part 2 adds its own deny-reason test, read from the bead's `close_reason` (where
+approve-bead writes `--deny --note`); `view` is None."""
 
 import hashlib
 import json
@@ -225,3 +226,58 @@ def test_a_readout_with_an_unknown_field_is_refused() -> None:
     with pytest.raises(ValueError):
         wbtq.parse_readout(json.dumps({**approved({"id": "btq-1"}, "x"), "surprise": 1}).encode())
     assert isinstance(wbtq.parse_readout(b'{"format": 1, "busy": true}'), wbtq.Busy)
+
+
+DENIED_AT = "2026-10-15T00:00:00Z"
+SOURCE = "approve-bead (Marmot, admind message marmot:m1)"
+NOTE = ". Note: "
+
+
+def denied_by(name: str, digest: str, rest: str = "") -> str:
+    """approve-bead's `decision_comment`, which `bd close --reason` stores as the bead's `close_reason`."""
+    return f"Denied by {name} at {DENIED_AT} via {SOURCE}; context_digest={digest}{rest}"
+
+
+# (case, close_reason with "<digest>" for the bead's digest or None to leave it out, the reason)
+REASONS: list[tuple[str, object, str | None]] = [
+    ("note", denied_by(OPERATOR, "<digest>", NOTE + "too risky"), "too risky"),
+    ("adr-revision", denied_by(OPERATOR, "<digest>", "; adr_revision=r16" + NOTE + "too risky"), "too risky"),
+    ("bare", denied_by(OPERATOR, "<digest>"), None),
+    ("blank", denied_by(OPERATOR, "<digest>", NOTE + "   "), None),
+    ("padded", denied_by(OPERATOR, "<digest>", NOTE + "  too risky \n"), "too risky"),
+    ("note-in-note", denied_by(OPERATOR, "<digest>", NOTE + "a. Note: b"), "a. Note: b"),
+    ("raw", denied_by(OPERATOR, "<digest>", NOTE + "one\n`two` <x>"), "one\n`two` <x>"),
+    ("bounded", denied_by(OPERATOR, "<digest>", NOTE + "é" * 600), "é" * 500),
+    ("another-operator", denied_by("operator-b", "<digest>", NOTE + "too risky"), None),
+    ("another-digest", denied_by(OPERATOR, "<other>", NOTE + "too risky"), None),
+    ("digest-prefix", denied_by(OPERATOR, "<prefix>", NOTE + "too risky"), None),
+    ("between", denied_by(OPERATOR, "<digest>", "; free text" + NOTE + "too risky"), None),
+    ("approved", denied_by(OPERATOR, "<digest>", NOTE + "too risky").replace("Denied", "Approved"), None),
+    ("missing", None, None),
+    ("type", 5, None),
+]
+
+
+@pytest.mark.parametrize("case, reason, want", REASONS, ids=[c for c, *_ in REASONS])
+def test_verdict_reads_the_deny_reason_from_the_close_reason(
+        bead: tuple[dict[str, Any], Any, Any], case: str, reason: object, want: str | None) -> None:
+    shown, recomputed, expect = bead
+    digest = recomputed[0]
+    if isinstance(reason, str):
+        reason = (reason.replace("<digest>", digest).replace("<other>", other())
+                  .replace("<prefix>", digest[:12]))
+    closed = {**shown, "status": "closed"} | ({"close_reason": reason} if reason is not None else {})
+    fields = {**approved(shown, digest), "decision": "deny", "approved_by": None, "approved_digest": None,
+              "denied_by": OPERATOR, "denied_digest": digest}
+    got = decide(readout_of(fields), closed, recomputed, expect)
+    assert got == approvals.Denied(want), case
+
+
+def test_a_denial_without_a_denier_has_no_reason(bead: tuple[dict[str, Any], Any, Any]) -> None:
+    shown, recomputed, expect = bead
+    digest = recomputed[0]
+    closed = {**shown, "status": "closed", "close_reason": denied_by(OPERATOR, digest, NOTE + "too risky")}
+    for change in ({"denied_by": None}, {"denied_digest": None}):
+        fields = {**approved(shown, digest), "decision": "deny", "approved_by": None, "approved_digest": None,
+                  "denied_by": OPERATOR, "denied_digest": digest, **change}
+        assert decide(readout_of(fields), closed, recomputed, expect) == approvals.Denied(None), change
