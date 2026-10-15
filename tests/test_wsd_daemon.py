@@ -2,6 +2,7 @@ import asyncio
 import concurrent.futures as cf
 import contextlib
 import gc
+import logging
 import os
 import signal
 import sqlite3
@@ -16,9 +17,11 @@ from typing import Any
 
 import msgspec
 import pytest
+from fake_ask_sock import FakeAskSock
 from fakes.checkpoints import CrashAt, Recorder, SimulatedCrash
 from fakes.fake_btq import World, factory
 from fakes.fake_runtime import FakeRuntime
+from sandbox_env import short_dir
 from wsd_env import PROFILES, WS, Clock, accounts_at, git_repo, login_home, repoint_codex_at, selected_config
 
 from heterodyne.config import ConfigError
@@ -2710,3 +2713,48 @@ def test_assemble_recovers_a_notice_cut_off_in_flight_before_any_pickup(tmp_path
     assemble(s, j, factory(World(tmp_path / "w")), FakeRuntime())
     row = j.notice("stuck:ws-1:1")
     assert row is not None and row.state == "uncertain"
+
+
+def test_a_failed_notices_recovery_is_logged_and_wsd_still_starts(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    row_text = "row text that must not reach the log"
+
+    def failing(_self: notices.Notices) -> None:
+        exc = sqlite3.OperationalError(row_text)
+        exc.sqlite_errorcode = sqlite3.SQLITE_IOERR
+        raise exc
+
+    monkeypatch.setattr(notices.Notices, "recover", failing)
+    with short_dir() as d:
+        s = replace(with_relay(tmp_path), relay=RelaySettings(True, d / "ask.sock", 2, 6, 90.0))
+        fake = FakeAskSock(d / "ask.sock")
+        fake.start()
+        try:
+            j = Journal(s.journal)
+            with j.transaction():
+                j.notice_add("stuck:ws-1:1", WS, None, "stuck", "t", "b", "sending", None, 1)
+            with caplog.at_level(logging.ERROR, logger=daemon.__name__):
+                parts = assemble(s, j, factory(World(tmp_path / "w")), FakeRuntime())
+            (sch,) = parts.schedulers.values()
+            assert isinstance(sch.d.notices, notices.Notices)        # still wired
+            wsd = Wsd(s, parts)
+
+            async def scenario() -> ctl.CtlReply:
+                stop = asyncio.Event()
+                task = asyncio.create_task(wsd.serve(stop))
+                await until(s.socket.exists)
+                reply = await ctl.request(s.socket, ctl.CtlRequest("status"))
+                stop.set()
+                await task
+                return reply
+
+            assert asyncio.run(scenario()).result == "ok"
+            sch.d.notices.retry_owed(sch.d.clock() + 100 * 3600)
+            row = j.notice("stuck:ws-1:1")
+            assert row is not None and row.state == "sending"       # left for a later start's recover
+            assert fake.frames == []
+        finally:
+            fake.stop()
+    records = [r for r in caplog.records if r.name == daemon.__name__]
+    assert [r.getMessage() for r in records] == [daemon.NOTICES_RECOVERY_FAILED % "OperationalError"]
+    assert all(r.exc_info is None and row_text not in r.getMessage() for r in records)
