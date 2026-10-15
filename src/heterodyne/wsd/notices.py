@@ -13,7 +13,6 @@ A title or body holding a secret or a public identifier is never stored or poste
 import math
 import re
 from collections.abc import Callable
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
@@ -40,14 +39,6 @@ DIAG_NOTICE_IN_FLIGHT = "notice {ref} was in flight when wsd stopped; it is not 
 _TITLE_CONTROLS = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 
 PostNotice = Callable[..., str]
-
-
-def _iso(at: int) -> str:
-    return datetime.fromtimestamp(at, UTC).isoformat(timespec="seconds")
-
-
-def _epoch(iso: str) -> int:
-    return int(datetime.fromisoformat(iso).timestamp())
 
 
 def _lines(text: str) -> int:
@@ -87,8 +78,7 @@ class Notices:
         left alone."""
         if not 1 <= len(ref) <= REF_MAX:
             raise ValueError(f"a notice ref must be 1-{REF_MAX} characters")
-        now = self.clock()
-        at = _iso(now)
+        now = at = self.clock()
         found = sensitive_kind(title) or sensitive_kind(body)
         if found is not None:
             fixed = WITHHELD_TITLE.format(subject=bead or ws, kind=found)
@@ -113,14 +103,14 @@ class Notices:
         for row in self.journal.notices_in("owed"):
             if self._expired(row, now):
                 with self.journal.transaction():
-                    self.journal.notice_set(row.ref, _iso(now), state="refused", why=EXPIRED)
+                    self.journal.notice_set(row.ref, now, state="refused", why=EXPIRED)
         for row in self.journal.notices_due(now, RETRY_PER_CALL):
             self._attempt(row.ref, now)
 
     def recover(self) -> None:
         """Once at start, before the first pickup: a `sending` row was cut off inside the post window, so
         it may have been posted. It becomes `uncertain` and is never posted again."""
-        at = _iso(self.clock())
+        at = self.clock()
         for row in self.journal.notices_in("sending"):
             with self.journal.transaction():
                 self.journal.notice_set(row.ref, at, state="uncertain")
@@ -128,7 +118,7 @@ class Notices:
                                        DIAG_NOTICE_IN_FLIGHT.format(ref=row.ref), row.ref)
 
     def _expired(self, row: NoticeRow, now: int) -> bool:
-        if row.bead is None or now - _epoch(row.created_at) <= self.owed_hours * 3600:
+        if row.bead is None or now - row.created_at <= self.owed_hours * 3600:
             return False
         state = self.journal.state(row.ws, row.bead)
         return state is not None and state.state is BeadState.CLOSED
@@ -139,7 +129,7 @@ class Notices:
             if row is None or row.state != "owed":
                 return
             attempts = row.attempts + 1
-            self.journal.notice_set(ref, _iso(now), state="sending", attempts=attempts)
+            self.journal.notice_set(ref, now, state="sending", attempts=attempts)
         self.cp("notice.sending")
         outcome: dict[str, str | int | None]
         try:
@@ -155,7 +145,7 @@ class Notices:
         else:
             outcome = {"state": "posted", "notice_id": notice_id}
         with self.journal.transaction():
-            self.journal.notice_set(ref, _iso(now), **outcome)
+            self.journal.notice_set(ref, now, **outcome)
             self.cp("notice.outcome")
 
     def _next(self, now: int, attempts: int) -> int:

@@ -370,8 +370,8 @@ class HarnessInstall:
 
 @dataclass(frozen=True)
 class NoticeRow:
-    """One notice by its `ref` (plan 5i part 2 T3): `state` is one of NOTICE_STATES; `next_at` (epoch
-    seconds) is when an `owed` row is due; `why` holds a refusal code, `expired` or a withheld kind."""
+    """One notice by its `ref` (plan 5i part 2 T3): `state` is one of NOTICE_STATES; `next_at` is when an
+    `owed` row is due; `why` holds a refusal code, `expired` or a withheld kind. Times are epoch seconds."""
     ref: str
     ws: str
     bead: str | None
@@ -383,8 +383,8 @@ class NoticeRow:
     attempts: int
     next_at: int | None
     why: str | None
-    created_at: str
-    updated_at: str
+    created_at: int
+    updated_at: int
 
 
 _NOTICE_COLS = ", ".join(f.name for f in dataclasses.fields(NoticeRow))
@@ -394,7 +394,7 @@ _NOTICE_SET = frozenset({"state", "notice_id", "attempts", "next_at", "why"})
 def _notice(r: tuple[object, ...]) -> NoticeRow:
     return NoticeRow(str(r[0]), str(r[1]), _opt(r[2]), str(r[3]), str(r[4]), str(r[5]), str(r[6]), _opt(r[7]),
                      int(cast(int, r[8])), None if r[9] is None else int(cast(int, r[9])), _opt(r[10]),
-                     str(r[11]), str(r[12]))
+                     int(cast(int, r[11])), int(cast(int, r[12])))
 
 
 @dataclass(frozen=True)
@@ -1543,7 +1543,7 @@ class Journal:
 
     @_locked
     def notice_add(self, ref: str, ws: str, bead: str | None, kind: str, title: str, body: str, state: str,
-                   next_at: int | None, at: str, why: str | None = None) -> bool:
+                   next_at: int | None, at: int, why: str | None = None) -> bool:
         """A notice, once per `ref` (in any state), inside the caller's transaction. True only if new."""
         cur = self.db.execute("INSERT OR IGNORE INTO notices (ref, ws, bead, kind, title, body, state, "
                               "next_at, why, created_at, updated_at) "
@@ -1558,7 +1558,7 @@ class Journal:
         return None if row is None else _notice(row)
 
     @_locked
-    def notice_set(self, ref: str, at: str, **fields: str | int | None) -> None:
+    def notice_set(self, ref: str, at: int, **fields: str | int | None) -> None:
         """Set `fields` (of `_NOTICE_SET`) and `updated_at` on the row, which must exist."""
         if not fields or not set(fields) <= _NOTICE_SET:
             raise ValueError("notice_set: no such field")
