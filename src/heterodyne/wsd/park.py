@@ -58,7 +58,7 @@ from heterodyne.wsd.beads import (
     WorktreeConflict,
 )
 from heterodyne.wsd.headroom import Deadline, quota_detail
-from heterodyne.wsd.journal import DeferralRow, EntryConflict, Op, OpKind, OpStatus, now
+from heterodyne.wsd.journal import DeferralRow, EntryConflict, Op, OpKind, OpStatus, ResolvedEnd, now
 from heterodyne.wsd.launches import (
     ABANDONED,
     LAUNCHED,
@@ -69,6 +69,7 @@ from heterodyne.wsd.launches import (
 )
 from heterodyne.wsd.runtime import (
     LOGIN_STALE,
+    NOT_SELECTED,
     EndCause,
     Ended,
     LaunchFailed,
@@ -121,6 +122,8 @@ RELEASE_REGATE_POINTS = ("release.regate", "release.regate.over!", *(f"release.{
 ADOPTED_RELEASE_POINTS = ("release.adopted", "release.adopted!")
 ESCALATE_POINTS = ("escalate.intent", "escalate.labelled!", "escalate.done")
 PARK_MARK = "wsd-park: "
+SELECTION_UNREADABLE = ("the install selection (harnesses.toml) can't be read; "
+                        "`heterodyne config check` says why")
 REASONS = {BeadState.HELD: Reason.HELD_BY_OPERATOR, BeadState.WAITING_INPUT: Reason.WAITING_ON_OPERATOR,
            BeadState.PARKED: Reason.BLOCKED_ON_BEAD}
 RELEASABLE = frozenset({BeadState.HELD, BeadState.STUCK, BeadState.DEFERRED})   # DEFERRED: account_changed
@@ -138,6 +141,18 @@ GUARD_SETTLES = frozenset({Reason.LAUNCH_UNCERTAIN})
 
 # g08sd: what an end is accounted as. Anything else (DIED, REFUSED, a cause wsd doesn't know) is a death.
 CLASSES = {EndCause.STOPPED: "stopped", EndCause.LIFETIME: "lifetime", EndCause.LEGACY_LIFETIME: "legacy"}
+
+
+def _resolved(entry: LaunchEntry, r: ResolvedEnd | None) -> Ended | None:
+    """wpyv5: the end a resolve carried for the entry's generation, as the runtime would report it: an
+    unknown cause is a death, as `ended()` maps one."""
+    if r is None:
+        return None
+    try:
+        cause = EndCause(r.cause)
+    except ValueError:
+        cause = EndCause.DIED
+    return Ended(entry.generation, cause, r.reached_running, r.ran_seconds)
 
 
 def _died(generation: int, end: Ended | None) -> str:
@@ -1295,10 +1310,13 @@ class Parker:
                     klass = "reset"          # plan 3 D8: a lost journal escalates; the release resets
                 elif e.generation != latest[e.session_key]:
                     klass = "legacy"
-                elif end is None or end.generation != e.generation or not end.reached_running:
-                    klass = "died"
                 else:
-                    klass = CLASSES.get(end.cause, "died")
+                    if end is None or end.generation != e.generation:
+                        end = _resolved(e, j.resolved_end(e)) or end    # wpyv5: carried by its resolve
+                    if end is None or end.generation != e.generation or not end.reached_running:
+                        klass = "died"
+                    else:
+                        klass = CLASSES.get(end.cause, "died")
                 n = j.crash_account(ws, bead, e, klass)
                 if klass == "died":
                     details.append(_died(e.generation, end))
@@ -1409,8 +1427,8 @@ class Parker:
         """Step 2: gate the account (AU-5 §3.3) and journal generation n+1 with the op's step, then the bead
         copy. A Deadline or AccountChanged defers the bead inside this op (AU-4 §3.2 entry 3): no session
         was dispatched for it, so the tail's stop only confirms that. The entry pins the adapter's selected
-        install as it reads now (plan 4c T7, D2), or none, as also when the selection can't be read (until
-        Task 8 refuses that); a replay dispatches the journaled pin."""
+        install as it reads now (plan 4c T7, D2); with none, or one that can't be read, it escalates
+        CONFIG_INVALID and journals nothing (Task 8). A replay dispatches the journaled pin."""
         j, kind = self.d.journal, op.kind.value
         entries = j.launches(rec.session_key)
         stale = stale_keys(op)
@@ -1435,10 +1453,13 @@ class Parker:
         try:
             pin = self.d.selections(adapter) if adapter else None
         except ConfigError:
-            # E23: launches as before T7. Task 8 turns this into a refusal (an unreadable selection is not
-            # "none selected"). The error's text can quote the file, so none of it is logged.
-            log.warning("the install selection can't be read; generation %d pins no install", n)
-            pin = None
+            # An unreadable selection is not "none selected", and its error's text can quote the file, so
+            # the escalation carries fixed wording only.
+            self.escalate_from(op, Reason.CONFIG_INVALID, SELECTION_UNREADABLE)
+            return Launch.ENDED
+        if adapter and pin is None:
+            self.escalate_from(op, Reason.CONFIG_INVALID, NOT_SELECTED)     # plan 4c E23: nothing journaled
+            return Launch.ENDED
         entry = LaunchEntry(rec.session_key, n, self.ws.name, op.bead, rec.role, rec.profile, chosen.account,
                             chosen.key, self.ws.models.get(rec.profile, ""), False, now(),
                             install=pin.install if pin else "", install_digest=pin.digest if pin else "")

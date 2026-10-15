@@ -83,7 +83,7 @@ from heterodyne.wsd.park import (
     parked_state,
     resumable,
 )
-from heterodyne.wsd.runtime import LimitSeen, RuntimeUnavailable, Signal, UsageSeen
+from heterodyne.wsd.runtime import InstallTainted, LimitSeen, RuntimeUnavailable, Signal, UsageSeen
 from heterodyne.wsd.states import TERMINAL, BeadState, Reason, allowed, ws_state
 from heterodyne.wsd.sweep import sweep
 from heterodyne.wsd.usage import decide, ingest_untrusted
@@ -242,7 +242,10 @@ class Scheduler:
     def _signal(self, signal: Signal, now: int) -> None:
         """A usage report is stored untrusted only for a profile with (c); a limit report defers its own
         bead only with (e). A report for a launch the journal doesn't have as this workstream's is
-        dropped. Handling a limit report twice is safe (`Parker.limit` opens nothing the second time)."""
+        dropped. Handling a limit report twice is safe (`Parker.limit` opens nothing the second time).
+        An install taint is left to plan 4c Task 10: the marker already refuses every launch on it."""
+        if isinstance(signal, InstallTainted):
+            return
         j, name = self.d.journal, self.ws.name
         entry = j.launch(signal.session_key, signal.generation)
         if entry is None or entry.ws != name:

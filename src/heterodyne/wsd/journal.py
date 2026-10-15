@@ -335,6 +335,16 @@ DEFERRAL_OVER = "deferral_over:"     # AU-4 §2.1: a re-gate marked an `account_
 CRASH_GEN = "crash_gen:"
 CRASH_RUN = "crash_run:"
 CRASH_CLASSES = frozenset({"died", "stopped", "lifetime", "legacy", "reset"})
+# wpyv5: the end a resolve carried from a generation's record, once (`crash_end:<ws>:<bead>:<key>:<gen>`),
+# for the guard to account it from. Never changed or removed by accounting; retention is plan 8's.
+CRASH_END = "crash_end:"
+
+
+class ResolvedEnd(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fields=True):
+    """A generation's end as its resolve carried it (the runtime's `Ended`, without its types)."""
+    cause: str
+    reached_running: bool
+    ran_seconds: int | None
 
 
 def _crash_gen(entry: LaunchEntry) -> str:
@@ -1195,6 +1205,34 @@ class Journal:
             self.db.execute("INSERT INTO events (at, ws, bead, kind, detail, ref) VALUES (?, ?, ?, ?, ?, ?)",
                             (now(), ws, bead, kind, detail, ref))
             return True
+
+    @_locked
+    def emit_resolved(self, ws: str, bead: str, detail: str, ref: str, key: str, generation: int,
+                      end: ResolvedEnd | None) -> bool:
+        """wpyv5: `emit_once` of the `unlanded_resolved` event, and in the same transaction the end it
+        carries, if any, written once (an event journaled before wpyv5 gets its end on a repeat). True if
+        it wrote the event."""
+        with self.transaction():
+            wrote = self.emit_once(ws, bead, "unlanded_resolved", detail, ref)
+            if end is not None:
+                row = f"{CRASH_END}{ws}:{bead}:{key}:{generation}"
+                self.db.execute("INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)",
+                                (row, msgspec.json.encode(end).decode()))
+            return wrote
+
+    @_locked
+    def resolved_end(self, entry: LaunchEntry) -> ResolvedEnd | None:
+        """The end a resolve carried for exactly this entry's generation; a row that doesn't decode is no
+        evidence."""
+        row = self.db.execute("SELECT value FROM meta WHERE key = ?",
+                              (f"{CRASH_END}{entry.ws}:{entry.bead}:{entry.session_key}:{entry.generation}",)
+                              ).fetchone()
+        if row is None:
+            return None
+        try:
+            return msgspec.json.decode(str(row[0]), type=ResolvedEnd)
+        except msgspec.MsgspecError:
+            return None
 
     @_locked
     def inbox_pending_count(self) -> int:

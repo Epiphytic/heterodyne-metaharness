@@ -46,7 +46,8 @@ def both(request: pytest.FixtureRequest) -> Iterator[Both]:
         try:            # the Journal closes whatever fails below: an open one breaks test_wsd_gate's fd count
             rt = runtime_rig(root / "x", tmux, rig.clock)
             rig.ws = replace(rig.ws, accounts=rt.runtime.c.accounts)   # one Accounts, as in wsd
-            rig.deps = replace(rig.deps, runtime=rt.runtime)
+            rig.selections = lambda adapter: rt.installs[adapter].pin  # the runtime's store: one selection
+            rig.deps = replace(rig.deps, runtime=rt.runtime, selections=rig.selections)
             rig.parker = Parker(rig.ws, rig.deps)
             rig.sched = Scheduler(rig.ws, rig.deps, rig.parker)
             try:

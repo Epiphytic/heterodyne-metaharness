@@ -4,7 +4,11 @@ from pathlib import Path
 
 import pytest
 
+from heterodyne.agents.base import Cli
+from heterodyne.agents.claude_code import ClaudeCode
+from heterodyne.agents.codex import Codex
 from heterodyne.sandbox.spec import (
+    INSIDE_LOGIN_DIR,
     LAUNCHER_ENV,
     NAME,
     RUN_INSIDE,
@@ -24,8 +28,10 @@ from heterodyne.sandbox.spec import (
 KEY = "alpha/bd-1/coder/p-two"
 
 
-def facts(root: Path) -> AgentFacts:
-    cli = root / "home" / ".codex" / "packages" / "rel" / "bin"
+def facts(root: Path, cli_root: Path | None = None) -> AgentFacts:
+    """A Codex-like adapter's facts, its CLI in an install store outside every login directory (or at
+    `cli_root`)."""
+    cli = (cli_root or root / "store" / "codex" / "0.160.0-0123456789ab") / "bin"
     cli.mkdir(parents=True, exist_ok=True)
     (cli / "codex").write_text("")
     layout = SessionLayout.at(root / "sessions", KEY)
@@ -83,6 +89,44 @@ def test_git_binds_keep_their_modes(tmp_path: Path) -> None:
     assert str(private.target) in spec.read_write
     assert {str(objects.target), str(pointer.target)} <= set(spec.read_only)
     assert str(objects.target) not in spec.read_write and str(pointer.target) not in spec.read_write
+
+
+def adapter_input(tmp_path: Path, adapter: Codex | ClaudeCode) -> SpecInput:
+    """spec_input with the adapter's own facts and login file."""
+    login = tmp_path / "home" / adapter.config_subdir / adapter.login_names[0]
+    login.parent.mkdir(parents=True, exist_ok=True)
+    login.write_text("{}")
+    root = tmp_path / "store" / adapter.name / "install"
+    root.mkdir(parents=True)
+    layout = SessionLayout.at(tmp_path / "sessions", KEY)
+    agent = adapter.facts(layout, Cli(root / "cli", root, "0"), 1000)
+    return spec_input(tmp_path, agent=agent, login_files=(login,))
+
+
+def test_the_codex_home_binds_tmp_and_packages_to_one_empty_read_only_dir(tmp_path: Path) -> None:
+    """E25: Codex's exec directories in the home are each covered by the generation's one empty directory,
+    read-only, bound after the home so it lies over it."""
+    i = adapter_input(tmp_path, Codex())
+    spec = build_spec(i)
+    targets = [b.target for b in spec.binds]
+    empties = [b for b in spec.binds if b.source == i.layout.empty(1)]
+    assert [(b.target, b.read_only) for b in empties] == [(i.layout.home / ".codex" / "tmp", True),
+                                                          (i.layout.home / ".codex" / "packages", True)]
+    assert all(targets.index(b.target) > targets.index(i.layout.home) for b in empties)
+    assert i.layout.empty(1) == i.layout.run(1) / "empty" and not any(b.install for b in empties)
+
+
+def test_claude_code_gets_no_empty_binds(tmp_path: Path) -> None:
+    i = adapter_input(tmp_path, ClaudeCode())
+    assert not [b for b in build_spec(i).binds if b.source == i.layout.empty(1)]
+
+
+def test_only_the_install_bind_is_marked(tmp_path: Path) -> None:
+    """E24: `driver_config` writes S9-8's fields on the bind marked install, and build_spec marks exactly
+    one, the CLI's install root, read-only at its host path."""
+    i = adapter_input(tmp_path, Codex())
+    [install] = [b for b in build_spec(i).binds if b.install]
+    assert (install.source, install.target, install.read_only) == (i.agent.cli_root, i.agent.cli_root, True)
 
 
 def test_coder_spec(tmp_path: Path) -> None:
@@ -156,9 +200,24 @@ def test_missing_login_is_refused(tmp_path: Path) -> None:
         build_spec(i)
 
 
-def test_credentials_pass_with_cli_inside_the_chosen_login_dir(tmp_path: Path) -> None:
-    spec = build_spec(spec_input(tmp_path))      # the CLI root is under ~/.codex/packages, as installed
-    check_credentials(spec, protected(tmp_path), tmp_path / "home")
+def test_credentials_pass_with_the_cli_in_the_install_store(tmp_path: Path) -> None:
+    check_credentials(build_spec(spec_input(tmp_path)), protected(tmp_path), tmp_path / "home")
+
+
+@pytest.mark.parametrize("route", ["direct", "linked"])
+def test_a_cli_inside_the_chosen_login_dir_is_refused(tmp_path: Path, route: str) -> None:
+    """Plan 4c: the CLI comes from the install store, so nothing is bound from the chosen account's login
+    directory, the old ~/.codex/packages install included, whether named directly or through a link."""
+    inside = tmp_path / "home" / ".codex" / "packages" / "rel"
+    root = inside
+    if route == "linked":
+        facts(tmp_path, inside)
+        root = tmp_path / "innocent"
+        root.symlink_to(inside)
+    spec = build_spec(spec_input(tmp_path, agent=facts(tmp_path, root)))
+    with pytest.raises(SpecRefused) as refused:
+        check_credentials(spec, protected(tmp_path), tmp_path / "home")
+    assert str(refused.value) == INSIDE_LOGIN_DIR
 
 
 @pytest.mark.parametrize("source", ["home/.codex-b", "home", "home/.codex", "."])
@@ -173,7 +232,7 @@ def test_a_bind_exposing_a_login_or_the_home_is_refused(tmp_path: Path, source: 
 
 def test_a_source_inside_another_accounts_login_dir_is_refused(tmp_path: Path) -> None:
     """r15 §7: a source in any other account's login directory refuses the launch, even one that holds
-    no login file. Only the chosen account's own directory may hold a bound source (the Codex CLI)."""
+    no login file. The chosen account's own directory holds none either (`INSIDE_LOGIN_DIR`)."""
     inner = tmp_path / "home" / ".codex-b" / "packages"
     inner.mkdir(parents=True)
     spec = build_spec(spec_input(tmp_path))

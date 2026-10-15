@@ -198,6 +198,7 @@ The card shows the title, then the ask fields in `ASK_FIELDS` order with their r
 | needs !details | `Ask p4xw was shortened. Reply !details to it and read it first. Nothing recorded.` |
 | bead changed | `btq-ab12c changed after it was shown (shown 1a2b3c4d5e6f, now 9f8e7d6c5b4a). Nothing recorded; ask p4xw is stale and the poster must post it again.` |
 | not an approver | `<name> is not a btq approver. Nothing recorded.` |
+| gate preview invalid at `!approve` (btq-ryfxf) | `btq's gate would reject approving btq-ab12c now: <reasons, redacted>. Nothing recorded. Fix the bead on the host, or deny it.` |
 | already decided / superseded / not open | `Ask p4xw is already <status>[ by <name>][; see ask q9rt]. Nothing recorded.` |
 | approve-bead refused, bead untouched | `Not recorded: "<stderr line>". btq-ab12c is unchanged; you can decide again.` |
 | partial or foreign write (`blocked`) | `btq-ab12c holds a decision admind cannot confirm as yours ("<stderr line>"). Nothing more will be done from Marmot. Resolve it on the host with approve-bead btq-ab12c.` |
@@ -247,14 +248,15 @@ The card shows the title, then the ask fields in `ASK_FIELDS` order with their r
 **Post an approval ask** (the ask-socket handler, under `ask_post_lock`, R22; it writes the store but does not take `work_lock`):
 
 1. Validate the request (R4, R16, R19). Refuse if latched (R17), if `approve_bead` is not set, if over a limit (R15), or if two posts are already in flight.
-2. Run `approve-bead <bead> --json`. Refuse if:
+2. Run `approve-bead <bead> --json --gate-preview` (btq-ryfxf; every read uses this argv). Refuse if:
    - it fails, or prints a `busy` reply;
    - `digest` is null;
    - the status is not `open`, or the bead is not `kind:approval`;
    - there are gaps (the gaps go back to the poster);
    - `design_review` is invalid;
    - a posted `context_digest` differs from the computed digest;
-   - any decision field is already set.
+   - any decision field is already set;
+   - btq's gate preview is missing or invalid (the reasons go back to the poster; audit reason `gate`). A preview that is null for an open, undecided bead, or present for any other, is `bad output`.
 3. Render the card and the details. Refuse if either fails R21.
 4. Re-check the latch, the limits and the same-bead state (R22). Then, in one transaction, without an await:
    - mark any `open` or `answered` ask for the bead `superseded` and queue its notice;
@@ -281,7 +283,8 @@ The card shows the title, then the ask fields in `ASK_FIELDS` order with their r
    - the operator is not in `approvers`;
    - the bead is not open or not `kind:approval`;
    - a decision field is set (this one goes to `blocked` instead);
-   - the reply is `busy`.
+   - the reply is `busy`;
+   - for `!approve`, btq's gate preview is invalid (btq-ryfxf, reason `gate`; a deny still runs). This narrows, doesn't eliminate, the race with a policy change: the policy can still change between this read and the decision, and approve-bead's own post-write check then reports it.
 6. Check `authorised(mid)` again, synchronously, with nothing awaited before the launch. If it fails, return the ask to `open`, close the attempt as `refused`, and deny the message (the existing `deny`), all in one transaction. This is the commit point (R11).
 7. Run the decision (90 s, a new process group, output capped at 1 MiB). On every exit path, a normal exit included, kill the process group, drain both pipes and reap the child, bounded at 5 s, closing the pipes if that runs out, before going on (R23).
 8. Read back with `--json` (R12) and settle the ask against the attempt. Then, in one compare-and-set transaction:

@@ -3,7 +3,6 @@
 import argparse
 import json
 import os
-import pwd
 import sys
 from collections.abc import Mapping
 from importlib import resources
@@ -46,7 +45,9 @@ def cmd_config_check(args: argparse.Namespace) -> int:
     for key, value in _flatten(cfg.values):
         # D10: no message shows a login path; `show` redacts secrets and identifiers (a 64-hex commit).
         shown = "<hidden>" if _is_login_dir(key) else show(value)
-        print(f"{key} = {shown}    ({cfg.sources.get(key, '?')})")
+        # Plan 4c Q5: the sandbox runs managed installs only; admind still runs the CLI this key names.
+        note = ", admind only" if _is_adapter_binary(key) else ""
+        print(f"{key} = {shown}    ({cfg.sources.get(key, '?')}{note})")
     print(f"policy: approvers={list(cfg.policy.approvers)}  (policy.toml)")
     if len({p.get("model") for p in cfg.get("profiles", {}).values()}) < 2:
         print("note: only one model configured; reviews will be adversarial (two LLMs recommended, §11.1)")
@@ -75,45 +76,16 @@ def _harness_lines(cfg: hconfig.Config, env: Mapping[str, str]) -> list[str]:
         elif sel and sel.previous:
             shown = f"none ({len(sel.previous)} previous)"
         lines.append(f"harnesses.selection.{show(adapter, False)} = {shown}    ({selection.FILE})")
-    try:
-        owner_uid: int | None = pwd.getpwnam(h.owner).pw_uid
-    except KeyError:
-        owner_uid = None
-    problems = store_paths.store_problems(
-        h.store, login_dirs=[a.login_dir for a in cfg.accounts.values()], worktrees=_worktrees(env),
-        state_dir=paths.state_dir(env), service_uid=os.getuid(), owner_uid=owner_uid, fallback=h.fallback)
-    if not h.fallback:
-        problems += store_paths.helper_problems(h.helper_copy, store_paths.packaged_helper())
+    problems = store_paths.location_problems(h, [a.login_dir for a in cfg.accounts.values()], env)
     lines += [f"harnesses problem: {problem}" for problem in problems]
     if h.fallback:
         lines.append(f"warning: {harness_settings.FALLBACK_WARNING}")
     return lines
 
 
-def _worktrees(env: Mapping[str, str]) -> list[Path]:
-    """Every workstream's repositories and their btq worktrees (`<repo>-btq-<id>`, §4.3)."""
-    from heterodyne.wsd.settings import workstream_names  # wsd.settings is heavy; config check needs it here
-
-    found: list[Path] = []
-    for name in workstream_names(paths.config_dir(env)):
-        ws = hconfig.load(name, env)
-        for value in layers.table_at(ws.values, "repos", f"workstreams/{name}.toml").values():
-            if isinstance(value, str):
-                repo = paths.expand(value, env)
-                found += [repo, *_btq_worktrees(repo)]
-    return found
-
-
-def _btq_worktrees(repo: Path) -> list[Path]:
-    """`repo`'s btq worktree siblings. When its parent can't be listed (glob would quietly find none), the
-    parent stands in for them, so a store there still counts as in a worktree."""
-    try:
-        names = [p.name for p in repo.parent.iterdir()]
-    except FileNotFoundError:
-        return []
-    except OSError:
-        return [repo.parent]
-    return [repo.parent / n for n in sorted(names) if n.startswith(f"{repo.name}-btq-")]
+def _is_adapter_binary(key: str) -> bool:
+    parts = key.split(".")
+    return len(parts) == 3 and parts[0] == "adapters" and parts[2] == "binary"
 
 
 def _is_login_dir(key: str) -> bool:

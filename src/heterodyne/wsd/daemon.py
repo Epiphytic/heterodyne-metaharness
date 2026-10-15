@@ -69,7 +69,7 @@ from heterodyne.wsd.btq import QueueFactory
 from heterodyne.wsd.checkpoints import Checkpoint, nothing
 from heterodyne.wsd.ctl import CtlReply, CtlRequest, CtlServer, refusal
 from heterodyne.wsd.gate import ClaimGate
-from heterodyne.wsd.journal import Journal, JournalBusy
+from heterodyne.wsd.journal import Journal, JournalBusy, ResolvedEnd
 from heterodyne.wsd.recovery import Recovered, recover
 from heterodyne.wsd.runtime import (
     Action,
@@ -352,8 +352,8 @@ class Wsd:
     def resolve_one(self, name: str, sid: str, generation: int, action: Action, tip: str | None) -> CtlReply:
         """`wsctl resolve` on the workstream's lane, holding its operation lock from the checks to the
         intent's removal. The journal entry comes from the runtime's Resolution, so from its intent, and is
-        written once however often the request is repeated; the intent, and so the hold, goes only once it
-        has committed."""
+        written once however often the request is repeated, with the generation's end (wpyv5) for the next
+        launch guard to account; the intent, and so the hold, goes only once it has committed."""
         sched = self.parts.schedulers[name]
         with sched.parker.entry():
             try:
@@ -365,9 +365,13 @@ class Wsd:
             sched.d.cp("resolve.resolved")
             detail = f"action={done.action} tip={done.tip or 'none'}"
             detail += f" ref={done.ref}" if done.ref else ""
+            end = None if done.end is None else ResolvedEnd(cause=done.end.cause.value,
+                                                             reached_running=done.end.reached_running,
+                                                             ran_seconds=done.end.ran_seconds)
             try:
-                self.parts.journal.emit_once(done.ws, done.bead, "unlanded_resolved", detail,
-                                             f"{done.short_id}-g{done.generation}")
+                self.parts.journal.emit_resolved(done.ws, done.bead, detail,
+                                                 f"{done.short_id}-g{done.generation}", done.key,
+                                                 done.generation, end)
             except Exception as exc:  # noqa: BLE001 - reported by type; the intent stays for a retry
                 return CtlReply("failed", f"{name}: the resolve was done, but its journal entry could not be "
                                           f"written ({type(exc).__name__}); run the same wsctl resolve again")

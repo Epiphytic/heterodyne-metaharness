@@ -118,6 +118,9 @@ STALE_NOT_REFRESHED = ("{bead} changed after this card was posted (shown {shown}
                        "recorded, and admind could not post a fresh card: {why}.")
 UPDATED_NOT_SHOWN = " Its updated content is not shown: {why}."
 NOT_APPROVER = "{name} is not a btq approver. Nothing recorded."
+# btq-ryfxf: `why` is the gate preview's reasons, redacted
+GATE_REFUSED = ("btq's gate would reject approving {bead} now: {why}. Nothing recorded. Fix the bead on the "
+                "host, or deny it.")
 NOT_DECIDABLE = "{bead} is {why}. Nothing recorded."
 BEAD_BUSY = "{bead} is being decided elsewhere right now. Nothing recorded; try again in a minute."
 PREFLIGHT_FAILED = "admind could not check {bead} ({word}); nothing was recorded. Try again."
@@ -804,9 +807,9 @@ class Admind:
         """Under `ask_post_lock`, with no await: the card for readout `r`, or (the refusal, its audit
         reason). `postable` (R4), the R21 redaction check and the R8 cap, then the latch, limits and
         same-bead checks again (the read awaited, R22). A refresh (R29) names the stale ask it replaces."""
-        why = approvals.postable(r)
-        if why is not None:
-            return redact(why), "not postable"
+        refusal = approvals.postable(r)
+        if refusal is not None:
+            return redact(refusal[0]), refusal[1]
         at = asks.stamp(asks.now())
         row = AskRow(asks.new_id(lambda i: self.store.ask(i) is not None), "approval", poster,
                      asks.approval_title(r, bead), "", None, None, bead, r.digest, False, 0, "open", None,
@@ -1206,6 +1209,10 @@ class Admind:
             return "open", NOT_DECIDABLE.format(bead=bead, why="not a kind:approval bead"), "not approval"
         if a.operator not in r.approvers:
             return "open", NOT_APPROVER.format(name=a.operator), "not an approver"
+        # btq-ryfxf: an approve btq's gate would reject (the policy changed since the post, say) is not
+        # written. This narrows, doesn't eliminate, the race: the policy can still change after this read.
+        if a.action == "approve" and (r.gate_preview is None or not r.gate_preview.valid):
+            return "open", GATE_REFUSED.format(bead=bead, why=redact(approvals.gate_reasons(r))), "gate"
         return None
 
     def close_refused(self, a: Attempt, new_status: str, text: str, why: str) -> None:
