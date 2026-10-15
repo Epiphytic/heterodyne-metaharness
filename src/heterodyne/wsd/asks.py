@@ -160,6 +160,14 @@ def reshown(text: str) -> str:
     return shown if kind is None else WITHHELD_TEXT.format(kind=kind)
 
 
+def shown_title(title: str) -> str:
+    """The task's title as the card shows it: one line, controls escaped, cut to TITLE_SHOWN; withheld if it
+    (or the cut shown) holds a secret or a public identifier, as the agent's text is."""
+    shown = " ".join(escape_controls(title).split())[:TITLE_SHOWN]
+    kind = sensitive_kind(title) or sensitive_kind(shown)
+    return shown if kind is None else TITLE_WITHHELD.format(kind=kind)
+
+
 def first_line(shown: str, limit: int) -> str:
     """The first line of `shown` with words, its whitespace runs made single spaces, cut to `limit`: one
     line admind takes as a title. NO_LINE if there is none, or if the cut holds something sensitive."""
@@ -196,7 +204,7 @@ def question_card(ws: str, bead: str, bead_title: str, child: str, shown: str, t
     title = CARD_TITLE.format(ws=ws, bead=bead, line=first_line(shown, CARD_LINE))
     tail = (CARD_ROUND.format(bead=bead, turn=turn, round=round_, limit=limit) if round_
             else CARD_REQUEST.format(bead=bead, turn=turn))
-    head = CARD_HEAD.format(bead=bead, title=" ".join(escape_controls(bead_title).split())[:TITLE_SHOWN])
+    head = CARD_HEAD.format(bead=bead, title=shown_title(bead_title))
     return AskPost("question", title=title[:TITLE_MAX], body="\n\n".join((head, shown, tail)), bead=child,
                    poster=relay.poster_for(ws), form="choices", choices=list(choices),
                    recommended=recommended)
@@ -335,7 +343,9 @@ class AskBridge:
     def _post(self, parker: "Parker", row: AskRow, now: int) -> None:
         """Post the question's card, rebuilt from its bead (read through `holder`), at most once: the row is
         marked uncertain, committed, before the post, so a post whose outcome is unknown (a lost reply, or
-        wsd dying) is looked for in admind's list before it is posted again."""
+        wsd dying) is looked for in admind's list, and never posted again. The list holds admind's active
+        asks but only its 20 newest finished ones, and admind has no lookup by bead or ref, so absence
+        proves nothing: the ask fails closed (`_unpostable`, ASK_POST_UNKNOWN)."""
         ws, bead = row.ws, row.bead
         child = self.beads.holder(ws, row.ref)
         if child is None:
@@ -353,7 +363,9 @@ class AskBridge:
             if found:
                 with self.journal.transaction():
                     self.journal.ask_set(row.ref, state="posted", ask_id=found[-1], uncertain=0, next_at=None)
-                return
+            else:
+                self._unpostable(parker, row, child, why=ASK_POST_UNKNOWN, body=UNKNOWN_BODY)
+            return
         card = self._card(row, child)
         with self.journal.transaction():
             self.journal.ask_set(row.ref, uncertain=1)
@@ -398,14 +410,16 @@ class AskBridge:
             self.journal.ask_set(row.ref, state="owed", uncertain=uncertain, attempts=row.attempts + 1,
                                  next_at=now + int(wait))
 
-    def _unpostable(self, parker: "Parker", row: AskRow, child: str) -> None:
-        """A permanent refusal: the row is `refused`, the task escalated needs-human, the operator told."""
+    def _unpostable(self, parker: "Parker", row: AskRow, child: str, *, why: str = ASK_UNPOSTABLE,
+                    body: str = UNPOSTABLE_BODY) -> None:
+        """A permanent refusal, or a post whose outcome can't be known: the row is `refused`, the task
+        escalated needs-human, the operator told."""
         if self.notices is not None:
             self.notices.send(row.ws, row.bead, "stuck", UNPOSTABLE_TITLE.format(bead=row.bead),
-                              UNPOSTABLE_BODY.format(bead=row.bead, child=child), f"unpostable:{row.ref}")
+                              body.format(bead=row.bead, child=child), f"unpostable:{row.ref}")
         with self.journal.transaction():
-            self.journal.ask_set(row.ref, state="refused", why=ASK_UNPOSTABLE, uncertain=0, next_at=None)
-            op = parker.escalation_for(row.bead, Reason.NEEDS_HUMAN, ASK_UNPOSTABLE)
+            self.journal.ask_set(row.ref, state="refused", why=why, uncertain=0, next_at=None)
+            op = parker.escalation_for(row.bead, Reason.NEEDS_HUMAN, why)
         parker.replay_escalate(op)
 
     def _too_many_rounds(self, parker: "Parker", bead: str, rounds: int, head: str | None) -> None:

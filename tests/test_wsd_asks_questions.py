@@ -319,9 +319,9 @@ def test_a_secret_in_the_tasks_title_is_withheld_from_the_card(tmp_path: Path, f
 
 def test_a_key_cut_short_in_the_tasks_title_is_withheld_whole(tmp_path: Path) -> None:
     """A key cut short by TITLE_SHOWN is withheld whole, never shown in part."""
-    title = "x" * (TITLE_SHOWN - 30) + SECRET           # the cut would keep the key's first 30 characters
+    title = "x" * (TITLE_SHOWN - 31) + " " + SECRET     # the cut would keep the key's first 30 characters
     post = question_card(WS, B, title, "btq-2", "Blue or green?", 1, 1, LIMIT, list(D4_CHOICES), "A")
-    assert TITLE_WITHHELD.format(kind="sk- API key") in post.body and "sk-" not in post.body
+    assert TITLE_WITHHELD.format(kind="sk- API key") in post.body and SECRET[:20] not in post.body
 
 
 def test_progress_resets_the_round_count(tmp_path: Path, fake: FakeAskSock) -> None:
