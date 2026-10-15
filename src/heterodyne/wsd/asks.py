@@ -140,6 +140,20 @@ def shown_text(text: str | None) -> str:
     return shown if kind is None else WITHHELD_TEXT.format(kind=kind)
 
 
+def reshown(text: str) -> str:
+    """A question bead's text read back (untrusted: anyone may have edited it) as step 5 would show it:
+    through `shown_text` if escaping changes more than its backslashes (a control, a CR or a lone
+    surrogate: not step 5's), else the same scan and cut without escaping again, since `escape_controls`
+    doubles a backslash every time it runs."""
+    if escape_controls(text) != text.replace("\\", "\\\\"):
+        return shown_text(text)
+    if not text.strip():
+        return NO_TEXT
+    shown = _cut(text, QUESTION_MAX)
+    kind = sensitive_kind(text) or sensitive_kind(shown)
+    return shown if kind is None else WITHHELD_TEXT.format(kind=kind)
+
+
 def first_line(shown: str, limit: int) -> str:
     """The first line of `shown` with words, its whitespace runs made single spaces, cut to `limit`: one
     line admind takes as a title. NO_LINE if there is none, or if the cut holds something sensitive."""
@@ -357,15 +371,11 @@ class AskBridge:
             self.journal.ask_set(row.ref, state="posted", ask_id=ask_id, uncertain=0, next_at=None)
 
     def _card(self, row: AskRow, child: str) -> AskPost:
-        """The card, from the question bead wsd made and the task's own title. The bead's text is what step
-        5 showed, unless someone edited it since: then it is shown as the agent's would be."""
+        """The card, from the question bead wsd made and the task's own title. The bead's text, framing
+        removed, is read back untrusted (`reshown`), as is its metadata (`card_choices`)."""
         made = self.beads.show(row.ws, child)
         description = str(made.raw.get("description", ""))
-        framing = QUESTION_FRAMING.format(bead=row.bead)
-        shown = (description.removesuffix(framing) if description.endswith(framing)
-                 else shown_text(description))
-        if sensitive_kind(shown) is not None or len(shown) > QUESTION_MAX:
-            shown = shown_text(shown)
+        shown = reshown(description.removesuffix(QUESTION_FRAMING.format(bead=row.bead)))
         try:
             choices: object = json.loads(str(made.metadata.get(CHOICES_KEY, "")))
         except ValueError:

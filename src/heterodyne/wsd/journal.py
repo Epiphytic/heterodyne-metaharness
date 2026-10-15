@@ -1712,7 +1712,9 @@ class Journal:
 
     @_locked
     def nudge(self, ws: str, bead: str) -> tuple[int, str | None]:
-        """The bead's question rounds without progress, and the tree they were counted from (D3)."""
+        """The bead's question rounds without progress, and the tree they were counted from (D3). The
+        `last_head` column holds the tree hash of btq/<bead>'s HEAD, never a commit: a park's WIP commit
+        of the same files is not progress."""
         row = self.db.execute("SELECT rounds, last_head FROM nudges WHERE ws = ? AND bead = ?",
                               (ws, bead)).fetchone()
         return (0, None) if row is None else (int(cast(int, row[0])), _opt(row[1]))

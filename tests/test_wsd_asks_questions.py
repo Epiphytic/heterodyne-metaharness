@@ -43,6 +43,7 @@ from heterodyne.wsd.asks import (
     AsksPins,
     card_choices,
     question_card,
+    reshown,
     shown_text,
 )
 from heterodyne.wsd.beads import NEEDS_HUMAN, QUESTION, BeadsAdapter, BeadsUnavailable
@@ -373,6 +374,12 @@ EDITS = [
 ]
 
 
+@settings(max_examples=300, deadline=None)
+@given(text=_texts)
+def test_step_5s_own_text_reads_back_unchanged(text: str | None) -> None:
+    assert reshown(shown_text(text)) == shown_text(text)
+
+
 @pytest.mark.parametrize(("edited", "shown", "never"), EDITS,
                          ids=["esc", "bel", "crlf", "secret", "long", "backslash"])
 @pytest.mark.parametrize("framed", [True, False], ids=["framed", "unframed"])
@@ -392,7 +399,7 @@ def test_a_question_beads_text_read_back_is_scanned_and_escaped_again(tmp_path: 
     [card] = cards(fake)
     assert card.post.body.split("\n\n")[1] == shown
     assert never not in card.post.body + card.post.title
-    assert admind_asks.check(to_admind(card.post)) is None
+    assert admind_asks.check(card.post) is None
 
 
 def test_an_uncertain_post_is_found_by_list_before_posting_again(tmp_path: Path, fake: FakeAskSock) -> None:
