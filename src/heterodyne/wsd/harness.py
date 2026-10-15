@@ -714,9 +714,8 @@ class HarnessOps:
             log.warning("a taint report names no install wsd alerts on")
             return
         text = (f"The install {install_label(adapter, install)} is tainted: its tree is not the one its "
-                "manifest describes. Every launch on it refuses, and the beads running on it are held. Once "
-                f"it is restored, `wsctl harness verify {adapter} <name>` clears it, with the name "
-                f"`wsctl harness list {adapter}` shows for it; or remove it.")
+                "manifest describes. Every launch on it refuses, and the beads running on it are held, until "
+                "it is restored and verified again, or removed.")
         with self.alerts_lock:
             at = self.clock()
             if alerts.write(self.alerts_dir, self._alert_id(adapter, install), text, at=at):

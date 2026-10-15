@@ -1580,7 +1580,7 @@ def test_a_published_installs_upstream_version_never_reaches_a_log_or_alert(
     h.ops.tainted("codex", a)
     [alert] = alert_names(h)
     text = (h.alerts / alert).read_text()
-    assert GHP not in text and label in text and "wsctl harness list codex" in text
+    assert GHP not in text and label in text and "wsctl" not in text
     with caplog.at_level(logging.DEBUG):
         with monkeypatch.context() as m:
             m.setattr(Path, "unlink", raising(OSError(5, "unlink")))
