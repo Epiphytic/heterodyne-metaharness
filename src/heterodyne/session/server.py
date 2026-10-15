@@ -3,7 +3,7 @@
 It is bound inside the generation's run directory (`/run/hz/s.sock` inside). It accepts only `hook_event`
 and `ws_request`, each with the launch token, and refuses every other operation with the exact reply
 `{"ok": false, "error": "forbidden"}`, which the self-test checks. Until plan 5 every hook event is
-allowed and ws-request is unsupported (plan 4 D15).
+allowed (plan 4 D15); ws-request is unsupported unless the runtime passes `on_request` (plan 5i).
 
 Everything a session sends is untrusted. Accepted requests are spooled, capped, to the generation's
 events file outside the sandbox. `TurnState` keeps only what the runtime reads: turn counts, the last
@@ -38,6 +38,7 @@ OK = {"ok": True}
 FORBIDDEN = {"ok": False, "error": "forbidden"}
 UNSUPPORTED = {"ok": False, "error": "unsupported"}
 MALFORMED = {"ok": False, "error": "malformed"}
+UNAVAILABLE = {"ok": False, "error": "unavailable"}
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 TURN_EVENTS = ("UserPromptSubmit", "Stop")
 
@@ -60,7 +61,8 @@ class SessionServer:
     def __init__(self, path: Path, token: str, events: Path, *, max_spool: int = 4 << 20,
                  max_handlers: int = MAX_HANDLERS, client_seconds: float = CLIENT_SECONDS,
                  clock: Callable[[], float] = time.monotonic, turn_ends: tuple[str, ...] = ("Stop",),
-                 on_event: Callable[[dict[str, Any]], None] | None = None) -> None:
+                 on_event: Callable[[dict[str, Any]], None] | None = None,
+                 on_request: Callable[[dict[str, Any]], dict[str, Any]] | None = None) -> None:
         self.path = path
         self.token = token.encode()
         self.events = events
@@ -69,6 +71,7 @@ class SessionServer:
         self.clock = clock
         self.turn_ends = turn_ends
         self.on_event = on_event
+        self.on_request = on_request
         self.served = 0
         self._state = TurnState()
         self._lock = threading.Lock()
@@ -230,9 +233,20 @@ class SessionServer:
         fields = cast(dict[str, Any], payload)
         self._spool(kind, fields)
         if kind == "ws_request":
-            return UNSUPPORTED
+            return self._request(fields)
         self._record(fields)
         return OK
+
+    def _request(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Plan 5i: a request naming an `op` goes to the runtime's callback, outside the lock (it writes
+        the event log and must not hold up hooks), and only while open; close waits for this handler like
+        any other. Anything else, or no callback, is unsupported as before."""
+        if self.on_request is None or not isinstance(payload.get("op"), str) or self._closed.is_set():
+            return UNSUPPORTED
+        try:
+            return self.on_request(payload)
+        except Exception:  # noqa: BLE001 - the session learns only that it can retry
+            return UNAVAILABLE
 
     def _record(self, payload: dict[str, Any]) -> None:
         """Turn state from the event name and session ID alone, then the runtime's callback, both under
