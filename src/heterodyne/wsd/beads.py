@@ -19,6 +19,7 @@
 """
 
 import contextlib
+import json
 import os
 import re
 import subprocess
@@ -51,6 +52,13 @@ BTQ_ROUTING_CHANGED = "Routing/design changed during claim"
 BTQ_NOT_OWNED = "Task is not in progress under this worker"
 NOT_FOUND = "no issue found matching"
 RECORD_KEY = "wsd_session"
+# The beads wsd creates itself: question and approval beads, never work. Each holds the caller's ref under
+# `wsd_ref`, which makes the create idempotent and marks the bead as wsd's own.
+REF_KEY = "wsd_ref"
+CREATED_KINDS = ("kind:question", "kind:approval")
+QUESTION = "kind:question"
+QUESTION_ANSWERED = "answered by the operator"      # the `bd close --reason` of an answered question
+ANSWER_MARK = "[wsd answer {ref}]"
 # The provenance line btq's `worktree` appends to the bead's notes. Paths may contain the separators, so a
 # line is never split on them: it is matched against the exact worker, repository and worktree expected
 # (`Bead.bases`), and what lies between is the base.
@@ -99,6 +107,15 @@ class RecordConflict(Exception):
 class LaunchConflict(Exception):
     """The bead's copy of a launch entry differs from the journal's under the same generation, other than
     a set-once field the bead still has empty: an entry is never changed."""
+
+
+class CreateUnverified(Exception):
+    """A bead under the create's ref is not what was asked: bd stored something else, or the ref is held by
+    another bead or by more than one. It is never returned or written to."""
+
+
+class NotAQuestion(Exception):
+    """`close_question` was given a bead that is not one of wsd's own question beads in the workstream."""
 
 
 class SessionRecord(msgspec.Struct, frozen=True, forbid_unknown_fields=False):
@@ -359,12 +376,16 @@ class BeadsAdapter:
         but one of the `settled` values. Closing a bead says nothing about its action, so status is never
         a reason to skip one, and a value wsd doesn't know (a number, an object, null) is never read as
         settled."""
+        beads = self._labelled(ws)
+        return [b.id for b in beads if key in b.metadata and not _settled(b.metadata[key], settled)]
+
+    def _labelled(self, ws: str) -> list[Bead]:
+        """Every bead labelled `ws:<ws>`, closed ones included, as `bd list` gives them."""
         queue = self.ws_queue(ws)
         raw = self._call(lambda: queue.bd("list", "--all", "--label", f"ws:{ws}", "--limit", "0"))
         if not isinstance(raw, list):
             raise UnexpectedShape("list did not return a list")
-        beads = [parse(item, detail=False) for item in cast(list[Any], raw)]
-        return [b.id for b in beads if key in b.metadata and not _settled(b.metadata[key], settled)]
+        return [parse(item, detail=False) for item in cast(list[Any], raw)]
 
     def validate(self, ws: str, bead: str) -> Bead:
         """btq's post-claim checks, run again right before a launch: the bead is in progress under our
@@ -533,6 +554,81 @@ class BeadsAdapter:
             if at is None or current.entries[at] != entry:
                 raise BeadsUnavailable("launch entry did not read back")
 
+    # --- beads wsd creates: questions and approvals (plan 5i) ---
+
+    def create(self, ws: str, *, ref: str, title: str, description: str, labels: tuple[str, ...],
+               metadata: dict[str, str]) -> str:
+        """Create a question or approval bead in the workstream, or find the one an earlier call made, and
+        return its ID. `labels` is exactly one of CREATED_KINDS; wsd adds `ws:<ws>` and never an `agent:`
+        label, so btq never routes the bead to a worker. `metadata` gains `wsd_ref = ref`. The lookup by
+        ref and the create run under the workstream worker's lock, so a crash between `bd create` and the
+        caller's journal, or a second caller, never makes a second bead. The bead is read back, found or
+        created: a title, description or label set other than asked, or an asked metadata value missing
+        or changed, is CreateUnverified. Metadata others add later (an approval's decision) is allowed."""
+        if len(labels) != 1 or labels[0] not in CREATED_KINDS:
+            raise ValueError("labels must be exactly one of " + ", ".join(CREATED_KINDS))
+        if REF_KEY in metadata:
+            raise ValueError(f"metadata must not set {REF_KEY}")
+        if not ref or not title or title.startswith("-"):
+            raise ValueError("ref and title must be set, and the title must not start with '-'")
+        asked_labels = (*labels, f"ws:{ws}")
+        asked = {**metadata, REF_KEY: ref}
+        queue = self.ws_queue(ws)
+        try:
+            with queue.exclusive():
+                found = [b.id for b in self._labelled(ws) if b.metadata.get(REF_KEY) == ref]
+                if len(found) > 1:
+                    raise CreateUnverified(f"more than one bead holds this {REF_KEY}")
+                if found:
+                    bead = found[0]
+                else:
+                    created = self._call(lambda: queue.bd(
+                        "create", title, f"--description={description}", "--type=task",
+                        f"--labels={','.join(asked_labels)}", "--metadata",
+                        json.dumps(asked, sort_keys=True)))
+                    bead = _created_id(created)
+                shown = self.show(ws, bead)
+                if (shown.title != title or shown.raw.get("description", "") != description
+                        or sorted(shown.labels) != sorted(asked_labels)
+                        or any(shown.metadata.get(k) != v for k, v in asked.items())):
+                    raise CreateUnverified("the bead does not read back as asked (title, description, "
+                                           f"labels or metadata, {REF_KEY} included)")
+                return bead
+        except (CreateUnverified, BeadsUnavailable):
+            raise
+        except _FAILURES as exc:
+            raise BeadsUnavailable(f"create failed ({type(exc).__name__})") from None
+
+    def close_question(self, ws: str, bead: str, answer_comment: str) -> None:
+        """Put the operator's answer on one of wsd's own question beads, then close it. The bead must be
+        labelled `kind:question` and no other kind, `ws:<ws>`, no `agent:` label, and hold a `wsd_ref`:
+        anything else, a `kind:task` above all, is NotAQuestion before any bd write. A question bead is
+        never claimed, so the writes go through the workstream worker under its lock rather than
+        `_owned`. Both steps are checked first and read back, so a replay writes nothing twice."""
+        queue = self.ws_queue(ws)
+        try:
+            with queue.exclusive():
+                shown = self.show(ws, bead)
+                ref = shown.metadata.get(REF_KEY)
+                kinds = [lbl for lbl in shown.labels if lbl.startswith("kind:")]
+                if (kinds != [QUESTION] or f"ws:{ws}" not in shown.labels
+                        or any(lbl.startswith("agent:") for lbl in shown.labels)
+                        or not isinstance(ref, str) or not ref):
+                    raise NotAQuestion(bead)
+                mark = ANSWER_MARK.format(ref=ref)
+                if not any(mark in c for c in self.comments(ws, bead)):
+                    self._call(lambda: queue.bd("comments", "add", bead, f"{mark}\n{answer_comment}"))
+                    if not any(mark in c for c in self.comments(ws, bead)):
+                        raise BeadsUnavailable("answer comment did not read back")
+                if shown.status != "closed":
+                    self._call(lambda: queue.bd("close", bead, f"--reason={QUESTION_ANSWERED}"))
+                    if self.show(ws, bead).status != "closed":
+                        raise BeadsUnavailable("question close did not read back")
+        except (NotAQuestion, BeadsUnavailable):
+            raise
+        except _FAILURES as exc:
+            raise BeadsUnavailable(f"question close failed ({type(exc).__name__})") from None
+
     # --- worktrees (§4.3: btq's convention) ---
 
     def worktree(self, ws: str, bead: str, repository: Path) -> Path:
@@ -583,3 +679,13 @@ class BeadsAdapter:
         if not ok:
             raise WorktreeConflict("the path is not this bead's recorded worktree")
         return worktree
+
+
+def _created_id(created: object) -> str:
+    """The bead ID in `bd create --json`'s answer (an object, or a list of one)."""
+    if isinstance(created, list) and len(cast(list[Any], created)) == 1:
+        created = cast(list[Any], created)[0]
+    bead = cast(dict[str, Any], created).get("id") if isinstance(created, dict) else None
+    if not isinstance(bead, str) or not bead:
+        raise UnexpectedShape("bd create gave no bead ID")
+    return bead
