@@ -62,7 +62,7 @@ class Rig:
 
     def notices(self, cp: Checkpoint = nothing, post: Callable[..., str] = relay.post_notice,
                 timeout: float = 2.0) -> notices.Notices:
-        return notices.Notices(self.journal, self.sock, clock=self.clock, backoff=60, backoff_max=1800,
+        return notices.Notices(self.journal, self.sock, clock=self.clock, backoff=60.0, backoff_max=1800.0,
                        owed_hours=24, timeout=timeout, cp=cp, post=post)
 
     def reopen(self) -> None:
@@ -155,6 +155,18 @@ def test_the_backoff_doubles_up_to_its_cap(rig: Rig) -> None:
         rig.clock.at = row.next_at
         n.retry_owed(rig.clock())
     assert due == [60, 120, 240, 480, 960, 1800, 1800, 1800]
+
+
+def test_a_huge_attempt_count_still_backs_off_to_the_cap_and_stays_owed(rig: Rig) -> None:
+    n = rig.notices()
+    send(n)                                                 # no socket: owed, nothing written
+    with rig.journal.transaction():
+        rig.journal.notice_set("stuck:ws1-1:1", rig.clock(), attempts=1024)
+    rig.clock.at += HOUR
+    n.retry_owed(rig.clock())                               # attempt 1025: 2**1024 is past float range
+    row = rig.journal.notice("stuck:ws1-1:1")
+    assert row is not None and (row.state, row.attempts) == ("owed", 1025)
+    assert row.next_at == rig.clock() + 1800
 
 
 @pytest.mark.parametrize("step", ["drop", "hang", "garbage", "failed"])
@@ -346,6 +358,16 @@ def test_a_ref_over_128_characters_is_a_value_error(rig: Rig) -> None:
     with pytest.raises(ValueError, match="ref"):
         send(rig.notices(), ref="r" * 129)
     send(rig.notices(), ref="r" * 128)
+
+
+def test_the_withheld_prefix_is_reserved_for_replacement_refs(rig: Rig) -> None:
+    fake = rig.start()
+    with pytest.raises(ValueError, match="withheld:"):
+        send(rig.notices(), ref="withheld:x")
+    assert rig.journal.notice("withheld:x") is None
+    send(rig.notices(), ref="x", body="why " + SECRETS["npub"]())    # so x's replacement is not shadowed
+    replacement = rig.journal.notice("withheld:x")
+    assert replacement is not None and replacement.state == "posted" and len(fake.notices) == 1
 
 
 def test_a_long_body_is_cut_with_the_marker(rig: Rig) -> None:
