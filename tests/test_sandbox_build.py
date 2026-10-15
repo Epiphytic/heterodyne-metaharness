@@ -167,12 +167,16 @@ relays = ["wss://relay.example.org"]
 ])
 def test_an_install_refusal_says_why_no_decision_is_read(tmp_path: Path, host: str, refusal: str) -> None:
     """A missing `[admind] approve_bead` and an `[admind]` that doesn't validate each get their own refusal,
-    which `install` gives before it stages or asks; the readout still fails, as a backstop."""
+    which `install` gives before it stages or asks, and which wsd's start says once; the readout still
+    fails, as a backstop."""
     env = config_env(tmp_path, host)
     journal = Journal(tmp_path / "journal.sqlite")
+    notices: list[str] = []
     try:
-        ops = build_harness(settings(tmp_path, env), env, NO_QUEUES, NoRuntime(), journal, lambda: ())
+        ops = build_harness(settings(tmp_path, env), env, NO_QUEUES, NoRuntime(), journal, lambda: (),
+                            notice=notices.append)
         assert isinstance(ops, HarnessOps) and ops.readout_refusal == refusal
+        assert notices == [f"wsctl harness install will refuse every install: {refusal}"]
         with pytest.raises(btq.ReadoutFailed):
             ops.readout("btq-1")
     finally:
@@ -187,9 +191,11 @@ def test_a_valid_admind_with_approve_bead_reads_the_decisions(tmp_path: Path,
     monkeypatch.setattr(build_module, "load", lambda env: SimpleNamespace(values={"admind": {
         "approve_bead": "/usr/bin/true"}}))
     journal = Journal(tmp_path / "journal.sqlite")
+    notices: list[str] = []
     try:
-        ops = build_harness(settings(tmp_path, env), env, NO_QUEUES, NoRuntime(), journal, lambda: ())
-        assert isinstance(ops, HarnessOps) and ops.readout_refusal == ""
+        ops = build_harness(settings(tmp_path, env), env, NO_QUEUES, NoRuntime(), journal, lambda: (),
+                            notice=notices.append)
+        assert isinstance(ops, HarnessOps) and ops.readout_refusal == "" and notices == []
         readout = cast("partial[Any]", ops.readout)
         assert readout.func is btq.approval_readout and readout.keywords == {"binary": Path("/usr/bin/true")}
     finally:

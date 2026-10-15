@@ -167,14 +167,18 @@ def _approve_bead(env: Mapping[str, str]) -> tuple[Path | None, str]:
 
 def build_harness(s: WsdSettings, env: Mapping[str, str], factory: btq.QueueFactory, runtime: AgentRuntime,
                   journal: Journal,
-                  guard_locks: Callable[[], Sequence[AbstractContextManager[Any]]]) -> HarnessOps | None:
+                  guard_locks: Callable[[], Sequence[AbstractContextManager[Any]]],
+                  notice: Callable[[str], None] = _stderr) -> HarnessOps | None:
     """`wsctl harness`'s operations (plan 4c T10), or None without the host's accounts (the store's location
-    check needs them). The approvals go to admind's ask socket and its alerts directory."""
+    check needs them). The approvals go to admind's ask socket and its alerts directory. When no approval
+    could take effect, the start says so once, as every install will refuse."""
     if s.accounts is None:
         return None
     harnesses = sandbox_settings(env).harnesses
     state, root = paths.state_dir(env), _checkout()
     binary, refusal = _approve_bead(env)
+    if refusal:
+        notice(f"wsctl harness install will refuse every install: {refusal}")
     readout = (partial(_no_readout, refusal) if binary is None
                else partial(btq.approval_readout, binary=binary))
     fetcher = Fetcher(HttpsOpener(), s.state_dir / "harness-cache", time.monotonic, FETCH_SECONDS,
