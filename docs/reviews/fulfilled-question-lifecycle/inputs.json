@@ -1,0 +1,206 @@
+{
+  "schema": "fulfilled-question-design-inputs-v1",
+  "author": "Codex",
+  "task": "btq-1b5km",
+  "branch_base": "2c0c5b5b775ee652d2ce32c192091aa2314e5b32",
+  "operative_product_commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+  "sources": [
+    {
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/store.py",
+      "git_blob": "605e8314fb57be770d1f86caf103c962c323225f",
+      "sha256": "5ae75889f8b1c58f9f4367bd2d76c8070154cfd8caa384eb8178f6c0c68d3359",
+      "bytes": 56321,
+      "anchors": [
+        {
+          "line": 146,
+          "text": "ASK_ACTIVE = (\"open\", \"answered\", \"deciding\", \"uncertain\")"
+        },
+        {
+          "line": 305,
+          "text": "class Store:"
+        },
+        {
+          "line": 771,
+          "text": "def asks_with_status(self, *statuses: str) -> list[AskRow]:"
+        },
+        {
+          "line": 778,
+          "text": "def recent_asks(self, limit: int) -> list[AskRow]:"
+        },
+        {
+          "line": 791,
+          "text": "def set_ask(self, ask_id: str, status: str, *, outcome: str | None = None,"
+        },
+        {
+          "line": 797,
+          "text": "def add_answer(self, ask_id: str, kind: str, operator: str, message_id: str, text: str,"
+        },
+        {
+          "line": 1031,
+          "text": "def transaction(self) -> Generator[None]:"
+        }
+      ]
+    },
+    {
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/asks.py",
+      "git_blob": "a419c858ba5864c599ca90bfa89c0538e221ddcc",
+      "sha256": "6b6645f1fbba429b0f52277152f31745422332fe063792ce4748378091f37042",
+      "bytes": 31088,
+      "anchors": [
+        {
+          "line": 37,
+          "text": "MAX_OPEN, MAX_PER_HOUR, MAX_IN_FLIGHT = 20, 30, 2"
+        },
+        {
+          "line": 51,
+          "text": "TERMINAL = (\"approved\", \"denied\", \"stale\", \"superseded\", \"cancelled\", \"blocked\")"
+        },
+        {
+          "line": 103,
+          "text": "AskRequest = AskPost | AskGet | AskList | AskCancel | NoticePost"
+        },
+        {
+          "line": 114,
+          "text": "class AskSummary(msgspec.Struct, frozen=True):"
+        },
+        {
+          "line": 127,
+          "text": "class AskView(msgspec.Struct, frozen=True):"
+        }
+      ]
+    },
+    {
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/daemon.py",
+      "git_blob": "9c3f17f9505a42e2c9510c093149eddf653330d1",
+      "sha256": "6dd566effd2fbd2a569e533cf8449da5ae15244290e6a9cfc30560e685acb0fb",
+      "bytes": 190140,
+      "anchors": [
+        {
+          "line": 695,
+          "text": "async def on_ask(self, req: asks.AskRequest, peer: ctl.Peer) -> asks.AskReply:"
+        },
+        {
+          "line": 727,
+          "text": "def post_ask(self, req: asks.AskPost, peer: ctl.Peer) -> asks.AskReply:"
+        },
+        {
+          "line": 799,
+          "text": "def approval_post_refusal(self, bead: str, retiring: tuple[str, str] | None = None) -> str | None:"
+        },
+        {
+          "line": 896,
+          "text": "def cancel_ask(self, row: AskRow) -> asks.AskReply:"
+        },
+        {
+          "line": 951,
+          "text": "def answer_ask(self, mid: str, ask_id: str, text: str, reaction: bool = False) -> None:"
+        },
+        {
+          "line": 989,
+          "text": "def answer_refusal(self, row: AskRow, text: str) -> str | None:"
+        },
+        {
+          "line": 1054,
+          "text": "async def autobump_loop(self) -> None:"
+        },
+        {
+          "line": 1447,
+          "text": "async def reconcile_asks(self, snapshot: list[tuple[str, str, str]]) -> None:"
+        }
+      ]
+    },
+    {
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/ctl.py",
+      "git_blob": "234c47d7f4f3561b0cfdd867e5cb6e137e067c81",
+      "sha256": "13551cafa7d953dff0f96dd4da4bd9544ddad1035f1b0134e2c5c05d785d6483",
+      "bytes": 12906,
+      "anchors": [
+        {
+          "line": 60,
+          "text": "class Peer(NamedTuple):"
+        },
+        {
+          "line": 68,
+          "text": "class JsonSocketServer[Req, Rep: msgspec.Struct]:"
+        },
+        {
+          "line": 166,
+          "text": "async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:"
+        }
+      ]
+    },
+    {
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/cli.py",
+      "git_blob": "39e80d889860fdea367ba6b13981d49cadbf8e91",
+      "sha256": "83858ebea0b71c777f865264d80c6537902206b0f2ca9024518f11ce160b843f",
+      "bytes": 26442,
+      "anchors": [
+        {
+          "line": 247,
+          "text": "def ask_command(s: AdmindSettings, args: argparse.Namespace) -> int:"
+        },
+        {
+          "line": 292,
+          "text": "def _ask_wait(s: AdmindSettings, req: asks.AskRequest, timeout: float, as_json: bool) -> int:"
+        }
+      ]
+    },
+    {
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "docs/superpowers/specs/2026-10-05-admind-marmot-relay-design.md",
+      "git_blob": "4fe4b55696ed29a30c66068e63739055ba42b23f",
+      "sha256": "3ab42a394c62fcfb3e8b2dd6db9a157036a8ef525b4394f4e54ffb3c33be611b",
+      "bytes": 57461,
+      "governing_clauses": [
+        "R13",
+        "R15",
+        "R16",
+        "R17",
+        "R24"
+      ]
+    },
+    {
+      "commit": "59ffe75c32932b60597fd2c43a945a98e383957a",
+      "path": "docs/adr/2026-10-16-admind-existing-session-wake.md",
+      "git_blob": "96e30789f7daaf60de4585de442a80aa54706d84",
+      "sha256": "389e4355f5b395c8e52ed54622408952818bdc45cd81e2f0f1bd92c13d8f121c",
+      "bytes": 25028,
+      "authority": "separate design compatibility input; no installed consumer asserted; human approval record not inferred from source bytes",
+      "status_table_lines": [
+        51,
+        63
+      ]
+    }
+  ],
+  "private_evidence": [
+    {
+      "name": "fulfilled-ask-capacity-reconciliation.json",
+      "sha256": "578c845729d702caa5555d86d33394361e737544a9c2306c77529a9753f00a23",
+      "visibility": "private bounded operator evidence; contents not published"
+    },
+    {
+      "name": "admind-capacity-list.json",
+      "sha256": "eb214866e11beecd5ce714cbfda39ba8b8e75842c9c4cdd01aa68a66eabb3ae9",
+      "visibility": "private bounded operator evidence; contents not published"
+    }
+  ],
+  "observations": {
+    "existing_product_status_count": 10,
+    "wake_proposed_status_count": 9,
+    "wake_omitted_product_status": "uncertain",
+    "wake_changed": false
+  },
+  "work_scope": "design/ADR/source-map only; no implementation, live reads, model invocation or approval claimed",
+  "review_state": "initial d1; controller ONE HIGH review pending",
+  "implementation_limitations": [
+    "Exact producer receipt adapter and source-pinned consumer compatibility require implementation evidence.",
+    "Local UID check is proposed, not existing producer enrollment; same-UID administrative trust remains.",
+    "No independent external-effect proof is asserted by admind; controller receipt is an attestation.",
+    "Original operation policy and authenticated human consent remain separate from fulfillment."
+  ]
+}
