@@ -10,18 +10,77 @@
       "archive_path": "docs/reviews/approved-inputs/2026-10-15-operator-task-management.md",
       "sha256": "3249c0a3b6207da6bc6172e5291895779a920d3afd56de6e38d0365df0ee2a39",
       "bytes": 7332,
-      "note": "Exact historical d2 bytes; its pending prose retained, no fresh review or approval inferred."
+      "note": "Exact historical d2 bytes; its pending prose retained, no fresh review or approval inferred.",
+      "source_repository": "heterodyne-metaharness-v2"
     }
   ],
   "proposed_prerequisites": [
     {
       "task": "btq-zcd1l",
-      "observed_revision": "e73eab04ac9eeb91ea7a5794cd04bbe2236fde4d",
+      "observed_revision": "e1eb90a28c1fab011d73f2860abe0cfb1c96b430",
       "path": "docs/designs/2026-10-16-management-design-task-recovery.md",
-      "sha256": "0d5637f8bc341018edc68ca09a52c2be2cd21ac7ae6bc4f3a4232ee5fe5744a2",
-      "note": "Not claimed approved. Resolve actual final approved/deployed Z revision before implementation; changed protection contract needs compatibility review."
+      "sha256": "7df1811922914e80b900543ae7dd84b6263e02d7de1fa84dbb98490af3647618",
+      "note": "Signed proposed d2; actual R2 in progress at authoring. No approval/deployment inferred; resolve genuinely approved compatible installed revision."
     }
   ],
   "observed_installed_queue": "6fe57598468ff53bf74dfd9e1cf181ad3177c3f1",
-  "implementation_or_live_actions": false
+  "implementation_or_live_actions": false,
+  "revision": "d2",
+  "controller_integration_provenance": {
+    "original_repository": "heterodyne-metaharness",
+    "original_commit": "3158263d049ea0a6b5cd398b40df95b704836d4d",
+    "original_path": "docs/designs/2026-10-16-controller-integration-evidence.md",
+    "approved_adr_revision": "0547abf9c303dd2104a32238759db30e66ca952c",
+    "approved_adr_path": "docs/adr/2026-10-16-controller-integration-evidence.md",
+    "approval_task": "btq-xu3ax",
+    "target": "btq-ytmpy",
+    "decision": "approve",
+    "operator": "Liam",
+    "at": "2026-10-16T04:19:25Z",
+    "via_ref": "marmot:id:6ab5e9ea5114",
+    "approved_digest": "ce7b7a7a959f1fd501af879a7e61d3a0003a29b19e2caf63c742cfc220b3d63b",
+    "evidence_source": "Controller fresh native read supplied to author; does not authorize delegation, deployment or other task admission"
+  },
+  "actual_review": {
+    "round": 1,
+    "maximum": 3,
+    "verdict": "REVISE",
+    "findings": 42,
+    "report_sha256": "f167ea7ef46b0f0ff073901d79e6c710d2599bd2a24482c54596debd03d8294d",
+    "author_dispositions_path": "docs/reviews/so7ma-r1-dispositions.md"
+  },
+  "source_observations": [
+    {
+      "repository": "beads-task-queue",
+      "revision": "6fe57598468ff53bf74dfd9e1cf181ad3177c3f1",
+      "path": "bin/btq",
+      "symbols": [
+        "Queue.bd_op",
+        "Handoff.move",
+        "Handoff.check_ask"
+      ],
+      "lines": [
+        1305,
+        2436,
+        2340
+      ],
+      "finding": "bd_op subprocess boundary; real ask metadata; any policy approver A and no recorded contrary answer",
+      "sha256": "ec2bc67b227326c80bf5d9a32eb661b220ea9af6942ef31bff04d8c06941bd2e"
+    },
+    {
+      "repository": "heterodyne-metaharness-v2",
+      "revision": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/daemon.py",
+      "symbols": [
+        "Admind.answer_ask"
+      ],
+      "line": 952,
+      "finding": "Question answers append; new delegation transaction/revoke behavior required, not existing API",
+      "sha256": "6dd566effd2fbd2a569e533cf8449da5ae15244290e6a9cfc30560e685acb0fb"
+    }
+  ],
+  "document_hashes": {
+    "docs/designs/2026-10-16-bounded-controller-management-delegation.md": "634dae801e412a67c92cfbfe2530aca26b01fcd73dfc9f4334f47368cfef7675",
+    "docs/reviews/so7ma-r1-dispositions.md": "db2ed9122f6f6d8919e2592aa3817146a8ada93269b664c3e100128f173fc948"
+  }
 }
