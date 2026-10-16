@@ -1,0 +1,68 @@
+{
+  "source_commit": "5a4d4d0d91cee0a75afa414a4ca5b7d0bbc31af6",
+  "started_at": "2026-10-16T20:56:19.116117+00:00",
+  "operations": [
+    {
+      "bead": "btq-5dh3q",
+      "operation": "summary",
+      "state": "finished",
+      "exit_code": 0,
+      "receipt": {
+        "format": 1,
+        "bead": "btq-5dh3q",
+        "comment_id": "01a14680-5ac6-7b49-976b-545d62d32b60",
+        "created_at": "2026-10-16T20:56:19Z",
+        "author": "bel:belthanior:supervisor",
+        "text_sha256": "2f5b8ada5598699cf44c49e79a2e044a51cc0e2110788a4e5f1a08eac2b5815c",
+        "pinned_at": "2026-10-16T20:56:19Z"
+      }
+    },
+    {
+      "bead": "btq-wpyv5",
+      "operation": "summary",
+      "state": "finished",
+      "exit_code": 0,
+      "receipt": {
+        "format": 1,
+        "bead": "btq-wpyv5",
+        "comment_id": "01a14680-5c9b-7654-8b6c-425a1fee7d0d",
+        "created_at": "2026-10-16T20:56:19Z",
+        "author": "bel:belthanior:supervisor",
+        "text_sha256": "41b7d68fc62c9fd2fa3d0ac81f46a65f721df6d9eacdbadbcaba224a56cd3ed2",
+        "pinned_at": "2026-10-16T20:56:19Z"
+      }
+    },
+    {
+      "bead": "btq-f41ih",
+      "operation": "summary",
+      "state": "finished",
+      "exit_code": 0,
+      "receipt": {
+        "format": 1,
+        "bead": "btq-f41ih",
+        "comment_id": "01a14680-5e74-79bb-bd3d-1213827e4923",
+        "created_at": "2026-10-16T20:56:20Z",
+        "author": "bel:belthanior:supervisor",
+        "text_sha256": "2b53ec7990df991cdb86db9e1cca8e6ffa402a8947c4950e8696c464a28a6556",
+        "pinned_at": "2026-10-16T20:56:20Z"
+      }
+    },
+    {
+      "bead": "btq-qcrlb",
+      "operation": "summary",
+      "state": "finished",
+      "exit_code": 0,
+      "receipt": {
+        "format": 1,
+        "bead": "btq-qcrlb",
+        "comment_id": "01a14680-6022-74c7-9339-a579720433d3",
+        "created_at": "2026-10-16T20:56:20Z",
+        "author": "bel:belthanior:supervisor",
+        "text_sha256": "822ae92efe6724bb664020be7f16f14ba9631d575adacdd918f2d66dea5566fd",
+        "pinned_at": "2026-10-16T20:56:20Z"
+      }
+    }
+  ],
+  "sanitization": "Only operation labels, finished states and exact public receipt fields retained; private command/file paths and complete runtime records excluded.",
+  "original_artifact_sha256": "c6dd91d392a6bc40e7450c565c2de8f47a51f90c4f102bfb16c22618c63cc48a"
+}

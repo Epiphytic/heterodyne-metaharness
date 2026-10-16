@@ -1,0 +1,15 @@
+{
+  "started_at": "2026-10-16T20:53:25.400942+00:00",
+  "finished_at": "2026-10-16T20:54:42.618733+00:00",
+  "head": "5a4d4d0d91cee0a75afa414a4ca5b7d0bbc31af6",
+  "end_head": "5a4d4d0d91cee0a75afa414a4ca5b7d0bbc31af6",
+  "exit_code": 0,
+  "log_sha256": "429bd41667d711e803f1cdccffe071ff3827e9425038819e6e2f023f2b5183ea",
+  "requested_model": "opus",
+  "requested_effort": "medium",
+  "skill": "/code-review",
+  "prompt": "Are there any critical flaws with this, or is this good enough to implement as a PoC?",
+  "reported_verdict": "APPROVE: good enough to implement as a PoC.",
+  "reported_model_identity": null,
+  "limitation": "Requested model recorded; standalone raw report does not provide a resolved provider/model identity. Reviewer did not rerun tests."
+}
