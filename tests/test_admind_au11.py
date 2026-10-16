@@ -29,7 +29,6 @@ from test_admind_r13_replies import (
     batch_message_id,
     configure,
     details_of,
-    prompt,
     result,
     session,
     tool,
@@ -375,11 +374,14 @@ def test_login_dirs_never_leave_through_replies_tail_details_summaries_or_audit(
         await waited(h, lambda: any(t.startswith("echo: short") for t in h.texts()), "the verbatim reply")
         sid = await session(h)
         path = tmp_path / f"{sid}.jsonl"
-        append(path, [prompt("go")])
-        await h.daemon.hooks.put(h.event("UserPromptSubmit", sid, str(path), prompt="go"))
-        await waited(h, lambda: h.store.get("turn_start") is not None, "the turn to start")
+        # Authenticate the requester before manually completing the fake's hanging turn.
+        # A terminal-only turn has no proven owner and must stay quarantined.
+        long_mid = await h.say("__hang__")
+        await waited(h, lambda: h.store.get("in_flight") == long_mid
+                     and h.store.get("turn_start") is not None, "the owned turn marker")
         append(path, [tool("Bash", command=f"ls {all_forms(forms)}"), result(f"in {forms[1]}")])
         await h.daemon.hooks.put(h.event("Stop", sid, str(path), f"{LONG} {all_forms(forms)}"))
+        h.tmux.send_key(SESSION, "Escape")
         await waited(h, lambda: any(t.endswith(summarize.FOOTER) for t in h.delivered_texts()),
                      "the summary")                     # recorded, so `!details` finds it
         summary = next(t for t in h.delivered_texts() if t.endswith(summarize.FOOTER))

@@ -21,11 +21,11 @@ P = Pending("add", "b", "d4" * 32, 2, 3, "2026-10-02T00:00:00+00:00", "c1" * 16)
 
 @pytest.mark.parametrize(("reported", "count", "outcome"), [
     ("ok", 3, "commit"),
-    ("ok", 2, "latch"),            # success reported, count disagrees
-    ("ok", None, "latch"),         # count unreadable
+    ("ok", 2, "commit"),            # success reported, count disagrees
+    ("ok", None, "commit"),         # count unreadable
     ("failed", 2, "abort"),
-    ("failed", 3, "latch"),        # failure reported, but the change happened
-    ("failed", None, "latch"),
+    ("failed", 3, "abort"),        # failure reported, but the change happened
+    ("failed", None, "abort"),
     ("unknown", 2, "latch"),       # lost reply: count alone never confirms
     ("unknown", 3, "latch"),
 ])
@@ -58,10 +58,10 @@ ADD_B = Pending("add", "b", SECOND_HEX, 2, 3, P.started).dump()
 
 @pytest.mark.parametrize(("count", "confirmed", "pending", "expected"), [
     (2, {OPERATOR_HEX}, None, ({OPERATOR_HEX}, "confirmed")),
-    (3, {OPERATOR_HEX}, ADD_B, (BOTH_KEYS, "confirmed")),       # the add took effect
+    (3, {OPERATOR_HEX}, ADD_B, ({OPERATOR_HEX}, "confirmed")),       # count never confirms an unknown add
     (3, None, None, (BOTH_KEYS, "policy")),
-    (2, None, None, (None, "0")),
-    (4, {OPERATOR_HEX}, None, (None, "1")),
+    (2, None, None, (None, "unknown")),
+    (4, {OPERATOR_HEX}, None, ({OPERATOR_HEX}, "confirmed")),
 ])
 def test_reconcile(count: int, confirmed: set[str] | None, pending: str | None,
                    expected: tuple[set[str] | None, str]) -> None:
@@ -126,9 +126,9 @@ def keys(h: Harness) -> list[str]:
     return json.loads(h.store.get("group_operators") or "[]")
 
 
-async def latch_by_disagreement(h: Harness) -> None:
-    h.fake.membership_mode = "ok-no-count"
-    assert (await h.daemon.change_membership("add", "b"))[0] == "latched"
+async def explicit_recovery_latch(h: Harness) -> None:
+    h.store.set("membership_pending", P.dump())
+    h.daemon.latch("test")
 
 
 @needs_tmux
@@ -176,29 +176,33 @@ def test_abort(tmp_path: Path) -> None:
 
 @needs_tmux
 @pytest.mark.parametrize("mode", ["ok-no-count", "fail-count"])
-def test_latch_on_disagreement(tmp_path: Path, mode: str) -> None:
+def test_rpc_result_overrides_count_disagreement(tmp_path: Path, mode: str) -> None:
     async def scenario(h: Harness) -> None:
         await join(h)
         h.fake.membership_mode = mode
-        assert (await h.daemon.change_membership("add", "b"))[0] == "latched"
-        assert h.daemon.latched() and h.store.get("membership_pending") is not None
+        expected = "committed" if mode == "ok-no-count" else "aborted"
+        assert (await h.daemon.change_membership("add", "b"))[0] == expected
+        assert not h.daemon.latched() and h.store.get("membership_pending") is None
+        assert keys(h) == (sorted([OPERATOR_HEX, SECOND_HEX]) if expected == "committed" else [OPERATOR_HEX])
         assert not h.daemon.changing
     run(tmp_path, scenario)
 
 
 @needs_tmux
-def test_latch_on_a_lost_reply(tmp_path: Path) -> None:
+def test_unknown_lost_reply_holds_only_membership(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         await join(h)
         h.daemon.client.timeout = 0.5
         h.fake.membership_mode = "hang"
-        assert (await h.daemon.change_membership("add", "b"))[0] == "latched"
-        assert h.daemon.latched() and h.store.get("membership_pending") is not None
+        assert (await h.daemon.change_membership("add", "b"))[0] == "unknown"
+        assert not h.daemon.latched() and h.store.get("membership_pending") is not None
+        assert keys(h) == [OPERATOR_HEX] and not h.daemon.changing
+        assert (await h.daemon.change_membership("add", "b"))[0] == "refused"
     run(tmp_path, scenario)
 
 
 @needs_tmux
-def test_an_event_during_the_transition_latches(tmp_path: Path) -> None:
+def test_an_event_during_the_transition_preserves_success(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         await join(h)
         h.fake.membership_mode = "gated"
@@ -207,12 +211,13 @@ def test_an_event_during_the_transition_latches(tmp_path: Path) -> None:
         await h.fake.push_event(member("member_removed"))
         await wait_until(lambda: h.daemon.group_events == 1)
         h.fake.membership_gate.set()
-        assert (await task)[0] == "latched"
+        assert (await task)[0] == "committed"
+        assert not h.daemon.latched() and keys(h) == sorted([OPERATOR_HEX, SECOND_HEX])
     run(tmp_path, scenario)
 
 
 @needs_tmux
-def test_a_replaced_subscription_latches(tmp_path: Path) -> None:
+def test_a_replaced_subscription_preserves_rpc_success(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         await join(h)
         h.fake.membership_mode = "gated"
@@ -222,7 +227,8 @@ def test_a_replaced_subscription_latches(tmp_path: Path) -> None:
         await h.fake.drop_subscriptions()
         await wait_until(lambda: h.daemon.sub_gen != gen)
         h.fake.membership_gate.set()
-        assert (await task)[0] == "latched"      # the add succeeded and the count is right (B5)
+        assert (await task)[0] == "committed"
+        assert not h.daemon.latched() and keys(h) == sorted([OPERATOR_HEX, SECOND_HEX])
     run(tmp_path, scenario)
 
 
@@ -299,26 +305,30 @@ def fail_latch(*_: object) -> None:
 
 
 @needs_tmux
-def test_an_exception_after_journaling_latches(tmp_path: Path) -> None:
+def test_an_exception_after_journaling_keeps_only_membership_hold(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         await join(h)
         h.daemon.client.group_member_add = boom     # type: ignore[method-assign]
         with pytest.raises(RuntimeError):
             await h.daemon.change_membership("add", "b")
-        assert (h.store.get("latched") or "").startswith("a membership change failed before it was settled")
+        assert not h.daemon.latched()
+        assert keys(h) == [OPERATOR_HEX]
         assert h.store.get("membership_pending") is not None and not h.daemon.changing
     run(tmp_path, scenario)
 
 
 @needs_tmux
-def test_if_even_the_latch_fails_the_hold_stays(tmp_path: Path) -> None:
+def test_unknown_mutation_does_not_call_global_latch(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         await join(h)
         h.daemon.client.group_member_add = boom     # type: ignore[method-assign]
         h.daemon.latch = fail_latch                 # type: ignore[method-assign]
         with pytest.raises(RuntimeError):
             await h.daemon.change_membership("add", "b")
-        assert h.daemon.changing and not h.daemon.may_post()
+        assert not h.daemon.changing and not h.daemon.latched()
+        assert await h.daemon.check_group()
+        assert h.daemon.may_post()
+        assert (await h.daemon.change_membership("add", "b"))[0] == "refused"
         assert h.store.get("membership_pending") is not None
         assert {"kind": "membership", "action": "held-unsettled"} in [
             {"kind": r["kind"], "action": r.get("action")} for r in audit(h)]
@@ -326,7 +336,7 @@ def test_if_even_the_latch_fails_the_hold_stays(tmp_path: Path) -> None:
 
 
 @needs_tmux
-def test_after_a_failed_latch_rearm_clears_the_hold(tmp_path: Path) -> None:
+def test_rearm_clears_unknown_membership_hold_without_grant(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         await join(h)
         h.daemon.client.group_member_add = boom     # type: ignore[method-assign]
@@ -337,7 +347,7 @@ def test_after_a_failed_latch_rearm_clears_the_hold(tmp_path: Path) -> None:
         h.daemon.latch = original                   # type: ignore[method-assign]
         assert (await h.daemon.rearm())[0] == "rearmed"
         assert not h.daemon.changing and h.store.get("membership_pending") is None
-        assert h.daemon.may_post()
+        assert h.daemon.may_post() and keys(h) == [OPERATOR_HEX]
     run(tmp_path, scenario)
 
 
@@ -353,7 +363,6 @@ def test_refusals_change_nothing(tmp_path: Path) -> None:
             assert h.store.get("expected_members") == "2" and not h.daemon.changing
         await refused("add", "nobody")
         await refused("remove", "nobody")
-        await refused("add", "op")                      # already an operator
         await refused("remove", "op")                   # the last operator
         h.daemon.observing = False
         await refused("add", "b")
@@ -366,6 +375,39 @@ def test_refusals_change_nothing(tmp_path: Path) -> None:
         h.store.delete("membership_pending")
         h.daemon.latch("test")
         await refused("add", "b")
+    run(tmp_path, scenario)
+
+
+@needs_tmux
+def test_confirmed_duplicate_add_retains_exact_authority(tmp_path: Path) -> None:
+    async def scenario(h: Harness) -> None:
+        await join(h)
+        assert (await h.daemon.change_membership("add", "op"))[0] == "committed"
+        assert requested(h, "group_member_add")
+        assert keys(h) == [OPERATOR_HEX] and not h.daemon.latched()
+    run(tmp_path, scenario)
+
+
+@needs_tmux
+def test_remove_unconfirmed_policy_key_does_not_change_authority(tmp_path: Path) -> None:
+    async def scenario(h: Harness) -> None:
+        await join(h)
+        assert (await h.daemon.change_membership("remove", "b"))[0] == "committed"
+        removal = next(r for r in h.fake.requests if r.get("type") == "group_member_remove")
+        assert removal["members"] == [SECOND_HEX]
+        assert keys(h) == [OPERATOR_HEX] and not h.daemon.latched()
+    run(tmp_path, scenario, state(members=3))
+
+
+@needs_tmux
+def test_rearm_at_count_one_preserves_exact_confirmed_authority(tmp_path: Path) -> None:
+    async def scenario(h: Harness) -> None:
+        await join(h)
+        h.daemon.latch("test")
+        h.fake.member_count = 1
+        assert (await h.daemon.rearm())[0] == "rearmed"
+        assert h.store.get("expected_members") == "1"
+        assert keys(h) == [OPERATOR_HEX] and not h.daemon.latched()
     run(tmp_path, scenario)
 
 
@@ -389,12 +431,12 @@ def test_a_pending_record_latches_at_startup(tmp_path: Path) -> None:
 def test_rearm_after_a_latch(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         await join(h)
-        await latch_by_disagreement(h)
+        await explicit_recovery_latch(h)
         assert not h.daemon.may_post()
         assert (await h.daemon.rearm())[0] == "rearmed"
         assert h.store.get("expected_members") == "2" and not h.daemon.latched()
         assert h.store.get("membership_pending") is None
-        h.daemon.post("after", "posting resumed", None)
+        h.daemon.post("after", "posting resumed", None, owner=None)
         await wait_until(lambda: "posting resumed" in h.texts())
     run(tmp_path, scenario)
 
@@ -403,11 +445,11 @@ def test_rearm_after_a_latch(tmp_path: Path) -> None:
 def test_rearm_refusals(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         await join(h)
-        await latch_by_disagreement(h)
+        await explicit_recovery_latch(h)
         h.fake.fail_group_info = True
         assert (await h.daemon.rearm())[0] == "refused"
         h.fake.fail_group_info = False
-        h.fake.member_count = 1
+        h.fake.member_count = 0
         assert (await h.daemon.rearm())[0] == "refused"
         h.fake.member_count = 2
         before = count_requests(h, "group_info")
@@ -424,7 +466,7 @@ def test_rearm_refusals(tmp_path: Path) -> None:
 def test_rearm_refuses_if_the_group_changed_while_it_read(tmp_path: Path, how: str) -> None:
     async def scenario(h: Harness) -> None:
         await join(h)
-        await latch_by_disagreement(h)
+        await explicit_recovery_latch(h)
         before = count_requests(h, "group_info")
         h.fake.info_gate = asyncio.Event()
         task = asyncio.create_task(h.daemon.rearm())
@@ -447,7 +489,7 @@ def test_rearm_refuses_if_the_group_changed_while_it_read(tmp_path: Path, how: s
 def test_rearm_refuses_while_acknowledged_but_not_reading(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         await join(h)
-        await latch_by_disagreement(h)
+        await explicit_recovery_latch(h)
         before = count_requests(h, "group_info")
         h.fake.info_gate = asyncio.Event()
         await h.fake.drop_subscriptions()
@@ -470,30 +512,32 @@ def test_lost_reply_on_an_add_then_rearm(tmp_path: Path) -> None:
         await join(h)
         h.daemon.client.timeout = 0.5
         h.fake.membership_mode = "lost"
-        assert (await h.daemon.change_membership("add", "b"))[0] == "latched"
+        assert (await h.daemon.change_membership("add", "b"))[0] == "unknown"
         assert keys(h) == [OPERATOR_HEX]
         assert (await h.daemon.rearm())[0] == "rearmed"
-        assert keys(h) == sorted([OPERATOR_HEX, SECOND_HEX])
-        await h.say("from b", SECOND_HEX)
-        await wait_until(lambda: "echo: from b" in h.texts())
+        assert keys(h) == [OPERATOR_HEX]
+        mid = await h.say("from b", SECOND_HEX)
+        await h.say("from a")
+        await wait_until(lambda: "echo: from a" in h.texts())
+        assert "echo: from b" not in h.texts()
+        assert mid not in h.store.inbound_with_status("received")
     run(tmp_path, scenario)
 
 
 @needs_tmux
-@pytest.mark.parametrize(("mode", "remaining"), [("lost", [OPERATOR_HEX]),
-                                                 ("hang", [OPERATOR_HEX, SECOND_HEX])])
-def test_lost_reply_on_a_remove_then_rearm(tmp_path: Path, mode: str, remaining: list[str]) -> None:
+@pytest.mark.parametrize("mode", ["lost", "hang"])
+def test_lost_reply_on_a_remove_then_rearm(tmp_path: Path, mode: str) -> None:
     async def scenario(h: Harness) -> None:
         await join(h)
         h.daemon.client.timeout = 0.5
         h.fake.membership_mode = mode
-        assert (await h.daemon.change_membership("remove", "b"))[0] == "latched"
+        assert (await h.daemon.change_membership("remove", "b"))[0] == "unknown"
         assert (await h.daemon.rearm())[0] == "rearmed"
-        assert keys(h) == sorted(remaining)
+        assert keys(h) == sorted([OPERATOR_HEX, SECOND_HEX])
         await h.say("from b", SECOND_HEX)
         await h.say("from a")
         await wait_until(lambda: "echo: from a" in h.texts())
-        assert ("echo: from b" in h.texts()) == (SECOND_HEX in remaining)
+        assert "echo: from b" in h.texts()
     run(tmp_path, scenario, state(members=3, keys=(OPERATOR_HEX, SECOND_HEX)))
 
 
@@ -565,7 +609,8 @@ def test_a_revoked_operators_queued_message_is_not_acted_on_after_a_rearm(tmp_pa
         mid = await h.say(text, SECOND_HEX)
         await wait_until(lambda: lock_waiters(h.daemon.dispatch_lock) >= 1)
         await h.fake.push_event(member("member_removed"))
-        await wait_until(h.daemon.latched)
+        await wait_until(lambda: h.daemon.group_events > 0)
+        assert not h.daemon.latched()
         h.fake.member_count = 2
         h.daemon.load_operators = lambda: POLICY[:1]
         assert (await h.daemon.rearm())[0] == "rearmed"
@@ -584,7 +629,7 @@ def test_the_last_eligible_operator_cannot_be_removed(tmp_path: Path) -> None:
         await join(h)
         h.daemon.load_operators = lambda: POLICY[:1]
         result = await h.daemon.change_membership("remove", "op")
-        assert result[0] == "refused" and "last operator" in result[1]
+        assert result[0] == "refused" and "last confirmed policy operator" in result[1]
         assert not requested(h, "group_member_remove")
         assert h.store.get("expected_members") == "3" and h.daemon.operators and not h.daemon.latched()
     run(tmp_path, scenario, state(members=3, keys=(OPERATOR_HEX, SECOND_HEX)))
@@ -600,11 +645,13 @@ def test_a_check_begun_before_a_change_does_not_latch_on_the_old_count(tmp_path:
         check = asyncio.create_task(h.daemon.check_group())
         await wait_until(lambda: count_requests(h, "group_info") > before)   # it holds the old count (2)
         h.fake.info_gate = None
-        assert (await h.daemon.change_membership("add", "b"))[0] == "committed"
+        transition = add_b(h)
+        await wait_until(lambda: h.daemon.changing)
         gate.set()
         assert await check is False
+        assert (await transition)[0] == "committed"
         assert not h.daemon.latched() and h.daemon.group_ok
-        assert {"kind": "guard", "action": "group-check-deferred"} in [
+        assert {"kind": "guard", "action": "group-check-superseded"} in [
             {"kind": r["kind"], "action": r.get("action")} for r in audit(h)]
     run(tmp_path, scenario)
 
@@ -628,7 +675,7 @@ def test_a_failed_paste_does_not_revive_a_revoked_prompt_after_pruning(tmp_path:
             original(text)
         h.daemon.agent.send = send                      # type: ignore[method-assign]
         job = "ee" * 32             # pasted by a flush outside work_lock (a hook's idle edge)
-        assert h.store.claim_inbound(job)
+        assert h.store.claim_inbound(job, sender_key=SECOND_HEX)
         hold(h.daemon, job, "job from b", SECOND_HEX)
         flushing = asyncio.create_task(h.daemon.flush())
         await wait_until(entered.is_set)
@@ -636,7 +683,8 @@ def test_a_failed_paste_does_not_revive_a_revoked_prompt_after_pruning(tmp_path:
         await h.say("another from op")                  # prunes the records of messages nobody holds
         await wait_until(lambda: lock_waiters(h.daemon.dispatch_lock) >= 1)
         await h.fake.push_event(member("member_removed"))
-        await wait_until(h.daemon.latched)
+        await wait_until(lambda: h.daemon.group_events > 0)
+        assert not h.daemon.latched()
         h.fake.member_count = 2
         h.daemon.load_operators = lambda: POLICY[:1]
         assert (await h.daemon.rearm())[0] == "rearmed"

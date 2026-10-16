@@ -203,7 +203,7 @@ def test_two_quick_messages_each_get_their_own_threaded_reply(tmp_path: Path) ->
 def test_recovery_notice_waits_for_a_good_group_check(tmp_path: Path) -> None:
     def before(h: Harness) -> None:
         h.store.set("operator_seen_at", "2026-09-30T00:00:00+00:00")
-        h.store.claim_inbound("99" * 32)
+        h.store.claim_inbound("99" * 32, sender_key=OPERATOR_HEX)
         h.fake.fail_group_info = True
 
     async def scenario(h: Harness) -> None:
@@ -217,7 +217,7 @@ def test_recovery_notice_waits_for_a_good_group_check(tmp_path: Path) -> None:
 @needs_tmux
 def test_recovery_notice_waits_for_the_operator(tmp_path: Path) -> None:
     def before(h: Harness) -> None:
-        h.store.claim_inbound("99" * 32)            # claimed, but the operator was never seen
+        h.store.claim_inbound("99" * 32, sender_key=OPERATOR_HEX)  # operator not seen
 
     async def scenario(h: Harness) -> None:
         await asyncio.sleep(1.5)
@@ -235,7 +235,7 @@ def test_latch_mid_batch_stops_the_rest(tmp_path: Path) -> None:
         sent = len(h.fake.sent)
         h.fake.on_send = lambda _req: h.store.set("latched", "test")
         for i in range(3):
-            h.store.enqueue(f"batch:{i}", f"b{i}", None)
+            h.store.enqueue(f"batch:{i}", f"b{i}", None, ownership_kind="system")
         h.daemon.wake.set()
         await h.until(lambda: len(h.fake.sent) > sent)
         await asyncio.sleep(0.5)
@@ -259,34 +259,29 @@ def test_non_operator_dropped_silently_and_commands_answered(tmp_path: Path) -> 
 
 
 @needs_tmux
-def test_member_count_latches_and_stops_all_posting(tmp_path: Path) -> None:
+def test_member_count_changes_allow_existing_operator(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         await h.say("first")
         await h.until(lambda: "echo: first" in h.texts())
-        sent = len(h.fake.sent)
+        confirmed = h.daemon.confirmed_operators()
         h.fake.member_count = 3
         await h.say("second")
-        await h.until(lambda: h.store.get("latched") is not None)
-        (h.settings.alerts_dir).mkdir(parents=True, exist_ok=True)
-        (h.settings.alerts_dir / "a1.json").write_text(json.dumps(
-            {"id": "a1", "created_at": "t", "text": "x"}))
-        await asyncio.sleep(1.0)
-        assert len(h.fake.sent) == sent
-        h.fake.member_count = 2
-        await h.say("third")
-        await asyncio.sleep(1.0)
-        assert len(h.fake.sent) == sent            # still latched until `admind rearm`
-    h = run_with(tmp_path, scenario)
-    assert "group has 3 members" in (h.store.get("latched") or "")
+        await h.until(lambda: "echo: second" in h.texts())
+        assert not h.daemon.latched() and h.daemon.confirmed_operators() == confirmed
+        assert h.daemon.expected_members() == 3
+    run_with(tmp_path, scenario)
 
 
 @needs_tmux
-def test_membership_event_latches(tmp_path: Path) -> None:
+def test_membership_event_does_not_latch(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         await h.fake.push_event({"type": "group_state_changed", "account_id_hex": ACCOUNT,
                                  "group_id_hex": "b2" * 32, "event_id_hex": "f6" * 32,
                                  "change": "member_added"})
-        await h.until(lambda: h.store.get("latched") is not None)
+        await h.until(lambda: h.daemon.group_events > 0)
+        assert not h.daemon.latched()
+        await h.say("still authorised")
+        await h.until(lambda: "echo: still authorised" in h.texts())
     run_with(tmp_path, scenario)
 
 
@@ -311,7 +306,7 @@ def test_alerts_wait_for_the_operator_then_relay_once(tmp_path: Path) -> None:
 def test_restart_recovery_answers_undelivered_messages(tmp_path: Path) -> None:
     def before(h: Harness) -> None:
         h.store.set("operator_seen_at", "2026-09-30T00:00:00+00:00")
-        h.store.claim_inbound("99" * 32)
+        h.store.claim_inbound("99" * 32, sender_key=OPERATOR_HEX)
 
     async def scenario(h: Harness) -> None:
         await h.until(lambda: RESTARTED_NOTICE in h.texts())
@@ -360,7 +355,7 @@ def test_lost_prompt_hook_holds_the_queue_until_interrupt(tmp_path: Path) -> Non
         after = await h.say("after")
         await h.until(lambda: UNCONFIRMED in h.texts(), timeout=30)
         by_text = {r["text"]: r["reply_to_message_id_hex"] for r in h.fake.sent}
-        assert by_text["echo: __noprompt__"] is None             # unconfirmed: posted top-level
+        assert "echo: __noprompt__" not in by_text  # unconfirmed ownership is held
         assert by_text[UNCONFIRMED] == lost
         assert ref_id(after) not in dispatched(h)                        # a timeout never dispatches
         await h.say("!interrupt")
@@ -434,10 +429,13 @@ def test_stop_during_interrupt_never_dispatches_into_the_escape(
         assert not any(r.text == "finished anyway" for r in h.store.pending())
         assert h.store.get("in_flight") == hung
         release.set()
-        await h.until(lambda: "echo: next" in h.texts())
+        await h.until(lambda: ref_id(nxt) in dispatched(h))
+        await h.until(lambda: h.store.db.execute(
+            "SELECT COUNT(*) FROM outbox WHERE text = 'finished anyway' AND status = 'quarantined'"
+        ).fetchone()[0] == 1)
         by_text = {r["text"]: r["reply_to_message_id_hex"] for r in h.fake.sent}
-        assert by_text["finished anyway"] is None       # the interrupt had already released the turn
-        assert ref_id(nxt) in dispatched(h) and "echo: next" in by_text
+        assert "finished anyway" not in by_text  # interrupted turn has no proven owner
+        assert dispatched(h).count(ref_id(nxt)) == 1
     run_with(tmp_path, scenario, before)
 
 
@@ -530,7 +528,7 @@ def test_lost_stop_then_terminal_turn_never_takes_the_thread(tmp_path: Path) -> 
         await h.daemon.hooks.put(h.event("Stop", sid, last_assistant_message="terminal answer"))
         await h.until(lambda: "echo: next" in h.texts())
         by_text = {r["text"]: r["reply_to_message_id_hex"] for r in h.fake.sent}
-        assert by_text["terminal answer"] is None
+        assert "terminal answer" not in by_text
         notice = next(r for r in h.fake.sent
                       if r["text"].startswith("No reply to this message: admind did not"))
         assert notice["reply_to_message_id_hex"] == stuck
@@ -548,9 +546,10 @@ def test_terminal_prompt_never_takes_a_pending_anchor(tmp_path: Path) -> None:
         h.store.set("in_flight_text", "from admind")
         await h.daemon.hooks.put(h.event("UserPromptSubmit", sid, prompt="typed at the terminal"))
         await h.daemon.hooks.put(h.event("Stop", sid, last_assistant_message="terminal answer"))
-        await h.until(lambda: "terminal answer" in h.texts())
-        row = next(r for r in h.fake.sent if r["text"] == "terminal answer")
-        assert row["reply_to_message_id_hex"] is None
+        await h.until(lambda: h.store.db.execute(
+            "SELECT COUNT(*) FROM outbox WHERE text = ? AND status = 'quarantined'",
+            ("terminal answer",)).fetchone()[0] == 1)
+        assert "terminal answer" not in h.texts()
         assert h.store.get("anchor") is None and h.store.get("in_flight") == "aa" * 32
     run_with(tmp_path, scenario)
 
@@ -564,11 +563,12 @@ def test_late_stop_after_interrupt_never_takes_the_next_anchor(tmp_path: Path) -
         await h.until(lambda: any(t.startswith("No reply to this message: interrupted") for t in h.texts()))
         # The interrupted turn's Stop is processed (and its reply sent) before "next" exists.
         await h.daemon.hooks.put(h.event("Stop", h.agent.session_id or "", None, "late"))
-        await h.until(lambda: "late" in h.texts())
+        await h.until(lambda: h.store.db.execute(
+            "SELECT COUNT(*) FROM outbox WHERE text = 'late' AND status = 'quarantined'").fetchone()[0] == 1)
         nxt = await h.say("next")
         await h.until(lambda: "echo: next" in h.texts())
         by_text = {r["text"]: r["reply_to_message_id_hex"] for r in h.fake.sent}
-        assert by_text["late"] is None and by_text["echo: next"] == nxt
+        assert "late" not in by_text and by_text["echo: next"] == nxt
     run_with(tmp_path, scenario)
 
 
@@ -594,6 +594,7 @@ def test_concurrent_flushes_dispatch_each_message_once(tmp_path: Path) -> None:
 def test_stale_in_flight_is_closed_out_at_startup(tmp_path: Path) -> None:
     def before(h: Harness) -> None:
         h.store.set("operator_seen_at", "2026-09-30T00:00:00+00:00")
+        h.store.claim_inbound("77" * 32, sender_key=OPERATOR_HEX)
         h.store.set("in_flight", "77" * 32)
         h.store.set("anchor", "77" * 32)
 
@@ -681,11 +682,11 @@ def test_handler_failures_are_contained_and_value_free(
         real = h.store.claim_inbound
         calls = [0]
 
-        def flaky(mid: str) -> bool:
+        def flaky(mid: str, **kwargs: Any) -> bool:
             calls[0] += 1
             if calls[0] == 1:
                 raise RuntimeError(f"y {npub}")
-            return real(mid)
+            return real(mid, **kwargs)
         monkeypatch.setattr(h.store, "claim_inbound", flaky)
 
     async def scenario(h: Harness) -> None:
@@ -753,7 +754,7 @@ def test_peer_error_detail_is_never_audited(tmp_path: Path, monkeypatch: pytest.
         await asyncio.sleep(1.2)                      # startup, the group loop and the message each checked
         assert h.fake.sent == []
     audit = audit_text(run_with(tmp_path, scenario, before))
-    assert "group-check-failed" in audit and '"code": "unavailable"' in audit
+    assert "group-check-unavailable" in audit
     assert token not in audit and npub not in audit
 
 
@@ -936,6 +937,8 @@ def test_serve_runs_until_sigterm_then_stops_cleanly(tmp_path: Path, monkeypatch
     h = Harness(tmp_path)
     stub = StubWn(tmp_path / "wn.sock")
     monkeypatch.setattr(cli, "WnAgent", lambda *_a, **_k: stub)
+    monkeypatch.setattr(cli.hconfig, "load", lambda: None)
+    monkeypatch.setattr(cli, "resolve", lambda *_a: h.settings)
     # Portable: no systemd scope (the launcher has its own tests); the server binds in the watched root.
     monkeypatch.setattr(cli, "tmux_launcher", lambda _s: None)
 

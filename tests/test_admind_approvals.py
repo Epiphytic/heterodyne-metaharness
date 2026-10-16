@@ -33,7 +33,6 @@ from admind_asks_fixture import (
 )
 from admind_waits import lock_waiters, stays, wait_until
 from escapes import FAKES, Escapes
-from fakes.fake_wn_agent import ACCOUNT
 from fakes.settings import OPERATOR_HEX, SECOND_HEX, operator
 from test_admind_asks import NONE, audited, joined, posted, row, via_main
 from test_admind_daemon import Harness, needs_tmux, run_with
@@ -1263,10 +1262,8 @@ def test_latch_during_decision_completes(tmp_path: Path) -> None:
         edit(tmp_path, decide="wait")
         mid = await send(h, approve(), first)
         await waiting(h)
-        await h.fake.push_event({"type": "group_state_changed", "account_id_hex": ACCOUNT,
-                                 "group_id_hex": "b2" * 32, "event_id_hex": "f6" * 32,
-                                 "change": "member_added"})
-        await wait_until(lambda: h.daemon.latched())
+        h.daemon.latch("operator recovery hold during decision")
+        assert h.daemon.latched()
         go_file(h).touch()
         await settled(h, mid)
         assert ask_status(h, ask_id) == "approved"

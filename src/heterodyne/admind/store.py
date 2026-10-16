@@ -168,6 +168,10 @@ class OutboxRow:
     attempts: int
     lane: int
     thread_key: str | None = None
+    ownership_kind: str = "unknown"
+    owners: tuple[str, ...] = ()
+    delivery_group: str = ""
+    not_before: float | None = None
 
 
 @dataclass(frozen=True)
@@ -251,12 +255,14 @@ def _ask(r: tuple[object, ...]) -> AskRow:
                   _opt_str(r[18]), _opt_str(r[19]), _opt_str(r[20]))
 
 
-_OUTBOX = "seq, key, reply_to, text, attempts, lane, thread_key"     # fixed, as _TURN
+_OUTBOX = ("seq, key, reply_to, text, attempts, lane, thread_key, ownership_kind, "
+           "delivery_group, not_before")     # fixed, as _TURN
 
 
 def _outbox(r: tuple[object, ...]) -> OutboxRow:
     return OutboxRow(int(cast(int, r[0])), str(r[1]), _opt_str(r[2]), str(r[3]), int(cast(int, r[4])),
-                     int(cast(int, r[5])), _opt_str(r[6]))
+                     int(cast(int, r[5])), _opt_str(r[6]), str(r[7]), (), str(r[8]),
+                     None if r[9] is None else float(cast(float, r[9])))
 
 
 def _opt_int(v: object) -> int | None:
@@ -344,6 +350,16 @@ class Store:
             for table, column in _CXMKF_COLUMNS:
                 if column not in {str(r[1]) for r in self.db.execute(f"PRAGMA table_info({table})")}:
                     self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
+        try:
+            self.migrate_guard()
+        except BaseException:
+            self.db.close()
+            raise
+
+    def migrate_guard(self) -> None:
+        from heterodyne.admind.guard_state import migrate
+        with self.transaction():
+            migrate(self.db)
 
     @_locked
     def close(self) -> None:
@@ -364,11 +380,13 @@ class Store:
         self.db.execute("DELETE FROM kv WHERE key = ?", (key,))
 
     @_locked
-    def claim_inbound(self, message_id: str, reply_to: str | None = None) -> bool:
+    def claim_inbound(self, message_id: str, reply_to: str | None = None,
+                      sender_key: str | None = None) -> bool:
         """Claim an inbound message ID once (a replay is refused). A reaction (`r:<event id>`) stores the
         message it reacted to as its reply target."""
-        cur = self.db.execute("INSERT OR IGNORE INTO inbound(message_id, status, received_at, reply_to) "
-                              "VALUES (?, 'received', ?, ?)", (message_id, now(), reply_to))
+        cur = self.db.execute("INSERT OR IGNORE INTO inbound(message_id, status, received_at, "
+                              "reply_to, sender_key) "
+                              "VALUES (?, 'received', ?, ?, ?)", (message_id, now(), reply_to, sender_key))
         return cur.rowcount == 1
 
     @_locked
@@ -396,13 +414,58 @@ class Store:
         return [str(r[0]) for r in rows]
 
     @_locked
+    def inbound_sender(self, mid: str) -> str | None:
+        row = self.db.execute("SELECT sender_key FROM inbound WHERE message_id = ?", (mid,)).fetchone()
+        return None if row is None else _opt_str(row[0])
+
+    @_locked
     def enqueue(self, key: str, text: str, reply_to: str | None, lane: int = 1,
-                thread_key: str | None = None) -> bool:
-        """Queue one message. A continuation chunk of a top-level post names chunk 0's key as `thread_key`
-        and no `reply_to`; its target is resolved when it is sent (K22)."""
-        cur = self.db.execute("INSERT OR IGNORE INTO outbox(key, reply_to, text, status, lane, thread_key) "
-                              "VALUES (?, ?, ?, 'pending', ?, ?)", (key, reply_to, text, lane, thread_key))
-        return cur.rowcount == 1
+                thread_key: str | None = None, *, ownership_kind: str = "unknown",
+                owners: tuple[str, ...] = (), delivery_group: str | None = None) -> bool:
+        """Unknown is safe storage, never system authority. Daemon callers name ownership explicitly."""
+        if ownership_kind not in {"system", "request", "unknown"}:
+            raise ValueError("invalid outbox ownership")
+        if (ownership_kind == "request") != bool(owners):
+            raise ValueError("request ownership requires exact authenticated owners")
+        group = delivery_group or thread_key or key
+        with self.transaction():
+            cur = self.db.execute(
+                "INSERT OR IGNORE INTO outbox(key, reply_to, text, status, lane, thread_key, "
+                "ownership_kind, delivery_group) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?)",
+                (key, reply_to, text, lane, thread_key, ownership_kind, group))
+            if cur.rowcount:
+                seq = int(cur.lastrowid or 0)
+                self.db.executemany("INSERT INTO outbox_owners(seq, sender_key) VALUES (?, ?)",
+                                    [(seq, owner) for owner in sorted(set(owners))])
+                parent = self.db.execute("SELECT status FROM outbox WHERE key = ?", (thread_key,)).fetchone()
+                if parent and parent[0] in {"quarantined", "suppressed"}:
+                    self.hold_group(group, str(parent[0]), "parent-held")
+            return cur.rowcount == 1
+
+    @_locked
+    def row_owners(self, seq: int) -> tuple[str, ...]:
+        return tuple(str(r[0]) for r in self.db.execute(
+            "SELECT sender_key FROM outbox_owners WHERE seq = ? ORDER BY sender_key", (seq,)))
+
+    @_locked
+    def hold_group(self, group: str, status: str, reason: str, not_before: float | None = None) -> None:
+        if status not in {"quarantined", "suppressed", "delayed"}:
+            raise ValueError("invalid group disposition")
+        self.db.execute("UPDATE outbox SET status = ?, hold_reason = ?, not_before = ? "
+                        "WHERE delivery_group = ? AND (status IN ('pending', 'delayed') "
+                        "OR (status = 'quarantined' AND ? != 'delayed'))",
+                        (status, reason, not_before, group, status))
+
+    @_locked
+    def limit_delay(self, group: str, not_before: float) -> None:
+        """Bound an existing delayed group's deadline after a wall-clock rollback."""
+        self.db.execute("UPDATE outbox SET not_before = MIN(not_before, ?) "
+                        "WHERE delivery_group = ? AND status = 'delayed'", (not_before, group))
+
+    @_locked
+    def release_delayed(self, at: float) -> None:
+        self.db.execute("UPDATE outbox SET status = 'pending', not_before = NULL, hold_reason = NULL "
+                        "WHERE status = 'delayed' AND not_before <= ?", (at,))
 
     @_locked
     def resolve_thread(self, seq: int) -> tuple[str | None, str | None, str]:
@@ -413,7 +476,8 @@ class Store:
         with self.transaction():
             r = self.db.execute("SELECT thread_key FROM outbox WHERE seq = ?", (seq,)).fetchone()
             parent = "" if r is None or r[0] is None else str(r[0])
-            p = self.db.execute("SELECT status, message_id FROM outbox WHERE key = ?", (parent,)).fetchone()
+            p = self.db.execute("SELECT status, message_id, not_before FROM outbox WHERE key = ?",
+                                (parent,)).fetchone()
             target: str | None = None
             why: str | None
             if p is None:
@@ -421,6 +485,11 @@ class Store:
             elif p[0] == "sent":
                 target = _opt_str(p[1])
                 why = None if target is not None else "no-message-id"
+            elif p[0] in {"quarantined", "suppressed", "delayed"}:
+                group = self.db.execute("SELECT delivery_group FROM outbox WHERE seq = ?",
+                                        (seq,)).fetchone()[0]
+                self.hold_group(str(group), str(p[0]), "parent-held", not_before=p[2])
+                return None, "parent-held", parent
             else:
                 why = "parent-failed" if p[0] == "failed" else "parent-pending"
             self.db.execute("UPDATE outbox SET reply_to = ?, thread_key = NULL WHERE seq = ?", (target, seq))
@@ -434,16 +503,20 @@ class Store:
                                 [(token, first + i, p) for i, p in enumerate(parts)])
 
     @_locked
-    def publish_details(self, token: str, prefix: str, reply_to: str, lane: int) -> int:
-        """Move every staged part to the outbox, keyed `{prefix}:{idx}`, in one statement: all or none.
-        Returns how many. The caller sets its inbound status in the same transaction."""
+    def publish_details(self, token: str, prefix: str, reply_to: str, lane: int,
+                        source_owners: tuple[str, ...] = ()) -> int:
+        """Publish with both the command's authenticated owner and every included source owner."""
+        owner = self.inbound_sender(token)
+        owners = tuple(sorted({owner, *source_owners})) if owner else ()
         with self.transaction():
-            cur = self.db.execute(
-                "INSERT OR IGNORE INTO outbox(key, reply_to, text, status, lane) "
-                "SELECT ? || ':' || idx, ?, text, 'pending', ? FROM details_stage WHERE token = ? "
-                "ORDER BY idx", (prefix, reply_to, lane, token))
-            self.db.execute("DELETE FROM details_stage WHERE token = ?", (token,))
-            return cur.rowcount
+            parts = self.db.execute("SELECT idx, text FROM details_stage WHERE token = ? ORDER BY idx",
+                                    (token,)).fetchall()
+            added = sum(self.enqueue(f"{prefix}:{idx}", str(text), reply_to, lane,
+                                     ownership_kind="request" if owner else "unknown",
+                                     owners=owners, delivery_group=prefix)
+                        for idx, text in parts)
+            self.discard_details(token)
+            return added
 
     @_locked
     def discard_details(self, token: str | None = None) -> None:
@@ -466,6 +539,20 @@ class Store:
         r = self.db.execute(f"SELECT {_OUTBOX} FROM outbox "  # noqa: S608 - a fixed column list
                             "WHERE status = 'pending' ORDER BY lane, seq LIMIT 1").fetchone()
         return None if r is None else _outbox(r)
+
+    def _joined_ownership(self, seqs: list[int], fallback_group: str) -> tuple[str, tuple[str, ...], str]:
+        """Caller holds Store lock. Joined text inherits every request owner and any unknown source."""
+        provenance = [self.db.execute(
+            "SELECT ownership_kind, delivery_group FROM outbox WHERE seq = ?", (seq,)
+        ).fetchone() for seq in seqs]
+        source_owners = [self.row_owners(seq) for seq in seqs]
+        known = all(p[0] in {"system", "request"} and (p[0] != "request" or owner)
+                    for p, owner in zip(provenance, source_owners, strict=True))
+        owners = tuple(sorted({key for group in source_owners for key in group})) if known else ()
+        kind = "request" if owners else "system" if known else "unknown"
+        group = (str(provenance[0][1]) if all(p[1] == provenance[0][1] for p in provenance)
+                 else fallback_group)
+        return kind, owners, group
 
     @_locked
     def redact_pending_outbox(self, chunk_chars: int) -> int:
@@ -502,14 +589,17 @@ class Store:
                         clean = redact_continuation("".join(earlier[i] for i in range(first)), joined)
                     else:
                         clean = PARTLY_SENT
+                kind, owners, group = self._joined_ownership([part[1] for part in parts], prefix)
+                self.db.executemany("DELETE FROM outbox_owners WHERE seq = ?", [(p[1],) for p in parts])
                 self.db.executemany("DELETE FROM outbox WHERE seq = ?", [(p[1],) for p in parts])
                 if first < 0:       # an unchunked key keeps its key
                     pieces = [(prefix, clean)]
                 else:
                     pieces = [(f"{prefix}:r{i}", part)
                               for i, part in enumerate(chunk.split(clean, chunk_chars))]
-                self.db.executemany("INSERT INTO outbox(key, reply_to, text, status, lane) "
-                                    "VALUES (?, ?, ?, 'pending', 1)", [(k, reply_to, t) for k, t in pieces])
+                for key, text in pieces:
+                    self.enqueue(key, text, reply_to, ownership_kind=kind, owners=owners,
+                                 delivery_group=group)
             self.db.execute("DELETE FROM kv WHERE key = 'outbox_needs_redaction'")
         return len(rows)
 
@@ -576,8 +666,9 @@ class Store:
         return [_turn(r) for r in rows]
 
     @_locked
-    def set_turn_status(self, turn_id: int, status: str) -> None:
-        self.db.execute("UPDATE turns SET status = ? WHERE turn_id = ?", (status, turn_id))
+    def set_turn_status(self, turn_id: int, status: str, *, detach_batch: bool = False) -> None:
+        self.db.execute("UPDATE turns SET status = ?, batch_id = CASE WHEN ? THEN NULL ELSE batch_id END "
+                        "WHERE turn_id = ?", (status, detach_batch, turn_id))
 
     @_locked
     def add_to_batch(self, turn_id: int, batch_id: int) -> None:
@@ -968,9 +1059,8 @@ class Store:
                                   (name, now()))
             if cur.rowcount != 1:
                 return False
-            cur = self.db.execute("INSERT OR IGNORE INTO outbox(key, reply_to, text, status, lane) "
-                                  "VALUES (?, NULL, ?, 'pending', 1)", (key, text))
-            if cur.rowcount != 1:
+            added = self.enqueue(key, text, None, ownership_kind="system")
+            if not added:
                 row = self.db.execute("SELECT text FROM outbox WHERE key = ?", (key,)).fetchone()
                 if row is None or row[0] != text:
                     raise ValueError(f"outbox key already in use with different text: {key}")

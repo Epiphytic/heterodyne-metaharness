@@ -28,6 +28,17 @@ def old_database(path: Path, rows: list[tuple[str, str, str]]) -> None:
     db.close()
 
 
+def redactable_store(path: Path) -> Store:
+    """Explicit system-owned fixtures for redaction/rollback tests, after legacy quarantine.
+
+    Real legacy rows stay quarantined; test_old_database_gains_the_lane_column covers that boundary.
+    """
+    store = Store(path)
+    store.db.execute("UPDATE outbox SET ownership_kind = 'system', status = 'pending' "
+                     "WHERE status = 'quarantined'")
+    return store
+
+
 def pending(s: Store) -> list[tuple[str, str]]:
     return [(r.key, r.text) for r in s.pending()]
 
@@ -51,8 +62,9 @@ def test_lane_one_first_then_lane_two(tmp_path: Path) -> None:
 def test_old_database_gains_the_lane_column(tmp_path: Path) -> None:
     old_database(tmp_path / "old.db", [("k", "t", "pending")])
     s = Store(tmp_path / "old.db")
-    row = s.next_pending()
-    assert row is not None and row.lane == 1
+    assert s.next_pending() is None              # legacy rows lack owner provenance and are quarantined
+    row = s.db.execute("SELECT lane, status FROM outbox WHERE key = ?", ("k",)).fetchone()
+    assert row is not None and tuple(row) == (1, "quarantined")
     assert s.get("outbox_needs_redaction") == "1"
 
 
@@ -60,7 +72,7 @@ def test_upgrade_redacts_a_secret_split_across_pending_chunks(tmp_path: Path) ->
     old_database(tmp_path / "old.db", [("reply:s:1:0", "token " + TOKEN[:12], "pending"),
                                        ("reply:s:1:1", TOKEN[12:] + f" and {HEX}", "pending"),
                                        ("ready", f"hello {HEX}", "pending")])
-    s = Store(tmp_path / "old.db")
+    s = redactable_store(tmp_path / "old.db")
     assert s.redact_pending_outbox(4000) == 3
     assert sorted(pending(s)) == [("ready", "hello <redacted hex key>"),
                                   ("reply:s:1:r0", "token <redacted GitHub token> and <redacted hex key>")]
@@ -71,7 +83,7 @@ def test_upgrade_redacts_a_secret_split_across_pending_chunks(tmp_path: Path) ->
 def test_upgrade_hides_the_rest_of_a_value_begun_in_a_sent_chunk(tmp_path: Path) -> None:
     old_database(tmp_path / "old.db", [("reply:s:2:0", "token " + TOKEN[:12], "sent"),
                                        ("reply:s:2:1", TOKEN[12:] + " end", "pending")])
-    s = Store(tmp_path / "old.db")
+    s = redactable_store(tmp_path / "old.db")
     s.redact_pending_outbox(4000)
     assert pending(s) == [("reply:s:2:r0", "<redacted fragment> end")]
 
@@ -82,7 +94,7 @@ def test_upgrade_hides_a_value_that_spans_several_sent_chunks(tmp_path: Path) ->
     old_database(tmp_path / "old.db", [("reply:s:3:0", long_token[:250], "sent"),
                                        ("reply:s:3:1", long_token[250:500], "sent"),
                                        ("reply:s:3:2", long_token[500:] + " end", "pending")])
-    s = Store(tmp_path / "old.db")
+    s = redactable_store(tmp_path / "old.db")
     s.redact_pending_outbox(4000)
     assert pending(s) == [("reply:s:3:r0", "<redacted fragment> end")]
 
@@ -90,7 +102,7 @@ def test_upgrade_hides_a_value_that_spans_several_sent_chunks(tmp_path: Path) ->
 def test_upgrade_hides_a_continuation_whose_start_is_gone(tmp_path: Path) -> None:
     old_database(tmp_path / "old.db", [("reply:s:4:0", "start", "sent"),
                                        ("reply:s:4:2", "Z" * 40 + " end", "pending")])   # :1 is missing
-    s = Store(tmp_path / "old.db")
+    s = redactable_store(tmp_path / "old.db")
     s.redact_pending_outbox(4000)
     assert pending(s) == [("reply:s:4:r0", "<redacted continuation of a partly sent reply>")]
 
@@ -99,7 +111,7 @@ def test_upgrade_rechunks(tmp_path: Path) -> None:
     # Not hex: a 600-character hex run would be one marker.
     old_database(tmp_path / "old.db", [(f"cmd:{MID}:0", "x" * 300, "pending"),
                                        (f"cmd:{MID}:1", "y" * 300, "pending")])
-    s = Store(tmp_path / "old.db")
+    s = redactable_store(tmp_path / "old.db")
     s.redact_pending_outbox(250)
     rows = pending(s)
     assert [k for k, _ in rows] == [f"cmd:{MID}:r{i}" for i in range(3)]
@@ -111,7 +123,7 @@ def test_upgrade_leaves_numeric_notice_keys_alone(tmp_path: Path) -> None:
                                        ("hook-lost:3", "lost", "pending"),
                                        ("long-turn:7", "long", "pending"),
                                        ("agent-stuck:2", "stuck", "pending")])
-    s = Store(tmp_path / "old.db")
+    s = redactable_store(tmp_path / "old.db")
     s.redact_pending_outbox(4000)
     assert pending(s) == [("adopt-hold:1", "held <redacted hex key>"), ("hook-lost:3", "lost"),
                           ("long-turn:7", "long"), ("agent-stuck:2", "stuck")]
@@ -121,7 +133,7 @@ def test_an_interrupted_rewrite_rolls_back_and_is_retried(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     rows = [(f"reply:s:5:{i}", f"part {i} {HEX if i == 1 else ''}", "pending") for i in range(2)]
     old_database(tmp_path / "old.db", rows + [("hook-lost:1", "lost", "pending")])
-    s = Store(tmp_path / "old.db")
+    s = redactable_store(tmp_path / "old.db")
     before = pending(s)
     conn = s.db
     calls = [0]
@@ -141,7 +153,7 @@ def test_an_interrupted_rewrite_rolls_back_and_is_retried(
     monkeypatch.undo()
     assert pending(s) == before and s.get("outbox_needs_redaction") == "1"
     s.close()
-    s = Store(tmp_path / "old.db")                  # reopened: the marker persisted, the retry succeeds
+    s = redactable_store(tmp_path / "old.db")     # reopened: marker persisted, retry succeeds
     assert s.get("outbox_needs_redaction") == "1"
     assert s.redact_pending_outbox(4000) == 3
     assert sorted(pending(s)) == [("hook-lost:1", "lost"),
@@ -170,10 +182,10 @@ def records(path: Path) -> list[dict[str, object]]:
 def test_lane_one_is_sent_before_the_rest_of_lane_two(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         await join(h)
-        h.fake.on_send = lambda req: (h.daemon.post("c", "command reply", None)
+        h.fake.on_send = lambda req: (h.daemon.post("c", "command reply", None, owner=None)
                                       if req["text"] == "d1" else None)
         for i in (1, 2, 3):
-            h.daemon.post(f"d{i}", f"d{i}", None, lane=2)
+            h.daemon.post(f"d{i}", f"d{i}", None, lane=2, owner=None)
         await wait_until(lambda: "d3" in h.texts())
         sent = [t for t in h.texts() if t in ("d1", "d2", "d3", "command reply")]
         assert sent == ["d1", "command reply", "d2", "d3"]
@@ -183,7 +195,7 @@ def test_lane_one_is_sent_before_the_rest_of_lane_two(tmp_path: Path) -> None:
 @needs_tmux
 def test_redaction_at_delivery(tmp_path: Path) -> None:
     def before(h: Harness) -> None:
-        h.store.enqueue("raw", f"see {HEX}", None)         # bypasses Admind.post
+        h.store.enqueue("raw", f"see {HEX}", None, ownership_kind="system")         # bypasses Admind.post
 
     async def scenario(h: Harness) -> None:
         await h.say("hello")                                # the join signal opens the outbound gate
@@ -198,6 +210,7 @@ def test_upgrade_at_startup(tmp_path: Path) -> None:
         old_database(h.settings.state_dir / "admind.db",
                      [("reply:s:1:0", "token " + TOKEN[:12], "pending"),
                       ("reply:s:1:1", TOKEN[12:] + " end", "pending")])
+        redactable_store(h.settings.state_dir / "admind.db").close()
 
     async def scenario(h: Harness) -> None:
         await h.say("hello")
@@ -235,9 +248,9 @@ def test_backoff_is_per_row(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         gates = await backoff_gates(h)
         h.fake.fail_sends = 2
-        h.daemon.post("d", "details", None, lane=2)
+        h.daemon.post("d", "details", None, lane=2, owner=None)
         await wait_until(lambda: len(gates) == 1)           # details failed: gates[0] is its backoff
-        h.daemon.post("c", "urgent", None)
+        h.daemon.post("c", "urgent", None, owner=None)
         await wait_until(lambda: len(gates) == 2)           # urgent was tried at once, failed, backs off
         gates[1].set()
         await wait_until(lambda: "urgent" in h.texts())
@@ -252,9 +265,9 @@ def test_lane_one_does_not_wait_for_a_lane_two_backoff(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         gates = await backoff_gates(h)
         h.fake.fail_sends = 1
-        h.daemon.post("d", "details", None, lane=2)
+        h.daemon.post("d", "details", None, lane=2, owner=None)
         await wait_until(lambda: len(gates) == 1)
-        h.daemon.post("c", "urgent", None)
+        h.daemon.post("c", "urgent", None, owner=None)
         await wait_until(lambda: "urgent" in h.texts())
         assert not gates[0].is_set() and "details" not in h.texts()
         gates[0].set()

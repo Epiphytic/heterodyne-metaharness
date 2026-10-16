@@ -33,9 +33,9 @@ def test_guard_accepts_only_the_operator_in_the_group() -> None:
 
 
 @pytest.mark.parametrize("change", sorted(guard.MEMBERSHIP_CHANGES))
-def test_membership_changes_latch(change: str) -> None:
+def test_membership_changes_are_observed(change: str) -> None:
     ev = GroupStateChanged(account_id_hex="a1" * 32, group_id_hex=GROUP, change=change)
-    assert guard.judge_group_change(ev, group_id=GROUP).action == "latch"
+    assert guard.judge_group_change(ev, group_id=GROUP).action == "process"
 
 
 def test_other_group_changes_are_ignored() -> None:
@@ -45,7 +45,9 @@ def test_other_group_changes_are_ignored() -> None:
     assert guard.judge_group_change(elsewhere, group_id=GROUP).action == "ignore"
 
 
-@pytest.mark.parametrize(("count", "action"), [(1, "latch"), (2, "process"), (3, "latch")])
+@pytest.mark.parametrize(
+    ("count", "action"), [(-1, "drop"), (0, "drop"), (1, "process"), (2, "process"), (3, "process")]
+)
 def test_member_count(count: int, action: str) -> None:
     assert guard.judge_member_count(count, 2).action == action
 

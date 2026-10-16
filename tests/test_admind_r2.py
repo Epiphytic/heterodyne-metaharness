@@ -196,7 +196,8 @@ def test_a_crash_between_the_ready_marker_and_the_notice_still_sends_the_notice_
     real_enqueue = u.store.enqueue
 
     def crashing_enqueue(key: str, text: str, reply_to: str | None, lane: int = 1,
-                         thread_key: str | None = None) -> bool:
+                         thread_key: str | None = None, *, ownership_kind: str = "unknown",
+                         owners: tuple[str, ...] = (), delivery_group: str | None = None) -> bool:
         raise OSError("simulated crash while queueing the notice")
     monkeypatch.setattr(u.store, "enqueue", crashing_enqueue)
 

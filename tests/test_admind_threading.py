@@ -149,8 +149,8 @@ def test_chunk_zero_sent_without_a_message_id(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         await join(h)
         without_message_id(h, "t:0")
-        h.daemon.post_parts("t", PARTS)
-        h.daemon.post("after", "unrelated", None)
+        h.daemon.post_parts("t", PARTS, owner=None)
+        h.daemon.post("after", "unrelated", None, owner=None)
         await drained(h, "t:1", "t:2", "after")
         assert sent_unidentified(h, "t:0")      # sent_mid needs the recorded ID, and there is none
         assert [reply_to(h, k) for k in ("t:1", "t:2")] == [None, None]
@@ -163,8 +163,8 @@ def test_chunk_zero_failed(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         await fast_backoff(h)
         h.fake.fail_sends = MAX_SEND_ATTEMPTS
-        h.daemon.post_parts("t", PARTS)
-        h.daemon.post("after", "unrelated", None)
+        h.daemon.post_parts("t", PARTS, owner=None)
+        h.daemon.post("after", "unrelated", None, owner=None)
         await drained(h, "t:1", "t:2", "after")
         assert sent_mid(h, "t:0") is None and len(sends(h, "t:0")) == MAX_SEND_ATTEMPTS
         assert [reply_to(h, k) for k in ("t:1", "t:2")] == [None, None]
@@ -175,9 +175,9 @@ def test_chunk_zero_failed(tmp_path: Path) -> None:
 @needs_tmux
 def test_chunk_zero_row_deleted(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
-        h.daemon.post_parts("t", PARTS)                 # held: nobody has been seen yet
+        h.daemon.post_parts("t", PARTS, owner=None)                 # held: nobody has been seen yet
         h.store.db.execute("DELETE FROM outbox WHERE key = 't:0'")
-        h.daemon.post("after", "unrelated", None)
+        h.daemon.post("after", "unrelated", None, owner=None)
         await joined(h)
         await drained(h, "t:1", "t:2", "after")
         assert [reply_to(h, k) for k in ("t:1", "t:2")] == [None, None]
@@ -189,8 +189,8 @@ def test_chunk_zero_row_deleted(tmp_path: Path) -> None:
 def test_a_child_picked_before_its_parent_never_waits(tmp_path: Path) -> None:
     """Lanes order the outbox, so a lane-1 child is picked while its lane-2 parent is still pending."""
     async def scenario(h: Harness) -> None:
-        h.daemon.post("t:0", "zero", None, lane=2)
-        h.daemon.post("t:1", "one", None, lane=1, thread_key="t:0")
+        h.daemon.post("t:0", "zero", None, lane=2, owner=None)
+        h.daemon.post("t:1", "one", None, lane=1, thread_key="t:0", owner=None)
         await joined(h)
         await drained(h, "t:0", "t:1")
         keys = [r["idempotency_key"] for r in h.fake.sent]
@@ -213,7 +213,7 @@ def test_a_crash_between_resolution_and_send(tmp_path: Path) -> None:
                 raise RuntimeError("injected")
             return await real(account, group, text, reply_to, k)
         h.daemon.client.send_final = send_final       # type: ignore[method-assign]
-        h.daemon.post_parts("t", PARTS)
+        h.daemon.post_parts("t", PARTS, owner=None)
         await drained(h, "t:0", "t:1", "t:2")
         first = sent_mid(h, "t:0")
         assert crashed == ["t:1"] and [reply_to(h, k) for k in ("t:1", "t:2")] == [first, first]
@@ -231,7 +231,7 @@ def test_a_retry_keeps_the_same_target(tmp_path: Path) -> None:
             if req["idempotency_key"] == "t:0":
                 h.fake.fail_sends = 1
         h.fake.on_send = fail_next
-        h.daemon.post_parts("t", PARTS)
+        h.daemon.post_parts("t", PARTS, owner=None)
         await drained(h, "t:0", "t:1", "t:2")
         first = sent_mid(h, "t:0")
         attempts = sends(h, "t:1")

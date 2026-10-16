@@ -2,9 +2,8 @@
 
 - Only MLS-authenticated messages from an operator's exact key, in admind's own group, are processed. A
   reaction is judged by the same rules on its actor (relay delta R27).
-- Any membership or admin change, or a member count other than the trusted expected count, latches
-  admind (plan decision D4): `group_info` reports a count, not a member list, so a swap that keeps the
-  count is visible only as an event.
+- Membership/admin changes and valid counts are observations. Authority comes only from explicit
+  RPC confirmation intersected with freshly validated policy; events never globally latch admind.
 """
 
 from collections.abc import Mapping
@@ -44,11 +43,11 @@ def judge_group_change(ev: GroupStateChanged, *, group_id: str) -> Verdict:
     if ev.group_id_hex.lower() != group_id:
         return Verdict("ignore", "change in another group")
     if ev.change in MEMBERSHIP_CHANGES:
-        return Verdict("latch", f"group membership changed ({ev.change})")
+        return Verdict("process", f"group membership observed ({ev.change})")
     return Verdict("ignore", f"group change {ev.change}")
 
 
 def judge_member_count(count: int, expected: int) -> Verdict:
-    if count == expected:
-        return Verdict("process", f"{count} members, as expected")
-    return Verdict("latch", f"group has {count} members, expected {expected}")
+    if count >= 1:
+        return Verdict("process", f"group has {count} observed members")
+    return Verdict("drop", "group member count unavailable")
