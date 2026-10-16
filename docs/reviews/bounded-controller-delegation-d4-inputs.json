@@ -1,0 +1,207 @@
+{
+  "schema": 1,
+  "status": "UNREVIEWED author revision; all3 rounds REVISE exhausted; no implementation, grant or deployment authority",
+  "task": "btq-so7ma",
+  "source_base": "07637745fe75dc614109a0b8ba72d3489f262a97",
+  "approved_inputs": [
+    {
+      "source_commit": "391516cd919234e69626970cb2e61b94299ed60e",
+      "source_path": "docs/designs/2026-10-15-operator-task-management.md",
+      "archive_path": "docs/reviews/approved-inputs/2026-10-15-operator-task-management.md",
+      "sha256": "3249c0a3b6207da6bc6172e5291895779a920d3afd56de6e38d0365df0ee2a39",
+      "bytes": 7332,
+      "note": "Exact original management d2; pending prose historical. Genuine native approval separately recorded below; no delegation/deployment authority inferred.",
+      "source_repository": "heterodyne-metaharness-v2"
+    }
+  ],
+  "proposed_prerequisites": [
+    {
+      "task": "btq-zcd1l",
+      "path": "docs/designs/2026-10-16-management-design-task-recovery-d4.md",
+      "sha256": "171ffd925ff55d8aeb487a7234d6ce3442ab73f8707ae85f028803bd6ee0e097",
+      "bytes": 55627,
+      "status": "Published d4 documentation only; UNREVIEWED, all3 rounds exhausted, no approval/deployment. Only exact subsequently reviewed/human-approved Z amendment may add delegated descriptor input.",
+      "observed_committed_revision": "4e027cb71e241f02f2d51effeba9adb8e1ef30e0"
+    }
+  ],
+  "observed_installed_queue": "6fe57598468ff53bf74dfd9e1cf181ad3177c3f1",
+  "implementation_or_live_actions": false,
+  "revision": "d4",
+  "controller_integration_provenance": {
+    "original_repository": "heterodyne-metaharness",
+    "original_commit": "3158263d049ea0a6b5cd398b40df95b704836d4d",
+    "original_path": "docs/designs/2026-10-16-controller-integration-evidence.md",
+    "approved_adr_revision": "0547abf9c303dd2104a32238759db30e66ca952c",
+    "approved_adr_path": "docs/adr/2026-10-16-controller-integration-evidence.md",
+    "approval_task": "btq-xu3ax",
+    "target": "btq-ytmpy",
+    "decision": "approve",
+    "operator": "Liam",
+    "at": "2026-10-16T04:19:25Z",
+    "via_ref": "marmot:id:6ab5e9ea5114",
+    "approved_digest": "ce7b7a7a959f1fd501af879a7e61d3a0003a29b19e2caf63c742cfc220b3d63b",
+    "evidence_source": "Controller fresh native read supplied to author; does not authorize delegation, deployment or other task admission"
+  },
+  "source_observations": [
+    {
+      "repository": "beads-task-queue",
+      "revision": "6fe57598468ff53bf74dfd9e1cf181ad3177c3f1",
+      "path": "bin/btq",
+      "symbols": [
+        "Queue.bd_op",
+        "Handoff.move",
+        "Handoff.check_ask",
+        "Handoff._prepare",
+        "CLAIM_NOTE_FORMAT"
+      ],
+      "lines": [
+        1305,
+        2436,
+        2340
+      ],
+      "finding": "bd_op subprocess boundary; real ask metadata; any policy approver A and no recorded contrary answer; _prepare freezes second-resolution UTC-Z note stamp and random12 base36 nonce, note second line includes holder; delegated mode fixes allowed hex-subset nonce and stamp in descriptor instead of regenerating",
+      "sha256": "ec2bc67b227326c80bf5d9a32eb661b220ea9af6942ef31bff04d8c06941bd2e"
+    },
+    {
+      "repository": "heterodyne-metaharness-v2",
+      "revision": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/daemon.py",
+      "symbols": [
+        "Admind.answer_ask"
+      ],
+      "line": 952,
+      "finding": "Question answers append; new delegation transaction/revoke behavior required, not existing API",
+      "sha256": "6dd566effd2fbd2a569e533cf8449da5ae15244290e6a9cfc30560e685acb0fb"
+    },
+    {
+      "repository": "heterodyne-metaharness-v2",
+      "revision": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/asks.py",
+      "symbols": [
+        "AskPost",
+        "_check_form",
+        "map_reply",
+        "map_reaction"
+      ],
+      "sha256": "6b6645f1fbba429b0f52277152f31745422332fe063792ce4748378091f37042",
+      "finding": "Existing bounded stored question API; no AskPost attachment or comparable global delivery/answer sequence. New proposal explicitly supplies missing seams."
+    },
+    {
+      "repository": "heterodyne-metaharness-v2",
+      "revision": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/store.py",
+      "symbols": [
+        "Store.card_delivered",
+        "Store.add_answer"
+      ],
+      "sha256": "5ae75889f8b1c58f9f4367bd2d76c8070154cfd8caa384eb8178f6c0c68d3359",
+      "finding": "Existing bounded stored question API; no AskPost attachment or comparable global delivery/answer sequence. New proposal explicitly supplies missing seams."
+    },
+    {
+      "repository": "beads-task-queue",
+      "revision": "6fe57598468ff53bf74dfd9e1cf181ad3177c3f1",
+      "path": "bin/btq-manage.py",
+      "symbols": [
+        "Management._mutate_steps",
+        "Management.comment"
+      ],
+      "sha256": "670ea807fd546f939f3441823dee2e1980e03f7026be580a62d7f91a4e6582b6",
+      "finding": "Legacy issued marker precedes bd_op and audit contains dynamic values; delegated mode requires Z-owned reducers and fixed canonical audit."
+    },
+    {
+      "repository": "heterodyne-metaharness-v2",
+      "revision": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/redact.py",
+      "sha256": "533ecbb089b57e643c1edf8745eb13dd908b5dc1cbd14f74f48e3a59883a0d8c",
+      "finding": "Existing64-hex redaction and immutable40-hex GitHub blob LinkSpec; d3 uses exact link/local canonical bytes, no old-daemon digest-field bypass."
+    },
+    {
+      "repository": "heterodyne-metaharness-v2",
+      "revision": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/links.py",
+      "sha256": "02a45b1858dacfc4e3a4e348d57c248352c5e82a65c8cca60d6021de7b23cd1a",
+      "finding": "Existing64-hex redaction and immutable40-hex GitHub blob LinkSpec; d3 uses exact link/local canonical bytes, no old-daemon digest-field bypass."
+    }
+  ],
+  "document_hashes": {
+    "docs/designs/2026-10-16-bounded-controller-management-delegation-d4.md": "05e49dd2270d2e7d200e39bf837230649e76bcfb5f5dbd1f061b03aa8b13cd07",
+    "docs/reviews/so7ma-r3-dispositions.md": "de740acd4202c7206a108482efbc3f7ac4368fabb8096627dc888186271dd00f"
+  },
+  "previous_design_head": "8c3db8cb7ac2e42817eb1efb9002021b81f1f063",
+  "original_management_approval": {
+    "task": "btq-ovvzt",
+    "status": "closed",
+    "decision": "approve",
+    "operator": "Liam",
+    "at": "2026-10-15T19:58:20Z",
+    "adr_revision": "391516cd919234e69626970cb2e61b94299ed60e",
+    "approved_digest": "64ff5d9c77c75a9c69c8ba6d0c6aa28f74bb84f5fe354973dd94704a93c05f31",
+    "via": "cli",
+    "marmot_reference": null,
+    "review": {
+      "reviewer": "claude-opus-5-5",
+      "author": "Codex",
+      "mode": "cross-model"
+    },
+    "scope": "implementation/offline; excluded deployment/master merge/recovery",
+    "source": "parent controller fresh native read; actual historical user approved/proceed recorded while daemon latched"
+  },
+  "actual_reviews": [
+    {
+      "round": 1,
+      "maximum": 3,
+      "verdict": "REVISE",
+      "findings": 42,
+      "report_sha256": "f167ea7ef46b0f0ff073901d79e6c710d2599bd2a24482c54596debd03d8294d",
+      "author_dispositions_path": "docs/reviews/so7ma-r1-dispositions.md",
+      "reviewed_head": "fb8ce8381df91eb15f1e50ca6ae7951e7057d67c"
+    },
+    {
+      "round": 2,
+      "maximum": 3,
+      "reviewed_head": "251d6b5fbb53ab2385195586c9a3dee22d76a6b4",
+      "verdict": "REVISE",
+      "findings": 24,
+      "retained_report": "HANDOFF_CODEX/review-so7ma-builtin-design-r2.log",
+      "report_sha256": "e5b8c6d04e94c8282f19dde6dde20e16fcb424abd1e685b658fc17dc319bf4b3",
+      "extracted_findings_sha256": "8ac4b808eab1bfa4ff0db41a42cef17604e828cdf634ca3f57d4548603614a41",
+      "author_dispositions_path": "docs/reviews/so7ma-r2-dispositions.md"
+    },
+    {
+      "round": 3,
+      "maximum": 3,
+      "reviewed_head": "8c3db8cb7ac2e42817eb1efb9002021b81f1f063",
+      "verdict": "REVISE",
+      "findings": 15,
+      "report_sha256": "64801b7682ca204f99c3ba03728587ad86b457063f2b9604de6c5f6e2d1a77c6",
+      "retained_report": "HANDOFF_CODEX/review-so7ma-builtin-design-r3.log",
+      "author_dispositions_path": "docs/reviews/so7ma-r3-dispositions.md",
+      "exact_private_ledger_sha256": "f71c1e277e62e17f39418025530a260d2f276c04b661f61e6c90bf27cc3ee154"
+    }
+  ],
+  "issued_rounds": 3,
+  "remaining_maximum": 0,
+  "locator_conventions": {
+    "HANDOFF_CODEX": "Controller private retained review evidence; public source identity comes from exact hashes, not host paths"
+  },
+  "historical_document_hashes": {
+    "docs/designs/2026-10-16-bounded-controller-management-delegation.md": "823da94f7b5025fa92d7941938bbc57bfaf0a830b9a2acb47d1bb28dbfce6012",
+    "docs/reviews/bounded-controller-delegation-inputs.json": "1cd2b6c1dbccec872ffd32b09ddfa5bd93a2ad79c349e0c9d2d15c7247e1d8d7",
+    "docs/reviews/so7ma-r1-dispositions.md": "db2ed9122f6f6d8919e2592aa3817146a8ada93269b664c3e100128f173fc948",
+    "docs/reviews/so7ma-r2-dispositions.md": "68880b66d39df3156dac62db1cf4064a398d7ef227b38af9668624763aabd2a8"
+  },
+  "card_feasibility": {
+    "dependency_remove": {
+      "characters": 2234,
+      "lines": 33,
+      "sha256": "74dbe82b1f4724541f0aa291e44e9eb833951ae052fe07fcab64ee36f272bb57",
+      "status": "static fictional complete native-framing feasibility example; no runtime test or authority"
+    },
+    "reclaim": {
+      "characters": 2258,
+      "lines": 33,
+      "sha256": "55cd7294551b5e95b4d507a00e3ada525cd1cb1f81df0066de9536a4ab30b4a1",
+      "status": "static fictional complete native-framing feasibility example; no runtime test or authority"
+    }
+  }
+}
