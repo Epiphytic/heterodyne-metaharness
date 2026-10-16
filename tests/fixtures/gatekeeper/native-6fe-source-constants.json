@@ -1,0 +1,30 @@
+{
+  "format": 1,
+  "revision": "6fe57598468ff53bf74dfd9e1cf181ad3177c3f1",
+  "path": "bin/btq",
+  "sha256": "ec2bc67b227326c80bf5d9a32eb661b220ea9af6942ef31bff04d8c06941bd2e",
+  "constants": {
+    "ASK_FIELDS": [
+      "effect",
+      "excludes",
+      "why",
+      "risks",
+      "refs",
+      "targets"
+    ],
+    "REF_FIELDS": [
+      "kind",
+      "id",
+      "repo",
+      "path"
+    ],
+    "REF_KINDS": [
+      "commit",
+      "file",
+      "range",
+      "bead"
+    ],
+    "BEAD_ID": "[a-z][a-z0-9-]{0,31}-[0-9a-z]{5}"
+  },
+  "proof": "existing wsd.btq.load only; no Queue construction or CLI invocation"
+}

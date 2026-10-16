@@ -15,7 +15,7 @@ nothing, so this ends quickly; `MAX_PASSES` is a backstop, and text that is stil
 """
 
 import re
-from collections.abc import Container, Iterable, Iterator
+from collections.abc import Callable, Container, Iterable, Iterator
 
 from heterodyne.config.secret_scan import IDENTIFIER_VALUES, SECRET_VALUES
 
@@ -39,17 +39,21 @@ def set_login_dirs(paths: Iterable[str]) -> None:
     """Install the login directory forms to hide, once at startup (`()` clears them). Matching is literal,
     longest form first, and never inside a longer name: `/x/.claude-b` doesn't match in `/x/.claude-bb`."""
     global _login_dirs
+    _login_dirs = _compile_dirs(paths)
+
+
+def _compile_dirs(paths: Iterable[str]) -> re.Pattern[str] | None:
     forms = sorted({p for p in paths if p}, key=lambda p: (-len(p), p))
-    _login_dirs = re.compile(f"(?:{'|'.join(map(re.escape, forms))}){_AFTER}") if forms else None
+    return re.compile(f"(?:{'|'.join(map(re.escape, forms))}){_AFTER}") if forms else None
 
 
 def _patterns() -> tuple[re.Pattern[str], ...]:
     return () if _login_dirs is None else (_login_dirs,)
 
 
-def _pass(text: str) -> str:
-    for pattern in _patterns():
-        text = pattern.sub(LOGIN_DIR, text)
+def _pass_with_dirs(text: str, directories: re.Pattern[str] | None) -> str:
+    if directories is not None:
+        text = directories.sub(LOGIN_DIR, text)
     text = _PEM.sub("<redacted PEM private key>", text)
     for kind, pattern in _SECRETS:
         text = pattern.sub(f"<redacted {kind}>", text)
@@ -58,13 +62,27 @@ def _pass(text: str) -> str:
     return _HEX_RUN.sub("<redacted hex key>", text)
 
 
-def redact(text: str) -> str:
+def _pass(text: str) -> str:
+    return _pass_with_dirs(text, _login_dirs)
+
+
+def _redact_loop(text: str, step: Callable[[str], str]) -> str:
     for _ in range(MAX_PASSES):
-        after = _pass(text)
+        after = step(text)
         if after == text:
             return text
         text = after
     return UNSTABLE
+
+
+def redact(text: str) -> str:
+    return _redact_loop(text, _pass)
+
+
+def redact_with_dirs(text: str, paths: Iterable[str]) -> str:
+    """Apply the existing redaction kernel with explicit directories and no global mutation."""
+    directories = _compile_dirs(paths)
+    return _redact_loop(text, lambda value: _pass_with_dirs(value, directories))
 
 
 def unique_key(key: str, taken: Container[str]) -> str:
