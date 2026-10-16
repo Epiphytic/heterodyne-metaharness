@@ -6,6 +6,7 @@ Configured typed facts are inputs, not proof that a caller obtained them from a 
 
 import json
 import re
+import unicodedata
 from typing import Never, cast
 
 import msgspec
@@ -61,8 +62,14 @@ def _walk(value: object, depth: int = 0) -> int:
     if depth > MAX_DEPTH:
         _fail("input-depth")
     if isinstance(value, str):
-        if (len(value) > MAX_TEXT or any(ord(c) < 32 or 127 <= ord(c) <= 159
-                                       or 0xD800 <= ord(c) <= 0xDFFF or c in "\u2028\u2029" for c in value)):
+        if len(value) > MAX_TEXT or any(
+            ord(c) < 32
+            or 127 <= ord(c) <= 159
+            or 0xD800 <= ord(c) <= 0xDFFF
+            or c in "\u2028\u2029"
+            or unicodedata.category(c) == "Cf"
+            for c in value
+        ):
             _fail("unsafe-text")
         if secret_value(value):
             _fail("secret-bearing-input")
@@ -82,18 +89,28 @@ def _reject_constant(_: str) -> None:
     _fail("unsupported-scalar")
 
 
-def _decode[T](data: bytes, cls: type[T]) -> T:
-    if type(data) is not bytes or len(data) > MAX_BYTES:
+def _decode[T](data: bytes, cls: type[T], *, max_bytes: int = MAX_BYTES, max_nodes: int = MAX_NODES) -> T:
+    if type(data) is not bytes or len(data) > max_bytes:
         _fail("input-size")
     try:
         raw: object = json.loads(
             data.decode("utf-8"), object_pairs_hook=_pairs, parse_constant=_reject_constant
         )
-        if _walk(raw) > MAX_NODES:
+        if _walk(raw) > max_nodes:
             _fail("input-nodes")
         return msgspec.convert(raw, type=cls, strict=True)
-    except (UnicodeError, RecursionError, json.JSONDecodeError, msgspec.ValidationError):
+    except InvalidAction:
+        raise
+    except (UnicodeError, RecursionError, ValueError, msgspec.ValidationError):
         raise InvalidAction("invalid-schema") from None
+
+
+def encode_record(value: object) -> bytes:
+    """Typed host values can be malformed too; never expose encoder diagnostics."""
+    try:
+        return msgspec.json.encode(value)
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        raise InvalidAction("invalid-host-record") from None
 
 
 def _match(pattern: re.Pattern[str], value: str) -> None:
@@ -108,8 +125,14 @@ def _positive(value: int) -> None:
 
 def validate_ref(value: str) -> None:
     """Deliberately restricted full branch refs; runtime Git check remains mandatory."""
-    if (not value.startswith("refs/heads/") or len(value) > 255 or not value.isascii()
-            or any(c in value for c in " ~^:?*[\\") or ".." in value or "@{" in value):
+    if (
+        not value.startswith("refs/heads/")
+        or len(value) > 255
+        or not value.isascii()
+        or any(c in value for c in " ~^:?*[\\")
+        or ".." in value
+        or "@{" in value
+    ):
         _fail("invalid-branch-ref")
     parts = value.split("/")
     if any(not part or part.startswith(".") or part.endswith((".", ".lock")) for part in parts):
@@ -119,9 +142,15 @@ def validate_ref(value: str) -> None:
 
 
 def _path(value: str) -> None:
-    if (len(value) > 512 or not value.isascii() or not value
-            or any(not re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9._-]*", part)
-                   or part.endswith(".") for part in value.split("/"))):
+    if (
+        len(value) > 512
+        or not value.isascii()
+        or not value
+        or any(
+            not re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9._-]*", part) or part.endswith(".")
+            for part in value.split("/")
+        )
+    ):
         _fail("invalid-object-path")
 
 
@@ -175,7 +204,7 @@ def decode_intent(data: bytes) -> Intent:
 
 
 def _config(config: ActionConfig) -> ActionConfig:
-    config = _decode(msgspec.json.encode(config), ActionConfig)
+    config = _decode(encode_record(config), ActionConfig, max_bytes=131_072, max_nodes=8192)
     for entries in (config.repositories, config.deployments, config.channels):
         if len(entries) > 64 or len({e.alias for e in entries}) != len(entries):
             _fail("invalid-config-aliases")
@@ -198,8 +227,12 @@ def _config(config: ActionConfig) -> ActionConfig:
 
 def _push_binding(action: PushBranch, facts: PushFacts, origin: Origin) -> None:
     _oid(action.expected_sha, facts.repository.object_format)
-    if (facts.source_bead != origin.bead or facts.owned_branch != action.from_ref
-            or facts.destination_ref != action.to_ref or facts.source_sha != action.expected_sha):
+    if (
+        facts.source_bead != origin.bead
+        or facts.owned_branch != action.from_ref
+        or facts.destination_ref != action.to_ref
+        or facts.source_sha != action.expected_sha
+    ):
         _fail("push-binding")
 
 
@@ -247,24 +280,43 @@ def decode_envelope(data: bytes, config: ActionConfig) -> Envelope:
         _fail("unknown-origin-repository")
     _repository_binding(value, config)
     if isinstance(value.action, Deploy):
-        if (not isinstance(value.resolved, DeployFacts) or value.resolved.target not in config.deployments
-                or value.action.target != value.resolved.target.alias):
+        if (
+            not isinstance(value.resolved, DeployFacts)
+            or value.resolved.target not in config.deployments
+            or value.action.target != value.resolved.target.alias
+        ):
             _fail("deployment-binding")
     elif isinstance(value.action, Notify):
-        if (not isinstance(value.resolved, NotifyFacts) or value.resolved.channel not in config.channels
-                or value.action.channel_ref != value.resolved.channel.alias):
+        if (
+            not isinstance(value.resolved, NotifyFacts)
+            or value.resolved.channel not in config.channels
+            or value.action.channel_ref != value.resolved.channel.alias
+        ):
             _fail("channel-binding")
     elif not isinstance(value.resolved, (PushFacts, PRFacts, MergeFacts)):
         _fail("resolved-kind-mismatch")
     return value
 
 
-def assemble_envelope(intent: Intent, origin: Origin, resolved: Resolved, approval_id: str,
-                      revision: int, config: ActionConfig) -> Envelope:
+def validate_request_inputs(intent: Intent, origin: Origin, resolved: Resolved, config: ActionConfig) -> None:
+    """Validate the same immutable tuple before allocation. No approval is allocated or asserted.
+
+    The private syntax sentinel is never returned, persisted or hashed as an ask identity.
+    The allocated native ID must subsequently pass assemble_envelope unchanged.
+    """
+    checked = decode_intent(encode_record(intent))
+    decode_envelope(
+        encode_record(Envelope(1, checked.action, resolved, origin, "validation-00000", 1)), config
+    )
+
+
+def assemble_envelope(
+    intent: Intent, origin: Origin, resolved: Resolved, approval_id: str, revision: int, config: ActionConfig
+) -> Envelope:
     """Attach separate host-provided facts; callers still owe real launch/native authentication."""
-    intent = decode_intent(msgspec.json.encode(intent))
+    intent = decode_intent(encode_record(intent))
     envelope = Envelope(1, intent.action, resolved, origin, approval_id, revision)
-    return decode_envelope(msgspec.json.encode(envelope), config)
+    return decode_envelope(encode_record(envelope), config)
 
 
 def action_data(envelope: Envelope, config: ActionConfig) -> dict[str, object]:
@@ -273,20 +325,25 @@ def action_data(envelope: Envelope, config: ActionConfig) -> dict[str, object]:
     Caller retains title, description and canonical repo locators/resolved refs in the native ask.
     Do not hash this projection as a replacement for native context_digest.
     """
-    checked = decode_envelope(msgspec.json.encode(envelope), config)
+    checked = decode_envelope(encode_record(envelope), config)
     return msgspec.to_builtins(checked)
 
 
 def validate_policy_facts(value: PolicyFacts) -> PolicyFacts:
-    value = _decode(msgspec.json.encode(value), PolicyFacts)
+    value = _decode(encode_record(value), PolicyFacts)
     _oid(value.revision, "sha256")
     return value
 
 
 def validate_interpretation(value: Interpretation) -> Interpretation:
-    value = _decode(msgspec.json.encode(value), Interpretation)
+    value = _decode(encode_record(value), Interpretation)
     _match(_ALIAS, value.workstream)
     _match(_ID, value.repository_id)
     if len(value.requirements) > 32 or any(not item for item in value.requirements):
         _fail("invalid-requirements")
     return value
+
+
+def validate_text(value: str) -> None:
+    """Apply shared bounded text/control/secret checks to a host observation."""
+    _walk(value)

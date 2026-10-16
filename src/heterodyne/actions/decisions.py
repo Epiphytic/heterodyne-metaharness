@@ -1,0 +1,138 @@
+"""Pure first-decision and staged native finalization model; no installed decision writer.
+
+A hypothetical authenticated observation remains caller-supplied data. The future all-kinds
+sole writer owes current principal, purpose, surface/event and native context checks.
+"""
+
+from typing import Literal
+
+from heterodyne.actions.contracts import Record
+from heterodyne.actions.requests import Refused, Request, changed, digest_syntax
+
+Purpose = Literal["design", "execution", "permission", "confirm", "recovery"]
+DecisionPhase = Literal[
+    "pending", "write-issued", "native-written", "native-closed", "pins-finished", "committed"
+]
+
+
+class DecisionObservation(Record, frozen=True):
+    event_id: str
+    surface_id: str
+    operator_id: str
+    via_ref: str
+    at: str
+    approval_id: str
+    purpose: Purpose
+    digest: str
+    value: Literal["approve", "deny"]
+    denial_reason: str = ""
+    current_principal: bool = False
+    surface_bound: bool = False
+    authority_current: bool = False
+
+
+class Decision(Record, frozen=True):
+    approval_id: str
+    purpose: Purpose
+    digest: str
+    event: DecisionObservation
+    phase: DecisionPhase = "pending"
+    version: int = 0
+    native_event_id: str | None = None
+    heart_proposal_pending: bool = False
+
+
+def _label(value: str, maximum: int) -> bool:
+    return (
+        type(value) is str
+        and 1 <= len(value) <= maximum
+        and value.isascii()
+        and all(32 <= ord(c) < 127 for c in value)
+    )
+
+
+def begin_decision(
+    request: Request,
+    event: DecisionObservation,
+    *,
+    expected_purpose: Purpose,
+    current_digest: str,
+    heart: bool = False,
+) -> Decision:
+    if (
+        request.phase != "filed"
+        or request.context_digest != current_digest
+        or event.digest != current_digest
+        or event.approval_id != request.approval_id
+        or event.purpose != expected_purpose
+        or expected_purpose not in {"design", "execution", "permission", "confirm", "recovery"}
+        or event.value not in {"approve", "deny"}
+        or not digest_syntax(current_digest)
+        or not event.current_principal
+        or not event.surface_bound
+        or not event.authority_current
+        or not all(
+            _label(v, 256) for v in (event.event_id, event.surface_id, event.operator_id, event.via_ref)
+        )
+        or not _label(event.at, 64)
+        or len(event.denial_reason.encode("utf-8")) > 1024
+    ):
+        raise Refused("decision-observation-binding")
+    from heterodyne.actions.codec import validate_text
+
+    validate_text(event.denial_reason)
+    return Decision(
+        event.approval_id,
+        expected_purpose,
+        current_digest,
+        event,
+        heart_proposal_pending=heart and event.value == "approve",
+    )
+
+
+def issue_decision(value: Decision, *, fresh_authority: bool, current_digest: str) -> Decision:
+    if value.phase != "pending" or not fresh_authority or current_digest != value.digest:
+        raise Refused("decision-write-not-admitted")
+    return changed(value, phase="write-issued")
+
+
+def read_decision(value: Decision, readback: DecisionObservation | None, *, read_ok: bool) -> Decision:
+    """Missing/uncertain write response only permits exact readback, never a second write."""
+    if value.phase != "write-issued" or not read_ok or readback is None or readback != value.event:
+        raise Refused("decision-write-unresolved-or-conflicting")
+    return changed(value, phase="native-written", native_event_id=readback.event_id)
+
+
+_FINALIZE = {
+    "native-written": ("native-closed", "close"),
+    "native-closed": ("pins-finished", "pins"),
+    "pins-finished": ("committed", "finish"),
+}
+
+
+def finalize_decision(
+    value: Decision,
+    operation: Literal["close", "pins", "finish"],
+    *,
+    readback: DecisionObservation,
+    current_digest: str,
+    native_readback: bool,
+) -> Decision:
+    if (
+        value.phase not in _FINALIZE
+        or _FINALIZE[value.phase][1] != operation
+        or readback != value.event
+        or current_digest != value.digest
+        or not native_readback
+    ):
+        raise Refused("decision-finalization-binding")
+    return changed(value, phase=_FINALIZE[value.phase][0])
+
+
+def settle_heart_proposal(value: Decision, *, proposal_readback: bool) -> Decision:
+    """Proposal recovery changes no ordinary decision or dispatch permission."""
+    if value.phase != "committed" or not proposal_readback:
+        raise Refused("heart-proposal-unresolved")
+    if not value.heart_proposal_pending:
+        return value
+    return changed(value, heart_proposal_pending=False)

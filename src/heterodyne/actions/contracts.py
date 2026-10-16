@@ -143,14 +143,14 @@ class Interpretation(Record, frozen=True):
     kind: Literal["question", "action"]
     outward: bool
     destructive: bool
-    unique_resolution: bool = True
+    unique_resolution: bool = False
 
 
 class PolicyFacts(Record, frozen=True):
     """Facts from future trusted admission; never accept these from an agent request."""
 
     revision: str
-    widens_permissions: bool = False
+    widens_permissions: bool = True
 
 
 class PolicyResult(Record, frozen=True):
@@ -169,5 +169,9 @@ class Adapter(Record, frozen=True):
 
 
 REGISTRY = (
-    Adapter("push_branch"), Adapter("open_pr"), Adapter("merge_pr"), Adapter("deploy"), Adapter("notify"),
+    Adapter("push_branch"),
+    Adapter("open_pr"),
+    Adapter("merge_pr"),
+    Adapter("deploy"),
+    Adapter("notify"),
 )

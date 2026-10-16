@@ -1,6 +1,6 @@
 # Pure action contracts (Plan5 Stage 0 / btq-71276)
 
-This package implements only the pure P0 boundary admitted by `btq-l6eeo`.
+This package implements the pure P0/P1 boundaries admitted by `btq-l6eeo`.
 Its design and governing amendment are archived at revision
 `cb180b72c21a157f721be1e4fa57ccfd03d4a11b`, under
 `docs/adr/2026-10-16-plan5-actions-and-executor-d4.md` and
@@ -18,17 +18,17 @@ cross-field consistency. Typed host data is **not authentication**: a later
 integration must obtain these facts from verified launch/config/native sources,
 check current generation and ownership, and prohibit client-supplied replacements.
 Policy revision and permission-widening facts likewise require trusted producers.
-No session socket, native reader, origin verifier, persistence, or model is added.
+No session socket, native reader, origin verifier, production persistence, or model is added.
 
 The fixed JSON limits are 32768 encoded bytes, depth 8, 512 total scalar/container
 nodes (including object keys), and 8192 characters per string. Text rejects C0,
-DEL/C1, surrogate, and Unicode line-separator controls and reuses `secret_value`.
+DEL/C1, surrogate, Unicode formatting characters, and Unicode line-separator controls and reuses `secret_value`.
 Unknown fields, duplicate keys, floats, boolean integers, and unsupported versions
 refuse with safe fixed diagnostics. Request revisions/generations/PR numbers are
 positive integers at most 2^31-1. IDs use the integrated queue grammar
 `[a-z][a-z0-9-]{0,31}-[0-9a-z]{5}`; aliases and opaque host identities use separate
 bounded grammars. Configuration has at most 64 unique entries in each namespace,
-subject also to the total byte/node limits.
+with separate configuration bounds of 131072 bytes and 8192 nodes.
 
 Repository configuration explicitly selects `sha1` (40 lowercase hex digits) or
 `sha256` (64). Pure refs are restricted full `refs/heads/` names at most 255 ASCII
@@ -54,15 +54,87 @@ digest: it includes kind/effect/resolved facts and logical session scope while
 excluding explanatory prose, generation, approval ID, and request revision.
 Future persistence must keep its denial across generations of that same session.
 `materiality` compares already canonical semantic projections conservatively;
-unique equal meaning is minor, while ambiguity or changed target/requirements/
+unique equal meaning is minor (uniqueness defaults to false), while ambiguity or changed target/requirements/
 question/action/outward/destructive meaning requires confirmation. It performs
 no parsing, alias resolution, routing, confirmation, or dispatch.
 
 `REGISTRY` has exactly five immutable unavailable entries. `adapter_refusal`
-validates and always refuses; there is no enable switch or dispatcher. P1/P2/Q0,
+validates and always refuses; there is no enable switch or dispatcher. P2/Q0,
 scanner integration, Plan5i consumers, decision writers, executors, credentials,
 and deployment remain separate prerequisites. An unavailable adapter remains
 unavailable even when a pure policy result is `escalate` or a human answers an ask.
 
 The synthetic named test module is `tests/test_actions_p0.py`. It does not open a
 store or run Git, processes, network, native queue, scanner, or model operations.
+
+
+## P1 offline durability and reducers (btq-efddg)
+
+P1 adds no daemon, CLI, configured factory, enabled adapter, production schema
+migration, native queue reader/writer, launcher, credential, or transport. Every
+boolean observation is a **synthetic port fact**, not a proof of authentication.
+A future admitted integration must derive it from authoritative current sources.
+`UnavailablePorts` always refuses and all five registry entries remain unavailable.
+
+`requests.new_request` validates the immutable action/origin/resolved tuple before
+allocation. `issue_allocation` must be committed before calling even the fake
+create port. Its creation key contains workstream, logical session, bead and
+sequence. Unknown acknowledgement permits only three read-only lookups, due at
+1/5/30 seconds, and unique adoption. No lookup authorizes another create. Every
+observed shell remains associated; duplicate history requires an exact, currently
+authenticated repair observation with closed-orphan readbacks. That repair also
+cannot recreate a shell. The reducer then orders blocker creation, park while
+retaining the claim, exact requested-source landing, whole native ask binding,
+sufficiency, and filed readback. Source/generation/digest changes cannot skip these
+steps. Two same-origin grooming revisions clear old ask/judgement bindings.
+
+`pin_ask` retains opaque whole canonical native bytes plus its supplied native
+digest. It does not compute, replace or authenticate that digest. The later native
+adapter must assemble and compare the full action data and native context, using
+the existing native algorithm. Passing fixture bytes here grants no authority.
+
+`decisions` separates first-event recording, one write intent, exact native
+readback, close, pin finalization, and committed state. Close alone is insufficient.
+Unknown writes permit readback, not another write. Surface, current principal,
+purpose and current digest observations are all required. A heart's optional
+follow-up proposal has separate bookkeeping and cannot rewrite the original event.
+Permission widening defaults to true (hard deny); callers must positively establish
+non-widening. This is a safety default, not a permission-model implementation.
+
+`dispatch` binds one approval/revision/digest/target/attempt and startup nonce hash.
+Preparation has 30 seconds and claims have five seconds, both clipped by the
+original fixed 60-second deadline; retries never reset that deadline. At most three
+launcher preparations use distinct startup/claim nonces. Conditional claim and
+retirement must share the future native atomic boundary. The fixture journal CAS
+models that boundary, committing consumed state before acknowledgement. Consumed,
+unknown or crashed attempts never become a fresh initial-effect capability.
+Reconciliation permits three read-only observations at 1/5/30 seconds; absence is
+not replay permission. Confirmed success plus cleanup releases locks. Exhausted
+absence needs exact currently authenticated fixed repair, which can settle the
+failed attempt and release its locks, but cannot retry it. Actual authentication,
+process-tree cleanup and effect evidence remain unavailable adapter obligations.
+
+`FixtureJournal` only creates/opens explicitly private temporary fixture databases,
+with a separate application ID and exact schema. Its v1-to-v2 migration is an
+explicit rollback-able **fixture** migration, not a WSD/native migration. Requests,
+versions and audit events commit together under BEGIN IMMEDIATE. Capacity is two
+outstanding requests per workstream/bead across sessions/generations, 128 globally,
+4096 retained requests and 16384 audit events. Full storage holds for explicit
+recovery; history is not silently pruned. Terminal capacity is freed only after
+all associated shells and blockers have consistent terminal readbacks. Native
+Beads remain authoritative in any future integration.
+
+Sorted resource, canonical-effect and approval locks survive restart and uncertain
+outcomes. The approval's dispatch row is retained permanently, preventing initial
+replay even after settlement. A denied canonical intent is blocked before shell
+allocation across generations of its logical session; alias spelling is excluded
+from the identity while real effect fields remain. A changed intent must retain
+its session's prior denial identities (at most 64, otherwise hold) rather than
+pretend that the previous denial did not occur. These fingerprints and fixture
+row locators are separate from native approval digests.
+
+Named synthetic offline tests are `test_actions_p0.py`, `test_actions_p1.py`,
+`test_actions_p1_dispatch.py`, and `test_actions_p1_hardening.py`. SQLite operations
+only target temporary test files. Fake ports are in-memory and cannot reach a
+queue, session socket, effect target, model, service or network. Passing them does
+not establish live adapter readiness or authorize deployment.
