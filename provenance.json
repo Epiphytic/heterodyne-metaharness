@@ -1,0 +1,263 @@
+{
+  "purpose": "Byte-exact administrative evidence filing only; no design edits, validation/review, human consent, task creation or deployment",
+  "policy": "Current operator policy: one HIGH design review, incorporate author fixes, then genuine Marmot human design approval; no second design review or validation. Existing actual REVISE history counts and remains unchanged. No new review or reviewer APPROVE is claimed.",
+  "components": [
+    {
+      "key": "f5e",
+      "planning_task": "btq-e7knb",
+      "original_commit": "45e239a53bdb3bee82d6d44125c021abe296f60d",
+      "original_repository": "/home/openclaw/repos/heterodyne-metaharness-v2",
+      "files": [
+        {
+          "original_path": "docs/designs/2026-10-16-plan5-actions-and-executor-d4.md",
+          "archive_path": "docs/adr/2026-10-16-plan5-actions-and-executor-d4.md",
+          "bytes": 61008,
+          "sha256": "de7239b72a3ac2b63d1d05f4143212e6f4ea83193bfe1ac3b4279bb28ba8c5f8",
+          "git_blob": "3f8daea6ad2133436caf1aecb05003fc9a636519",
+          "url": "https://github.com/Epiphytic/heterodyne-metaharness/blob/45e239a53bdb3bee82d6d44125c021abe296f60d/docs/designs/2026-10-16-plan5-actions-and-executor-d4.md"
+        },
+        {
+          "original_path": "docs/reviews/plan5-actions-executor-d4-inputs.json",
+          "archive_path": "evidence/f5e/docs/reviews/plan5-actions-executor-d4-inputs.json",
+          "bytes": 4414,
+          "sha256": "75e94e1c3d620f14040f530dd4d53250b55e753f3d08604f4413dd1529205b5a",
+          "git_blob": "a2d4cfde9749eb050331727a9a71806984f36cae",
+          "url": "https://github.com/Epiphytic/heterodyne-metaharness/blob/45e239a53bdb3bee82d6d44125c021abe296f60d/docs/reviews/plan5-actions-executor-d4-inputs.json"
+        },
+        {
+          "original_path": "docs/reviews/plan5-actions-executor-r3-disposition-d4.json",
+          "archive_path": "evidence/f5e/docs/reviews/plan5-actions-executor-r3-disposition-d4.json",
+          "bytes": 9194,
+          "sha256": "dc207d8200f7d2062021c523c616734f125158c4b4c98356f5ecc4b02442fd6f",
+          "git_blob": "94af01139c3eccb99d867d3b4e264148aa0a15bf",
+          "url": "https://github.com/Epiphytic/heterodyne-metaharness/blob/45e239a53bdb3bee82d6d44125c021abe296f60d/docs/reviews/plan5-actions-executor-r3-disposition-d4.json"
+        },
+        {
+          "original_path": "docs/reviews/plan5-actions-executor-r3-disposition-d4.md",
+          "archive_path": "evidence/f5e/docs/reviews/plan5-actions-executor-r3-disposition-d4.md",
+          "bytes": 15176,
+          "sha256": "0f7d76565e6a3a454ef887704e4c70d211f4b1b7a3f3f9b3dc3072fe6570404f",
+          "git_blob": "248b1926e4bd6f54bb791bd3163c0f013e5b59d8",
+          "url": "https://github.com/Epiphytic/heterodyne-metaharness/blob/45e239a53bdb3bee82d6d44125c021abe296f60d/docs/reviews/plan5-actions-executor-r3-disposition-d4.md"
+        }
+      ],
+      "reviews": [
+        {
+          "round": 1,
+          "actual_verdict": "REVISE",
+          "finding_count": 10,
+          "requested_model": "opus",
+          "reported_inner_model": null,
+          "source": "79aec6f2237bb601c85884ad15f5b9fc2b69a40e",
+          "actual_exit": 0,
+          "raw_sha256": "29ea537bc0108e489148125507f8b13f9616ba9b4e0c6f3816022f1e658b7e0b",
+          "retained_private_report": "/home/openclaw/.hermes/handoff/2026-10-15/codex/review-e7knb-builtin-design-r1.log",
+          "retained_private_result": "/home/openclaw/.hermes/handoff/2026-10-15/codex/review-e7knb-builtin-design-r1-result.json",
+          "result_sha256": "f0e9377d2dee818ab62781a620990f1f6631f4f837e79909d1a7a919d0d7d0f3"
+        },
+        {
+          "round": 2,
+          "actual_verdict": "REVISE",
+          "finding_count": 32,
+          "requested_model": "opus",
+          "reported_inner_model": null,
+          "source": "150a81ceb23dbdacf33fbe58f5fe5a8b8da8d373",
+          "actual_exit": 0,
+          "raw_sha256": "a88f0a09c44c4bf04eed8d3d353e85c552912785065b11245ebdc6403fb79502",
+          "retained_private_report": "/home/openclaw/.hermes/handoff/2026-10-15/codex/review-e7knb-builtin-design-r2.log",
+          "retained_private_result": "/home/openclaw/.hermes/handoff/2026-10-15/codex/review-e7knb-builtin-design-r2-result.json",
+          "result_sha256": "5c64fd53e78c6e3667a73c17f862fd80f537749e5cce84713feaf0f4f66fd006"
+        },
+        {
+          "round": 3,
+          "actual_verdict": "REVISE",
+          "finding_count": 30,
+          "requested_model": "opus",
+          "reported_inner_model": null,
+          "source": "0180a4321e74e93c81516ebb50f9ac7f10a0dd4a",
+          "actual_exit": 0,
+          "raw_sha256": "85e5877220ae182f0eec6525392e789ade6d3ea541db04340d210b20f3cb3538",
+          "retained_private_report": "/home/openclaw/.hermes/handoff/2026-10-15/codex/review-e7knb-builtin-design-r3.log",
+          "retained_private_result": "/home/openclaw/.hermes/handoff/2026-10-15/codex/review-e7knb-builtin-design-r3-result.json",
+          "result_sha256": "056a10c7def6c101665c975110d8e8964c4bf6ff05b27f87779488d41c11b3d5"
+        }
+      ],
+      "fixes": "D4 author dispositions; no subsequent reviewer clearance",
+      "native_task_authority": "none created by archive"
+    },
+    {
+      "key": "f5i",
+      "planning_task": "btq-fu366",
+      "original_commit": "83f61c746e773bb63e4e7d11cff7ba27f39d13b8",
+      "original_repository": "/home/openclaw/repos/heterodyne-metaharness-v2",
+      "files": [
+        {
+          "original_path": "docs/adr/2026-10-16-plan5i-current-main-integration-d4.md",
+          "archive_path": "docs/adr/2026-10-16-plan5i-current-main-integration-d4.md",
+          "bytes": 35552,
+          "sha256": "a07075d233df058bd899353a2077c84e84e7e77b5137434aaa3b9fab1aa6bea8",
+          "git_blob": "add6042b6dec297cfe23776322190c69dd8619b3",
+          "url": "https://github.com/Epiphytic/heterodyne-metaharness/blob/83f61c746e773bb63e4e7d11cff7ba27f39d13b8/docs/adr/2026-10-16-plan5i-current-main-integration-d4.md"
+        },
+        {
+          "original_path": "docs/reviews/plan5i-integration/inputs-d4.json",
+          "archive_path": "evidence/f5i/docs/reviews/plan5i-integration/inputs-d4.json",
+          "bytes": 1352,
+          "sha256": "805258373ca3354df6869295268be71ecb7fca183d65414d0a2f1f5442d379f6",
+          "git_blob": "083d4f6c5f64cad4d660babfc2c0b3976099073c",
+          "url": "https://github.com/Epiphytic/heterodyne-metaharness/blob/83f61c746e773bb63e4e7d11cff7ba27f39d13b8/docs/reviews/plan5i-integration/inputs-d4.json"
+        },
+        {
+          "original_path": "docs/reviews/plan5i-integration/r3-disposition-d4.json",
+          "archive_path": "evidence/f5i/docs/reviews/plan5i-integration/r3-disposition-d4.json",
+          "bytes": 12930,
+          "sha256": "b6e9d25b3b979eca6b78509631eb856299be5c51c55d858b735f6bef62e6af66",
+          "git_blob": "b6d94a9a9c7737efbd854a2fd578c18411196c6d",
+          "url": "https://github.com/Epiphytic/heterodyne-metaharness/blob/83f61c746e773bb63e4e7d11cff7ba27f39d13b8/docs/reviews/plan5i-integration/r3-disposition-d4.json"
+        },
+        {
+          "original_path": "docs/reviews/plan5i-integration/r3-disposition-d4.md",
+          "archive_path": "evidence/f5i/docs/reviews/plan5i-integration/r3-disposition-d4.md",
+          "bytes": 11072,
+          "sha256": "2deaee8d95c5ca190ca08f76d4670d5a3e45e0e219b795659cbe94ba3a0d0c83",
+          "git_blob": "f7c326e43a7ad0f061a4f6eb16d1b10ccfd4a863",
+          "url": "https://github.com/Epiphytic/heterodyne-metaharness/blob/83f61c746e773bb63e4e7d11cff7ba27f39d13b8/docs/reviews/plan5i-integration/r3-disposition-d4.md"
+        },
+        {
+          "original_path": "docs/reviews/plan5i-integration/source-map-d4.json",
+          "archive_path": "evidence/f5i/docs/reviews/plan5i-integration/source-map-d4.json",
+          "bytes": 933063,
+          "sha256": "09d240aee4f3bafed15e0ec4141dbbfe0d99cf2ec6fa880cf72412d3e7207765",
+          "git_blob": "da6e3717040d5959bccb208edbf42a670d87844d",
+          "url": "https://github.com/Epiphytic/heterodyne-metaharness/blob/83f61c746e773bb63e4e7d11cff7ba27f39d13b8/docs/reviews/plan5i-integration/source-map-d4.json"
+        }
+      ],
+      "reviews": [
+        {
+          "round": 1,
+          "actual_verdict": "REVISE",
+          "finding_count": 10,
+          "requested_model": "opus",
+          "reported_inner_model": null,
+          "source": "de52da11cee8da4bb1cc6f470c79b6cd57099d3c",
+          "actual_exit": 0,
+          "raw_sha256": "fa821758210cb2cd73038f4649549def9189388d251d6288cd98064ced2d50ce",
+          "retained_private_report": "/home/openclaw/.hermes/handoff/2026-10-15/codex/review-fu366-builtin-design-r1.log",
+          "retained_private_result": "/home/openclaw/.hermes/handoff/2026-10-15/codex/review-fu366-builtin-design-r1-result.json",
+          "result_sha256": "0abb5f9391c0528af336fc0bc2659886155b1967fe3aacd7100671e1d21cc224"
+        },
+        {
+          "round": 2,
+          "actual_verdict": "REVISE",
+          "finding_count": 42,
+          "requested_model": "opus",
+          "reported_inner_model": null,
+          "source": "7db7066ddd58ce7697908cb5df2fe703a1bb1901",
+          "actual_exit": 0,
+          "raw_sha256": "7ede8a7c11f6c88e6e3b3767357aab076a4a45bf283a98d361403609f78e9471",
+          "retained_private_report": "/home/openclaw/.hermes/handoff/2026-10-15/codex/review-fu366-builtin-design-r2.log",
+          "retained_private_result": "/home/openclaw/.hermes/handoff/2026-10-15/codex/review-fu366-builtin-design-r2-result.json",
+          "result_sha256": "8a5cb19f4c121602930e31c2a45ade5efd97e3dd42bed48429022525c4c7ac4f"
+        },
+        {
+          "round": 3,
+          "actual_verdict": "REVISE",
+          "finding_count": 8,
+          "requested_model": "opus",
+          "reported_inner_model": null,
+          "source": "a25cda136a1e860f774e30b8eaeaf0911f7147ae",
+          "actual_exit": 0,
+          "raw_sha256": "e2dbc4aa28ee511071d8e8181861de59fe100aa3b217d51c79dcb8eb18db4f96",
+          "retained_private_report": "/home/openclaw/.hermes/handoff/2026-10-15/codex/review-fu366-builtin-design-r3.log",
+          "retained_private_result": "/home/openclaw/.hermes/handoff/2026-10-15/codex/review-fu366-builtin-design-r3-result.json",
+          "result_sha256": "ef387b01b4bbfb0aa356e6a0679f484d65f25d208e78669a592a78e00c6c7127"
+        }
+      ],
+      "fixes": "D4 author dispositions; no subsequent reviewer clearance",
+      "native_task_authority": "none created by archive"
+    },
+    {
+      "key": "l",
+      "planning_task": "btq-litno",
+      "original_commit": "2c0c51b2695e7fb4745ec1b9fbd845cae7fc35c0",
+      "original_repository": "/home/openclaw/.hermes/workstreams/runs/9eb99115-e773-57a4-97de-524ea63c67ee/beads/btq-harness-09c48c6d2906b3a1d55f38e0/checkout-btq-btq-litno",
+      "files": [
+        {
+          "original_path": "docs/designs/2026-10-16-empty-findings-review-amendment-d4.md",
+          "archive_path": "docs/adr/2026-10-16-empty-findings-review-amendment-d4.md",
+          "bytes": 17080,
+          "sha256": "730544d6ccf53ce17ab64e552e4c623c04f5359c49c094274cbd7cf74f729673",
+          "git_blob": "1de45e846a2c70c2248385b450181dad8e2cc781",
+          "url": "https://github.com/Epiphytic/hermes-maintenance/blob/2c0c51b2695e7fb4745ec1b9fbd845cae7fc35c0/docs/designs/2026-10-16-empty-findings-review-amendment-d4.md"
+        },
+        {
+          "original_path": "docs/reviews/2026-10-16-litno-r3-author-dispositions.md",
+          "archive_path": "evidence/l/docs/reviews/2026-10-16-litno-r3-author-dispositions.md",
+          "bytes": 20661,
+          "sha256": "cf9f1b867d160b1323536ee56bbb4753ab0dd741dc2e0cbb2848d03868afb856",
+          "git_blob": "7d46a1f0c104ff31f3fccf7b3f00f52caccd2941",
+          "url": "https://github.com/Epiphytic/hermes-maintenance/blob/2c0c51b2695e7fb4745ec1b9fbd845cae7fc35c0/docs/reviews/2026-10-16-litno-r3-author-dispositions.md"
+        },
+        {
+          "original_path": "docs/reviews/2026-10-16-litno-r3-actual-review.md",
+          "archive_path": "evidence/l/docs/reviews/2026-10-16-litno-r3-actual-review.md",
+          "bytes": 34069,
+          "sha256": "9f62d55d6f918e509e763bba2e6505ebc4669dfeb79a3a8a37d2711f3abacd2f",
+          "git_blob": "868915ef786234d876395a3ed40706d3dbaacb31",
+          "url": "https://github.com/Epiphytic/hermes-maintenance/blob/2c0c51b2695e7fb4745ec1b9fbd845cae7fc35c0/docs/reviews/2026-10-16-litno-r3-actual-review.md"
+        },
+        {
+          "original_path": "docs/reviews/2026-10-16-litno-r3-inputs.json",
+          "archive_path": "evidence/l/docs/reviews/2026-10-16-litno-r3-inputs.json",
+          "bytes": 1623,
+          "sha256": "eda4be9304c19bf71e0c4c56371877ae062ed59d003662c605eb6c0c24ec62f3",
+          "git_blob": "7457a7ad1e8addabf5384c0d810e495f10a8d34b",
+          "url": "https://github.com/Epiphytic/hermes-maintenance/blob/2c0c51b2695e7fb4745ec1b9fbd845cae7fc35c0/docs/reviews/2026-10-16-litno-r3-inputs.json"
+        }
+      ],
+      "reviews": [
+        {
+          "round": 1,
+          "actual_verdict": "REVISE",
+          "finding_count": 10,
+          "requested_model": "opus",
+          "reported_inner_model": null,
+          "source": "f606ab4259552b10625c27043ba94c03b6c9c580",
+          "actual_exit": 0,
+          "raw_sha256": "2b69505c53ce3e1ef20254e076c1e769d474758c9669a032bc9c1db44dc08c37",
+          "retained_private_report": "/home/openclaw/.hermes/handoff/2026-10-15/codex/review-litno-builtin-design-r1.log",
+          "retained_private_result": "/home/openclaw/.hermes/handoff/2026-10-15/codex/review-litno-builtin-design-r1-result.json",
+          "result_sha256": "82cdaf33c85b80c4a0610474918b2a4622519b98bbedb9103c9c7cede4233613"
+        },
+        {
+          "round": 2,
+          "actual_verdict": "REVISE",
+          "finding_count": 10,
+          "requested_model": "opus",
+          "reported_inner_model": null,
+          "source": "21a29b581addf85c7ba4795e17a10ba1f33b4221",
+          "actual_exit": 0,
+          "raw_sha256": "9b2bd19e24139cb1f4e40d41c190119d385aa11dfb4e27fdf0e1ec86994f9c32",
+          "retained_private_report": "/home/openclaw/.hermes/handoff/2026-10-15/codex/review-litno-builtin-design-r2.log",
+          "retained_private_result": "/home/openclaw/.hermes/handoff/2026-10-15/codex/review-litno-builtin-design-r2-result.json",
+          "result_sha256": "0632008a9fcc66c403e65a8d6297e20918749996dc0d5f6bd01ff61eec01f087"
+        },
+        {
+          "round": 3,
+          "actual_verdict": "REVISE",
+          "finding_count": 30,
+          "requested_model": "opus",
+          "reported_inner_model": null,
+          "source": "7f73a3259ccff7158d959f28f7c52900d6ea0adc",
+          "actual_exit": 0,
+          "raw_sha256": "9f62d55d6f918e509e763bba2e6505ebc4669dfeb79a3a8a37d2711f3abacd2f",
+          "retained_private_report": "/home/openclaw/.hermes/handoff/2026-10-15/codex/review-litno-builtin-design-r3.log",
+          "retained_private_result": "/home/openclaw/.hermes/handoff/2026-10-15/codex/review-litno-builtin-design-r3-result.json",
+          "result_sha256": "8c76dc2c06fa6f422b7c85e36e4947c8793d1c8769aa7645082bca4e3a06f400"
+        }
+      ],
+      "fixes": "D4 author dispositions; no subsequent reviewer clearance",
+      "native_task_authority": "none created by archive"
+    }
+  ]
+}

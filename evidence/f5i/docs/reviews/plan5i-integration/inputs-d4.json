@@ -1,0 +1,34 @@
+{
+  "schema": "fu366-d4-document-inputs-1",
+  "status": "UNREVIEWED d4; actual R1 REVISE10/R2 REVISE42/R3 REVISE8; 3/3 exhausted; no approval/clearance/additional review",
+  "source_head": "a25cda136a1e860f774e30b8eaeaf0911f7147ae",
+  "documentation_only": true,
+  "files": [
+    {
+      "path": "docs/adr/2026-10-16-plan5i-current-main-integration-d4.md",
+      "bytes": 35552,
+      "sha256": "a07075d233df058bd899353a2077c84e84e7e77b5137434aaa3b9fab1aa6bea8"
+    },
+    {
+      "path": "docs/reviews/plan5i-integration/source-map-d4.json",
+      "bytes": 933063,
+      "sha256": "09d240aee4f3bafed15e0ec4141dbbfe0d99cf2ec6fa880cf72412d3e7207765"
+    },
+    {
+      "path": "docs/reviews/plan5i-integration/r3-disposition-d4.json",
+      "bytes": 12930,
+      "sha256": "b6e9d25b3b979eca6b78509631eb856299be5c51c55d858b735f6bef62e6af66"
+    },
+    {
+      "path": "docs/reviews/plan5i-integration/r3-disposition-d4.md",
+      "bytes": 11072,
+      "sha256": "2deaee8d95c5ca190ca08f76d4670d5a3e45e0e219b795659cbe94ba3a0d0c83"
+    }
+  ],
+  "input_map": "source-map-d4.json",
+  "historical_inputs": {
+    "path": "inputs-d3.json",
+    "sha256": "d098f707b09e7fd75cde21fb2bfa855fbda83991c3e924c3409e2aa9aba005be"
+  },
+  "hash_convention": "SHA256 of UTF-8 JSON finding object sort_keys=True separators comma/colon ensure_ascii=False; files raw bytes."
+}

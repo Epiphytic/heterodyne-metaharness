@@ -1,0 +1,188 @@
+{
+  "schema": 1,
+  "status": "UNREVIEWED d4; R1-R3 exhausted",
+  "report_sha256": "85e5877220ae182f0eec6525392e789ade6d3ea541db04340d210b20f3cb3538",
+  "canonicalization": "UTF-8 JSON sorted keys compact separators ensure_ascii=False no newline",
+  "findings": [
+    {
+      "ordinal": 1,
+      "finding_sha256": "6c4444d1a23544efcdc2d76c347a1e0e9637790628c180592140d48439cd595d",
+      "disposition": "accepted",
+      "response": "§6 accepts trusted same-UID administrative bypass explicitly; no credential/key ACL proof or shared-writer credential revocation."
+    },
+    {
+      "ordinal": 2,
+      "finding_sha256": "cf1a31fb411fb5ab6171cedcbb8018022d2daadb174804e261e4bb34779c9ec1",
+      "disposition": "accepted",
+      "response": "§5 returns bounded grooming to the SAME parked originating session, relands changed SHA and recomputes revision/digest."
+    },
+    {
+      "ordinal": 3,
+      "finding_sha256": "04e77e6297ee139dd163cbf5a1c373d723eb6a90f1e4a5d63b6c35b1825c6868",
+      "disposition": "accepted",
+      "response": "§7 completes bounded import/digest preflight before separate effect nonce and five-second claim window; original60s stays fixed."
+    },
+    {
+      "ordinal": 4,
+      "finding_sha256": "c8ca8a6b1c00bff4adfddf29a73288d8fa6295f2cab1bb9aebc6edda0921435b",
+      "disposition": "accepted",
+      "response": "§10 requires an actual reviewed, human-approved committed ADR amendment and native admission before affected implementation; oldpins cannot override."
+    },
+    {
+      "ordinal": 5,
+      "finding_sha256": "e1b41d90ff447f3bb20a6e778773039664da22229cf5c20ef6b314cfb9cb7ba9",
+      "disposition": "accepted",
+      "response": "§10 specifies exact-before-state Marmot HOLD/repair question and sole-writer conditional recovery with retained provenance and no foreign overwrite."
+    },
+    {
+      "ordinal": 6,
+      "finding_sha256": "23bbf8940fccbabc32bc2b27fc748506e1aa55d4b8df7929c162922ddd73fd45",
+      "disposition": "accepted",
+      "response": "§12 sufficiency returns sufficient|enrich|groom|unknown; enrichment rehashes; model output cannot human-deny."
+    },
+    {
+      "ordinal": 7,
+      "finding_sha256": "bd2cea03c55d7f1de118a43ed1208bf6d52a101dd53d3011555abd865528a76d",
+      "disposition": "accepted",
+      "response": "§6 requires relay judgement enforcement before coupled activation, independent of executor success; no binary-presence exception."
+    },
+    {
+      "ordinal": 8,
+      "finding_sha256": "230f9451d43df6f872d06281da1ad2a4bd5ec66ba41ebb4f6a12ac377507d2ff",
+      "disposition": "accepted",
+      "response": "§5 cannot-approve question exposes safe gaps and genuine groom/deny; silence holds, no auto-denial or fabricated consent."
+    },
+    {
+      "ordinal": 9,
+      "finding_sha256": "08b475add4f439ec5ea73c000b21e4b2f06f1c7b3e5da74e758b8c223eb7d8bd",
+      "disposition": "accepted",
+      "response": "§7 settlement recommends HOLD; thumbs-up holds; explicit A authorizes only displayed attestation."
+    },
+    {
+      "ordinal": 10,
+      "finding_sha256": "1257191f67a483404cf9466802fe36bf6445259ec878a3f121f7b9ea9462de7d",
+      "disposition": "accepted",
+      "response": "§6 heart preserves proposal on every supported form while outward floor cannot be lowered; effect is disclosed."
+    },
+    {
+      "ordinal": 11,
+      "finding_sha256": "c4168e19bed9c9fb69a1ff2ea96ba9b5f1a59cf3df8c93818a4f2543e7364700",
+      "disposition": "accepted",
+      "response": "§6/10 adds explicit permission purpose as a proposed real ADR17 amendment; no missing-purpose guessing."
+    },
+    {
+      "ordinal": 12,
+      "finding_sha256": "e2c29d8cd48dfb748fcf680b15421947c952f09a2867bdeee1088cb9189a7dc2",
+      "disposition": "accepted",
+      "response": "§7 dispatch-preparing/ready/held remain unsettled; deadline/reboot/exhaustion emits needs-human and never settled pending."
+    },
+    {
+      "ordinal": 13,
+      "finding_sha256": "5803545aaf592dc4937bc08bb96e842072cbf3ade15098da2f2db1fd178a010f",
+      "disposition": "accepted",
+      "response": "§6/10 queue extension is an explicit separately admitted implementation dependency covered by real amended design scope, not an invented currentAPI."
+    },
+    {
+      "ordinal": 14,
+      "finding_sha256": "6f27156dc49c73070f304a49b95341c29a890a470b0682db492a2031930df1ec",
+      "disposition": "accepted",
+      "response": "§10 single authoritative checklist covers every proposed ADR departure; no secondary incomplete list claims sufficiency."
+    },
+    {
+      "ordinal": 15,
+      "finding_sha256": "90d259fcff4f3c0fe46539a8df362e6849b04e9921eb2e9bf76161225d407c6c",
+      "disposition": "accepted",
+      "response": "§12 removes typed full-hash/key redaction bypass; bounded labels/prefixes plus ordinary approved checks."
+    },
+    {
+      "ordinal": 16,
+      "finding_sha256": "144af8a2891e07cac55351e2f4ee2853ae659f170e4e8cbeda6c433ee2d4bf3f",
+      "disposition": "accepted",
+      "response": "§7 root broker retains actual cross-UID cgroup cleanup authority; wsd cannot signal/inspect those descendants itself."
+    },
+    {
+      "ordinal": 17,
+      "finding_sha256": "72140d70b97e94e171b04836a97ef2b5d90b6b7f9e96883f0e3291d714628442",
+      "disposition": "accepted",
+      "response": "§6 all supported decision types including confirmation/recovery submit to the same serial writer."
+    },
+    {
+      "ordinal": 18,
+      "finding_sha256": "b0401a349ab80bdf9f25a314048196a4cef93fee563900b297fadf9d0197c6a6",
+      "disposition": "accepted",
+      "response": "§3/12 separates permission allow|deny|escalate from sufficiency and explicitly admits both narrow Plan7 prerequisites."
+    },
+    {
+      "ordinal": 19,
+      "finding_sha256": "39b3c34478c1520c317465868e8a06079d62d5fb9037df381f56ee4247d1a861",
+      "disposition": "accepted",
+      "response": "§5 stale-origin cleanup is creation-key/expected-state scoped; unknown orphan retains slot until authenticated resolution."
+    },
+    {
+      "ordinal": 20,
+      "finding_sha256": "f54a8322a331606fd702da021aac80a72d0a366d9a403135a018eeee4a1a0969",
+      "disposition": "accepted",
+      "response": "§12 and new manifest define canonical finding hashes and supply private exact R2/R3 objects; no public-hash-only verification claim."
+    },
+    {
+      "ordinal": 21,
+      "finding_sha256": "0fd493d9ec4afa06b0ca5fa72a431f06085f47708a71ccd8b895cdeede6e2e60",
+      "disposition": "accepted",
+      "response": "§5 simplifies capacity to2/bead plus configured hostcap; removes redundant8/session."
+    },
+    {
+      "ordinal": 22,
+      "finding_sha256": "50f6de304c37f1771bf121d50f2ac3768f83743e5a7481a524c36782d3732dac",
+      "disposition": "accepted",
+      "response": "§11 requires published-ref retention/readback before asks and clean final doc snapshot landing, not historical forbidden-example ancestry."
+    },
+    {
+      "ordinal": 23,
+      "finding_sha256": "69f7490269c9515f1dabb1b20272adebfb96f98a1138617208f6fda8e70e4048",
+      "disposition": "accepted",
+      "response": "§2/11 mark old author claims historical; old files preserved, no claim that removed archive exists at currentHEAD."
+    },
+    {
+      "ordinal": 24,
+      "finding_sha256": "e3852ef6836159f41487e8c7dfd1ac4faaa31ad555e05d99c94cc8b08f593ffa",
+      "disposition": "accepted",
+      "response": "§7 single reviewed managed installer plan/apply/verify/rollback; no ad hoc credential recipe."
+    },
+    {
+      "ordinal": 25,
+      "finding_sha256": "996d9e49f382202ad957507f320b299b20afffd602cb2acaaf22c465dec0ff08",
+      "disposition": "accepted",
+      "response": "§6 absent purpose remains nonselectable legacy; genuine operator migration/reissue before finalization, never infer design."
+    },
+    {
+      "ordinal": 26,
+      "finding_sha256": "6090e2e323e6ee346b1c2c0a374f37455ae844a2639d855238eba3cb9323cb0a",
+      "disposition": "accepted",
+      "response": "§7 PR marker must be part of approved pinned body before hashing; no postapproval body mutation."
+    },
+    {
+      "ordinal": 27,
+      "finding_sha256": "b62d45894cfc306afb6f2129d727b139b0d3a275e8f3c62a162efd8773677f52",
+      "disposition": "accepted",
+      "response": "§7 destination-resource locks serialize different approved effects targeting same destination, plus effect/approval locks."
+    },
+    {
+      "ordinal": 28,
+      "finding_sha256": "e9bd013cff268c72812890acda1e107e1d39319c5d0a3b74f6aa444ebd78a017",
+      "disposition": "accepted residual; no scope expansion",
+      "response": "§12 accepts bounded full-bundle cost as residual; no performance-driven weakening or unsupported incremental promise."
+    },
+    {
+      "ordinal": 29,
+      "finding_sha256": "d814a80f3f8d72914aa7e6c6e18ae553275cf7e2339c2303c55a8abfd92f46de",
+      "disposition": "accepted",
+      "response": "§7 !action settle uses reply card only, no redundant free-text approval ID."
+    },
+    {
+      "ordinal": 30,
+      "finding_sha256": "49d1c3c6f18e4bcbdfd74b501694d29ca7b4fb88f12b9c6796250f3aa3a0c7a3",
+      "disposition": "accepted",
+      "response": "§7 dispatch_kind initial|reconcile is distinct from askpurpose design|execution|permission."
+    }
+  ]
+}

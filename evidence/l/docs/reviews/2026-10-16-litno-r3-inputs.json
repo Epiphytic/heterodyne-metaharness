@@ -1,0 +1,39 @@
+{
+  "schema": "litno-r3-author-inputs-v1",
+  "status": "unreviewed author triage; not approval or review pass",
+  "actual_review": {
+    "round": 3,
+    "maximum": 3,
+    "verdict": "REVISE",
+    "findings": 30,
+    "raw_report_name": "review-litno-builtin-design-r3.log",
+    "raw_report_sha256": "9f62d55d6f918e509e763bba2e6505ebc4669dfeb79a3a8a37d2711f3abacd2f",
+    "publication": "docs/reviews/2026-10-16-litno-r3-actual-review.md"
+  },
+  "frozen_design": {
+    "commit": "7f73a3259ccff7158d959f28f7c52900d6ea0adc",
+    "path": "docs/designs/2026-10-16-empty-findings-review-amendment.md",
+    "sha256": "3c7668b27bb5343136fea916d19261c316fdd374cc6b85e69c75f18680ab9cd5"
+  },
+  "canonical_original": {
+    "commit": "3158263d049ea0a6b5cd398b40df95b704836d4d",
+    "path": "docs/designs/2026-10-16-controller-integration-evidence.md",
+    "sha256": "350ee897aa5676999f57b34fc42642365605adeeea2731ab7568643fa32919a9"
+  },
+  "private_full_triage": {
+    "name": "litno-design-r3-triage/findings.json",
+    "sha256": "7bde3efc47b60f05a363f45fb75e794aa3c783ec985cbd971c8746848e542c8a"
+  },
+  "private_proof_inputs": {
+    "name": "litno-design-r3-triage/inputs.json",
+    "sha256": "fa1bf51703ec242f4824e8068815aa4a7c4fd17ccdd96368c5e542d50f7458ed"
+  },
+  "portable_dispositions": {
+    "path": "docs/reviews/2026-10-16-litno-r3-author-dispositions.md",
+    "sha256": "cf9f1b867d160b1323536ee56bbb4753ab0dd741dc2e0cbb2848d03868afb856"
+  },
+  "proposed_d4": {
+    "path": "docs/designs/2026-10-16-empty-findings-review-amendment-d4.md",
+    "sha256": "730544d6ccf53ce17ab64e552e4c623c04f5359c49c094274cbd7cf74f729673"
+  }
+}

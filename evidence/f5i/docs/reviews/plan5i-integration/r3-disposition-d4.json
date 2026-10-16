@@ -1,0 +1,133 @@
+{
+  "schema": "ordered-verbatim-author-dispositions-1",
+  "round": 3,
+  "actual_result": "REVISE",
+  "report": {
+    "anchor": "controller-evidence",
+    "path": "review-fu366-builtin-design-r3.log",
+    "sha256": "e2dbc4aa28ee511071d8e8181861de59fe100aa3b217d51c79dcb8eb18db4f96",
+    "bytes": 7557
+  },
+  "extracted_findings": {
+    "anchor": "controller-evidence",
+    "path": "review-fu366-builtin-design-r3-findings-extracted.json",
+    "sha256": "2cfe1692d4d112f0c6b249987b87012e1e0b472f4bc39db1539d94824c0b8f09",
+    "bytes": 5828
+  },
+  "status": "UNREVIEWED d4; actual R1 REVISE10/R2 REVISE42/R3 REVISE8; 3/3 exhausted; no approval/clearance/additional review",
+  "hash_convention": "SHA256 of UTF-8 JSON finding object sort_keys=True separators comma/colon ensure_ascii=False; files raw bytes.",
+  "findings": [
+    {
+      "number": 1,
+      "finding": {
+        "file": "docs/adr/2026-10-16-plan5i-current-main-integration-d3.md",
+        "line": 72,
+        "summary": "§6 'Complete consumers' still omits current direct secret_scan consumers, and claims 'Source-specific matrix pins their actual bytes' while units.py and harness/selection.py have no pin; this is the same defect class as R1#8 and R2#35, both marked accepted-corrected.",
+        "failure_scenario": "At 0763774, `show` is imported by admind/cli.py, admind/daemon.py, admind/settings.py, admind/wnagent.py, heterodyne/cli.py, config/policy.py and services.py; none is named in §6 or the map (grep count 0). units.py (sensitive_kind+show) and harness/selection.py are named but unpinned. When S changes show() redaction, these error and display paths change with no required test selection or byte pin, and the stage2 receipt can be filled without them."
+      },
+      "finding_sha256": "f815f9c11f3e63b74535271cd29efc3f4500d304ab204b7d82f59cc9b6add063",
+      "disposition": "accepted-corrected-in-unreviewed-d4-proposal",
+      "sections": "6/7; direct_scanner_consumers, required_direct_consumer_matrix, source_pins",
+      "response": "Add exact AST imports/calls/value references for all18 production consumers and7 tracked test consumers; source-pin every module including units/selection and scanner. Per-consumer nonempty boundary fixtures are explicitly proposed, not claimed installed; existing static import test paths are discoverable but not asserted behavioral proof. Recompute on admitted S/ports; missing/new undisposed consumer coverage holds.",
+      "verification_limit": "Documentation-only author repair; all3 actual rounds spent; no review clearance, implementation/native admission or human approval claimed."
+    },
+    {
+      "number": 2,
+      "finding": {
+        "file": "docs/reviews/plan5i-integration/source-map-d3.json",
+        "line": 14950,
+        "summary": "Five retained Plan5i reports carry an explicit '**Verdict: X**' line but are recorded with actual_text_verdict null: t4-b1fix and t4-c3 (APPROVE), t45-final, t5-c3 and t5-c4 (REVISE).",
+        "failure_scenario": "§5 requires counting all historical part1 Task4/5 rounds before any new invocation. A controller using the map's 'actual' verdict field undercounts three real REVISE rounds and two APPROVEs on the most over-budget tasks (T4 used 5, T5 used 5+), so its budget accounting for P1 is wrong. The '67 actual reports' inventory is not a faithful verdict ledger."
+      },
+      "finding_sha256": "5c033bba936b4d295f3af91f9ef4f9b739640621466fedde321f0319a67b8812",
+      "disposition": "accepted-corrected-in-unreviewed-d4-proposal",
+      "sections": "4/5/9; historical_plan5i_reviews, actual_verdict_corrections",
+      "response": "Correct only the five nulls to two APPROVE/three REVISE from exact original bold Verdict lines, retaining report bytes/hashes/line numbers and all67 actual reviews; update nested range-discovery verdict copies. No result inferred from null and no budget reset.",
+      "verification_limit": "Documentation-only author repair; all3 actual rounds spent; no review clearance, implementation/native admission or human approval claimed."
+    },
+    {
+      "number": 3,
+      "finding": {
+        "file": "docs/adr/2026-10-16-plan5i-current-main-integration-d3.md",
+        "line": 40,
+        "summary": "The ADR says T12a btq-29lrr's landed provenance has a 'merge pin in map', but source-map-d3.json contains no a16d86e, 29lrr or T12a entry.",
+        "failure_scenario": "A reviewer or controller relying on the map to verify that T12a is already in the baseline, and must not be redispatched, finds no pin. This leaves R2#42 actually unaddressed despite its accepted-corrected disposition, and the ADR makes a false evidence claim."
+      },
+      "finding_sha256": "e0009006badd8c2032a952ecf6616cf9fd143e2b2e1160222f2738c7973b576a",
+      "disposition": "accepted-corrected-in-unreviewed-d4-proposal",
+      "sections": "3; landed_T12a_provenance, source_pins",
+      "response": "Pin actual a16d86ea6238d0b6faef404e27a5901dd567d530 merge, both parents, ancestor076 proof and all8 changed file blobs/review bytes. Preserve native historical29lrr CLOSED as separate snapshot fact, not fresh deployment/review authority.",
+      "verification_limit": "Documentation-only author repair; all3 actual rounds spent; no review clearance, implementation/native admission or human approval claimed."
+    },
+    {
+      "number": 4,
+      "finding": {
+        "file": "docs/adr/2026-10-16-plan5i-current-main-integration-d3.md",
+        "line": 28,
+        "summary": "I's stage2 prerequisites btq-4lsqy, btq-b7oa3 and btq-oaw8k lack kind:task and are parked by claude:belthanior:plan2-controller. Pinned btq skips both design_required and review_recorded for non-kind:task beads, so their native closure is no evidence of 'genuinely accepted' fixes. The ADR does not say this or require their relabel or unpark recovery.",
+        "failure_scenario": "Unpark readback 4 shows all three with labels [agent:claude, repo, ws] and assignee plan2-controller. Any holder can `btq close` them without a Code-Review line and without design approval, which satisfies I's `blocks` edges. Alternatively they stay parked by a different controller session that the Codex controller cannot claim without an unplanned Marmot reclaim."
+      },
+      "finding_sha256": "b704813e1bbf6534c2411d86c29ed1f5fc84aec0dd0c241a48031277ec8778c7",
+      "disposition": "accepted-corrected-in-unreviewed-d4-proposal",
+      "sections": "7; prerequisite_native_readback, nonkind_prerequisite_admission_hold",
+      "response": "Disclose actual blocked parked non-kind/no-metadata state and source native gate bypass for nonkind. Require future authenticated stopped-worker/recovery evidence and supported admission with genuine applicable design targets/pins/blockers plus actual source/code review; bare CLOSED/relabel is insufficient. No queue mutation or admission claimed.",
+      "verification_limit": "Documentation-only author repair; all3 actual rounds spent; no review clearance, implementation/native admission or human approval claimed."
+    },
+    {
+      "number": 5,
+      "finding": {
+        "file": "docs/adr/2026-10-16-plan5i-current-main-integration-d3.md",
+        "line": 34,
+        "summary": "'Private candidate stacking follows part order' with no merge during stage1 names no supported way to give P2/P3 (and P1 on unmerged T10) the predecessor head as base. Pinned `btq worktree` records `rev-parse HEAD` of the repository path passed.",
+        "failure_scenario": "The worker runs the documented `btq worktree btq-fk68j /canonical/repo`. Its base is canonical HEAD without P1, so part2 lacks part1 code. A manual rebase inside the worktree makes the recorded bead base differ from the actual base, which breaks the exact base/head/range evidence §5 requires. The design should name the stacking source, for example passing the predecessor's accepted worktree path or ref."
+      },
+      "finding_sha256": "0d059c1f0777bcb62c4ece7ffa9ad97a3c0659def26eb1a068eb027175ff33ae",
+      "disposition": "accepted-corrected-in-unreviewed-d4-proposal",
+      "sections": "2; supported_candidate_stacking",
+      "response": "Use actual queue worktree repository argument as accepted clean predecessor receipt worktree path: T10→P1→P2→P3; verify recorded HEAD/base/path and cleanliness. Native function pinned; no invented ref argument, rebasing or receipt rewrite.",
+      "verification_limit": "Documentation-only author repair; all3 actual rounds spent; no review clearance, implementation/native admission or human approval claimed."
+    },
+    {
+      "number": 6,
+      "finding": {
+        "file": "docs/adr/2026-10-16-plan5i-current-main-integration-d3.md",
+        "line": 32,
+        "summary": "The btq-1a845 hold on S is prose-only. btq-1wu2i natively depends only on btq-pxtig, P1-P3 have no edge to 1a845, the map has no 1a845 pin, the pending Marmot question uypy (posted 08:38Z, before d3) is undisclosed, and §8's card item 'scanner H gate' is an undefined term.",
+        "failure_scenario": "1wu2i can be closed and S treated as admitted, readying P1 natively, without the host-read prerequisite admitted. Liam's stage1 card says 'scanner H gate' without telling him it means 1a845's exhausted-budget amendment, which is awaiting his separate uypy answer."
+      },
+      "finding_sha256": "1ef1e6bc07ffc21544c75dba1b2ca832f1762d4eaeda7082fa3aaff40ec3bb73",
+      "disposition": "accepted-corrected-in-unreviewed-d4-proposal",
+      "sections": "2/8; hostread_H_admission_hold",
+      "response": "Pin signed H1ebff100 d4 and disclose exhausted3/3, uypy request and captured zero-answer readback; define H explicitly. Actual missing native edges remain HOLD, not silently credited. Require genuine H outcome and real implementation gate via scoped supported recovery before admitting scanner/P1, preserving original pxtig. No fake implementation ID or approval attached.",
+      "verification_limit": "Documentation-only author repair; all3 actual rounds spent; no review clearance, implementation/native admission or human approval claimed."
+    },
+    {
+      "number": 7,
+      "finding": {
+        "file": "docs/adr/2026-10-16-plan5i-current-main-integration-d3.md",
+        "line": 54,
+        "summary": "'The twelve identified outside historical stated code-review ranges' are not identified anywhere in the map, and the map contradicts the claim: 11 of R2's twelve SHAs carry 1-4 range_memberships, and only 8 of the 21 resolution merges have empty membership.",
+        "failure_scenario": "A stage2 author sees nonzero combined_resolution.range_memberships on 80b5914, 70e4149, e80787c and others and treats their resolutions as covered by a historical range. That is the inheritance R2#11 warned about; the map has no field marking these twelve as outside every Code-Review range."
+      },
+      "finding_sha256": "f2066723dc47a6d452c9e80bf729a69fe15d13302862ec80835b57ba247dacc1",
+      "disposition": "accepted-corrected-in-unreviewed-d4-proposal",
+      "sections": "4; twelve_review_uncovered_combined_resolutions, per-row combined_resolution fields",
+      "response": "Name all12 full-SHA real combined resolutions and exact hashes with empty membership in15 actual Git Code-Review trailer ranges. Preserve broad brief discovery ranges separately (11 overlap); neither is port acceptance. Retain all21 combined resolution rows/raw hashes.",
+      "verification_limit": "Documentation-only author repair; all3 actual rounds spent; no review clearance, implementation/native admission or human approval claimed."
+    },
+    {
+      "number": 8,
+      "finding": {
+        "file": "docs/reviews/plan5i-integration/source-map-d3.json",
+        "line": 27,
+        "summary": "Constant boilerplate (namespace_authority, proposal_binding_limit, combined_resolution.acceptance, applicability) is repeated in every one of the 230 rows and 67 review entries instead of being stated once at top level. historical_native_task and native_binding_status are derivable from disposition.",
+        "failure_scenario": "This adds hundreds of KB to an 813 KB evidence file that reviewers must read in full, and any wording change has to be made 230 times consistently. Hoisting to a top-level policy object removes the redundancy. This is a cleanup item and can be deferred."
+      },
+      "finding_sha256": "d0828976abca5ee0a09a65a9b03dd07774c204bc867ff7e0c1c886ae508ab4b4",
+      "disposition": "deferred-optional-cleanup",
+      "sections": "9; optional_cleanup",
+      "response": "Defer optional deduplication. Substantive fixes preserve every230row/67report/13rawlog/7original privateinput fact and forensic shape. No cleanup or blanket reduction of retained evidence during exhausted-budget author repair.",
+      "verification_limit": "Documentation-only author repair; all3 actual rounds spent; no review clearance, implementation/native admission or human approval claimed."
+    }
+  ]
+}
