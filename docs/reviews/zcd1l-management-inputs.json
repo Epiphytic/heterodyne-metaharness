@@ -1,9 +1,9 @@
 {
   "schema": "zcd1l-design-inputs-v1",
   "task": "btq-zcd1l",
-  "draft": "d2",
+  "draft": "d3",
   "design_base": "07637745fe75dc614109a0b8ba72d3489f262a97",
-  "previous_design_head": "e73eab04ac9eeb91ea7a5794cd04bbe2236fde4d",
+  "previous_design_head": "e1eb90a28c1fab011d73f2860abe0cfb1c96b430",
   "authority": "proposed design only; no implementation/deployment/recovery authority",
   "source_method": "read-only Git object/source inspection; no executable imports, tests, queue operations or model calls",
   "sources": [
@@ -85,6 +85,18 @@
     {
       "path": "USER_LIBEXEC/workstream-controller/1defdb83b2b4e73784759982e628c1240e76fcc3cc89d00bed3452b2d9a65503-management.json",
       "sha256": "1defdb83b2b4e73784759982e628c1240e76fcc3cc89d00bed3452b2d9a65503"
+    },
+    {
+      "path": "USER_LIBEXEC/workstream-controller/6cace6aa900363af6e13306899f21d03acc356c22165d883226ebcb7003f1529.py",
+      "sha256": "6cace6aa900363af6e13306899f21d03acc356c22165d883226ebcb7003f1529"
+    },
+    {
+      "path": "USER_LIBEXEC/workstream-controller/84716a3801c970dba83c44efed5d0d1c3e21a81f19aa5887a5a4c2c90e547132.json",
+      "sha256": "84716a3801c970dba83c44efed5d0d1c3e21a81f19aa5887a5a4c2c90e547132"
+    },
+    {
+      "path": "USER_LIBEXEC/workstream-controller/dd952fe46a650d6ada3512f10fd0cd03b30000c291a2817d802f8c25789f3cf6-lane.py",
+      "sha256": "dd952fe46a650d6ada3512f10fd0cd03b30000c291a2817d802f8c25789f3cf6"
     }
   ],
   "closure": [
@@ -92,15 +104,6 @@
     "bin/btq-manage.py",
     "bin/btq-supervise"
   ],
-  "actual_review": {
-    "round": 1,
-    "reviewed_head": "e73eab04ac9eeb91ea7a5794cd04bbe2236fde4d",
-    "outcome": "REVISE",
-    "finding_count": 24,
-    "retained_report": "HANDOFF_CODEX/review-zcd1l-builtin-design-r1.log",
-    "report_sha256": "2e73f4fcd5140b5fdba15336c24b42a036c2d82c07022b253ed0e38341f0f672",
-    "remaining_maximum": 2
-  },
   "retained_prerequisite_evidence": {
     "fn9r": {
       "path": "HANDOFF_CODEX/management-admind-policy-prerequisite",
@@ -120,8 +123,9 @@
     }
   },
   "current_document_hashes": {
-    "docs/designs/2026-10-16-management-design-task-recovery.md": "7df1811922914e80b900543ae7dd84b6263e02d7de1fa84dbb98490af3647618",
-    "docs/reviews/zcd1l-r1-dispositions.md": "35df169733e04846b3d6ae6724464a028b5d9046dbcca9f8b2afda8513ac0847"
+    "docs/designs/2026-10-16-management-design-task-recovery.md": "41ad49bc9a1ffe6938888e23fafa26d8618a0a739a9ec4c6c4720dc8edc9bc2a",
+    "docs/reviews/zcd1l-r1-dispositions.md": "35df169733e04846b3d6ae6724464a028b5d9046dbcca9f8b2afda8513ac0847",
+    "docs/reviews/zcd1l-r2-dispositions.md": "0abd2f6569554fcd17ec0324b1d148b0e3c501a32b28c611c5cebe8a2b4d3d1d"
   },
   "limits": [
     "No current new API support claimed.",
@@ -134,15 +138,57 @@
     "USER_LIBEXEC": "operator-configured user libexec evidence prefix, not an installer default",
     "HANDOFF_CODEX": "controller retained handoff evidence directory; exact local locator retained privately"
   },
-  "proposed_classifier": {
-    "schema": "management-endpoint-roles-v1",
-    "status": "new closed classifier rules plus per-request data-only evidence, not installed API",
-    "proposed_plan_argument": "--endpoint-facts-file FILE",
-    "unclassified_removal": "refuse",
-    "ordinary_task_pins_are_role_evidence": false,
-    "rule_changes": "changed-design approval and reviewed deployment",
-    "endpoint_fact_changes": "exact fresh snapshot/purpose/source evidence bound to original authenticated per-operation card; no additional approval/model/deployment",
-    "protected_gate_override": "native approval/confirm/question and known protected-gate evidence cannot be waived by attestation/card"
+  "actual_reviews": [
+    {
+      "round": 1,
+      "reviewed_head": "e73eab04ac9eeb91ea7a5794cd04bbe2236fde4d",
+      "outcome": "REVISE",
+      "finding_count": 24,
+      "retained_report": "HANDOFF_CODEX/review-zcd1l-builtin-design-r1.log",
+      "report_sha256": "2e73f4fcd5140b5fdba15336c24b42a036c2d82c07022b253ed0e38341f0f672"
+    },
+    {
+      "round": 2,
+      "reviewed_head": "e1eb90a28c1fab011d73f2860abe0cfb1c96b430",
+      "outcome": "REVISE",
+      "finding_count": 25,
+      "retained_report": "HANDOFF_CODEX/review-zcd1l-builtin-design-r2.log",
+      "report_sha256": "d2257627e037fad7b70738bb104da7d7dfe2c024e805e6a7ca15f0e6517e9cd8",
+      "extracted_findings": "HANDOFF_CODEX/review-zcd1l-builtin-design-r2-findings-extracted.json",
+      "extracted_findings_sha256": "c34cee4f144ef739d05d415f8012be7adbb96baaabcfdd2aea6a57f77acd7c1f"
+    }
+  ],
+  "issued_rounds": 2,
+  "remaining_maximum": 1,
+  "normative_design": "docs/designs/2026-10-16-management-design-task-recovery.md",
+  "original_native_approval": {
+    "id": "btq-ovvzt",
+    "status": "closed",
+    "decision": "approve",
+    "approver": "Liam",
+    "at": "2026-10-15T19:58:20Z",
+    "adr_revision": "391516cd919234e69626970cb2e61b94299ed60e",
+    "approved_digest": "64ff5d9c77c75a9c69c8ba6d0c6aa28f74bb84f5fe354973dd94704a93c05f31",
+    "via": "cli",
+    "marmot_reference": null,
+    "design_review": {
+      "reviewer": "claude-opus-5-5",
+      "author": "Codex",
+      "mode": "cross-model"
+    },
+    "scope": "implementation/offline only; excluded deployment/master merge/recovery",
+    "provenance": "parent controller fresh native read; historical close_reason recorded operator approved/proceed while admind latched; no fabricated Marmot receipt"
   },
-  "review_budget_rule": "distinct ISSUED invocations consume slots, including failed/aborted/running/unresolved; only proven never-spawned reservations excluded; unknown issuance/history HOLD"
+  "controller_baseline_observations": {
+    "source_commit": "e0a1a018fe23c6502cc8b3d544d369a3068b911f",
+    "harness_head": "ba5bddcb1c677b101e0bb991541fb489893adfaf",
+    "harness_digest": "0c26a69c14deefcc8b2169fc48ed670632fb47a897a803f52fef4a19099eb943",
+    "harness_diff_digest": "093c49c101e2735895f088ac7e0103d79207d0b4dfc22f76a45094f52bbaa71f",
+    "helper_digest": "6cace6aa900363af6e13306899f21d03acc356c22165d883226ebcb7003f1529",
+    "lane_module_digest": "dd952fe46a650d6ada3512f10fd0cd03b30000c291a2817d802f8c25789f3cf6",
+    "queue_digest": "ec2bc67b227326c80bf5d9a32eb661b220ea9af6942ef31bff04d8c06941bd2e",
+    "wrapper_digest": "9a60e1eb501951e81149843ba39694145f5234e6ad37f3684ed651ea10ea9692",
+    "private_install_capture": "HANDOFF_CODEX/queue-controller-rollout-2026-10-16/05-controller-fresh-install.stdout",
+    "private_management_capture": "HANDOFF_CODEX/queue-controller-rollout-2026-10-16/06-management-install.stdout"
+  }
 }
