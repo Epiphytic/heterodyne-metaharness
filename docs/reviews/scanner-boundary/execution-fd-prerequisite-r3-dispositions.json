@@ -1,0 +1,120 @@
+{
+  "status": "AUTHOR d4 UNREVIEWED; actual R3 REVISE14; 3/3 exhausted; no further review authorized",
+  "raw_report_sha256": "36f274dd25130a9307acd5a2d72666ab0e9d303688ea755faa6e235efc0c0c53",
+  "private_verbatim_relative": "codex/1a845-d4-author/r3-verbatim-findings.json",
+  "finding_hash_convention": "SHA256 of complete original finding object encoded json.dumps(sort_keys=True,separators=(comma,colon),ensure_ascii=True), UTF-8, no newline",
+  "findings": [
+    {
+      "number": 1,
+      "finding_sha256": "879e7070ec0cbe52c7583768075f490214bef4f3634fc9fd20d93a40ca3d5950",
+      "source_file": "docs/superpowers/specs/2026-10-16-scanner-execution-fd-prerequisite-d3.md",
+      "source_line": 181,
+      "author_priority": "blocker",
+      "disposition": "Accepted blocker: PYTHONPATH is active tested source/src first, audited plugin second; stage-specific imports and hashes must match before collect/run."
+    },
+    {
+      "number": 2,
+      "finding_sha256": "301b835936464752bcb7b94f79d9ba28b740fb222f8ecef4851b70acd7ce4fb4",
+      "source_file": "docs/superpowers/specs/2026-10-16-scanner-execution-fd-prerequisite-d3.md",
+      "source_line": 102,
+      "author_priority": "blocker",
+      "disposition": "Accepted blocker: complete mandatory on-card human text explicitly covers oracle3373, residuals, dependency, two-stage delivery, one sequence, denial and no deployment."
+    },
+    {
+      "number": 3,
+      "finding_sha256": "c95568904fc210be084ecbd498baf05142221ad3122c80d1ce03ff6afdded3b2",
+      "source_file": "docs/superpowers/specs/2026-10-16-scanner-execution-fd-prerequisite-d3.md",
+      "source_line": 125,
+      "author_priority": "correctness-or-simplification",
+      "disposition": "Accepted: H is reviewed/hosted-CI-passing merged test+docs prerequisite before close; subsequent scanner B1+B2 production delta is atomic."
+    },
+    {
+      "number": 4,
+      "finding_sha256": "a27ec60a5e57d5aee6f76353a486fa7c4986c79a80e4ec64f2e1e660d908c694",
+      "source_file": "docs/superpowers/specs/2026-10-16-scanner-execution-fd-prerequisite-d3.md",
+      "source_line": 182,
+      "author_priority": "correctness-or-simplification",
+      "disposition": "Accepted: load scanner_probe plus _hypothesis_pytestplugin explicitly; omit unused serial xdist plugins, preserve Hypothesis health checks."
+    },
+    {
+      "number": 5,
+      "finding_sha256": "b11363fb7f88b123198afb49de7a39ba78e9b46da77c01e6d63b69b7c78bd086",
+      "source_file": "docs/reviews/scanner-boundary/execution-fd-prerequisite-d3-inputs.json",
+      "source_line": 145,
+      "author_priority": "correctness-or-simplification",
+      "disposition": "Accepted: one logical handoff root, all paths normalized relative to its dated root; historical originals remain unmodified."
+    },
+    {
+      "number": 6,
+      "finding_sha256": "9bee5404d204b7db59a22dc3de2197ca3c0643a1d50a97322335be26d4540747",
+      "source_file": "docs/superpowers/specs/2026-10-16-scanner-execution-fd-prerequisite-d3.md",
+      "source_line": 129,
+      "author_priority": "correctness-or-simplification",
+      "disposition": "Accepted: final portable files snapshot onto canonical ancestry; never merge planning ancestry containing opaque exhibits. Preserve actual9a14 test ancestry separately."
+    },
+    {
+      "number": 7,
+      "finding_sha256": "5b26aec72fbbf25bad26c69a739a942b14ed432789e5c5fa5d601e98fc574541",
+      "source_file": "docs/superpowers/specs/2026-10-16-scanner-execution-fd-prerequisite-d3.md",
+      "source_line": 80,
+      "author_priority": "correctness-or-simplification",
+      "disposition": "Accepted: self-contained ask substance precedes links; no obligation to read a task/file/step to learn approval scope. Private original finding is hash-bound without publishing host paths."
+    },
+    {
+      "number": 8,
+      "finding_sha256": "ccb593ea85414db68e39e7a39b517cf98f58d401dbdedc2876c0936dc7e4e420",
+      "source_file": "docs/superpowers/specs/2026-10-16-scanner-execution-fd-prerequisite-d3.md",
+      "source_line": 57,
+      "author_priority": "correctness-or-simplification",
+      "disposition": "Accepted: current recorded6.17 same-process pidfd identity reuse is an explicit residual from historical review; pre6.9 global sharing remains separately sourced."
+    },
+    {
+      "number": 9,
+      "finding_sha256": "05d8ab6cc8482191aab910b018c0210a3bf4f762deba3a85aa4f797c687ccde5",
+      "source_file": "docs/superpowers/specs/2026-10-16-scanner-execution-fd-prerequisite-d3.md",
+      "source_line": 77,
+      "author_priority": "correctness-or-simplification",
+      "disposition": "Accepted/simplified: spec is directly docs/adr/0002-scanner-execution-fd-prerequisite-d4.md; configured glob verified before admission; R=D, no later unreviewed pin content."
+    },
+    {
+      "number": 10,
+      "finding_sha256": "41580c2c8b13f514967273d5e3920a765419c1b1c23871e1112eca2cf203358a",
+      "source_file": "docs/superpowers/specs/2026-10-16-scanner-execution-fd-prerequisite-d3.md",
+      "source_line": 212,
+      "author_priority": "correctness-or-simplification",
+      "disposition": "Accepted: release slot after H92; reserve separate exclusive scanner steps2-5 batch after H merge/recovery; release before review. Loss pauses before further execution."
+    },
+    {
+      "number": 11,
+      "finding_sha256": "94fb77814abec6711750738c9305991ac5aaf5fd4e1da8b24532dc7ef3f69887",
+      "source_file": "docs/reviews/scanner-boundary/execution-fd-prerequisite-d3-inputs.json",
+      "source_line": 326,
+      "author_priority": "correctness-or-simplification",
+      "disposition": "Accepted: R1 log and result file have separate paths and actual raw SHA256 values; historical manifest stays immutable."
+    },
+    {
+      "number": 12,
+      "finding_sha256": "d04f7b8cf8b2f3618af4bb297d116a229beb906c915354a3fb7b12363d80af79",
+      "source_file": "docs/superpowers/specs/2026-10-16-scanner-execution-fd-prerequisite-d2.md",
+      "source_line": 143,
+      "author_priority": "correctness-or-simplification",
+      "disposition": "Accepted without rewriting history: main landing excludes old docs with deleted relative exhibits; exact d442 Git locator resolves historical d2 and exhibits."
+    },
+    {
+      "number": 13,
+      "finding_sha256": "47c5d373981125630a53a448cd6fe7cd555d12fd92f50b6019e2bc846b737b7d",
+      "source_file": "docs/superpowers/specs/2026-10-16-scanner-execution-fd-prerequisite-d3.md",
+      "source_line": 231,
+      "author_priority": "correctness-or-simplification",
+      "disposition": "Accepted: manifest carries exact ordered19 original test_config.py node IDs and both semantic hash conventions, extracted from pinned legacy evidence; unrelated admind node remains in3372."
+    },
+    {
+      "number": 14,
+      "finding_sha256": "6154a5d34553bddaf1c2b5af346377fe0a5d10b10813dc99b2a97507bd56bd94",
+      "source_file": "docs/superpowers/specs/2026-10-16-scanner-execution-fd-prerequisite-d3.md",
+      "source_line": 76,
+      "author_priority": "correctness-or-simplification",
+      "disposition": "Accepted simplification: reviewed spec already matches native ADR path; D and R are the same immutable revision, with actual runtime admission in separate receipt."
+    }
+  ]
+}
