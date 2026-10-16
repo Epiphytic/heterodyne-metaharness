@@ -1,6 +1,6 @@
 # Plan7A actual design R1 disposition — d2 author repair
 
-Status: UNCOMMITTED author proposal; no approval or reviewer APPROVE. Actual R1 REVISE consumed 1 of maximum 3 rounds; no reset. No tests, models, queue, sends, services or runtime changes.
+Status: historical d2 author disposition, committed in the reviewed c6a4e0f lineage; superseded by d3 for current status. No approval or reviewer APPROVE. Actual R1 REVISE consumed 1 of maximum 3 rounds; no reset. No tests, models, queue, sends, services or runtime changes.
 
 Actual raw report SHA-256: `5c287ac2abd3bf456424c852270156eb3f56247d1a853bc217bcec43122f59b5`. The 27 JSON entries below match the actual fenced JSON in order; summaries and failure_scenario strings are preserved verbatim. Responses are author dispositions, not reviewer verdicts.
 
