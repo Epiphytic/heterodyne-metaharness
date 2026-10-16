@@ -1,0 +1,8 @@
+{
+  "source_commit": "7b2d757364d3f0e21a0c6ec87a5b5af7b244fb81",
+  "source_path": "docs/designs/2026-10-14-btq-supervise-cards.md",
+  "source_sha256": "46b0102cb4919aa97d75a7f5a0337d1ef537e8e54d72e5210b4bc6d1bd56670d",
+  "purpose": "Byte-exact publication of existing genuinely approved design; no new review, content change or deployment authority",
+  "native_approval": "btq-s9ss7",
+  "native_decision_reference": "marmot:id:7d8606600083"
+}
