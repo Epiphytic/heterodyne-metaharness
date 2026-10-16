@@ -1,14 +1,14 @@
 {
-  "status": "Proposed d2 after actual R1 REVISE28; author repairs UNREVIEWED/UNAPPROVED",
+  "status": "Proposed d3 author repairs after actual R2 REVISE20; UNREVIEWED/UNAPPROVED",
   "author": "Codex",
   "task": "btq-8d487",
-  "at": "2026-10-16T09:15:37.568944+00:00",
+  "at": "2026-10-16T09:36:08.175986+00:00",
   "source_base": "07637745fe75dc614109a0b8ba72d3489f262a97",
   "governing_adr": "a27acecee8274e6ad8dc65def436614d42b5cb04",
-  "actual_review_rounds": 1,
+  "actual_review_rounds": 2,
   "design": {
     "path": "docs/designs/2026-10-16-plan8-scheduling-reconciliation.md",
-    "sha256": "6cbce46cbfccc8715715c3a6aae68bf7d7c820da5512276e410759d178e6ce77"
+    "sha256": "2f4bcd7fc12f543b765eee4fc45ee9bc620640abc9ac29a7e8f671d26e13351f"
   },
   "inputs": [
     {
@@ -167,6 +167,23 @@
       "path": "docs/reviews/plan6c-delivery-inputs.json",
       "sha256": "14207b1a00ebba20338e7b9ca9c4eab58097bc4e42c9831767f3538d780cd113",
       "authority": "Current proposed d2, actual R2 REVISE27; NOT approved, installed or implementation authority. Owner-local600/660/4h wakes; no Plan8 polling deadline substitution."
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/agents/base.py",
+      "sha256": "ca7c2ab3c8e96fc99f219ea959ee19a2638655071e4a8484e4c4d6e7d6ed880a"
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "4acc2d5a2d6ee3e2266ff465271a72c419493723",
+      "path": "docs/designs/2026-10-16-plan6c-durable-delivery.md",
+      "git_blob": "5dd70a02c0d114e4ce7c46db7131575d33e96734",
+      "sha256": "cf60b088c53123e127539a92d66f771385f2f2b4deb6cf399b76fcb77bae506f",
+      "source_link": "https://github.com/Epiphytic/heterodyne-metaharness/blob/4acc2d5a2d6ee3e2266ff465271a72c419493723/docs/designs/2026-10-16-plan6c-durable-delivery.md",
+      "authority": "Signed/pushed proposed d3; actual R3 pending. NOT approved or installed. Byte-identical to earlier private author snapshot; shared helper compatibility remains proposed."
     }
   ],
   "discovery": "Semble code search and bounded source reads; ripwire reuse map saved privately; no runtime imports or executions",
@@ -187,25 +204,17 @@
     "local-git:hermes-workstreams-v2-adr-r17 (no remote)": "Existing external ADR object archive; exact commit/path/hash, not a fabricated GitHub URL.",
     "private_research": "Controller evidence directory artifact-relative paths. Historical research, not public authority."
   },
-  "remaining_review_rounds": 2,
+  "remaining_review_rounds": 1,
   "r1_dispositions": {
     "path": "docs/designs/2026-10-16-plan8-scheduling-reconciliation-r1-dispositions.md",
     "sha256": "7c9e644a805664a73be2eb1c4293db5ae65191cccf42b688b65b2cd40334529f",
     "finding_count": 28,
     "verbatim_order_preserved": true
   },
-  "review_evidence": {
-    "base": "c9fa7942386556b5227d96cbe73b8ca4a9223efc",
-    "raw_report_sha256": "978578bab018dc2cf248f98bae068525fb3f78183848681259e542816b2cc983",
-    "extracted_sha256": "e26d3c67f885b7d4201c9e325f67be9d63a4ada0aed9e5d32cdf8ad5edf33968",
-    "verdict": "REVISE",
-    "issued_rounds": 1,
-    "new_revision_reviewed": false
-  },
   "source_verification": {
     "all_input_sha256_verified": true,
-    "verified_input_count": 22,
-    "method": "git show exact commit:path and SHA256; historical private research read/hash only; no runtime execution",
+    "verified_input_count": 24,
+    "method": "Exact git show commit:path SHA256; exact private/provisional input snapshot hashes. No runtime imports/executions; pins are not human authority.",
     "scope": "Pins verify bytes, not human approval or current installation freshness"
   },
   "human_decisions_required": [
@@ -213,6 +222,32 @@
     "Explicit ADRv1 user schedules deferral + revised release acceptance or keep original requirement",
     "Typed scheduled BACKSTOP ingress instead of manual tick origin",
     "Observer same-manager failure-domain residual",
-    "Bounded effect high-water/recent-history compaction; core wakes never capacity-held"
-  ]
+    "Bounded effect high-water/recent-history compaction; core wakes never capacity-held",
+    "External activation-interval cadence semantics vs internal completion-relative sleep; slow-lane load disclosure",
+    "ADR17\u00a73.3 new authoritative WSD effect store and loss/recovery behavior",
+    "Native-owner paired backup seam/cadence with local artifact retention and honest non-atomic three-store capture",
+    "Local alert settlement/coalescing can remove diagnostics before relay; same-manager/overflow remote freshness limits"
+  ],
+  "r2_dispositions": {
+    "path": "docs/designs/2026-10-16-plan8-scheduling-reconciliation-r2-dispositions.md",
+    "sha256": "2f827723304f3bbb945ebb3d79ffbef5534b718fcc9a901c223554385418714f",
+    "finding_count": 20,
+    "verbatim_order_preserved": true
+  },
+  "r1_review_evidence": {
+    "base": "c9fa7942386556b5227d96cbe73b8ca4a9223efc",
+    "raw_report_sha256": "978578bab018dc2cf248f98bae068525fb3f78183848681259e542816b2cc983",
+    "extracted_sha256": "e26d3c67f885b7d4201c9e325f67be9d63a4ada0aed9e5d32cdf8ad5edf33968",
+    "verdict": "REVISE",
+    "issued_rounds": 1,
+    "new_revision_reviewed": false
+  },
+  "review_evidence": {
+    "base": "09411b3c48bc2018540a3fa29afc3c3f3fe60239",
+    "raw_report_sha256": "7cd005a26f96dbce4c5d94f7e38fad94d53398eb138477696c674fb731e72af4",
+    "extracted_sha256": "891def21eda42951514c1e6fceee0d081ac883ed6dc771cd22fa0bdded03caf5",
+    "verdict": "REVISE",
+    "issued_rounds": 2,
+    "new_revision_reviewed": false
+  }
 }
