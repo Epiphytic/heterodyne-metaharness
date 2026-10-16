@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "task": "btq-63iz7",
-  "status": "proposed design only; reviews/publication/human answer pending",
+  "status": "proposed d2 after actual R1 REVISE; parent inspection, remaining review, publication and native human approval pending",
   "source_base": "07637745fe75dc614109a0b8ba72d3489f262a97",
   "design_path": "docs/designs/2026-10-16-plan6b-authenticated-marmot-read-surface.md",
-  "design_sha256": "59fa91fc6c5b99b80b4e2f739322cf1ab79cc5c3bf2c1ed9c6c1580f538ab22c",
+  "design_sha256": "896756d7f7007e8d050f7308b85933713600ee8bce5f5575e2a28086f7215f40",
   "inputs": [
     {
       "repository": "heterodyne-metaharness",
@@ -149,6 +149,38 @@
       "bytes": 190140,
       "sha256": "6dd566effd2fbd2a569e533cf8449da5ae15244290e6a9cfc30560e685acb0fb",
       "role": "actual64hex message/event/target validation; not universal group length"
+    },
+    {
+      "repository": "heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/wsd/scheduler.py",
+      "bytes": 33451,
+      "sha256": "cc265d66bca5899b4a3bbb9a19288c473c8c420403b204e67862d768de53983e",
+      "role": "actual resumable-first candidate gating; not native-ready pickup order"
+    },
+    {
+      "repository": "heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/wsd/btq.py",
+      "bytes": 2443,
+      "sha256": "1bda049fb8b42b0e9c1b34d71423ee5c75dbf1d535cf04566ca0b89a82cae1d7",
+      "role": "factory constructs general Queue; not read-only"
+    },
+    {
+      "repository": "heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/config/layers.py",
+      "bytes": 8393,
+      "sha256": "4f701161db899952bf7d51ec6da4f9388c9ac28898041ff73d87480921179b2c",
+      "role": "supported configuration layering source; new read schema remains proposed"
+    },
+    {
+      "repository": "beads-task-queue",
+      "commit": "6fe57598468ff53bf74dfd9e1cf181ad3177c3f1",
+      "path": "bin/btq",
+      "bytes": 146751,
+      "sha256": "ec2bc67b227326c80bf5d9a32eb661b220ea9af6942ef31bff04d8c06941bd2e",
+      "role": "Queue constructor/state/writer credentials/native20s timeout and unbounded paused-ready behavior"
     }
   ],
   "private_controller_inputs": [
@@ -189,12 +221,12 @@
     "explicit early-read-only sequencing human decision or full Plan5 predecessor",
     "actual supported trust recovery and initial registered baseline before deployment",
     "separate reviewed implementation and deployment approvals",
-    "implement the explicit sections4.1–4.2 read port/adapters and prove consumed native field/ordering contracts offline; unsupported facts return Unavailable"
+    "implement the explicit sections4.1\u20134.2 read port/adapters and prove consumed native field/ordering contracts offline; unsupported facts return Unavailable"
   ],
   "implementation_or_live_actions": false,
   "proposed_projection_contract": {
     "version": 1,
-    "defined_in": "design sections4.1–4.2",
+    "defined_in": "design sections4.1\u20134.2",
     "selectors": [
       "Workstreams",
       "Status",
@@ -212,5 +244,30 @@
     "existing_api_claim": false,
     "new_read_adapters_required": true,
     "no_native_order_or_total_proof": "Unavailable; no guessed totals or ordering"
-  }
+  },
+  "revision": "d2",
+  "review_history": [
+    {
+      "round": 1,
+      "verdict": "REVISE",
+      "raw_sha256": "628b9583c7d2804b6dfb8cf032684c3eb252d686d9c13d1ec8901ad79ab23c87",
+      "prose_count": 26,
+      "actual_fenced_json_count": 27,
+      "reviewed_source": "60f8ad6768b6ee20638d9a0dbe51336c25a4dce3",
+      "disposition_path": "docs/reviews/plan6b-authenticated-read-design-r1-disposition.md",
+      "disposition_sha256": "fac93739158b7caa5bc0bef69bbe23c747ea53ec3ea5e42e551e5efd6c997d09",
+      "actual_returncode": 0,
+      "requested_model": "opus",
+      "requested_effort": "high",
+      "actual_inner_model": null,
+      "verification_pass_reported": false
+    }
+  ],
+  "unresolved_prerequisites": [
+    "Genuine remaining design review/native Marmot approval including early-sequencing choice; no approval claimed",
+    "Exact genuinely approved/implemented6A source/schema and bounded compatibility artifact before implementation integration; provisional7903439 remains only inspectedinput",
+    "Supported read-role/owner port and verified finite native operation shapes before deployment; no Queue writer fallback",
+    "Implemented/tested supported config/epoch recovery/approval validation and initial trusted route baseline before deployment",
+    "Separate exactdeploymentapproval; no consumer startup or live acceptance in design/library work"
+  ]
 }
