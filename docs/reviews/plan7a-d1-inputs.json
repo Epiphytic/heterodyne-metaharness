@@ -1,0 +1,154 @@
+{
+  "format": 1,
+  "status": "PROPOSED_UNREVIEWED_D1",
+  "task": "btq-jzat7",
+  "author": "Codex",
+  "actual_design_review_rounds_used": 0,
+  "human_design_approval": null,
+  "implementation_authorized": false,
+  "product_base": "07637745fe75dc614109a0b8ba72d3489f262a97",
+  "spec": {
+    "path": "docs/designs/2026-10-16-plan7a-intake-and-sufficiency-contracts.md",
+    "sha256": "1fc2b61f1f12fd9a1a3ea20dcc875000c5af8319604771bb6e8bed610e9bdcb7"
+  },
+  "source_repository_locator_note": "Logical names resolve via root private source-map.json. Design repositories have no asserted public remote. Actual Git objects and bytes were verified; no copied or encoded ADR archive is created. Product sources are canonical Epiphytic/heterodyne-metaharness.",
+  "sources": [
+    {
+      "repository": "governing-adr17-design-repository",
+      "commit": "a27acecee8274e6ad8dc65def436614d42b5cb04",
+      "path": "docs/adr/0001-workstreams-v2.md",
+      "git_blob": "40e02d55e6b752dcb97fd5ac21b0e920e7194d47",
+      "sha256": "3b6da7d95d2652619439192a5fbda0dc5e281e8e5bd87813e95ae8c5d860ea3c"
+    },
+    {
+      "repository": "adr16-design-repository",
+      "commit": "93d0e90b121a07db720d92924cda443a1cfc239c",
+      "path": "docs/adr/0001-workstreams-v2.md",
+      "git_blob": "4b608411f364760c93ad10155bdcbe23d7b9d992",
+      "sha256": "13086760390dc786c233fe358048878e1fa657f374f61534d619a8d22b8d8b35"
+    },
+    {
+      "repository": "Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "docs/superpowers/plans/2026-09-29-heterodyne-v1-roadmap.md",
+      "git_blob": "b5654e5d5eeb7e205c6cb4103dd4b57ddcb6c9f0",
+      "sha256": "87ef1a4aa63e2f35aca075c9b0f63be7a1c93e9225099e8396f135a21a9df9a1"
+    },
+    {
+      "repository": "Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/approvals.py",
+      "git_blob": "4e1cf22d65dbf9433e66c14662505cba473f651b",
+      "sha256": "fe3666517162efabd3142d4be687fc89c7062248e4a05635a76a422d7e87b6b7"
+    },
+    {
+      "repository": "Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/daemon.py",
+      "git_blob": "9c3f17f9505a42e2c9510c093149eddf653330d1",
+      "sha256": "6dd566effd2fbd2a569e533cf8449da5ae15244290e6a9cfc30560e685acb0fb"
+    },
+    {
+      "repository": "Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/asks.py",
+      "git_blob": "a419c858ba5864c599ca90bfa89c0538e221ddcc",
+      "sha256": "6b6645f1fbba429b0f52277152f31745422332fe063792ce4748378091f37042"
+    },
+    {
+      "repository": "Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/redact.py",
+      "git_blob": "c5a3af2d8aa74742d337beed18370b7b16940153",
+      "sha256": "533ecbb089b57e643c1edf8745eb13dd908b5dc1cbd14f74f48e3a59883a0d8c"
+    },
+    {
+      "repository": "Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/config/secret_scan.py",
+      "git_blob": "e5db682fefdc1c9c747320502a4842977f5867c9",
+      "sha256": "92422444c6e632c54a2fe8a4e5c80554fcce0421e6ada2f383ae58fdfff0bc59"
+    },
+    {
+      "repository": "Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/defaults/defaults.toml",
+      "git_blob": "216ec319beceed0a40c905caea71d356bf3f7bb7",
+      "sha256": "75b73d52b25c87c3d7d72dac942ae7b29602db47b4f2782bbfe5ee71c389b618"
+    },
+    {
+      "repository": "Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "pyproject.toml",
+      "git_blob": "1235d97bdc62eeeb1cd1a4210ef532bd6927c54c",
+      "sha256": "f772a967a4e3f944e4f0293a744a5f0157ead4cc77ee9d7fd8854c176bbeb911"
+    },
+    {
+      "repository": "beads-task-queue",
+      "commit": "6fe57598468ff53bf74dfd9e1cf181ad3177c3f1",
+      "path": "bin/btq",
+      "git_blob": "4d5a1d463673bec99da4186715efd889a1e311b3",
+      "sha256": "ec2bc67b227326c80bf5d9a32eb661b220ea9af6942ef31bff04d8c06941bd2e"
+    }
+  ],
+  "historical_approval_evidence": [
+    {
+      "id": "btq-ovngv",
+      "evidence_source": "historical native snapshot pinned below; no fresh queue call",
+      "metadata": {
+        "adr_revision": "a27acecee8274e6ad8dc65def436614d42b5cb04",
+        "approved_by": "Liam",
+        "approved_at": "2026-10-14T15:57:38Z",
+        "approved_digest": "c874eb3d81c0647f53005e5cfb1b35f33ca30bf6617bc10e84d24079d7ba6fbb",
+        "context_digest": "c874eb3d81c0647f53005e5cfb1b35f33ca30bf6617bc10e84d24079d7ba6fbb",
+        "decision": "approve",
+        "design_review": "reviewer=gpt-6.1-sol author=claude-opus-5-5 mode=cross-model",
+        "via": "marmot",
+        "via_ref": "marmot:id:189fd6bb97ba"
+      }
+    },
+    {
+      "id": "btq-xywu0",
+      "evidence_source": "historical native snapshot pinned below; no fresh queue call",
+      "metadata": {
+        "adr_revision": "93d0e90b121a07db720d92924cda443a1cfc239c",
+        "approved_by": "Liam",
+        "approved_at": "2026-10-13T20:23:40Z",
+        "approved_digest": "183d522381d3246c90dfcb98cbd6de7844f635482b267065472a80c0783172df",
+        "context_digest": "183d522381d3246c90dfcb98cbd6de7844f635482b267065472a80c0783172df",
+        "decision": "approve",
+        "design_review": "reviewer=gpt-6.1-sol author=claude-opus-5-5 mode=cross-model",
+        "via": "marmot",
+        "via_ref": "marmot:id:194185aeb556"
+      }
+    }
+  ],
+  "private_inputs": [
+    {
+      "private_handoff_relative_path": "plan7-preparation/assessment.md",
+      "sha256": "d5e9a613d81cd0975fc7c98027dbb01346ee855dfb06b70dc1631b9afcde4b12",
+      "role": "historical bounded preparation, not current task-state proof"
+    },
+    {
+      "private_handoff_relative_path": "plan7-preparation/evidence.json",
+      "sha256": "efbfb3eed427650768525c5738a95b2e4c5829b97493f2e0740dcbfae1e54af3",
+      "role": "historical bounded preparation, not current task-state proof"
+    },
+    {
+      "private_handoff_relative_path": "plan7-preparation/manifest.json",
+      "sha256": "469122c233bd7cfd167890af2119c596e971c99a546dc427e3fe9ffe461f2634",
+      "role": "historical bounded preparation, not current task-state proof"
+    },
+    {
+      "private_handoff_relative_path": "release-resume-2026-10-16/native-workstream-issues.json",
+      "sha256": "984f34dcef44961472d1b6846842ac3f2752be39887f8f14bccafa4cb0da37d3",
+      "role": "historical bounded preparation, not current task-state proof"
+    }
+  ],
+  "limits": [
+    "No runtime implementation, tests, model/review calls, queue operations, services, or sends.",
+    "Existing Hermes endpoint matching proposed contracts remains unverified.",
+    "Future Plan5/6 designs are not implementation prerequisites or installed claims.",
+    "Exact later native admission and immutable publication are root responsibilities; no future IDs fabricated."
+  ]
+}
