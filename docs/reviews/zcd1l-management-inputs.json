@@ -1,0 +1,148 @@
+{
+  "schema": "zcd1l-design-inputs-v1",
+  "task": "btq-zcd1l",
+  "draft": "d2",
+  "design_base": "07637745fe75dc614109a0b8ba72d3489f262a97",
+  "previous_design_head": "e73eab04ac9eeb91ea7a5794cd04bbe2236fde4d",
+  "authority": "proposed design only; no implementation/deployment/recovery authority",
+  "source_method": "read-only Git object/source inspection; no executable imports, tests, queue operations or model calls",
+  "sources": [
+    {
+      "repo": "beads-task-queue",
+      "commit": "6fe57598468ff53bf74dfd9e1cf181ad3177c3f1",
+      "path": "bin/btq",
+      "sha256": "ec2bc67b227326c80bf5d9a32eb661b220ea9af6942ef31bff04d8c06941bd2e"
+    },
+    {
+      "repo": "beads-task-queue",
+      "commit": "6fe57598468ff53bf74dfd9e1cf181ad3177c3f1",
+      "path": "bin/btq-manage.py",
+      "sha256": "670ea807fd546f939f3441823dee2e1980e03f7026be580a62d7f91a4e6582b6"
+    },
+    {
+      "repo": "beads-task-queue",
+      "commit": "6fe57598468ff53bf74dfd9e1cf181ad3177c3f1",
+      "path": "bin/btq-supervise",
+      "sha256": "e1509441219e38a40185bf596ada3ed33610f69d0032db9af47e630a5403fae9"
+    },
+    {
+      "repo": "beads-task-queue",
+      "commit": "6fe57598468ff53bf74dfd9e1cf181ad3177c3f1",
+      "path": "tests/test_manage.py",
+      "sha256": "cce0eaa7db2c08e1f5c941a77353b9e5bc1b662c4e76a779214c78f0da4df6f7"
+    },
+    {
+      "repo": "beads-task-queue",
+      "commit": "6fe57598468ff53bf74dfd9e1cf181ad3177c3f1",
+      "path": "docs/MANAGE.md",
+      "sha256": "8ebfe8f2ecd4f78ac850765dd7f3c76bd89f9e830b324e3c880e3ff88ee68270"
+    },
+    {
+      "repo": "beads-task-queue",
+      "commit": "6fe57598468ff53bf74dfd9e1cf181ad3177c3f1",
+      "path": "docs/OPS.md",
+      "sha256": "0ecb17e6a7a5d9288aeeb27490a60059721d528f39a828f4479f13e903b15dfc"
+    },
+    {
+      "repo": "harness-improvements",
+      "commit": "e0a1a018fe23c6502cc8b3d544d369a3068b911f",
+      "path": "scripts/install_workstream_controller.py",
+      "sha256": "fb1a9802ac5ac3dfbf250ae402c3e5ffd5aca4c1cdd1e0b81b52945c835b38d1"
+    },
+    {
+      "repo": "harness-improvements",
+      "commit": "e0a1a018fe23c6502cc8b3d544d369a3068b911f",
+      "path": "scripts/workstream_manage.py",
+      "sha256": "c6805737dc1422a06cb61b8ed5c872d18faa41ceba62af42a71fb790da555bca"
+    },
+    {
+      "repo": "harness-improvements",
+      "commit": "e0a1a018fe23c6502cc8b3d544d369a3068b911f",
+      "path": "scripts/workstream_controller.py",
+      "sha256": "6cace6aa900363af6e13306899f21d03acc356c22165d883226ebcb7003f1529"
+    }
+  ],
+  "approved_archive": {
+    "source_repo": "heterodyne-metaharness-v2",
+    "source_commit": "391516cd919234e69626970cb2e61b94299ed60e",
+    "source_path": "docs/designs/2026-10-15-operator-task-management.md",
+    "archive_path": "docs/reviews/approved-inputs/2026-10-15-operator-task-management.md",
+    "sha256": "3249c0a3b6207da6bc6172e5291895779a920d3afd56de6e38d0365df0ee2a39"
+  },
+  "installed_baseline": [
+    {
+      "path": "USER_LIBEXEC/workstream-controller/management-9e3f6f4a38237bd7197098a9463e2b910c109936bf6053595e06a87e1b64b607/bin/btq",
+      "sha256": "ec2bc67b227326c80bf5d9a32eb661b220ea9af6942ef31bff04d8c06941bd2e"
+    },
+    {
+      "path": "USER_LIBEXEC/workstream-controller/management-9e3f6f4a38237bd7197098a9463e2b910c109936bf6053595e06a87e1b64b607/bin/btq-manage.py",
+      "sha256": "670ea807fd546f939f3441823dee2e1980e03f7026be580a62d7f91a4e6582b6"
+    },
+    {
+      "path": "USER_LIBEXEC/workstream-controller/c6805737dc1422a06cb61b8ed5c872d18faa41ceba62af42a71fb790da555bca-manage.py",
+      "sha256": "c6805737dc1422a06cb61b8ed5c872d18faa41ceba62af42a71fb790da555bca"
+    },
+    {
+      "path": "USER_LIBEXEC/workstream-controller/1defdb83b2b4e73784759982e628c1240e76fcc3cc89d00bed3452b2d9a65503-management.json",
+      "sha256": "1defdb83b2b4e73784759982e628c1240e76fcc3cc89d00bed3452b2d9a65503"
+    }
+  ],
+  "closure": [
+    "bin/btq",
+    "bin/btq-manage.py",
+    "bin/btq-supervise"
+  ],
+  "actual_review": {
+    "round": 1,
+    "reviewed_head": "e73eab04ac9eeb91ea7a5794cd04bbe2236fde4d",
+    "outcome": "REVISE",
+    "finding_count": 24,
+    "retained_report": "HANDOFF_CODEX/review-zcd1l-builtin-design-r1.log",
+    "report_sha256": "2e73f4fcd5140b5fdba15336c24b42a036c2d82c07022b253ed0e38341f0f672",
+    "remaining_maximum": 2
+  },
+  "retained_prerequisite_evidence": {
+    "fn9r": {
+      "path": "HANDOFF_CODEX/management-admind-policy-prerequisite",
+      "decision": "Liam A2026-10-16T05:25:51Z",
+      "deployed": "2026-10-16T05:26:23Z",
+      "policy_before_sha256": "672a56e2d4d0c958d987b92879e7244dc30b2080c5dcf5ef675c4f1e70d99ec4",
+      "policy_after_sha256": "c3ffa23ccde426574d0bde3441cbdfe6e7a63a4554c414155e8642b4917fafa6",
+      "doctor_exit": 0,
+      "doctor_is_transport_health": false
+    },
+    "sbjv": {
+      "path": "HANDOFF_CODEX/design-task-reopen",
+      "decision": "Liam A2026-10-16T05:47:37Z",
+      "applied": "2026-10-16T05:51:26Z",
+      "scope": "exact historical status-only OPS repair; not generic authority",
+      "source": "parent controller authenticated record verification"
+    }
+  },
+  "current_document_hashes": {
+    "docs/designs/2026-10-16-management-design-task-recovery.md": "7df1811922914e80b900543ae7dd84b6263e02d7de1fa84dbb98490af3647618",
+    "docs/reviews/zcd1l-r1-dispositions.md": "35df169733e04846b3d6ae6724464a028b5d9046dbcca9f8b2afda8513ac0847"
+  },
+  "limits": [
+    "No current new API support claimed.",
+    "No implementation, runtime, model, queue or live tests performed.",
+    "Current merge authority is operator instruction, not fabricated native approval.",
+    "Bel configured principal retained under explicit operator authority; no policy change."
+  ],
+  "locator_conventions": {
+    "repositories": "local Git repository names; exact commits/blobs establish source identity",
+    "USER_LIBEXEC": "operator-configured user libexec evidence prefix, not an installer default",
+    "HANDOFF_CODEX": "controller retained handoff evidence directory; exact local locator retained privately"
+  },
+  "proposed_classifier": {
+    "schema": "management-endpoint-roles-v1",
+    "status": "new closed classifier rules plus per-request data-only evidence, not installed API",
+    "proposed_plan_argument": "--endpoint-facts-file FILE",
+    "unclassified_removal": "refuse",
+    "ordinary_task_pins_are_role_evidence": false,
+    "rule_changes": "changed-design approval and reviewed deployment",
+    "endpoint_fact_changes": "exact fresh snapshot/purpose/source evidence bound to original authenticated per-operation card; no additional approval/model/deployment",
+    "protected_gate_override": "native approval/confirm/question and known protected-gate evidence cannot be waived by attestation/card"
+  },
+  "review_budget_rule": "distinct ISSUED invocations consume slots, including failed/aborted/running/unresolved; only proven never-spawned reservations excluded; unknown issuance/history HOLD"
+}
