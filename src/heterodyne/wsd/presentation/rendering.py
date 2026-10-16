@@ -155,6 +155,8 @@ class Ordinary:
         if value == "unknown":
             self.complete = False
         if value is None:
+            if name in ("current_bead", "session_label", "launch_label", "actor_label"):
+                return generated("none")
             self.complete = False
             return generated("unknown")
         if isinstance(value, datetime):
@@ -205,10 +207,6 @@ class Ordinary:
                 if isinstance(value, d.DecisionSummary) and field.name == "kind" and item == "approval":
                     rendered = generated("native approval record")
                 out.append(generated(field.name + ": ") + rendered)
-                if rendered.atomic:
-                    out[-1] = Span(
-                        out[-1].text, out[-1].public, out[-1].syntax, out[-1].template, atomic=True
-                    )
         return out
 
     def label_list(self, name: str, values: tuple[Any, ...]) -> list[Span]:
@@ -224,7 +222,7 @@ class Ordinary:
         if status.count is None:
             self.complete = False
             return [generated(name + ": unknown")]
-        out: list[Span] = []
+        out = [generated(name + (":" if value.items else ": none"))]
         for index, item in enumerate(value.items):
             if name == "transcript_labels" and item not in tuple(
                 x.label for x in self.policy.transcript_labels
@@ -284,7 +282,15 @@ class Ordinary:
                 and payload.reason.resume_at is None
             ):
                 self.complete = False
-            state = payload.state if payload.reason is None else _reason(payload.reason)
+            state = payload.state
+            if payload.reason is not None:
+                reason = _reason(payload.reason)
+                if isinstance(payload.reason, d.Unknown):
+                    state += ": unknown"
+                elif reason.startswith(payload.state + ":"):
+                    state = reason
+                else:
+                    state += "; " + reason
             return (
                 generated(_TASK_ICON[payload.state] + " ") + self.text(state),
                 join(
@@ -381,13 +387,14 @@ def render(view: d.PresentationView, policy: d.RenderPolicy = _DEFAULT_POLICY) -
     if isinstance(pages, d.NeedsDetails):
         return pages
     if not all(safe(page, policy, final=True) for page in pages):
-        # Fixed output only, never return even the safe prefix of a newly dangerous concatenation.
-        return d.Rendered(
-            ("[withheld]",),
-            view.kind,
-            False,
-            tuple((row.key, renderer.statuses[row.key].count) for row in rows_in(view.payload)),
-        )
+        # Rebuild from safe framing and a fixed replacement, retaining observation
+        # provenance rather than returning an unframed fragment of this view.
+        renderer.complete = False
+        pages = paginate(header, (generated("[withheld]"),), tail, policy.max_chars)
+        if isinstance(pages, d.NeedsDetails):
+            return pages
+        if not all(safe(page, policy, final=True) for page in pages):
+            return d.Unavailable("required-source")
     return d.Rendered(
         tuple(page.text for page in pages),
         view.kind,

@@ -210,7 +210,14 @@ def validate_view(view: d.PresentationView) -> None:
             segments = [item.segment == "native-ready" for item in row.items]
             if segments != sorted(segments):
                 fail()
-        identities = [getattr(item, "bead", getattr(item, "name", None)) for item in row.items]
+        identities = [
+            item
+            if type(item) is str
+            else item.sequence
+            if isinstance(item, d.Launch)
+            else getattr(item, "bead", getattr(item, "name", None))
+            for item in row.items
+        ]
         identities = [item for item in identities if item is not None]
         if len(identities) != len(set(identities)):
             fail("duplicate-key")

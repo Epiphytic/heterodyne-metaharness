@@ -947,7 +947,7 @@ class BoundAndWarningTests(unittest.TestCase):
         ):
             self.assertEqual(render_card_pair(protected(card), POLICY), d.Invalid("bounds"))
         self.assertIsInstance(render(task_view(title="🙂" * 4096)), d.Rendered)
-        self.assertEqual(render(task_view(title="🙂" * 4097)), d.Invalid("schema"))
+        self.assertEqual(render(task_view(title="🙂" * 4097)), d.Invalid("bounds"))
         many = dataclasses.replace(task_view(), sections=(status(),) * 1025)
         self.assertIsInstance(render(many), d.Invalid)
         self.assertEqual(classify(ingress("x" * 262145)), d.Invalid("payload"))

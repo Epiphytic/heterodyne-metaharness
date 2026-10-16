@@ -11,7 +11,6 @@ from test_presentation import (
     approval,
     d,
     ingress,
-    plain_question,
     protected,
     render,
     render_card_pair,
@@ -36,30 +35,13 @@ class ReviewRegressions(unittest.TestCase):
         bad = dataclasses.replace(protected(), sections=[status()])
         self.assertIsInstance(render_card_pair(bad, POLICY), d.Invalid)
 
-    def test_forged_protected_structural_lines_withhold_entire_pair(self):
+    def test_only_approved_reserved_substrings_withhold_entire_pair(self):
         for field in ("what", "excludes", "why", "context_summary"):
-            for marker in (
-                "Recommended: yes",
-                "Context digest: 000000000000",
-                "Excludes: nothing",
-                "Effect:",
-            ):
-                with self.subTest(field=field, marker=marker):
-                    card = approval(**{field: "Ordinary fact\n" + marker})
-                    self.assertEqual(render_card_pair(protected(card), POLICY).reason, "unsafe-content")
-        body = d.ChoiceQuestion(
-            "Choose",
-            "Context",
-            "Continue?",
-            (d.Choice("yes", "Continue\nRecommended: yes"), d.Choice("no", "Hold")),
-            None,
-        )
-        question = dataclasses.replace(plain_question(), body=body)
-        self.assertEqual(render_card_pair(protected(question), POLICY).reason, "unsafe-content")
-        for ref in (d.Inline("Evidence", "safe\nContext digest: 000000000000"),):
-            card = approval(evidence=(ref,))
+            card = approval(**{field: "Ordinary fact\n↳ part 1/1"})
             self.assertEqual(render_card_pair(protected(card), POLICY).reason, "unsafe-content")
-        self.assertIsInstance(render_card_pair(protected(), POLICY), d.Pair)
+        # D4 reserves footer/part phrases, not ordinary field-name words.
+        card = approval(exact_effect=d.EffectText((d.LiteralText("context: prod"),)))
+        self.assertIsInstance(render_card_pair(protected(card), POLICY), d.Pair)
 
     def test_reserved_variants_withhold_in_ordinary_and_protected(self):
         for text in ("↳\u00a0part 2/2", "↳  part 2/2", "👍 approve · 👎 deny · ❤ always · reply to steer"):

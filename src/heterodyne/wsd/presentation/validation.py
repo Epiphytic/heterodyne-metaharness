@@ -60,12 +60,17 @@ def _shape(value: Any, expected: Any, substitutions: dict[Any, Any] | None = Non
     expected = substitutions.get(expected, expected)
     origin, args = get_origin(expected), get_args(expected)
     if origin in (Union, types.UnionType):
+        # Closed variants have exact runtime types. Select the matching variant
+        # before descending so a nested bounds/payload error is not erased by
+        # subsequent alternatives that merely have the wrong outer shape.
         for candidate in args:
-            try:
+            candidate_type = get_origin(candidate) or candidate
+            literal_match = candidate_type is Literal and any(
+                type(value) is type(item) and value == item for item in get_args(candidate)
+            )
+            if literal_match or isinstance(candidate_type, type) and type(value) is candidate_type:
                 _shape(value, candidate, substitutions)
                 return
-            except BadInput:
-                continue
         fail()
     if origin is Literal:
         if not any(type(value) is type(item) and value == item for item in args):
@@ -180,6 +185,16 @@ def _semantic(value: Any) -> None:
         _slug(value.bead)
     if isinstance(value, (d.Task, d.WorkstreamRow)):
         _reason(value.state, value.reason)
+    if isinstance(value, d.BeadContext):
+        _slug(value.short_bead)
+    if isinstance(value, (d.AllBlocked, d.AllAccountsExhausted)):
+        _slug(value.workstream)
+    if isinstance(value, d.Rows):
+        items = cast(d.Rows[Any], value).items
+        if items and type(items[0]) is str:
+            _unique(items)
+            for label in items:
+                _label(label)
     if isinstance(value, d.WorkstreamRow):
         _slug(value.name)
         _slug(value.current_bead)

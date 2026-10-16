@@ -40,7 +40,7 @@ def evidence(ref: d.EvidenceRef, policy: d.RenderPolicy) -> tuple[Span, ...] | N
             return None
         return (
             generated("Evidence: ")
-            + Span(ref.short_bead)
+            + Span(ref.short_bead, atomic=True)
             + generated(" · ")
             + generated(ref.digest12, public=True),
             *detail,

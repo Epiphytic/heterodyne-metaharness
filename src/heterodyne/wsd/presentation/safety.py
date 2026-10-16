@@ -23,10 +23,9 @@ _EXTRA = tuple(
 )
 _LINK = re.compile(r"[a-z][a-z0-9+.-]{0,31}://|www\.|mailto:|(?<!\S)//|\]\(|\]:|[<>`]", re.IGNORECASE)
 _COMMAND_NAMES = "|".join(re.escape(name[1:]) for name in (*READ_COMMANDS, *sorted(MUTATIONS)))
-_PATH = re.compile(r"(?<![\w/])(?:~/|/)(?!(?:" + _COMMAND_NAMES + r")(?=$|[\s,;:!?\)\]]))\S*", re.IGNORECASE)
+_PATH = re.compile(r"(?<![\w/])(?:~/\S*|/(?!(?:" + _COMMAND_NAMES + r")(?=$|[^\w\s./-]|\s))\S*)")
 _RESERVED = re.compile(
-    r"↳[^\S\n]*part\s+|👍\s*approve\s*·\s*👎\s*deny\s*·\s*❤\ufe0f?\s*always\s*·\s*reply\s+to\s+steer"
-    r"|(?m:^[^\S\n]*(?:What|Effect|Excludes|Why|Context(?:\s+digest)?|Question|Recommended|Evidence)\s*:)",
+    r"↳[^\S\n]*part\s+|👍\s*approve\s*·\s*👎\s*deny\s*·\s*❤\ufe0f?\s*always\s*·\s*reply\s+to\s+steer",
     re.IGNORECASE,
 )
 
