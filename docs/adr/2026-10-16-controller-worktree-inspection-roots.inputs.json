@@ -1,0 +1,96 @@
+{
+  "version": 1,
+  "task": "btq-9dcl2",
+  "status": "author-incorporated-one-high-review-awaiting-human-approval",
+  "source_commit": "6fe57598468ff53bf74dfd9e1cf181ad3177c3f1",
+  "spec": "docs/adr/2026-10-16-controller-worktree-inspection-roots.md",
+  "spec_sha256": "3416f7d61705355d9e95f021ff740eccd33f7eb487db0cf8d01798ff5dc1f77b",
+  "inputs": [
+    {
+      "path": "bin/btq",
+      "git_blob": "4d5a1d463673bec99da4186715efd889a1e311b3",
+      "sha256": "ec2bc67b227326c80bf5d9a32eb661b220ea9af6942ef31bff04d8c06941bd2e"
+    },
+    {
+      "path": "bin/btq-manage.py",
+      "git_blob": "a6d08e644cf4744c913c1a52f5468ec6b193448c",
+      "sha256": "670ea807fd546f939f3441823dee2e1980e03f7026be580a62d7f91a4e6582b6"
+    },
+    {
+      "path": "docs/MANAGE.md",
+      "git_blob": "bd2f2e710766a3fcf1591280e5a3d7d88f386d6f",
+      "sha256": "8ebfe8f2ecd4f78ac850765dd7f3c76bd89f9e830b324e3c880e3ff88ee68270"
+    },
+    {
+      "path": "docs/OPS.md",
+      "git_blob": "5f51e4499f9b068d6ea29e2bfdac808f74188ed4",
+      "sha256": "0ecb17e6a7a5d9288aeeb27490a60059721d528f39a828f4479f13e903b15dfc"
+    },
+    {
+      "path": "tests/test_handoff.py",
+      "git_blob": "c3c79f944d49160292de8d7445e6776f470f2384",
+      "sha256": "a7636794967d460d2886cf85fce5a5a0caa39b2fe7fffbdbb7a0533fbdd634c0"
+    },
+    {
+      "path": "tests/test_manage.py",
+      "git_blob": "c6912ca559a7ed48f364b34536adf0437fe72f60",
+      "sha256": "cce0eaa7db2c08e1f5c941a77353b9e5bc1b662c4e76a779214c78f0da4df6f7"
+    },
+    {
+      "path": "bin/approve-bead",
+      "git_blob": "36f6dc0ce9ed780c9dcc1107247e1a83181903a0",
+      "sha256": "c480ea0213335b17fbf0b23771914c35b9a23e9bc878b391825df62aec04f0ee"
+    }
+  ],
+  "harness_installer_input": {
+    "commit": "c2cd3ae6da4f23b6ab676f77b882889c97d156fa",
+    "path": "scripts/install_workstream_controller.py",
+    "git_blob": "aebc08ef99b1b2228d0fea8e528ce2335b497d62",
+    "sha256": "e9d3ab50cd79d39c2f9d068c40f01785ed404c9e8ca44a021482b80da74b91dc"
+  },
+  "harness_facade_input": {
+    "commit": "c2cd3ae6da4f23b6ab676f77b882889c97d156fa",
+    "path": "scripts/workstream_manage.py",
+    "git_blob": "339246b27a5260e66d7da10b5975fbabe78217c1",
+    "sha256": "c6805737dc1422a06cb61b8ed5c872d18faa41ceba62af42a71fb790da555bca"
+  },
+  "review": {
+    "reviewed_commit": "59608f866b23f5f88bc5cf27bb3e3f34fb13b7ab",
+    "verdict": "needs revision",
+    "round": 1,
+    "policy": "one HIGH design review then author incorporation, no second review/validation",
+    "path": "docs/reviews/2026-10-16-9dcl2-high-design-review.txt",
+    "sha256": "811316f12690bc8fe1add3e2a97f5b2a886d35dd86b7d96127c110f33db6add5"
+  },
+  "dispositions": [
+    {
+      "path": "docs/reviews/2026-10-16-9dcl2-high-design-dispositions.json",
+      "sha256": "aa93ff79cef6eaaec1247ffcf373fdb723d4de076d2dcea17004ddecfa8020a5"
+    },
+    {
+      "path": "docs/reviews/2026-10-16-9dcl2-high-design-dispositions.md",
+      "sha256": "ff33335d0ddd29a71f06a1a8a5b9de9da631bb30b0e397c2abf22ccb223cac25"
+    }
+  ],
+  "intervening_reviewed_queue_baseline": {
+    "commit": "1fd84b5f1594f3298cddf833cfa4ece5339c50e2",
+    "purpose": "preserve canonical J overlay; original source inputs remain historical design bindings",
+    "inputs": [
+      {
+        "path": "bin/btq",
+        "git_blob": "4d5a1d463673bec99da4186715efd889a1e311b3",
+        "sha256": "ec2bc67b227326c80bf5d9a32eb661b220ea9af6942ef31bff04d8c06941bd2e"
+      },
+      {
+        "path": "bin/btq-manage.py",
+        "git_blob": "a6d08e644cf4744c913c1a52f5468ec6b193448c",
+        "sha256": "670ea807fd546f939f3441823dee2e1980e03f7026be580a62d7f91a4e6582b6"
+      },
+      {
+        "path": "bin/btq-supervise",
+        "git_blob": "0cb4ea35c08b2d0fe8f0f07ea6e580b1f43928c0",
+        "sha256": "0b7c437d98e1b85a447ade95398146e8038f528fe6f165b660b6fe75b71561e0"
+      }
+    ]
+  }
+}

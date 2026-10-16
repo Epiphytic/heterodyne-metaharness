@@ -1,0 +1,28 @@
+{
+  "source_commit": "3e5aa623cbcb06d60ac233df0beac1a9c75dfbc7",
+  "original_base": "6fe57598468ff53bf74dfd9e1cf181ad3177c3f1",
+  "author_reviewed_initial": "59608f866b23f5f88bc5cf27bb3e3f34fb13b7ab",
+  "review": "one actual Opus HIGH returned needs revision; author incorporated ten; no second review",
+  "files": [
+    {
+      "path": "docs/adr/2026-10-16-controller-worktree-inspection-roots.inputs.json",
+      "sha256": "cc27d632d506bdc5b38fb554e32e0f13762dfc3e78a28f3df0644ae15264faf1"
+    },
+    {
+      "path": "docs/adr/2026-10-16-controller-worktree-inspection-roots.md",
+      "sha256": "3416f7d61705355d9e95f021ff740eccd33f7eb487db0cf8d01798ff5dc1f77b"
+    },
+    {
+      "path": "docs/reviews/2026-10-16-9dcl2-high-design-dispositions.json",
+      "sha256": "aa93ff79cef6eaaec1247ffcf373fdb723d4de076d2dcea17004ddecfa8020a5"
+    },
+    {
+      "path": "docs/reviews/2026-10-16-9dcl2-high-design-dispositions.md",
+      "sha256": "ff33335d0ddd29a71f06a1a8a5b9de9da631bb30b0e397c2abf22ccb223cac25"
+    },
+    {
+      "path": "docs/reviews/2026-10-16-9dcl2-high-design-review.txt",
+      "sha256": "811316f12690bc8fe1add3e2a97f5b2a886d35dd86b7d96127c110f33db6add5"
+    }
+  ]
+}

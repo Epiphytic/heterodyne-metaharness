@@ -1,0 +1,74 @@
+The review ran read-only at exact HEAD `59608f866b23f5f88bc5cf27bb3e3f34fb13b7ab`. The manifest checks out: its `spec_sha256` and all four input blob and sha256 values match the source commit `6fe5759`. The installer input matches `harness-dev` at `c2cd3ae6`. I also checked the current `bin/btq`, `bin/btq-manage.py`, the tests' HOME setup, the harness installer and shim, and the real permissions on this host.
+
+**Verdict: needs revision before human approval.** The main goal holds up: a trusted passwd-home source, an additive root, commonpath containment and a policy digest. The Y checkout really is a registered linked worktree of `/home/openclaw/repos/harness-improvements`, so the change would fix Y. Seven problems are concrete enough to cause real failures:
+- **Default root mode left undefined:** `~/repos` on this host is mode 0775 and other users in group `claws` can write to it. If the new owner/mode rule also applies to the default root, every inspection on this host fails.
+- **Tests can't be isolated:** the existing tests depend on a temporary HOME, and the design gives no other way to point them at a fake home.
+- **In-flight writes can get stuck:** management write readback and resume re-run the full inspection. A policy change or rollback mid-apply can strand a half-applied change.
+- **Mixed versions during rollout:** the two `bin/btq` copies share handoff state, the rollout doesn't say they must switch together, and "old-format request" is never defined.
+
+Smaller points: some of the design's prose limits have missing spaces ("at most8", "old7bacae7 and6fe5759", "lines307–316"). The harness installer pin description at lines 307–316 is accurate.
+
+```json
+[
+  {
+    "file": "docs/adr/2026-10-16-controller-worktree-inspection-roots.md",
+    "line": 17,
+    "summary": "HIGH: The design doesn't say how the default root is validated. 'Also canonicalized/ownership checked' could mean the configured-root rule (owned by the effective UID, not group/world writable, no symlink components) also applies to the default. On this host /home/openclaw/repos is mode 0775 openclaw:claws, and claws includes ironclaw and liamhelmer.",
+    "failure_scenario": "If the implementer applies the configured-root rule to the default, every inspection under ~/repos refuses (inspection-policy or not-owned). Every Handoff card and management plan stops working on deploy, including Y's repository side. If instead the default skips the mode check, the default root is weaker than configured roots and nothing says so. Missing ~/repos also has no defined outcome (outside-roots or inspection-policy). Fix: state exactly how the default is checked. Use realpath of pw_dir/repos, require a directory owned by the effective UID, and either keep today's no-mode check (disclose it) or make chmod 0755 an explicit deployment precondition. A missing default should give 'outside-roots', not inspection-policy."
+  },
+  {
+    "file": "docs/adr/2026-10-16-controller-worktree-inspection-roots.md",
+    "line": 13,
+    "summary": "HIGH: Fixing home to pwd.getpwuid(os.getuid()).pw_dir with no test seam breaks today's isolated tests, and the required offline cases can't be built. Tests would read the operator's real policy file.",
+    "failure_scenario": "tests/test_handoff.py:689-701 creates repos under HOME=tmp/home/repos. Under the new default root they refuse as outside-roots, so the existing suite fails. Cases 1, 4 and 5 need the policy to be absent, malformed or unsafe, but the canonical path is the real /home/openclaw/.config/beads-task-queue/policy.json. After deployment that file contains worktree_inspection_roots, so case 1 ('absent key') can't be produced without writing to the real home. The test harnesses already assert that nothing points into REAL_HOME. Fix: specify one in-process seam (for example, _trusted_identity() returns (uid, canonical home)) that tests patch with mock and that is never set from env, argv or task data. Tests must assert they never open the real passwd home. Disclose that subprocess-level tests can't use the seam."
+  },
+  {
+    "file": "docs/adr/2026-10-16-controller-worktree-inspection-roots.md",
+    "line": 33,
+    "summary": "HIGH: Management write readback and resume re-run the full inspection. bin/btq-manage.py:295 _observed_bead calls evidence_snapshot, and move() runs _current_and_check on every resume. A policy edit, a policy file mode/parse drift, or a rollback between an 'issued' step and its readback strands the request.",
+    "failure_scenario": "Example: a dependency replacement (add, then remove). Step 1 'add' is issued, then the root list is edited or rolled back. Readback raises ValueError('worktree was not inspected (inspection-policy/outside-roots)') instead of verifying the issued write. Every resume then fails 'Management facts changed; post a fresh card'. The add is live, the remove never happens, and the design forbids repost or retry, so there is no way to finish. Fix: make readback use bead-only facts with no worktree inspection, or pin the record's policy digest for the record's lifetime. Also state that root-setting edits are operator changes allowed only with pickup paused and no non-terminal handoff or management records, the same precondition as the initial switch."
+  },
+  {
+    "file": "docs/adr/2026-10-16-controller-worktree-inspection-roots.md",
+    "line": 53,
+    "summary": "MEDIUM-HIGH: The rollout doesn't require the canonical bin/btq and the management bundle's bin/btq to switch together. Both share one handoff state dir (Path.home()/.local/state/beads-task-queue) and HANDOFF_FORMAT 1, and the facade exposes 'handoff'.",
+    "failure_scenario": "Canonical btq is upgraded first. A Handoff card posted with worktree.inspection_policy_sha256 is later resumed through the old facade bundle, or the reverse. The digests never match, so the result is a permanent 'facts changed; post a new card'. Meanwhile the old side still refuses Y as outside-roots. Fix: require both installs to switch in one pause window, with no non-terminal records under either, and cover both in the rollback steps."
+  },
+  {
+    "file": "docs/adr/2026-10-16-controller-worktree-inspection-roots.md",
+    "line": 46,
+    "summary": "MEDIUM: 'Old-format request holds without replay' doesn't say how an old record is detected. Neither obvious implementation is safe.",
+    "failure_scenario": "Bumping HANDOFF_FORMAT makes Handoff.load (bin/btq:2141) treat every older handoff.json as 'malformed; ask Bel to inspect it', including done and aborted ones. That blocks all future handoffs and management for those beads. Not bumping means old records just fail the generic 'facts changed; post a new card / post a fresh card' check, which invites the reposting the design forbids. Fix: keep format 1. Detect a non-terminal record whose saved worktree facts lack inspection_policy_sha256 and refuse with a dedicated hold message. Leave done/aborted records readable."
+  },
+  {
+    "file": "docs/adr/2026-10-16-controller-worktree-inspection-roots.md",
+    "line": 17,
+    "summary": "MEDIUM: The strict canonical policy read becomes a dependency of every inspection queue-wide, possibly even for beads with no worktree ('at each evidence snapshot'). Its parse rules differ from the lenient load_policy that approvals still use (bin/btq:48, bin/approve-bead:565,1318).",
+    "failure_scenario": "Suppose the operator's policy.json has a duplicate key, grows past 64KiB, or is saved by an editor as mode 0664. Approvals keep working through json.loads, but every Handoff and management snapshot on every bead fails with an opaque 'inspection-policy', even for tasks entirely under ~/repos or with no recorded worktree. Fix: say whether no-worktree and other-host snapshots load the policy at all (they shouldn't need to). Document that this is an intentional queue-wide availability dependency in the deployment disclosure. Add an OPS read-only validation step that reports the failure category without printing contents."
+  },
+  {
+    "file": "docs/adr/2026-10-16-controller-worktree-inspection-roots.md",
+    "line": 33,
+    "summary": "MEDIUM-LOW: The digest binds the whole effective root set, which is the same for every task, so any root edit invalidates every pending card and request across the queue, not just ones that use the changed root.",
+    "failure_scenario": "Narrowing /home/openclaw/.hermes/workstreams to a run-specific root, which the design itself anticipates, or adding a root for another controller invalidates every pending Handoff card and management request. That includes tasks whose worktree and repository are both under ~/repos, so each needs a new human per-operation approval. Fix: bind uid, home, and the specific roots that admitted the worktree and the repository. Removing or changing an admitting root still invalidates; unrelated edits don't."
+  },
+  {
+    "file": "docs/adr/2026-10-16-controller-worktree-inspection-roots.md",
+    "line": 33,
+    "summary": "LOW-MEDIUM: The new field only feeds the hidden 12-hex facts digest. The Handoff and management cards never show the approver that the worktree was admitted through a non-default root.",
+    "failure_scenario": "An approver looking at Y's status-correction card sees the same worktree line (HEAD, status, diff) as for a ~/repos worktree. They can't tell the inspected checkout lives under a broad controller-runs root that covers every run. Fix: add one card line naming the admitting root (or 'default') and the policy digest prefix, within the existing card budget."
+  },
+  {
+    "file": "docs/adr/2026-10-16-controller-worktree-inspection-roots.md",
+    "line": 9,
+    "summary": "LOW: The design says to reuse _read_nofollow for the policy read, but that function raises Uninspected('filters') for symlinks or unreadable files and 'too-large' past the limit. That conflicts with the required single safe reason 'inspection-policy'.",
+    "failure_scenario": "A symlinked or oversized policy.json would be reported as 'filters' or 'too-large', which misleads the operator and breaks the case-4 assertions. Fix: wrap it and convert every failure except absence to Uninspected('inspection-policy'), or name a dedicated bounded reader that also does the ancestor walk and duplicate-key rejection."
+  },
+  {
+    "file": "docs/adr/2026-10-16-controller-worktree-inspection-roots.inputs.json",
+    "line": 8,
+    "summary": "LOW: The inputs manifest leaves out files the design's claims and scope rely on: tests/test_handoff.py and tests/test_manage.py (their HOME-based repos layout is affected), bin/approve-bead (a load_policy consumer), and harness scripts/workstream_manage.py at c2cd3ae6 (the facade's handoff and management route).",
+    "failure_scenario": "Later byte verification of the design can't show which test fixtures and facade behavior the author relied on. Changes to those files between design and implementation go unnoticed, for example the facade route that makes the mixed-version problem possible. Fix: add these paths with git_blob and sha256 entries."
+  }
+]
+```
