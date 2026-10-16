@@ -1,0 +1,10 @@
+import json
+import os
+from pathlib import Path
+
+def pytest_collection_modifyitems(items):
+    for item in items:
+        item.user_properties.append(('scanner_nodeid', item.nodeid))
+
+def pytest_collection_finish(session):
+    Path(os.environ['SCANNER_COLLECTION']).write_text(json.dumps([i.nodeid for i in session.items]))

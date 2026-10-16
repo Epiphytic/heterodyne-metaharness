@@ -1,0 +1,14 @@
+### Why (fd, st_dev, st_ino) catches a leaked pidfd
+
+Checked on kernel 6.17.0-1032-oem (pidfs backs pidfds since Linux 6.9), with the worktree venv:
+
+```
+self#1 dev 5 ino 71129030 anon_inode:[pidfd]
+self#2 dev 5 ino 71129030 anon_inode:[pidfd]
+pid1 dev 5 ino 2 anon_inode:[pidfd]
+child dev 5 ino 71129035 anon_inode:[pidfd]
+```
+
+Two pidfds for one process share an inode, and different processes get different inodes, all on one pidfs device. readlink shows `anon_inode:[pidfd]` for every pidfd, so open_fds() compares stat identity, not link text. A leaked pidfd for a test's child therefore shows up as a new entry even on a reused fd number.
+
+Caveat: before 6.9 every pidfd shares one inode, so a leaked pidfd reusing a closed pidfd's number would be missed. The GC-closed fds behind this flake are SQLite files, not pidfds. Only this host's kernel has been confirmed.

@@ -1,0 +1,309 @@
+"""A token prefix inside a word is still a token (btq-18sfj, /tmp/design-scanner-boundary-d3.md).
+
+Fake secret material is assembled at runtime so no literal token sits in the repo (gitleaks gate)."""
+import json
+import re
+import string
+import time
+import tomllib
+from collections.abc import Callable, Iterator
+from functools import partial
+from pathlib import Path
+from typing import Any, cast
+
+import pytest
+from hypothesis import given
+from hypothesis import strategies as st
+
+from heterodyne import units
+from heterodyne.admind import hook
+from heterodyne.admind.alerts import Alert, render
+from heterodyne.admind.redact import redact, redact_continuation
+from heterodyne.config import ConfigError
+from heterodyne.config.secret_scan import SECRET_VALUES, check, secret_value, show
+
+ROOT = Path(__file__).resolve().parent.parent
+
+VGHP = "v" + "gh" + "p_" + "A1" * 18
+SK = "sk" + "-"
+# Each distinctive token, with a piece of its body that must never survive redaction.
+DISTINCT = {
+    "nsec": ("nsec1" + "q" * 58, "q" * 58),
+    "ghp": ("gh" + "p_" + "A1" * 18, "A1" * 18),
+    "gho": ("gh" + "o_" + "A1" * 18, "A1" * 18),
+    "github_pat": ("github" + "_pat_" + "11" + "A" * 40, "A" * 40),
+    "slack": ("xo" + "xb-" + "1234567890-abcdefghij", "1234567890-abcdefghij"),
+    "aws": ("AK" + "IA" + "ABCDEFGHIJKLMNOP", "ABCDEFGHIJKLMNOP"),
+    "jwt": ("ey" + "JhbGciOiJIUzI1NiJ9." + "eyJzdWIiOiIxIn0." + "c2lnbmF0dXJlXzEy", "c2lnbmF0dXJlXzEy"),
+}
+# `sk-` bodies a word may run into and still be found (32+ characters, not lowercase kebab).
+SK_BODIES = {
+    "mixed": "a1B2" * 8,
+    "letters": "aB" * 16,                                     # Codex d1 B2: 32 letters
+    "digits": "1" * 32,                                       # 32 digits
+    "groups_": "_".join(["a1b2c3d4"] * 4),                    # four mixed groups joined by _
+    "groups-": "-".join(["a1b2c3d4"] * 4),                    # ... or by -
+    "ant": "ant-api03-" + "x9" * 20,
+    "hex": "0123456789abcdef" * 2,
+    "underscore": "abcdefghijklmnop_qrstuvwxyzabcdef",
+}
+
+
+def fragments(body: str) -> list[str]:
+    """Every 8-character piece of `body`: none may survive redaction, not just the whole token."""
+    return [body[i:i + 8] for i in range(0, len(body) - 7, 4)]
+
+
+def leaks(body: str, out: str) -> list[str]:
+    return [f for f in fragments(body) if f in out]
+
+
+# 1. The review's sentinel.
+
+def test_a_github_token_after_a_letter_is_found() -> None:
+    assert secret_value(VGHP) == "GitHub token"
+    with pytest.raises(ConfigError, match="looks like secret"):
+        check({"a": VGHP}, "layer")
+    assert show(VGHP) == "<redacted GitHub token>"
+    assert not leaks("A1" * 18, redact(VGHP))
+
+
+# 2. Every distinctive prefix, after any character.
+
+@pytest.mark.parametrize("lead", ["v", "9", "Z", "é"])
+@pytest.mark.parametrize("kind", sorted(DISTINCT))
+def test_a_distinctive_prefix_inside_a_word_is_found(kind: str, lead: str) -> None:
+    token, body = DISTINCT[kind]
+    assert secret_value(lead + token) is not None
+    assert not leaks(body, redact(lead + token))
+
+
+def test_an_aws_key_glued_to_a_capital_is_found() -> None:
+    token, body = DISTINCT["aws"]
+    for text in (token + "Q", "X" + token + "Q", token + "7"):
+        assert secret_value(text) == "AWS access key ID"
+        assert body not in redact(text)
+
+
+# 3. `sk-` inside a word.
+
+@pytest.mark.parametrize("body", sorted(SK_BODIES))
+def test_an_sk_key_inside_a_word_is_found(body: str) -> None:
+    for lead in ("x9", "v", "risk"):
+        assert secret_value(lead + SK + SK_BODIES[body]) == "sk- API key"
+        assert not leaks(SK_BODIES[body], redact(lead + SK + SK_BODIES[body]))
+
+
+def test_a_long_lowercase_sk_body_inside_a_word_fails_closed() -> None:
+    assert secret_value("v" + SK + "a" * 256) == "sk- API key"
+
+
+def test_the_stated_sk_gaps_inside_a_word() -> None:
+    """Design d3 §3: inside a word, an `sk-` body under 32 characters or of lowercase letters and `-` only is
+    not found. Pinned so that changing it is a decision; at a start both are still found."""
+    for body in ("a1B2" * 7, "abcdefgh-" * 4, "a" * 255):
+        assert secret_value("v" + SK + body) is None
+        assert secret_value(SK + body) == "sk- API key"
+
+
+@pytest.mark.parametrize(("body", "found"), [
+    ("a1" * 15 + "a", False), ("a1" * 16, True),             # the length floor: 31, 32
+    ("a" * 255, False), ("a" * 256, True),                    # lowercase only: found from 256 (fails closed)
+])
+def test_the_sk_thresholds_inside_a_word(body: str, found: bool) -> None:
+    assert (secret_value("v" + SK + body) is not None) is found
+    assert secret_value(SK + body) == "sk- API key"            # at a start, always
+
+
+@pytest.mark.parametrize("text", [
+    "risk-management-dashboard-v2", "task-runner-integration-suite", "asterisk-configuration-files",
+    "mask-0123-4567-89ab-cdef0123", "disk-by-uuid-1a2b3c4d-5e6f", "brisk-" + "abcdefghijklmnopqrst",
+    "kiosk-2026-10-15-session", "task-release-candidate-rc2026", "mask-eth0-bond0-vlan100-up",
+    "desk-" + "booking-service-for-the-third-floor-annex", "flask-app-v1_2-staging",
+])
+def test_a_word_ending_in_sk_is_not_a_key(text: str) -> None:
+    assert secret_value(text) is None
+
+
+@pytest.mark.parametrize("text", [
+    "task-nightly-release-candidate-rc2026-b", "mask-eth0-bond0-vlan100-uplink-primary",
+])
+def test_the_stated_sk_false_positives(text: str) -> None:
+    """Design d3 §2: a word ending in `sk`, then 32+ name characters with a digit, capital or `_`, is
+    flagged. Pinned so the cost stays visible."""
+    assert secret_value(text) == "sk- API key"
+
+
+def test_an_sk_key_at_a_start_is_still_found() -> None:
+    assert secret_value(SK + "abcdefghijklmnop") == "sk- API key"
+    assert secret_value("HETERODYNE_" + SK + "abcdefghijklmnop") == "sk- API key"
+
+
+# 4. A token whose first character completes a 64-hex run, and the marker that makes a boundary.
+
+@pytest.mark.parametrize("kind", ["jwt", "aws"])
+def test_a_token_after_63_hex_digits_is_redacted_whole(kind: str) -> None:
+    token, body = DISTINCT[kind]
+    once = redact("f" * 63 + token)
+    assert not leaks(body, once) and token[1:4] not in once
+    assert redact(once) == once
+
+
+def test_a_lowercase_sk_key_after_a_hex_run_needs_the_second_pass() -> None:
+    once = redact("f" * 64 + SK + "abcdefghijklmnop")
+    assert once == "<redacted hex key><redacted sk- API key>"
+    assert redact(once) == once
+
+
+# 4b. Two kinds that overlap (Codex d2 B1): each is matched on the same text, so neither keeps a piece.
+
+JWT_PARTS = ("ey" + "JhdrSEGMENT", "payloadSEG", "signatureX")
+JWT = ".".join(JWT_PARTS)
+KEY_BODY = "a1B2" * 8
+OVERLAPS = {
+    "pat then jwt": "v" + "github" + "_pat_" + KEY_BODY + "_" + JWT,    # the pat's body takes the header
+    "sk then jwt": "x9" + SK + KEY_BODY + "_" + JWT,
+    "sk then jwt, by -": "x9" + SK + KEY_BODY + "-" + JWT,
+    "jwt then pat": JWT + "github" + "_pat_" + KEY_BODY,
+    "jwt then sk": JWT + "_" + SK + KEY_BODY,
+    "jwt then glued sk": JWT + SK + KEY_BODY,
+}
+
+
+def overlap_leaks(out: str) -> list[str]:
+    return [f for body in (KEY_BODY, JWT_PARTS[0][3:], *JWT_PARTS[1:]) for f in leaks(body, out)]
+
+
+@pytest.mark.parametrize("case", sorted(OVERLAPS))
+def test_overlapping_kinds_leave_no_piece_of_either(case: str) -> None:
+    once = redact("see " + OVERLAPS[case] + " rest")
+    assert not overlap_leaks(once) and once.startswith("see ") and once.endswith("> rest")
+    assert redact(once) == once
+
+
+def test_overlapping_kinds_in_hook_keys_and_values_leave_no_piece(tmp_path: Path) -> None:
+    t = tmp_path / "s.jsonl"
+    records: list[dict[str, Any]] = [{"type": "user", "message": {"content": "go"}}]
+    for value in OVERLAPS.values():
+        call = {"type": "tool_use", "id": "t1", "name": "B", "input": {value: "x", "k": value}}
+        records.append({"type": "assistant", "message": {"content": [call]}})
+    with t.open("w") as fh:
+        fh.writelines(json.dumps(r) + "\n" for r in records)
+    out, _ = hook.render_tool_calls(t, 0, t.stat().st_size)
+    assert out.count("▸ B") == len(OVERLAPS) and not overlap_leaks(out)
+
+
+# 5. Every consumer.
+
+def test_a_unit_value_with_an_embedded_token_is_refused() -> None:
+    for token, _ in DISTINCT.values():
+        with pytest.raises(ValueError, match="sensitive material"):
+            units.check("Environment", "/srv/x" + token)
+
+
+def test_an_alert_with_an_embedded_token_is_withheld() -> None:
+    for token, body in DISTINCT.values():
+        for alert in (Alert("a", "2026-10-15T00:00:00Z" + token, "fine"),
+                      Alert("a", "2026-10-15T00:00:00Z", "see v" + token)):
+            out = render("a.json", alert, 4000)
+            assert "withheld" in out and not leaks(body, out)
+
+
+def test_a_hook_tool_call_with_embedded_tokens_in_keys_and_values_is_redacted(tmp_path: Path) -> None:
+    t = tmp_path / "s.jsonl"
+    records: list[dict[str, Any]] = [{"type": "user", "message": {"content": "go"}}]
+    for token, _ in DISTINCT.values():
+        call = {"type": "tool_use", "id": "t1", "name": "B", "input": {"v" + token: "x", "k": "v" + token}}
+        records.append({"type": "assistant", "message": {"content": [call]}})
+    with t.open("w") as fh:
+        fh.writelines(json.dumps(r) + "\n" for r in records)
+    out, _ = hook.render_tool_calls(t, 0, t.stat().st_size)
+    assert out.count("▸ B") == len(DISTINCT)
+    for _, body in DISTINCT.values():
+        assert not leaks(body, out)
+
+
+@pytest.mark.parametrize("kind", sorted(DISTINCT))
+def test_a_continuation_hides_the_rest_of_an_embedded_token(kind: str) -> None:
+    token, body = DISTINCT[kind]
+    whole = "see v" + token + " rest"
+    cut = len("see v") + len(token) - len(body) // 2          # the edge falls inside the body
+    out = redact_continuation(whole[:cut], whole[cut:])
+    assert out.endswith(" rest") and not leaks(body, out)
+
+
+# 6. Any alphanumeric lead.
+
+@given(st.text(alphabet=string.ascii_letters + string.digits, max_size=8), st.sampled_from(sorted(DISTINCT)))
+def test_any_alphanumeric_lead_still_finds_the_token(lead: str, kind: str) -> None:
+    token, body = DISTINCT[kind]
+    assert secret_value(lead + token) is not None
+    assert not leaks(body, redact(lead + token))
+
+
+# 7. Our own shipped text stays clean.
+
+def _strings(value: Any) -> Iterator[str]:
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, list):
+        for item in cast(list[Any], value):
+            yield from _strings(item)
+    elif isinstance(value, dict):
+        for key, child in cast(dict[str, Any], value).items():
+            yield key
+            yield from _strings(child)
+
+
+def test_shipped_config_holds_nothing_secret_shaped() -> None:
+    files = [ROOT / "src/heterodyne/defaults/defaults.toml", *sorted((ROOT / "examples").rglob("*.toml"))]
+    for path in files:
+        for text in _strings(tomllib.loads(path.read_text())):
+            assert secret_value(text) is None, path.name
+
+
+def _at_a_start(pattern: re.Pattern[str]) -> re.Pattern[str]:
+    return re.compile(r"(?<![A-Za-z0-9])(?:" + pattern.pattern + ")")
+
+
+def test_matching_inside_words_adds_no_match_in_our_own_text() -> None:
+    """Docs quote some redacted test output and a PEM header, so lines may match; what must not appear
+    is a match that only the inside-a-word rule makes (the design measured none)."""
+    paths = [*sorted((ROOT / "docs").rglob("*.md")), *sorted((ROOT / "src").rglob("*.py")),
+             *sorted((ROOT / "examples").rglob("*"))]
+    for path in (p for p in paths if p.is_file()):
+        for n, line in enumerate(path.read_text().splitlines(), 1):
+            for kind, pattern in SECRET_VALUES:
+                if pattern.search(line):
+                    assert _at_a_start(pattern).search(line), f"{path.relative_to(ROOT)}:{n} {kind}"
+
+
+# 8. Scans stay linear (Codex d1 B1): 4x the input must not take much more than 4x the time.
+
+ADVERSARIAL: dict[str, Callable[[int], str]] = {
+    "sk- repeated": lambda n: SK * (n // 3),
+    "sk- lowercase runs": lambda n: (SK * 80 + ".") * (n // 241),
+    "sk- long lowercase": lambda n: "x" + SK + "a" * n,
+    "eyJ repeated": lambda n: "eyJ" * (n // 3),
+    "eyJ short segments": lambda n: ("eyJ" + "a" * 8 + ".") * (n // 12),
+    "eyJ runs": lambda n: ("eyJ" * 80 + ".") * (n // 241),
+    "prefixes": lambda n: ("eyJ" + SK + "gh" + "p_" + "nsec1" + "xo" + "xb-" + "AK" + "IA") * (n // 24),
+}
+
+
+def _seconds(fn: Callable[[], object]) -> float:
+    best = float("inf")
+    for _ in range(5):
+        start = time.perf_counter()
+        fn()
+        best = min(best, time.perf_counter() - start)
+    return best
+
+
+@pytest.mark.parametrize("case", sorted(ADVERSARIAL))
+def test_scanning_grows_linearly(case: str) -> None:
+    small, large = ADVERSARIAL[case](16_000), ADVERSARIAL[case](64_000)
+    for scan in (secret_value, redact):
+        t_small, t_large = _seconds(partial(scan, small)), _seconds(partial(scan, large))
+        # 4x the input: linear is ~4x, quadratic ~16x. Generous for a loaded host; a floor for tiny times.
+        assert t_large < max(10 * t_small, 0.02), (case, scan.__name__, t_small, t_large)

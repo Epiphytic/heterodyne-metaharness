@@ -1,0 +1,330 @@
+{
+  "schema": 2,
+  "status": "proposed d2 design only; R1 REVISE13; no approval/implementation authority",
+  "planning_task": "btq-1a845",
+  "implementation_task": "btq-1wu2i",
+  "canonical_source_base": "07637745fe75dc614109a0b8ba72d3489f262a97",
+  "historical_fix_commit": "9a14b3b2664e4ea0c5452c9eea013bf37aab658f",
+  "historical_fix_parent": "2c0c5b5b775ee652d2ce32c192091aa2314e5b32",
+  "historical_fix_signature": "G",
+  "historical_fix_changed_paths": [
+    "tests/test_sandbox_hostread.py"
+  ],
+  "blobs": {
+    "original_test": {
+      "git_blob": "306b1fcc632be1eaad921b532bd93e47428c8bda",
+      "bytes": 51572,
+      "sha256": "032a568e849094af2832b2de9bf8927001362c1859e8b0a68d88e9ab7f482e17"
+    },
+    "current_test": {
+      "git_blob": "306b1fcc632be1eaad921b532bd93e47428c8bda",
+      "bytes": 51572,
+      "sha256": "032a568e849094af2832b2de9bf8927001362c1859e8b0a68d88e9ab7f482e17"
+    },
+    "fixed_test": {
+      "git_blob": "53b1af47be9a4d71d7bd80fafe3719d7aa62b375",
+      "bytes": 53849,
+      "sha256": "35e94c4b67a8f50a7f73e2c16e838b137c3917ae034dc6b384c0922346f19f86"
+    },
+    "original_product": {
+      "git_blob": "2864c87cef46443a039422eeb2f0f1d0fe85f082",
+      "bytes": 23084,
+      "sha256": "692a17d1c8b87cf1e36f142ccc499707744c312171d547070861d536c0948e77"
+    },
+    "current_product": {
+      "git_blob": "2864c87cef46443a039422eeb2f0f1d0fe85f082",
+      "bytes": 23084,
+      "sha256": "692a17d1c8b87cf1e36f142ccc499707744c312171d547070861d536c0948e77"
+    },
+    "fixed_product": {
+      "git_blob": "2864c87cef46443a039422eeb2f0f1d0fe85f082",
+      "bytes": 23084,
+      "sha256": "692a17d1c8b87cf1e36f142ccc499707744c312171d547070861d536c0948e77"
+    }
+  },
+  "overlay_proof": {
+    "original_test_equals_current": true,
+    "product_unchanged": true,
+    "exact_patch_check_on_current_exit": 0,
+    "patch_sha256": "bb6847b2835c6934226c1beddac6dddd4d345efc0d8a844ae2b1c16dacc122ac",
+    "patch_bytes": 4823
+  },
+  "historical_code_review": {
+    "round": 1,
+    "verdict": "APPROVE",
+    "model": "not recorded in retained report or brief; do not infer from commit co-author",
+    "brief": {
+      "path": "tmp-docs/brief-hostread-fix2-c1.md",
+      "sha256": "8f0700829d1d90ef2d6ab1dfed038114643a43000847dda74ea5373050aa6b94"
+    },
+    "report": {
+      "path": "tmp-docs/review-hostread-fix2-c1.md",
+      "sha256": "5f26a52d4581af1713cf980e1a2f4d0ddaea49e3659251075395627c43f7a6fb"
+    },
+    "reported_validation": {
+      "python": "3.12.3",
+      "serial_passed": 92,
+      "parallel_n8_passed": 92,
+      "instrumented_regression_passed": 1
+    },
+    "fresh_validation_claimed": false
+  },
+  "preserved_scanner_protocol": {
+    "planning_commit": "c21f85f",
+    "approval_artifacts_commit": "24a687ccbb246f17a34b15a7ae8c0a07e4af2364",
+    "native_approval": "btq-pxtig",
+    "approved_digest": "e2a5f3d08708d82358db6ed75550675fa14bd78397f6dedea66e75761f36144b",
+    "expected_data_sha256": "52d8772fa92925addc23d87b203adb95aca60400681c86a405a190c07ec476e0"
+  },
+  "collection_delta": {
+    "before": 3372,
+    "after_expected": 3373,
+    "added_node": "tests/test_sandbox_hostread.py::test_a_leaked_fd_that_another_test_left_closing_meanwhile_is_no_leak",
+    "unchanged_scanner_expected_failures": 4,
+    "fresh_collection_required": true
+  },
+  "failed_runs": [
+    {
+      "artifact_directory": "codex/scanner-1wu2i-implementation/t2s2",
+      "actual_exit": 1,
+      "total": 3372,
+      "failed": 5,
+      "fd_count_before": 43,
+      "fd_count_after": 25,
+      "log_sha256": "f710ffb2e6cf39dd0f7ec8bae76be606f45735921bea0a8f1394686a57d9fd9b",
+      "junit_sha256": "541a8e68d2821ce38bdc79af6d61845cb97dcd0bc07befd1d923ffa90bdce5f3",
+      "collection_file": "collection-pinned.json",
+      "collection_file_sha256": "3659430f4bd3e12edf6ff2295c30bd27538c25eaaaa14c8a2b6c954d00224f09",
+      "collection_semantic_legacy_sha256": "ce942161d2de1350694ccc829a7d3abd7453407cd7427d646643906b1bf1e032"
+    },
+    {
+      "artifact_directory": "codex/scanner-1wu2i-implementation/t2s2-rerun",
+      "actual_exit": 1,
+      "total": 3372,
+      "failed": 5,
+      "fd_count_before": 40,
+      "fd_count_after": 25,
+      "log_sha256": "183bb2b1646ae0f36a1940925fd0f9ef38e220e7031b3530fbd58fdd3d9f6c91",
+      "junit_sha256": "8ccb8af767a59bdfcae9452eaad370d220644c2ff1fc02af4d59492151112d7b",
+      "collection_file": "collection-pinned.json",
+      "collection_file_sha256": "3659430f4bd3e12edf6ff2295c30bd27538c25eaaaa14c8a2b6c954d00224f09",
+      "collection_semantic_legacy_sha256": "ce942161d2de1350694ccc829a7d3abd7453407cd7427d646643906b1bf1e032"
+    }
+  ],
+  "private_diagnosis": [
+    {
+      "path": "codex/scanner-1wu2i-implementation/hostread-diagnosis-result.json",
+      "sha256": "745824b64791ae5caaf9f3b30d24c3d6cfe45fba551cef7ed84d064b9ca85f13"
+    },
+    {
+      "path": "codex/scanner-1wu2i-implementation/fd-gc-natural-diagnosis.json",
+      "sha256": "4e9a0a91da34fe70f3e7bc0476f95c2ee9948365abba672cfaef81cf34195b7b"
+    },
+    {
+      "path": "codex/scanner-1wu2i-implementation/sqlite-gc-reproduction.json",
+      "sha256": "8cc35f77e30c790cef7e985b228b79e2595460acd80c862dc0da319dab2aadcd"
+    },
+    {
+      "path": "codex/scanner-1wu2i-implementation/t2s2-unexpected-failure-diagnosis.json",
+      "sha256": "1dddf672cd0a90dd26a3503ef2f85aa0d8fcae3d5dc10d1e8f76fed8ae11cbd6"
+    }
+  ],
+  "private_evidence_root": {
+    "logical_id": "operator-handoff-2026-10-15",
+    "resolution": "Controller-retained dated private handoff directory; path and artifact_directory entries are relative to it, not repository paths."
+  },
+  "prior_design_commit": "d1bfc8da0e39fd5827edd44f434d1fcd9fe61691",
+  "native_admission": {
+    "hostread_implementation_id": null,
+    "amendment_approval_id": null,
+    "ops_authorization_reference": null,
+    "state": "must be actual and natively pinned before posting; null is not a usable ID",
+    "scanner_primary_approval": "btq-pxtig",
+    "scanner_primary_pins_unchanged": true,
+    "dependency_shape": "scanner blocks on separately admitted hostread kind:task; hostread task pinned to its genuine amendment approval; never rely on approval closure alone"
+  },
+  "published_patch": {
+    "observed_at": "2026-10-16T07:15:54.475918+00:00",
+    "commit": "9a14b3b2664e4ea0c5452c9eea013bf37aab658f",
+    "branch": "design/scanner-hostread-test-prerequisite-9a14",
+    "status": "DRAFT PUBLICATION ONLY; NOT IMPLEMENTATION APPROVAL OR FRESH CODE REVIEW",
+    "path": "tests/test_sandbox_hostread.py",
+    "blob": "53b1af47be9a4d71d7bd80fafe3719d7aa62b375",
+    "url": "https://github.com/Epiphytic/heterodyne-metaharness/blob/9a14b3b2664e4ea0c5452c9eea013bf37aab658f/tests/test_sandbox_hostread.py",
+    "patch_url": "https://github.com/Epiphytic/heterodyne-metaharness/commit/9a14b3b2664e4ea0c5452c9eea013bf37aab658f"
+  },
+  "retained_tooling": [
+    {
+      "source_private_relative": "scanner-1wu2i-implementation/scanner_evidence.py",
+      "archive_path": "docs/reviews/scanner-boundary/fd-prerequisite-evidence/scanner_evidence.py.base64.txt",
+      "bytes": 5429,
+      "sha256": "607512464d94d9168cae1d87fa04c425414d62dec16c396537fb2b07ac3a518c",
+      "use": "immutable historical input; never blindly execute old3372/fixed-directory drivers for renewed gates",
+      "archive_encoding": "RFC4648 standard base64, ASCII, single payload line followed by LF; strict base64 decode after removing one final LF",
+      "stored_file_sha256": "631d3d4d815f96efb2d47be52d77c400af031c1f9e4e0b58ff7d058f137ff660",
+      "stored_file_bytes": 7241,
+      "bytes_and_sha256_mean": "decoded original bytes"
+    },
+    {
+      "source_private_relative": "scanner-1wu2i-implementation/probe_verifier.py",
+      "archive_path": "docs/reviews/scanner-boundary/fd-prerequisite-evidence/probe_verifier.py.txt",
+      "bytes": 2484,
+      "sha256": "31382ebcdcd1b89652a8cc6e536e5085db5a6204bd75fdf03e87fb2790a308ac",
+      "use": "immutable historical input; never blindly execute old3372/fixed-directory drivers for renewed gates",
+      "archive_encoding": "raw original bytes",
+      "stored_file_sha256": "31382ebcdcd1b89652a8cc6e536e5085db5a6204bd75fdf03e87fb2790a308ac",
+      "stored_file_bytes": 2484
+    },
+    {
+      "source_private_relative": "scanner-1wu2i-implementation/scanner_probe.py",
+      "archive_path": "docs/reviews/scanner-boundary/fd-prerequisite-evidence/scanner_probe.py.txt",
+      "bytes": 323,
+      "sha256": "1f69202e9ab60e0a85ace9abbdded3300269cebc12f51b25411f286b7f104cd3",
+      "use": "immutable historical input; never blindly execute old3372/fixed-directory drivers for renewed gates",
+      "archive_encoding": "raw original bytes",
+      "stored_file_sha256": "1f69202e9ab60e0a85ace9abbdded3300269cebc12f51b25411f286b7f104cd3",
+      "stored_file_bytes": 323
+    },
+    {
+      "source_private_relative": "scanner-1wu2i-implementation/run_partial.py",
+      "archive_path": "docs/reviews/scanner-boundary/fd-prerequisite-evidence/run_partial.py.txt",
+      "bytes": 2745,
+      "sha256": "f17f1516bcf0135379b6ba9218d595f52fd855d04fbfed7526b84c26824b90f6",
+      "use": "immutable historical input; never blindly execute old3372/fixed-directory drivers for renewed gates",
+      "archive_encoding": "raw original bytes",
+      "stored_file_sha256": "f17f1516bcf0135379b6ba9218d595f52fd855d04fbfed7526b84c26824b90f6",
+      "stored_file_bytes": 2745
+    },
+    {
+      "source_private_relative": "scanner-1wu2i-implementation/run_full.py",
+      "archive_path": "docs/reviews/scanner-boundary/fd-prerequisite-evidence/run_full.py.txt",
+      "bytes": 4130,
+      "sha256": "a029e39d2960ba58b65899ab8158599265abcf2779f2edb02122616eb40f94e7",
+      "use": "immutable historical input; never blindly execute old3372/fixed-directory drivers for renewed gates",
+      "archive_encoding": "raw original bytes",
+      "stored_file_sha256": "a029e39d2960ba58b65899ab8158599265abcf2779f2edb02122616eb40f94e7",
+      "stored_file_bytes": 4130
+    },
+    {
+      "source_private_relative": "scanner-1wu2i-implementation/appendix-a.py",
+      "archive_path": "docs/reviews/scanner-boundary/fd-prerequisite-evidence/appendix-a.py.txt",
+      "bytes": 13097,
+      "sha256": "91befae4c93170a52f07090ed3c71c5d1b9d9535e11ddf62321317083e49ebe2",
+      "use": "immutable historical input; never blindly execute old3372/fixed-directory drivers for renewed gates",
+      "archive_encoding": "raw original bytes",
+      "stored_file_sha256": "91befae4c93170a52f07090ed3c71c5d1b9d9535e11ddf62321317083e49ebe2",
+      "stored_file_bytes": 13097
+    },
+    {
+      "source_private_relative": "scanner-1wu2i-implementation/targeted-modules.json",
+      "archive_path": "docs/reviews/scanner-boundary/fd-prerequisite-evidence/targeted-modules.json.txt",
+      "bytes": 2843,
+      "sha256": "340e6650fa81301027f5ee095a3069d532b560d93eb7857b087e8db096e2c4de",
+      "use": "immutable historical input; never blindly execute old3372/fixed-directory drivers for renewed gates",
+      "archive_encoding": "raw original bytes",
+      "stored_file_sha256": "340e6650fa81301027f5ee095a3069d532b560d93eb7857b087e8db096e2c4de",
+      "stored_file_bytes": 2843
+    },
+    {
+      "source_private_relative": "scanner-1wu2i-implementation/b1.patch",
+      "archive_path": "docs/reviews/scanner-boundary/fd-prerequisite-evidence/b1.patch.base64.txt",
+      "bytes": 9370,
+      "sha256": "a594f7bab06ae8c57830da7656449a72965387bd900ab5f0e6c52f291691a0e6",
+      "use": "immutable historical input; never blindly execute old3372/fixed-directory drivers for renewed gates",
+      "archive_encoding": "RFC4648 standard base64, ASCII, single payload line followed by LF; strict base64 decode after removing one final LF",
+      "stored_file_sha256": "5a1f78c6d0352594803a5c3b76431d16949a8278d30bdb72bc935087203fa10b",
+      "stored_file_bytes": 12497,
+      "bytes_and_sha256_mean": "decoded original bytes"
+    },
+    {
+      "source_private_relative": "scanner-1wu2i-implementation/b2.patch",
+      "archive_path": "docs/reviews/scanner-boundary/fd-prerequisite-evidence/b2.patch.base64.txt",
+      "bytes": 3883,
+      "sha256": "9659b908b659029018c4dd7319b0a2b505ced84ec36479f3b8a663e2a13fd25d",
+      "use": "immutable historical input; never blindly execute old3372/fixed-directory drivers for renewed gates",
+      "archive_encoding": "RFC4648 standard base64, ASCII, single payload line followed by LF; strict base64 decode after removing one final LF",
+      "stored_file_sha256": "b9297d6df80735698c2e0784e03e4bf3a67140797d820b6c6dab49d2a22f3a16",
+      "stored_file_bytes": 5181,
+      "bytes_and_sha256_mean": "decoded original bytes"
+    }
+  ],
+  "hash_conventions": {
+    "raw_file_sha256": "SHA256 of complete file bytes, including whitespace/newline; separate from semantic list hash",
+    "legacy_node_list_sha256": "SHA256(json.dumps(nodes).encode(UTF-8)); default Python separators/ensure_ascii=True; no newline; retained verifier result key collection_sha256 uses this convention",
+    "portable_node_list_sha256": "SHA256(json.dumps(nodes,ensure_ascii=True,separators=(comma,colon)).encode(UTF-8)), ordered list, no newline; record separately, never compare to raw or legacy hash",
+    "git_blob": "native Git object ID, not SHA256(file bytes)",
+    "required_result_fields": [
+      "raw_collection_file_sha256",
+      "legacy_node_list_sha256",
+      "portable_node_list_sha256",
+      "driver_sha256",
+      "verifier_sha256",
+      "probe_sha256",
+      "plugin_sha256",
+      "modules_sha256",
+      "expected_data_sha256",
+      "actual_exit",
+      "source_head",
+      "source_file_hashes",
+      "interpreter_realpath",
+      "python_version",
+      "uv_lock_sha256",
+      "before_porcelain",
+      "after_porcelain",
+      "run_id",
+      "log_sha256",
+      "junit_sha256"
+    ]
+  },
+  "actual_design_review_r1": {
+    "report_private_path": "review-1a845-builtin-design-r1.log",
+    "sha256": "2bebab4e7abdee455add025fc63e4f173727c5362df819687f381c034b48cffc",
+    "verdict": "REVISE",
+    "findings": 13,
+    "rounds_used": 1,
+    "cap": 3,
+    "result_sha256_as_controller_supplied": "2bebab4e7abdee455add025fc63e4f173727c5362df819687f381c034b48cffc"
+  },
+  "supplemental_kernel_note": {
+    "archive_path": "docs/reviews/scanner-boundary/fd-prerequisite-evidence/pr-hostread-fix2-pidfs.md.txt",
+    "sha256": "c52d57b2c1e2fc89fc438faadeaf20462ac2fac6d1114dd6fa586457bb965f1f",
+    "authority": "historical author probe note, not mentioned in pinned cycle1 brief/report; not itself proven reviewed"
+  },
+  "locked_environment_inputs": [
+    {
+      "path": "uv.lock",
+      "base": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "sha256": "450b91c21227d80eda778c734bd914c71c74a18371a536da33ee8e4221df6c56"
+    },
+    {
+      "path": "pyproject.toml",
+      "base": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "sha256": "f772a967a4e3f944e4f0293a744a5f0157ead4cc77ee9d7fd8854c176bbeb911"
+    }
+  ],
+  "revision_artifacts": [
+    {
+      "path": "docs/superpowers/specs/2026-10-16-scanner-execution-fd-prerequisite-d2.md",
+      "bytes": 15337,
+      "sha256": "b88e53a652dff4e74164db9cd1099188c88e7c3892f53ee435c4fc05f16b3344"
+    },
+    {
+      "path": "docs/reviews/scanner-boundary/execution-fd-prerequisite-r1-dispositions.md",
+      "bytes": 11012,
+      "sha256": "fdb2eac4b075ddd5244bdcae578b56afb012a799014c45f0abe27766ddb69e92"
+    },
+    {
+      "path": "docs/reviews/scanner-boundary/execution-fd-prerequisite-r1-dispositions.json",
+      "bytes": 19699,
+      "sha256": "b00c74f111bd2b1dd8e488432bd3b7477a30573fadc054a7e2b3c2408a4547cd"
+    }
+  ],
+  "native_primitive_source": {
+    "repo": "beads-task-queue (controller configured canonical local repository)",
+    "observed_head": "6fe57598468ff53bf74dfd9e1cf181ad3177c3f1",
+    "path": "bin/btq",
+    "sha256": "ec2bc67b227326c80bf5d9a32eb661b220ea9af6942ef31bff04d8c06941bd2e",
+    "lines": "827\u2013878",
+    "limit": "read-only source proof, not native operation or live policy validation"
+  }
+}

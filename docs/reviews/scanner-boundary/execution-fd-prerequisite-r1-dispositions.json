@@ -1,0 +1,165 @@
+{
+  "schema": 1,
+  "review_round": 1,
+  "verdict": "REVISE",
+  "report_sha256": "2bebab4e7abdee455add025fc63e4f173727c5362df819687f381c034b48cffc",
+  "author_dispositions_not_reviewer_clearance": true,
+  "records": [
+    {
+      "finding": 1,
+      "actual_review_finding": {
+        "file": "docs/superpowers/specs/2026-10-16-scanner-execution-fd-prerequisite-d1.md",
+        "line": 110,
+        "summary": "Step 1's 'genuine blocking approval dependency' cannot gate btq-1wu2i. The pins are create-only (btq:554, 1476-1477) and already pass through btq-pxtig. design_allowed() reads only metadata.design_approval (btq:866-878). approve-bead closes the approval bead on both approve and deny (approve-bead:30-31, 1517-1521). So a denial, or an 'approval' that approval_valid() rejects, releases the blocks edge, and the spec defines no outcome for a denial.",
+        "failure_scenario": "Root adds approval bead A2 as a blocks edge; approve-bead:703-704 refuses to pin it because design_approval is already btq-pxtig. Liam declines, A2 closes with denied_* fields, and bd stops counting it as a blocker. The task was already released blocked/unassigned, so it is later reopened via manage or unpark, which validate only btq-pxtig. ready() and claim() then pass, and any matching session (there is no session: label) can claim it and implement the declined amendment. The preparation note's 'A decline leaves implementation blocked' does not hold."
+      },
+      "disposition": "Fixed admission contract",
+      "change_or_accepted_limit": "Separate newly gated H task pins A_H and blocks scanner. Denial cannot satisfy H design_allowed; H remains incomplete. Original pxtig stays unchanged. Actual IDs/approval/OPS evidence must exist before card.",
+      "basis": "bin/btq:859\u2013878 checks only task primary design_approval; :827\u2013853 requires actual APPROVED, not closure. Supported metadata pins/dependency model reused; no gate implementation added."
+    },
+    {
+      "finding": 2,
+      "actual_review_finding": {
+        "file": "docs/superpowers/specs/2026-10-16-scanner-execution-fd-prerequisite-d1.md",
+        "line": 108,
+        "summary": "The human gate publishes GitHub links only for the design and manifest. The admitted code, 9a14b3b, exists only on refs/heads/fix/hostread-flake (no upstream, never pushed), and neither file includes the diff, so the approver cannot inspect the patch being approved.",
+        "failure_scenario": "The card is posted as drafted (card-draft.txt links only the d1bfc8d spec and manifest). Liam has no terminal access, and a GitHub link to 9a14b3b returns 404, so he approves a test-oracle change known only by hashes (manifest:49-50) and prose. Step 3 also depends on this local-only object: from a fresh clone, or after the branch and worktree are deleted and gc runs, the 'exact 9a14b3b single-path patch' cannot be imported."
+      },
+      "disposition": "Fixed visibility and reachability",
+      "change_or_accepted_limit": "Actual immutable9a14 GitHub code/patch links are now published and pinned in manifest; publication explicitly confers no approval.",
+      "basis": "Parent publication receipt2026-10-16T07:15:54Z names exact commit/blob and canonical GitHub URLs."
+    },
+    {
+      "finding": 3,
+      "actual_review_finding": {
+        "file": "docs/superpowers/specs/2026-10-16-scanner-execution-fd-prerequisite-d1.md",
+        "line": 161,
+        "summary": "An unexpected failure becomes a hold that the executing agent can lift itself, with no rerun limit, no named decider and no needs-human escalation, although btq-1wu2i already has two failed strict gates. Rules: AGENTS.md:59 'Circuit breakers: 3 failures on the same task \u2192 halt and escalate to user'; AGENTS.md:66 '3 retries max, then escalate'; PICKUP.md:92-93 'Persist attempt failures on the bead; two failures go to Bel with `needs-human`.' Breaking line, spec:161-162: 'Any further unexpected failure is a hold with concrete diagnosis and complete affected-gate rerun, not an automatic baseline update or retry lottery.'",
+        "failure_scenario": "A renewed step-6 or step-8 run fails on an unrelated flake. The agent writes a diagnosis and reruns, exactly as it did about 3 minutes after t2s2 under d3's equivalent wording, with no human decision. That makes a third, then a fourth, strict-gate failure with no needs-human and no message to Liam, and a later pass proceeds to B2, review and merge. d3:156 named 'reviewer/operator disposition'; spec:130 drops the named authority."
+      },
+      "disposition": "Fixed finite failure policy",
+      "change_or_accepted_limit": "One human-approved renewal, then unexpected failure stops immediately, root marks needs-human and sends authenticated Marmot escalation. No executing-agent rerun/self-unhold. Existing failed runs remain failed.",
+      "basis": "Execution section states escalation before B2 or another attempt; new authenticated operator disposition required."
+    },
+    {
+      "finding": 4,
+      "actual_review_finding": {
+        "file": "docs/superpowers/specs/2026-10-16-scanner-execution-fd-prerequisite-d1.md",
+        "line": 155,
+        "summary": "Step 8 requires a 'signed clean complete candidate', but step 2 (117-118) records an untracked .venv alias in that same checkout and never says to remove or exempt it. The '.venv/' gitignore pattern does not match a symlink, so porcelain shows '?? .venv'. The retained run_full.py creates full-ci/ and then asserts empty porcelain.",
+        "failure_scenario": "The executor keeps the alias, since Pyright's venv setting points at .venv, and runs the retained driver. It fails with 'Full CI requires clean candidate' before pytest starts, which spec:161-162 turns into a hold. A retry then fails with FileExistsError on full-ci/. Separately, a reboot clears /tmp/scanner-1wu2i-python312, and the spec has no rule for recreating and re-verifying 'the existing locked private Python 3.12 environment' (126)."
+      },
+      "disposition": "Fixed clean/env/run lifecycle",
+      "change_or_accepted_limit": "Record/remove only .venv symlink before clean freeze; absolute private tools. Missing/rebooted env recreated with locked3.12 sync and checked inventory/imports. Source prechecks precede fresh exclusive attempt-directory creation; aborted dirs never reused.",
+      "basis": "Archived run_full.py.txt documents original fixed-directory/clean preconditions; new finite protocol replaces these paths without weakening empty porcelain."
+    },
+    {
+      "finding": 5,
+      "actual_review_finding": {
+        "file": "docs/reviews/scanner-boundary/execution-fd-prerequisite-d1-inputs.json",
+        "line": 96,
+        "summary": "collection_sha256 3659430f\u2026 (lines 96 and 107) is the raw-byte hash of the pretty-printed collection-pinned.json, but the manifest names neither the file nor the encoding. The retained verifier that step 6 mandates computes this key as sha256(json.dumps(pinned)) (scanner_evidence.py:78), which gives ce942161\u2026 for the same 3,372-node list.",
+        "failure_scenario": "Following step 6, an executor or reviewer recomputes the prior list's hash with the retained verifier, or hashes collected.json, and gets ce942161\u2026. The result is either a false 'baseline collection mismatch' hold, or fresh hashes recorded under the other convention, so manifest-to-fresh comparisons quietly stop lining up."
+      },
+      "disposition": "Fixed hash conventions",
+      "change_or_accepted_limit": "Manifest separates raw collection-pinned.json bytes from legacy json.dumps list hash and compact portable ordered-list hash. Fresh results name each explicitly.",
+      "basis": "Both old3372 collection files were read without execution and their raw and semantic SHA256 recorded separately."
+    },
+    {
+      "finding": 6,
+      "actual_review_finding": {
+        "file": "docs/superpowers/specs/2026-10-16-scanner-execution-fd-prerequisite-d1.md",
+        "line": 116,
+        "summary": "The amendment gives no landing path for its own spec and manifest. Step 2 fixes the worktree as 'the declared planning commits' plus 1995977, and steps 3 and 9 add and review only the test prerequisite. So the scanner PR carries the changed hostread oracle and the 3,373 accounting with no d1 in the tree, unlike d3:135-137 ('Require exact 076 base plus only these planning documents: cherry-pick their signed docs commits onto 076').",
+        "failure_scenario": "The steps are followed literally and the scanner merges. Main gets d3, whose implementation scope does not cover hostread, plus a hostread oracle change with no record in the tree that authorizes it. d1bfc8d stays only on btq/btq-1a845 and origin/design/scanner-fd-prerequisite-d1, no design/* branch has ever been merged here, and the native approval's pinned refs depend on that commit staying reachable. Traceability only; no gate is weakened."
+      },
+      "disposition": "Fixed docs landing",
+      "change_or_accepted_limit": "Exact final d2/manifests/dispositions/evidence land through reviewed prerequisite delivery; scanner imports same signed docs before final complete-diff review. D1 remains historical.",
+      "basis": "Source-transition section explicitly adds amendment documents to delivery and scanner review."
+    },
+    {
+      "finding": 7,
+      "actual_review_finding": {
+        "file": "docs/superpowers/specs/2026-10-16-scanner-execution-fd-prerequisite-d1.md",
+        "line": 146,
+        "summary": "Steps 5-8 rely on 'the retained' strict verifier, negative probes, drivers and 81-module list, but neither this manifest nor d3's pins their bytes. These private files were edited during the task: the verifier went through versions A, B and C, and the original t2s2 run was judged by the weaker version A.",
+        "failure_scenario": "Step 6's delta/order check needs new driver code, because the retained run() requires exact equality with the old 3,372-node list (scanner_evidence.py:67-68). If verify() or the probes change in the mutable private directory first, the renewed gate is still called 'retained', result.json does not record which verifier ran, and nothing in the approved manifest can detect the change."
+      },
+      "disposition": "Fixed retained-tool identity; bounded future adapter",
+      "change_or_accepted_limit": "Nine byte-exact historical tool/patch/module artifacts are archived and SHA256 pinned. Old3372/fixed-path drivers are not represented as ready3373 runners. New driver adaptation is limited to declared paths/env/delta; verify/mask and19 probes unchanged, actual driver bytes retained/hashed before invocation and visible in final scanner review.",
+      "basis": "Manifest includes raw bytes/SHA256 of verifier, plugin, probes, overlap/full drivers, AppendixA driver, module list and B1/B2; semantic changes beyond declared adaptation require root review/escalation. Driver/patch archives use explicit base64 storage to retain historical install paths and patch context whitespace; manifest separately pins stored-file hash and decoded original bytes/hash."
+    },
+    {
+      "finding": 8,
+      "actual_review_finding": {
+        "file": "docs/superpowers/specs/2026-10-16-scanner-execution-fd-prerequisite-d1.md",
+        "line": 96,
+        "summary": "Lines 96-100 present the pre-Linux-6.9 pidfd caveat as one of 'the retained review's disclosed limitations'. The pinned brief (8f070082\u2026) and report (5f26a52d\u2026) never mention 6.9; the caveat appears only in the unpinned pr-hostread-fix2-pidfs.md. The spec also softens that note's 'before 6.9 every pidfd shares one inode' to 'pidfds can share an inode'.",
+        "failure_scenario": "An approver checks spec:93-100 against the pinned report and brief and cannot find the 6.9 caveat, so they either reject the provenance or accept unpinned text as reviewed evidence. A reader of 'can share' assumes pre-6.9 collisions are occasional, when in fact a leaked pidfd that reuses a closed pidfd's number is always missed on those kernels."
+      },
+      "disposition": "Fixed provenance and wording",
+      "change_or_accepted_limit": "Pre6.9 every-pidfd-shares-inode caveat attributed to separately archived author probe note, explicitly not in pinned review/brief; only recorded host kernel established.",
+      "basis": "Original pr-hostread-fix2-pidfs.md bytes copied/pinned as supplemental unreviewed historical author evidence."
+    },
+    {
+      "finding": 9,
+      "actual_review_finding": {
+        "file": "docs/superpowers/specs/2026-10-16-scanner-execution-fd-prerequisite-d1.md",
+        "line": 121,
+        "summary": "Step 3 requires re-committing the 9a14b3b patch as a new signed commit, which loses the commit's identity. Merging fix/hostread-flake would add only 9a14b3b, since its parent 2c0c5b5 is already in 076. The spec also gives no disposition for pending artifacts that refer to that commit id.",
+        "failure_scenario": "The scanner lands with an equivalent commit X. Plan p5's `git merge-base --is-ancestor 9a14b3b HEAD || \u2026 \"STOP: r3 Fix 1 (9a14b3b) is not landed\"` then stops on main, d2.r4's 'Commit A: \u2026 Cherry-pick 9a14b3b, or merge fix/hostread-flake' becomes an empty cherry-pick, and later edits on fix/hostread-flake can conflict with main. This fails closed but needs manual reconciliation the spec does not anticipate."
+      },
+      "disposition": "Fixed real ancestry and downstream assumptions",
+      "change_or_accepted_limit": "Preserve actual9a14 ancestry by merging exact commit whose2c0c parent is already in076. Pin parents/tree; do not claim a cherry-picked equivalent proves9a14 ancestor or broader-plan completion.",
+      "basis": "Original commit/object and published patch pinned; no branch merge, rebase or source changes performed by this revision."
+    },
+    {
+      "finding": 10,
+      "actual_review_finding": {
+        "file": "docs/superpowers/specs/2026-10-16-scanner-execution-fd-prerequisite-d1.md",
+        "line": 121,
+        "summary": "Step 3 commits in a worktree with three unstaged B1 source edits but names no commit route and requires no B1 hash or porcelain recheck afterwards; step 2 checks them only 'before applying'. A plain `git commit` runs the shared pre-commit 4.6.2 hook, which stashes the B1 diff and checks out the 076 sources while the hooks run.",
+        "failure_scenario": "The operator runs `git commit -S`. pre-commit saves the B1 diff to ~/.cache/pre-commit/patch<ts>-<pid> and runs `git checkout -- .`. If the process is hard-killed (SIGTERM, SIGHUP or a timeout) before the restore in its finally block, W is left with the original sources plus the new commit. Step 6 then runs about 19 minutes and shows roughly 57 unexpected failures. It fails closed as a hold but costs one more strict-gate failure; recovery is possible from b1.patch."
+      },
+      "disposition": "Fixed B1 hook interruption path",
+      "change_or_accepted_limit": "Externally save/fsync/hash exact B1 files+patch; temporarily restore only verified B1 to committed bytes before hooks/commits; integrate clean then reapply exact snapshot and compare all3 hashes/B2/porcelain. Crash or mismatch holds for root reconciliation.",
+      "basis": "No assumption that pre-commit restores its stash; no tests run in temporary source state."
+    },
+    {
+      "finding": 11,
+      "actual_review_finding": {
+        "file": "tests/test_sandbox_hostread.py",
+        "line": 766,
+        "summary": "In the admitted blob (9a14b3b), the regression's patched sleep runs a full gc.collect() on every one of recover's 200 fake 0.05 s sleeps, though only the first is needed. In the gate's heap this is an estimated 8-18 s for one test, against about 0.06 s for its siblings. This is inferred; no recorded run includes the test. The exact-blob pin (spec:121-123) freezes the cost.",
+        "failure_scenario": "This safety test runs in every tier and in the serial 3,373-node and full-suite gates, adding seconds to tens of seconds, more on slow CI runners. Step 4's isolated run hides the cost and no step records or bounds it. Trimming it to a single collect needs a re-pinned blob, which means a new review and approval. It stays under the sleeper's 60 s CAP, so this is cost, not correctness."
+      },
+      "disposition": "Accepted exact-patch performance residual",
+      "change_or_accepted_limit": "Keep admitted exact blob; record actual new-regression/per-node duration in fresh92-case evidence. No claim isolated timings bound full-heap cost; no code trim or new test-oracle change.",
+      "basis": "Historical exact-blob scope retained; source implementation/performance changes require separate scope/review/approval."
+    },
+    {
+      "finding": 12,
+      "actual_review_finding": {
+        "file": "tests/test_sandbox_hostread.py",
+        "line": 307,
+        "summary": "In the admitted blob (9a14b3b), none_left() reduces the subset check to a bare bool, and no call site passes a message (352, 689, 783, 894). A leak failure shows only 'False = none_left(frozenset({...}))', with the baseline truncated to 240 characters under -q. It never lists the new (fd, dev, ino) identities, which an inline `open_fds() <= before` would print as 'Extra items', and it drops the counts the old assertion printed.",
+        "failure_scenario": "A step-8 `pytest -q` run leaks a pidfd in test_no_readable_worker_settles. The log and JUnit show only `assert (True and False)` and the truncated baseline, because the after-set is discarded inside the helper. Getting the 'concrete diagnosis' spec:161-162 requires then means rerunning a failure that may depend on test order, which repeats the spec's own 'no FD-identity trace' gap (47-48)."
+      },
+      "disposition": "Accepted diagnostic residual; explicit hold",
+      "change_or_accepted_limit": "Keep exact blob with weak bare-bool subset assertion. Preserve complete first failure/JUnit; cannot rerun for richer diagnostics or self-unhold when identity attribution is unavailable.",
+      "basis": "Universal diagnostics not promised. New code diagnostics would change exact admitted blob and require their genuine gates."
+    },
+    {
+      "finding": 13,
+      "actual_review_finding": {
+        "file": "docs/superpowers/specs/2026-10-16-scanner-execution-fd-prerequisite-d1.md",
+        "line": 22,
+        "summary": "The spec excludes the larger hostread-flake design's host-wide scan/subreaper, channel and daemon fixes without saying that the flake modes they target are still unfixed at 076 and exposed inside the step 4/6/7/8 gates. For example, d2.r4 cause 2: hostread.py:337 raises _Unknown for a live non-dumpable same-uid process, which hits '36 cases in 21 functions'.",
+        "failure_scenario": "During the serial step-6 run, another session's non-dumpable git, bwrap or tmux process starts inside a real-scan test's window. The test logs DIAG_RECOVERY_KEPT, child.wait(10) times out, and the run holds. The log has no pid or comm, so the 'concrete diagnosis' can only be inferred. Neither serial t2s2 run showed these modes, and a recurrence fails closed, so this is a disclosure and availability gap."
+      },
+      "disposition": "Fixed disclosure; availability risk retained",
+      "change_or_accepted_limit": "Disclose excluded wider hostread failure modes still exposed at076 including live non-dumpable same-uid processes. Their recurrence is unexpected and immediately held/escalated; no assertion that serial scheduling removes them.",
+      "basis": "Decision/limits sections preserve narrow scope and explicitly decline broader hostread/subreaper/channel/daemon fixes or btq-gtetp completion."
+    }
+  ]
+}
