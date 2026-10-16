@@ -1,0 +1,116 @@
+{
+  "schema": 1,
+  "task": "btq-e7knb",
+  "status": "UNREVIEWED d4; final R3 REVISE30;3/3used; no human approval",
+  "frozen_parent": "0180a4321e74e93c81516ebb50f9ac7f10a0dd4a",
+  "base": "07637745fe75dc614109a0b8ba72d3489f262a97",
+  "governing_input": {
+    "repository_identity": "hermes-workstreams-v2-adr-r17 (no remote)",
+    "commit": "a27acecee8274e6ad8dc65def436614d42b5cb04",
+    "path": "docs/adr/0001-workstreams-v2.md",
+    "sha256": "3b6da7d95d2652619439192a5fbda0dc5e281e8e5bd87813e95ae8c5d860ea3c",
+    "approval": "btq-ovngv",
+    "approved_by": "Liam",
+    "approved_at": "2026-10-14T15:57:38Z",
+    "via_ref": "marmot:id:189fd6bb97ba",
+    "approved_digest": "c874eb3d81c0647f53005e5cfb1b35f33ca30bf6617bc10e84d24079d7ba6fbb"
+  },
+  "actual_reviews": [
+    {
+      "round": 1,
+      "head": "79aec6f",
+      "verdict": "REVISE",
+      "findings": 10,
+      "report_sha256": "29ea537bc0108e489148125507f8b13f9616ba9b4e0c6f3816022f1e658b7e0b"
+    },
+    {
+      "round": 2,
+      "head": "150a81ceb23dbdacf33fbe58f5fe5a8b8da8d373",
+      "verdict": "REVISE",
+      "findings": 32,
+      "report_sha256": "a88f0a09c44c4bf04eed8d3d353e85c552912785065b11245ebdc6403fb79502"
+    },
+    {
+      "round": 3,
+      "head": "0180a4321e74e93c81516ebb50f9ac7f10a0dd4a",
+      "verdict": "REVISE",
+      "findings": 30,
+      "report_sha256": "85e5877220ae182f0eec6525392e789ade6d3ea541db04340d210b20f3cb3538"
+    }
+  ],
+  "remaining_rounds": 0,
+  "required_future_authority": "Exact review-budget exception before any further review; actual approved ADR amendment and native admission before affected implementation; separate deployment approval.",
+  "files": [
+    {
+      "path": "docs/designs/2026-10-16-plan5-actions-and-executor-d4.md",
+      "bytes": 61008,
+      "sha256": "de7239b72a3ac2b63d1d05f4143212e6f4ea83193bfe1ac3b4279bb28ba8c5f8"
+    },
+    {
+      "path": "docs/reviews/plan5-actions-executor-r3-disposition-d4.json",
+      "bytes": 9194,
+      "sha256": "dc207d8200f7d2062021c523c616734f125158c4b4c98356f5ecc4b02442fd6f"
+    },
+    {
+      "path": "docs/reviews/plan5-actions-executor-r3-disposition-d4.md",
+      "bytes": 15176,
+      "sha256": "0f7d76565e6a3a454ef887704e4c70d211f4b1b7a3f3f9b3dc3072fe6570404f"
+    }
+  ],
+  "private_inputs": [
+    {
+      "bytes": 24089,
+      "sha256": "85e5877220ae182f0eec6525392e789ade6d3ea541db04340d210b20f3cb3538",
+      "locator": "handoff-codex/review-e7knb-builtin-design-r3.log"
+    },
+    {
+      "bytes": 22126,
+      "sha256": "4af32aba8d5246b90006c1e4039597cb167aa0d65a1bcb14e1ed1864afb8d9c4",
+      "locator": "handoff-codex/e7knb-d4-author/r3-verbatim-findings.json"
+    },
+    {
+      "bytes": 27887,
+      "sha256": "e13ecf67e49043bcc829dfe314cc8181e7ff90f79eff8632f363e143a2243ab8",
+      "locator": "handoff-codex/review-e7knb-builtin-design-r2-findings-extracted.json"
+    },
+    {
+      "bytes": 32347,
+      "sha256": "a88f0a09c44c4bf04eed8d3d353e85c552912785065b11245ebdc6403fb79502",
+      "locator": "handoff-codex/review-e7knb-builtin-design-r2.log"
+    }
+  ],
+  "historical_d3_sha256": "68de32f21aed9f346c26c400ea5b5358a33c42dc5845eb2b1a7072e4ce34e3bd",
+  "r2_historical_hash_check": {
+    "canonicalization": "UTF-8 sorted-key compact JSON ensure_ascii=False no newline",
+    "findings": 32,
+    "historical_hashes_match": 32,
+    "private_original_objects_required": true
+  },
+  "source_files": [
+    {
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/config/policy.py",
+      "sha256": "7fdbce1dcc17f5e5a9b2d6f2e750a3485d0777e77c75af698502a34de2677799"
+    },
+    {
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/session/server.py",
+      "sha256": "5048d5274a1b8f5042f95d1147f8cdab01ea614b70ce60294a7b075d85bcebaf"
+    },
+    {
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/session/shim.py",
+      "sha256": "87175778da3b2d7132c3e2da5c473b83d577c1d92d45a002800f481a8d533694"
+    },
+    {
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/wsd/runtime.py",
+      "sha256": "c6fc0de85dd22fa619e585af61fad303f833390122b71a50a9117c93db62bf8d"
+    },
+    {
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/wsd/daemon.py",
+      "sha256": "3c285bdc61d2dc1cc245e0c90fac54a3fa821ce45298d858c8b016e2a38c60bd"
+    }
+  ]
+}
