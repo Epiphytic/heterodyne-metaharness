@@ -1,0 +1,70 @@
+**Verdict: REVISE. Do not approve as written.** The central claim, that the bridge can wake this exact session through `Tmux.send` to an "existing owned process", does not hold for the session that is actually running, and several stated prerequisites are false on the live host. I checked the live state read-only (SQLite opened `mode=ro`, `ps`, `/proc`, tmux listing). I edited nothing and ran no tests.
+
+What holds up: every input-manifest blob and sha256 matches its commit, and the design file's sha256 matches the manifest. The native identity `01a140f3…` is the latest registered worker lineage for run `9eb99115…`.
+
+Also worth knowing (efficiency, not in the list): the live rollout is 62.8 MB. Reading 1 MiB per 10-second pass means about 10 minutes to establish a baseline, and again on every restart if the baseline is rebuilt. Seeking from the tail to the last turn boundary would avoid that.
+
+```json
+[
+  {
+    "file": "docs/designs/2026-10-16-admind-existing-session-wake.md",
+    "line": 64,
+    "summary": "CRITICAL: The live controller is not a harness-owned tmux pane, so 'Tmux.send to the existing owned process' cannot reach it.",
+    "failure_scenario": "Native 01a140f3-0d04-79b1-84df-7ff665412a6d belongs to `codex --yolo` PID 174221 (started Oct 15 12:03:51). That process runs under an interactive -bash in the operator's DEFAULT tmux server (/tmp/tmux-1001/default, pane %6). Its environment has no HERMES_WORKSTREAM_RUN. The run record still says tmux_session ws-9eb99115…/pane %140 on `-L hermes-workstreams`, and no server is running on that socket. Tmux.send -> inspect -> _owner (show-environment on =ws-<id>) returns not-owned, so send raises 'cannot send to a missing or exited pane'. As written, the bridge either holds forever under §8, or the implementer has to accept the manifest's free tmux_socket/session/pane and bypass owned-session validation, which is an unapproved departure. Repair: state the real binding honestly. Add an explicitly approved 'adopted operator pane' binding (exact socket path, pane %6, verified codex child PID and start ticks, no reliance on the ownership env), with its own checks and approval scope. Otherwise declare the prerequisite unmet and HOLD."
+  },
+  {
+    "file": "docs/designs/2026-10-16-admind-existing-session-wake.md",
+    "line": 40,
+    "summary": "HIGH: The process identity binds the pane PID, but that PID is an interactive bash shell; Codex is its child, so 'alive process' doesn't prove Codex is the input target.",
+    "failure_scenario": "Tmux.process and the pane's #{pane_pid} give bash (1632860), not codex (174221). If Codex exits or crashes, bash and its prompt remain. The pane is still 'alive', and a misrecognised or stale composer check lets paste+Enter run the wake text as shell commands, including the literal `admind ask get ... --json` line. Repair: record the codex PID and its /proc start ticks. Before each send, require that the foreground process group of the pane's tty (#{pane_tty} -> tpgid) is exactly that PID; hold otherwise."
+  },
+  {
+    "file": "docs/designs/2026-10-16-admind-existing-session-wake.md",
+    "line": 52,
+    "summary": "HIGH: The run already has 17 pending worker inbox rows and 1 uncertain row, so the preflight's 'no pending/sending/uncertain direct input' gate holds permanently, or is undefined.",
+    "failure_scenario": "The live inbox for 9eb99115 has 17 pending worker `task-update:` rows (Sep 27 to Oct 15) and one uncertain manager row `codex-20261015-approved-design`. §4/§5 hold on pending/sending/uncertain direct inputs, and §8 says to retain them. The result is that no wake is ever sent. Excluding task-update or manager rows instead is an unspecified implementer choice. Repair: list exactly which inbox states, targets and ID prefixes block the bridge. Make reconciling this existing backlog through admind an explicit activation prerequisite."
+  },
+  {
+    "file": "docs/designs/2026-10-16-admind-existing-session-wake.md",
+    "line": 70,
+    "summary": "HIGH: The supervisor flock does not fence this run's actual automated actor; the escalation dispatcher uses its own locks and starts a replacement `codex exec`.",
+    "failure_scenario": "harness/escalation.py `_run_one`/`run_once` serialise on runs/RUN/oneshot.lock and drain.lock, never `.supervisor.lock`. They claim ready escalation Beads (pickup_enabled=true) and Popen a new `codex exec` in Hermes home. So 'other automated submitters honoring this lock serialize' is false for this run kind. escalation.py is also missing from the input manifest, even though the design is an explicit departure from it. Repair: add escalation.py (and its dirty canonical bytes) to the inputs. On every pass, also take drain.lock/oneshot.lock without blocking (or hold if busy), and require the escalation timer/service to be verified disabled as a guard, not just a one-time deployment note."
+  },
+  {
+    "file": "docs/designs/2026-10-16-admind-existing-session-wake.md",
+    "line": 72,
+    "summary": "MEDIUM: For escalation runs the legacy fields the guards read are stale, because tick_run skips this kind and nothing refreshes them; the continuation.question exception targets a field the bridge never refreshes.",
+    "failure_scenario": "In the live run, observation and terminal_buffer are empty, pane_id is %140 (dead server), manager pane %137 is dead while manager_missing=null, and continuation.question is frozen at its last hook value. Preflight checks on observed_state, recovery or question state therefore read fossil data, and the 'ignore the question heuristic only for controller_wait' exception is effectively meaningless. Repair: list the legacy fields that are actually maintained (identity and lineage, pickup and recovery flags written by hooks/CLI). Derive turn, question and idle state only from the bridge's own transcript cursor. Drop the legacy-continuation exception, which simplifies the design."
+  },
+  {
+    "file": "docs/designs/2026-10-16-admind-existing-session-wake.md",
+    "line": 70,
+    "summary": "MEDIUM: The target pane is the operator's attached interactive pane. The screen-only checks miss tmux copy-mode and live typing, so the 'residual' race is the normal case here, not an edge case.",
+    "failure_scenario": "If the operator has scrolled pane %6 into copy-mode, capture-pane returns the underlying screen, which still shows an empty composer. Enter from send-keys then goes to copy-mode, or the paste lands later as a draft. If the operator starts typing within the 2s window, the wake is appended to their half-typed message and Enter submits both. Repair: right before the final capture, check #{pane_in_mode}, #{pane_input_off}, #{session_attached} and recent #{client_activity} with display-message, and hold on any of them. Evaluate a fixture-validated input fence such as `select-pane -d`, or require the bridge to own a pane with no attached client."
+  },
+  {
+    "file": "docs/designs/2026-10-16-admind-existing-session-wake.md",
+    "line": 66,
+    "summary": "MEDIUM: 'Aborted histories hold' plus 'require a matched turn_completed for the latest turn' brings back the deadlock whenever the operator interrupts the controller to wait for an answer.",
+    "failure_scenario": "The live rollout already contains a turn_aborted. The operator presses Esc to stop the controller and then answers in Marmot. The latest turn is aborted, so no completion ever matches it, and the bridge stays ineligible until the operator sends another message, which is the problem this design exists to fix. Repair: treat a matched turn_aborted for the latest turn as an idle boundary that is eligible only with positive empty-composer and foreground-PID evidence. Add this case to the offline acceptance list."
+  },
+  {
+    "file": "docs/designs/2026-10-16-admind-existing-session-wake.md",
+    "line": 74,
+    "summary": "MEDIUM: 'Submitted' with no acknowledgment, and 'uncertain', both block every later wake indefinitely with no operator-visible signal; 'any distinct turn start' is also a weak acknowledgment.",
+    "failure_scenario": "Enter is consumed as a newline, or Codex ignores the input, leaving a draft in the composer. No turn start ever arrives, every later wake waits for one, and the non-empty composer holds them forever. Separately, the operator's own message starts a turn that is counted as the wake's acknowledgment. And an uncertain attempt occupies the single active-attempt slot until `settle`, which the controller is never woken to run. Repair: accept as acknowledgment only a transcript user message containing the wake ID. After a bounded time with no acknowledgment, move to uncertain and send an admind notice or other configured operator-visible alert, so a person learns the bridge is stuck without having to look."
+  },
+  {
+    "file": "docs/designs/2026-10-16-admind-existing-session-wake.md",
+    "line": 56,
+    "summary": "LOW-MEDIUM: The status rules don't cover admind's real status set; 'deciding' and the approval 'answered' path are unaddressed, and 'reject unknown variants' may treat valid replies as an outage.",
+    "failure_scenario": "asks.py at 07637745 defines open, answered, deciding, approved, denied, stale, superseded, cancelled and blocked (see TERMINAL and SKIPPED). An implementer following 'reject unknown response variants' treats 'deciding' as unknown and marks the ask unavailable, or wakes twice (deciding, then approved) and burns the 60s budget. Repair: list every status from asks.py with an explicit wake/no-wake/hold rule, and pin that enum in the schema."
+  },
+  {
+    "file": "docs/designs/2026-10-16-admind-existing-session-wake.md",
+    "line": 64,
+    "summary": "LOW: The read-only Beads facade is under-specified: task_gates.check also calls queue.bd('list', ...), and _queue() executes the installed BTQ module.",
+    "failure_scenario": "For an opted-in blocker task, assert_worker_unblocked -> gates.check calls queue.bd('list','--id',key,'--all','--limit','0'). A facade offering only show() raises AttributeError and holds forever, or someone widens it ad hoc. Beads._queue also loads the installed BTQ executable through SourceFileLoader, so the facade isn't read-only by construction. task_gates.py and beads.py, both dirty in the canonical checkout, are absent from git_inputs. Repair: list the exact queue methods needed (show plus bd list), pin the dirty canonical bytes, and require the facade to wrap a Queue instance without importing write paths."
+  }
+]
+```

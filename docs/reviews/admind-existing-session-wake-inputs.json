@@ -1,0 +1,594 @@
+{
+  "schema": "admind-existing-session-wake-inputs-v1",
+  "design_task": "btq-aoz4l",
+  "status": "proposed-after-one-high-review-incorporation-not-human-approved",
+  "design": {
+    "path": "docs/designs/2026-10-16-admind-existing-session-wake.md",
+    "sha256": "389e4355f5b395c8e52ed54622408952818bdc45cd81e2f0f1bd92c13d8f121c"
+  },
+  "git_inputs": [
+    {
+      "repository": "harness-improvements-btq-btq-aoz4l",
+      "commit": "ba5bddcb1c677b101e0bb991541fb489893adfaf",
+      "path": "harness/tmux.py",
+      "blob": "25f9db1e9c47ae007ea9c5cbf5807b65eb4b100a",
+      "sha256": "a977888922118379ba70fa4f40378c3d2d05ea4c2f86c49a76aeadee393a042d"
+    },
+    {
+      "repository": "harness-improvements-btq-btq-aoz4l",
+      "commit": "ba5bddcb1c677b101e0bb991541fb489893adfaf",
+      "path": "harness/lifecycle.py",
+      "blob": "3f9ee0a96d001a51ca34cb35056c34a3c53e110c",
+      "sha256": "05b754cfd3aabdf795bc45761883cf5c6b0afa73a363f22d00d4ce2c34dac28b"
+    },
+    {
+      "repository": "harness-improvements-btq-btq-aoz4l",
+      "commit": "ba5bddcb1c677b101e0bb991541fb489893adfaf",
+      "path": "harness/status.py",
+      "blob": "9ae4dec35e7086d3313a258739b475fd523d0c0b",
+      "sha256": "2dd5f883f34d69bed4c1ea50a482b4ed6c2faaaa0769a78804b33b06aba16e3c"
+    },
+    {
+      "repository": "harness-improvements-btq-btq-aoz4l",
+      "commit": "ba5bddcb1c677b101e0bb991541fb489893adfaf",
+      "path": "harness/terminal_observation.py",
+      "blob": "156bf9452271a429d89f8b95b9108e5da93a80d1",
+      "sha256": "d28f8d31ba1f007294f951fafca34a9d9a5a34ded67a9ae4099ce4bc87f62997"
+    },
+    {
+      "repository": "harness-improvements-btq-btq-aoz4l",
+      "commit": "ba5bddcb1c677b101e0bb991541fb489893adfaf",
+      "path": "harness/agents.py",
+      "blob": "0503d02e09f6f3f2ef5489769c79768bc8aefbcb",
+      "sha256": "5b57327ab0bd18956354a4da16a2609e555c0cad572942726874db8aa942517a"
+    },
+    {
+      "repository": "harness-improvements-btq-btq-aoz4l",
+      "commit": "ba5bddcb1c677b101e0bb991541fb489893adfaf",
+      "path": "harness/store.py",
+      "blob": "20e0c3cf0c8d0bdbf8fbef0d462f2a03e0ac6d5a",
+      "sha256": "f3f7b98980ecdf66c587ba90d29afebe1b702e913db1a7fe894aa60b09bf717e"
+    },
+    {
+      "repository": "harness-improvements-btq-btq-aoz4l",
+      "commit": "ba5bddcb1c677b101e0bb991541fb489893adfaf",
+      "path": "harness/supervisor.py",
+      "blob": "c485a60f562e16bcec100a5a39b7f5afbe9a55ee",
+      "sha256": "1c472d56fbc7939e8c78331e504203d786d7a0add204a204c4331f2cf1b1ac42"
+    },
+    {
+      "repository": "harness-improvements-btq-btq-aoz4l",
+      "commit": "ba5bddcb1c677b101e0bb991541fb489893adfaf",
+      "path": "harness/continuation.py",
+      "blob": "0d34e3939a60984289b5b9afba954c2f8cda6dfd",
+      "sha256": "049df96971e810d8e84ce20835e18255f56544d9e612f5efc0762056360ef32f"
+    },
+    {
+      "repository": "harness-improvements-btq-btq-aoz4l",
+      "commit": "ba5bddcb1c677b101e0bb991541fb489893adfaf",
+      "path": "harness/secondary_worker.py",
+      "blob": "7eb54b747a96f997a76cd8c5cf0fef5ed2181820",
+      "sha256": "b1db7d81bbc0304b1781e4ee339fa19c1ce0f77e116569ca7091fc0c59d5d4cb"
+    },
+    {
+      "repository": "harness-improvements-btq-btq-aoz4l",
+      "commit": "ba5bddcb1c677b101e0bb991541fb489893adfaf",
+      "path": "harness/task_blockers.py",
+      "blob": "8d37704f7609bdd87858b41288b4ad1482e53b24",
+      "sha256": "0e448d8af2d5f3c9e179df551f7a3d41b0a8b18b7af4f80f9c02d411736ba9dd"
+    },
+    {
+      "repository": "harness-improvements-btq-btq-aoz4l",
+      "commit": "ba5bddcb1c677b101e0bb991541fb489893adfaf",
+      "path": "spec/escalation-workstream.md",
+      "blob": "318b7998460e148e9481c6059a563d9521a9cf5a",
+      "sha256": "145a09f654dae7dda91a835c98cd4448010d5ff097fa3fad2b90c1ace8bebeed"
+    },
+    {
+      "repository": "harness-improvements-btq-btq-aoz4l",
+      "commit": "ba5bddcb1c677b101e0bb991541fb489893adfaf",
+      "path": "spec/continuation.md",
+      "blob": "0588ae1b23bd209dd7aba56ab0457a39851182d2",
+      "sha256": "b73de6b5afc994608f6347cb0fc9cedb59b7fbac55d8fb19da831c82a55bf14f"
+    },
+    {
+      "repository": "harness-improvements-btq-btq-aoz4l",
+      "commit": "ba5bddcb1c677b101e0bb991541fb489893adfaf",
+      "path": "spec/status.md",
+      "blob": "ce60e802808d4b2ffef112c2cfe475b0f76a5242",
+      "sha256": "b050ac48d0ba552495106daf2625a35c286668d2380eb9806660402c446c5258"
+    },
+    {
+      "repository": "harness-improvements-btq-btq-aoz4l",
+      "commit": "ba5bddcb1c677b101e0bb991541fb489893adfaf",
+      "path": "spec/sessions.md",
+      "blob": "eb0aa42ca55faec067a3e8696874763d82df14c4",
+      "sha256": "b82ce4f7e9b5f9245c478555fb002af1092ab79a58d87870813a3aed8895e4ee"
+    },
+    {
+      "repository": "harness-improvements-btq-btq-aoz4l",
+      "commit": "ba5bddcb1c677b101e0bb991541fb489893adfaf",
+      "path": "spec/terminal-observation.md",
+      "blob": "4b4db6c938d59c0628049917046b8dbd2cfc6478",
+      "sha256": "4e7d47031cdba90be5ec12bac74daf05e8e17db48f959dcaba48c7368aa97370"
+    },
+    {
+      "repository": "harness-improvements-btq-btq-aoz4l",
+      "commit": "ba5bddcb1c677b101e0bb991541fb489893adfaf",
+      "path": "spec/README.md",
+      "blob": "77488b794873b0501212cc77efc330f7461f7830",
+      "sha256": "5939a4d2e281e250363e920177e099d952b113cb4efccbc2357492d43654f6e0"
+    },
+    {
+      "repository": "harness-improvements-btq-btq-aoz4l",
+      "commit": "ba5bddcb1c677b101e0bb991541fb489893adfaf",
+      "path": "MANIFEST.md",
+      "blob": "d932fe08337c748d3149a8b9272ac8f562245017",
+      "sha256": "1c53f738239862261db53d61aeea1aa779637377e67305e9d3ea0566afb7a1ba"
+    },
+    {
+      "repository": "heterodyne-metaharness-v2",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/asks.py",
+      "blob": "a419c858ba5864c599ca90bfa89c0538e221ddcc",
+      "sha256": "6b6645f1fbba429b0f52277152f31745422332fe063792ce4748378091f37042"
+    },
+    {
+      "repository": "heterodyne-metaharness-v2",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/cli.py",
+      "blob": "39e80d889860fdea367ba6b13981d49cadbf8e91",
+      "sha256": "83858ebea0b71c777f865264d80c6537902206b0f2ca9024518f11ce160b843f"
+    },
+    {
+      "repository": "heterodyne-metaharness-v2",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/daemon.py",
+      "blob": "9c3f17f9505a42e2c9510c093149eddf653330d1",
+      "sha256": "6dd566effd2fbd2a569e533cf8449da5ae15244290e6a9cfc30560e685acb0fb"
+    },
+    {
+      "repository": "heterodyne-metaharness-v2",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/wsd/scheduler.py",
+      "blob": "1cccc0014783598b72077dfc8c5e72dcf02345b0",
+      "sha256": "cc265d66bca5899b4a3bbb9a19288c473c8c420403b204e67862d768de53983e"
+    },
+    {
+      "repository": "heterodyne-metaharness-v2-btq-btq-8d487",
+      "commit": "fdaa9500021526219f8ef29a2eab687823c45839",
+      "path": "docs/designs/2026-10-16-plan8-scheduling-reconciliation-d4.md",
+      "blob": "866da975b3171e9e636c0e5cc677a4c45a210b62",
+      "sha256": "20e1c94f5c2f37fd2a819977b6a8eb81dce1855dba946a22d92ebd7ca432da39"
+    },
+    {
+      "repository": "harness-improvements-btq-btq-aoz4l",
+      "commit": "ba5bddcb1c677b101e0bb991541fb489893adfaf",
+      "path": "harness/escalation.py",
+      "blob": "94206836c9c7baabec35ea189daefed8c143f00d",
+      "sha256": "b57c15a1dd7e3058ef0b87075ff9328a084a81eec3f50d424d63616b2e1ca91a"
+    },
+    {
+      "repository": "harness-improvements-btq-btq-aoz4l",
+      "commit": "ba5bddcb1c677b101e0bb991541fb489893adfaf",
+      "path": "install_escalation.py",
+      "blob": "bbc5860a28b5334e1c774619e1d9a4d72b6c860a",
+      "sha256": "018a8977c411519337b7edcfe194293ec81614a002a948994c10b620f486bd40"
+    },
+    {
+      "repository": "harness-improvements-btq-btq-aoz4l",
+      "commit": "ba5bddcb1c677b101e0bb991541fb489893adfaf",
+      "path": "harness/beads.py",
+      "blob": "1c3505c50b7ebdb7d9c4bef9bfabcf63bda1b1e8",
+      "sha256": "afed6819fc607dd8afb024b9443a276530ae84761aa57ee6f2785e26e3366002"
+    },
+    {
+      "repository": "harness-improvements-btq-btq-aoz4l",
+      "commit": "ba5bddcb1c677b101e0bb991541fb489893adfaf",
+      "path": "harness/task_gates.py",
+      "blob": "b82794524c68af0ba4482cedc8fe714be45bdfa9",
+      "sha256": "81a2cb8b7017ac909d611027bb518a18f679006eca20061909cff6b566045413"
+    }
+  ],
+  "installed_observations": [
+    {
+      "locator": "historical-escalation",
+      "sha256": "7953e5907b2fd75ad986c69c4f7dcf7757f4e6352ae3b26a76661a780a272468"
+    },
+    {
+      "locator": "current-session-policy",
+      "sha256": "a9c0f36f161a37c6c406cc47934f964682812b17261f13176740a85a156a2877"
+    },
+    {
+      "locator": "installed-workstream-wrapper",
+      "sha256": "9a60e1eb501951e81149843ba39694145f5234e6ad37f3684ed651ea10ea9692"
+    },
+    {
+      "locator": "installed-controller-helper",
+      "sha256": "6cace6aa900363af6e13306899f21d03acc356c22165d883226ebcb7003f1529"
+    },
+    {
+      "locator": "installed-controller-manifest",
+      "sha256": "84716a3801c970dba83c44efed5d0d1c3e21a81f19aa5887a5a4c2c90e547132"
+    },
+    {
+      "locator": "configured-queue-executable-actual-byte-observation",
+      "sha256": "ec2bc67b227326c80bf5d9a32eb661b220ea9af6942ef31bff04d8c06941bd2e"
+    }
+  ],
+  "canonical_source_observation": {
+    "status": "actual-byte-observation-not-clean-Git-proof",
+    "modified_tracked_paths": [
+      "harness/beads.py",
+      "harness/task_gates.py"
+    ],
+    "harness_files": [
+      {
+        "path": "harness/__init__.py",
+        "sha256": "9694537feb51c13c63c4f932c68d07c3582366a2201530230c3358c1c13764fd"
+      },
+      {
+        "path": "harness/admin_references.py",
+        "sha256": "68c57b91029587aa03f0e4d1497e3b45c61b64cc33f92320cd4690e965b4140d"
+      },
+      {
+        "path": "harness/agents.py",
+        "sha256": "5b57327ab0bd18956354a4da16a2609e555c0cad572942726874db8aa942517a"
+      },
+      {
+        "path": "harness/approvals.py",
+        "sha256": "e1ad0022febfbb42b8e14319920d09f9338c9cd2d2ebcc4ad35c181178022df9"
+      },
+      {
+        "path": "harness/babysitter_capture.py",
+        "sha256": "4ea05f0a6f9530892b6e7e055887b6493da6f65d44992e3ab9bbd381760383a9"
+      },
+      {
+        "path": "harness/babysitter_observers.py",
+        "sha256": "99286cb9c25e221cfa5869d122b880ab6cfa028dfb4fc7036020db724d83bfb9"
+      },
+      {
+        "path": "harness/babysitter_queue.py",
+        "sha256": "d8e6b4527350abe81b59b716ede123fd072af5ed8dbcbee88578980b2df74984"
+      },
+      {
+        "path": "harness/babysitter_resolution.py",
+        "sha256": "7c2394934d943d21f89fbe82644066f6a20ff1c5676387aa9e97f91d9d9d3205"
+      },
+      {
+        "path": "harness/beads.py",
+        "sha256": "8dea2996e29b47681c5488da577a5d24ebff265ddbb5134fd8a21bf0a14fcb2d"
+      },
+      {
+        "path": "harness/blocker_cli.py",
+        "sha256": "697e273f33772976ad747b303df2b3fea7eedb3b19cfce8ca144fb7dd71ca188"
+      },
+      {
+        "path": "harness/blocker_receipts.py",
+        "sha256": "319f74b6b26c8a08dc1176aec6a48391a0859fbda2e79f14588457a862dfd773"
+      },
+      {
+        "path": "harness/brain.py",
+        "sha256": "ce551e42a458edb76174924deff0a8f4fce22001c16f116124b6f2c938f5cc4e"
+      },
+      {
+        "path": "harness/brain_hooks.py",
+        "sha256": "0fad79e5e52728b36aa66a956f2073970b2963069dcf0559da8df6ebac6a524e"
+      },
+      {
+        "path": "harness/brain_visible.py",
+        "sha256": "c7c04986b118bebbef0d08060bb53a59f9b0144469f7f4a00d583fba30c09ab5"
+      },
+      {
+        "path": "harness/capabilities.py",
+        "sha256": "45b3d8c827a86d1831b46577c1d10da8ba63864f060388010c6d6325fc096010"
+      },
+      {
+        "path": "harness/channel_status.py",
+        "sha256": "cab3ee20a766d8d6ce098668a4e23cfc2595fe3dd547c3e4c767c1e1e329b90e"
+      },
+      {
+        "path": "harness/channel_status_hook.py",
+        "sha256": "f426aadfa8f2270885c8a86748533e3f6fafaef788292879a227fbe31d59ce2f"
+      },
+      {
+        "path": "harness/cleanup.py",
+        "sha256": "eb4663b5e86fd02342e9d1393a6c27b11fba8b0b25097f11dcd8eb64c29bb53c"
+      },
+      {
+        "path": "harness/cli.py",
+        "sha256": "0797153fc0864c5691d029c09099786ab5e4727258ad6e1a7cc2e3b11a336574"
+      },
+      {
+        "path": "harness/continuation.py",
+        "sha256": "049df96971e810d8e84ce20835e18255f56544d9e612f5efc0762056360ef32f"
+      },
+      {
+        "path": "harness/delivery.py",
+        "sha256": "33bd744e15152c7108ac23d21315b46524018589b7b6606bab0b0ac48fe25fe8"
+      },
+      {
+        "path": "harness/durable_files.py",
+        "sha256": "7ca69bdc2224e9b6300549ec5aed9615288180f48c494ff303731d044b68e306"
+      },
+      {
+        "path": "harness/escalation.py",
+        "sha256": "b57c15a1dd7e3058ef0b87075ff9328a084a81eec3f50d424d63616b2e1ca91a"
+      },
+      {
+        "path": "harness/governance.py",
+        "sha256": "bdf36bdf0bfe68c0a5f6aff09172f16ff401cb821b0e04769a9d8c129d0ecde3"
+      },
+      {
+        "path": "harness/hook_config.py",
+        "sha256": "813d860a8e3980c92a143ce9837f55eaf70f17c51d4b8387f5ed5458e193acae"
+      },
+      {
+        "path": "harness/hook_context.py",
+        "sha256": "134d0ce26a3af301ce724a9aa7674f8932acfe8dc4ea147d2d95ca30fa217c13"
+      },
+      {
+        "path": "harness/ingress_release.py",
+        "sha256": "48494e32f5d1f5f0e9bf358984267674150d6188577987781e2b54787eb6e3a7"
+      },
+      {
+        "path": "harness/lifecycle.py",
+        "sha256": "05b754cfd3aabdf795bc45761883cf5c6b0afa73a363f22d00d4ce2c34dac28b"
+      },
+      {
+        "path": "harness/maintenance.py",
+        "sha256": "8d458e53b16645cc9faafaa659bb3cf2e0a222a96f0f91d292ae372fd4ebded1"
+      },
+      {
+        "path": "harness/manager_notices.py",
+        "sha256": "630d629181e4ce24a3ea317df4f65dd74d07a5f47189199f1bb8fdb02c3b08d4"
+      },
+      {
+        "path": "harness/manager_resolution.py",
+        "sha256": "15aa840027f578d98ef4e3a486d223946545d23344d4092cd10b1f14d69da187"
+      },
+      {
+        "path": "harness/manager_tasks.py",
+        "sha256": "ab89a326ab3122bf809951457ebd1fbcc81a33dd25d31af8a0194a0fc461c337"
+      },
+      {
+        "path": "harness/marmot.py",
+        "sha256": "28c2a2657a02eeaa5ff6113247520f6fc67e12c9ce938d0353ac929a15727458"
+      },
+      {
+        "path": "harness/memory.py",
+        "sha256": "ecd11e11756b8e044656cc62f4d6cc678392c3319a1f3625ed7c0255f4d945f4"
+      },
+      {
+        "path": "harness/merge_identity.py",
+        "sha256": "216e8c59a8271005f324446d807984d9b6c69fea4f1d45203430279c5e03ea54"
+      },
+      {
+        "path": "harness/native_hook.py",
+        "sha256": "2dc9bd6c0fde4c96f048005c31d92be678aa2db216329bfbda5cb4d7028055a4"
+      },
+      {
+        "path": "harness/notify.py",
+        "sha256": "21bac351c98cba5a2d91006f49b9c8dbc370c4c55858b942ef818c06cc790db6"
+      },
+      {
+        "path": "harness/operator_asks.py",
+        "sha256": "31ebeb136a88afbc4e1a0d34f5212b1c7c036007d13ba115a6f583e4e361af4c"
+      },
+      {
+        "path": "harness/outbox_dispositions.py",
+        "sha256": "578270523e9e4444fcd4b6d9ec797221cdbb1d53ab24c5272b44118408666244"
+      },
+      {
+        "path": "harness/permission_consent.py",
+        "sha256": "18d3c22dd5b12f17050474024f83c99045eca7708b6e321b4d90deebcc40faf9"
+      },
+      {
+        "path": "harness/permission_relay.py",
+        "sha256": "47907fecd0ecad5653d6fc8cb1385dd7c998937398a1ae5ba7fdbaf49c329204"
+      },
+      {
+        "path": "harness/pr_watch.py",
+        "sha256": "5b7830d1f1a6f38fa784610a9b94971345b7679cc06d43c2c0454b212438adee"
+      },
+      {
+        "path": "harness/provisioning.py",
+        "sha256": "be8712fd7a4213f748173b14d052e4de30aa47362d570cf6565eb071e466d165"
+      },
+      {
+        "path": "harness/queue_cli.py",
+        "sha256": "b4e909277dc6982cff59e076033d4ca61d97e18059aa23c322c84ae485a84658"
+      },
+      {
+        "path": "harness/queue_hook.py",
+        "sha256": "c8e4b2bb2986991e8ec74b5aa1a795034128c5121f5fac7fe60b0f3bf8140cc1"
+      },
+      {
+        "path": "harness/reactions.py",
+        "sha256": "f9e0f7f54411139839edf1767afca1680a8527b03bddbd2865dd02a494be1c51"
+      },
+      {
+        "path": "harness/review_cli.py",
+        "sha256": "778c2c866852749057b7cdd273683a9f516354857e6dc20253c397b7472e2bfa"
+      },
+      {
+        "path": "harness/review_dispatch.py",
+        "sha256": "3bfe2e742a79b97d5bb5c19ae34e3a01463f88f9349ffce620c13747fc07f653"
+      },
+      {
+        "path": "harness/review_evidence.py",
+        "sha256": "4658b4fd76ae2d510d20ffc05acfcac9152bdda29d38878bbc08139c3e017efd"
+      },
+      {
+        "path": "harness/review_gate.py",
+        "sha256": "2058ee81670008ee6e822609df8895f03f5429883131f3ca0270f39de21e077c"
+      },
+      {
+        "path": "harness/review_runner.py",
+        "sha256": "5f18d8466341eb2a146342085dce77efcc42d70964721be54ccebd42016535c6"
+      },
+      {
+        "path": "harness/review_schedule.py",
+        "sha256": "74c8ebfa106b3288468bde13d4973e3988fa27efdcbd4aafe7b76249c13cc5c2"
+      },
+      {
+        "path": "harness/review_shell.py",
+        "sha256": "d6109a6b80349dbdbf1c808f970f849b9b78a4af308d969a377c5468f6824aab"
+      },
+      {
+        "path": "harness/reviews.py",
+        "sha256": "34e03f8e56be1128a559c01928a2ae86e1f6f575a5359aacd8be5ee0ef714e16"
+      },
+      {
+        "path": "harness/routing.py",
+        "sha256": "aa7686de8c4a9ebbcac49dfbf00f11e50388bf4cd147262215e953b7726c6c74"
+      },
+      {
+        "path": "harness/run_closure.py",
+        "sha256": "9004e471dfb26abaee94a8e61a0aa31abde8b4626477235976df8644e086310d"
+      },
+      {
+        "path": "harness/runtime_repair.py",
+        "sha256": "dfd7e7a7b2d22eaf63d7b2d90553f7319ad62cb210055a31fd0ec8c1abd8e306"
+      },
+      {
+        "path": "harness/secondary_worker.py",
+        "sha256": "b1db7d81bbc0304b1781e4ee339fa19c1ce0f77e116569ca7091fc0c59d5d4cb"
+      },
+      {
+        "path": "harness/status.py",
+        "sha256": "2dd5f883f34d69bed4c1ea50a482b4ed6c2faaaa0769a78804b33b06aba16e3c"
+      },
+      {
+        "path": "harness/store.py",
+        "sha256": "f3f7b98980ecdf66c587ba90d29afebe1b702e913db1a7fe894aa60b09bf717e"
+      },
+      {
+        "path": "harness/supervisor.py",
+        "sha256": "1c472d56fbc7939e8c78331e504203d786d7a0add204a204c4331f2cf1b1ac42"
+      },
+      {
+        "path": "harness/task_blockers.py",
+        "sha256": "0e448d8af2d5f3c9e179df551f7a3d41b0a8b18b7af4f80f9c02d411736ba9dd"
+      },
+      {
+        "path": "harness/task_delivery.py",
+        "sha256": "6c65e166bce22200482f4dcefe2291885671366770b5477dbff2224c24429c22"
+      },
+      {
+        "path": "harness/task_formulas.py",
+        "sha256": "f42feab9160963637f6946d3d26999c4cafbc9ad2bfbb2b6f24b1e6f17448685"
+      },
+      {
+        "path": "harness/task_gates.py",
+        "sha256": "4a9ec2df9cec0f01b8c254e379eeb68686b4052aeb6939cd899c6f8955f80223"
+      },
+      {
+        "path": "harness/task_handoffs.py",
+        "sha256": "5375cafa9083f4358b506f6952926ffa8b097c99890f33f05853e9d874b1dad7"
+      },
+      {
+        "path": "harness/task_hooks.py",
+        "sha256": "a66adb47ec101a5886d6d8b870ab1f15b74a78de8cc6e0475e288e9449f3d4ae"
+      },
+      {
+        "path": "harness/task_interrupt.py",
+        "sha256": "b81bbac627cc3a0e70e4f823648d1ae5e8a734525afa3a541413729b193917fc"
+      },
+      {
+        "path": "harness/task_order.py",
+        "sha256": "a8695f85fd01d5c5a35363115175d90c75ce649e8720449fd4c1a6c062ecd339"
+      },
+      {
+        "path": "harness/task_progress.py",
+        "sha256": "0fca891fcf91911321e548e0fdc784264aeeef0694cd7914f24239ccfa255a41"
+      },
+      {
+        "path": "harness/task_review.py",
+        "sha256": "9d296e53456f67c3bcddb73e508946c2999db6b03d703f049b793b508484293a"
+      },
+      {
+        "path": "harness/task_stages.py",
+        "sha256": "d7cf01870118cb44f18b8063ac34e0502b0140b35dbdb2f796881d283b5a1e2c"
+      },
+      {
+        "path": "harness/task_workspace.py",
+        "sha256": "e2286b70ab28aa924831addb393b9def4918a1fe290c1301400763439c3d57b2"
+      },
+      {
+        "path": "harness/tasks.py",
+        "sha256": "c1dc8b78417a52462b6ef2e0be500cd6a8c4440a570e752201c77771c27c659b"
+      },
+      {
+        "path": "harness/terminal_observation.py",
+        "sha256": "d28f8d31ba1f007294f951fafca34a9d9a5a34ded67a9ae4099ce4bc87f62997"
+      },
+      {
+        "path": "harness/tmux.py",
+        "sha256": "a977888922118379ba70fa4f40378c3d2d05ea4c2f86c49a76aeadee393a042d"
+      },
+      {
+        "path": "harness/transcript_cleanup.py",
+        "sha256": "00b62133260420bb8300132dafdcd95b38dfcac73f4b6df78eeb4e9e9b9ffbbd"
+      },
+      {
+        "path": "harness/transition_cli.py",
+        "sha256": "8a25e5e6b597c3d2a226ccdada5c1aac1e72b4fe15685331ef76a889997a0bbe"
+      },
+      {
+        "path": "harness/transitions.py",
+        "sha256": "4ce1a4aa76a14830fd492c403f7fb1fef5f7a617e327e926daf377e8b86289d4"
+      },
+      {
+        "path": "harness/version.py",
+        "sha256": "46b19dff74856ce4e3d2485c21e7c9bf461c311a4dbc108fc65c1f2eafbc143a"
+      },
+      {
+        "path": "harness/worker_identity.py",
+        "sha256": "3e21479c786b59a73764e0905e7c17f51dc787f9ae462763d3fa3ad6ba87a646"
+      },
+      {
+        "path": "harness/workspace.py",
+        "sha256": "fdcfef9fd9a6b80d7a94055f72d1660b53b881bc2d170c8dc7b50109a212398e"
+      }
+    ]
+  },
+  "reviewed_integration_to_preserve": {
+    "repository": "harness-improvements",
+    "commit": "d1b92f87bf342a3eff846ef8802a647801fdb50e",
+    "status": "existing-reviewed-integration-not-authority-for-this-bridge"
+  },
+  "verification_limits": [
+    "One actual HIGH design review yielded REVISE; this is author incorporation, not a second review or validation.",
+    "Same-daemon identity read proved; direct-input boolean and any effect behavior remain unproved.",
+    "No code/runtime tests/task-queue command/deployment/input/model call by author.",
+    "Installed evidence is snapshot-only; implementation/deployment must preserve exact closure and controller pins."
+  ],
+  "revision": "d2",
+  "review": {
+    "count": 1,
+    "reasoning": "high",
+    "model": "Claude Opus as requested; preserve root invocation metadata separately",
+    "result": "REVISE on d1; author incorporated once; no second review/validation",
+    "reviewed_head": "e22daec876d59888331550786f4867b4fcb4c8b1"
+  },
+  "incorporation_artifacts": [
+    {
+      "path": "docs/reviews/admind-existing-session-wake-r1.md",
+      "sha256": "94c785b8f940c89ba6822fcfaeb8b31a80c03e0124c1d1e74a60140126c63f7c"
+    },
+    {
+      "path": "docs/reviews/admind-existing-session-wake-r1-dispositions.json",
+      "sha256": "567153d948c7170131fd17dbc4c2d39dae66abfa85af517810a44896bc3e5da0"
+    },
+    {
+      "path": "docs/reviews/admind-existing-session-wake-feasibility.json",
+      "sha256": "76c3fcc6f9088c59b0067fa084bc11f6d3eaa9d3f8c9072cbea45a463726151d"
+    }
+  ],
+  "native_approval_design_ref": {
+    "path": "docs/adr/2026-10-16-admind-existing-session-wake.md",
+    "sha256": "389e4355f5b395c8e52ed54622408952818bdc45cd81e2f0f1bd92c13d8f121c",
+    "representation": "byte-identical ADR-path copy for actual native approval adr_path_glob, not a second design"
+  }
+}

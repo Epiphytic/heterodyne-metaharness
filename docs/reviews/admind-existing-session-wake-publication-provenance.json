@@ -1,0 +1,130 @@
+{
+  "schema": "byte-exact-public-design-archive-v1",
+  "source_repository": "Epiphytic/hermes-maintenance",
+  "source_commit": "59ffe75c32932b60597fd2c43a945a98e383957a",
+  "source_parent": "e22daec876d59888331550786f4867b4fcb4c8b1",
+  "source_signature": "git verify-commit exit0; Good git signature openclaw ED25519 SHA256:cazAkry1QuA/9yTEUW+XdXomJz+weJjk+1Jzpu07wzU",
+  "publication_repository": "Epiphytic/heterodyne-metaharness",
+  "publication_branch": "design/admind-existing-session-wake",
+  "status": "design-after-one-HIGH-review-and-author-incorporation; not-human-approved; no-second-review-or-validation",
+  "review": {
+    "actual_count": 1,
+    "effort": "HIGH",
+    "result": "REVISE on source parent; author incorporated once",
+    "raw_sha256": "94c785b8f940c89ba6822fcfaeb8b31a80c03e0124c1d1e74a60140126c63f7c",
+    "raw_path": "docs/reviews/admind-existing-session-wake-r1.md",
+    "dispositions_path": "docs/reviews/admind-existing-session-wake-r1-dispositions.json"
+  },
+  "files": [
+    {
+      "path": "docs/adr/2026-10-16-admind-existing-session-wake.md",
+      "source_blob": "96e30789f7daaf60de4585de442a80aa54706d84",
+      "sha256": "389e4355f5b395c8e52ed54622408952818bdc45cd81e2f0f1bd92c13d8f121c",
+      "bytes": 25028
+    },
+    {
+      "path": "docs/designs/2026-10-16-admind-existing-session-wake.md",
+      "source_blob": "96e30789f7daaf60de4585de442a80aa54706d84",
+      "sha256": "389e4355f5b395c8e52ed54622408952818bdc45cd81e2f0f1bd92c13d8f121c",
+      "bytes": 25028
+    },
+    {
+      "path": "docs/reviews/admind-existing-session-wake-feasibility.json",
+      "source_blob": "2e43fa106b2c41a2f2c7f8d2817a58b8a2587165",
+      "sha256": "76c3fcc6f9088c59b0067fa084bc11f6d3eaa9d3f8c9072cbea45a463726151d",
+      "bytes": 4038
+    },
+    {
+      "path": "docs/reviews/admind-existing-session-wake-inputs.json",
+      "source_blob": "b558f477173e81f733e7c1dac77b7373431558de",
+      "sha256": "38ca1b70dd93c03efc4d6442c9e2422b4ab3cdb6b6ec4e3e2e6ad2c9b4dd2d2f",
+      "bytes": 23316
+    },
+    {
+      "path": "docs/reviews/admind-existing-session-wake-r1-dispositions.json",
+      "source_blob": "96e4bb9ed78d79d92e2fe13fde6ccb9e8c011d06",
+      "sha256": "567153d948c7170131fd17dbc4c2d39dae66abfa85af517810a44896bc3e5da0",
+      "bytes": 14759
+    },
+    {
+      "path": "docs/reviews/admind-existing-session-wake-r1.md",
+      "source_blob": "1543c23415bb4208eb4095ed227dc79021dba7b8",
+      "sha256": "94c785b8f940c89ba6822fcfaeb8b31a80c03e0124c1d1e74a60140126c63f7c",
+      "bytes": 10502
+    }
+  ],
+  "feasibility_source_hashes": [
+    {
+      "locator": "handoff/codex/autonomous-resume/wake-gap-prep/current-process-seam.json",
+      "sha256": "0a8be89ed762bc755f5e2621f3bd4ecb2a214541361233bb6eee59036739f246"
+    },
+    {
+      "locator": "handoff/codex/autonomous-resume/wake-gap-prep/same-daemon-readonly-probe.json",
+      "sha256": "b728d5a1a1ba4debc54938286b687a4f898ce33d57489f0e2c6f6f42d24b9951"
+    },
+    {
+      "locator": "handoff/codex/autonomous-resume/wake-gap-prep/same-daemon-websocket-readonly-probe.json",
+      "sha256": "0a1312c7f64bfba33274a22a811b8913bb68d42c8904b1cd3bd4754c42be7d59"
+    },
+    {
+      "locator": "handoff/codex/autonomous-resume/wake-gap-prep/same-daemon-protocol-selected.json",
+      "sha256": "779512d2d8541f090ac0b4551d03fad92a7bdefb1ec1bc66fb4f087bdfb345d5"
+    },
+    {
+      "locator": "handoff/codex/autonomous-resume/wake-gap-prep/thread-direct-input-schema.json",
+      "sha256": "b1d449dd0adc410aa9a499a377d4637ffdc8a277069e92eef507c2193190ad6f"
+    },
+    {
+      "locator": "handoff/codex/autonomous-resume/wake-gap-prep/current-existing-thread-feasibility.md",
+      "sha256": "6659c0e3798748c4a384c3fd383f95a2bc46d176525f065b157e0b885693906a"
+    },
+    {
+      "locator": "handoff/codex/autonomous-resume/wake-gap-prep/current-existing-thread-feasibility-inputs.json",
+      "sha256": "a7fe42103d8711c3d7987d2d629f98b79b62f062ad962628ea0b6b0f272c3e16"
+    },
+    {
+      "locator": "handoff/codex/autonomous-resume/wake-gap-prep/bounded-turn-lifecycle-schema.json",
+      "sha256": "c0554530f3aac7d3824e6d67f9c0e3847475e3367562b9de2e22d95668394bd3"
+    }
+  ],
+  "installed_schema_pins": [
+    {
+      "path": "v2/ThreadReadParams.json",
+      "sha256": "dfe040c6ac71d30795b8be3f3ff232e66f362a37f883b491e5d1ea367f470db4"
+    },
+    {
+      "path": "v2/ThreadReadResponse.json",
+      "sha256": "59d458102e90380c1a436346aba78ad3cd64178b022113a63a0d0731a925d60f"
+    },
+    {
+      "path": "v2/ThreadTurnsListParams.json",
+      "sha256": "2a8b93d7d4437cc25e16a1dde16d8db3c338d39e16c5eece2a56e943a21577d7"
+    },
+    {
+      "path": "v2/ThreadTurnsListResponse.json",
+      "sha256": "eba82395d4479bb28091bbe6f39c929c7c66a30d7b0eeabedac39057ce72aceb"
+    },
+    {
+      "path": "v2/ThreadItemsListParams.json",
+      "sha256": "d5cf9784413f1d1abba756e04e48b273a9d12ab2c5675442e91b6a4ee55e19f0"
+    },
+    {
+      "path": "v2/ThreadItemsListResponse.json",
+      "sha256": "0ecf37ff62571c8411aab271ea65d22be4da1108cc2fd2dffb15a7034bfedb28"
+    },
+    {
+      "path": "v2/TurnStartParams.json",
+      "sha256": "835e0d4ca1a0ddc4fb6db1e2b3249dd67f07c50ac2506092ba81543efc92829b"
+    },
+    {
+      "path": "v2/TurnStartResponse.json",
+      "sha256": "20e837d07826b9c01578ff40b962ab08f58a355a9984e96226733498514e9bad"
+    },
+    {
+      "path": "v2/TurnSteerParams.json",
+      "sha256": "857e7a2b061ae46ed6aedea6a5fddd3a6ce14f0334bf7eafaf10d4cbe68ec78b"
+    }
+  ],
+  "privacy": "Private probes, process paths, transcripts and responses are not copied. Exact review contains a reviewer-mentioned historical default tmux socket; it is not the proven runtime socket. Evidence locators are relative provenance only.",
+  "filing_check": "Each file byte-equal to exact signed source Git blob; ADR and main design byte-identical. No new model/review/runtime test."
+}

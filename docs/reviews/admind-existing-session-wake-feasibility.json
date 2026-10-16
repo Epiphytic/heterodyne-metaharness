@@ -1,0 +1,100 @@
+{
+  "schema": "existing-daemon-feasibility-v1",
+  "status": "bounded-read-only-observation-not-send-proof-or-authority",
+  "observed_native_uuid": "01a140f3-0d04-79b1-84df-7ff665412a6d",
+  "installed_version": "0.163.0",
+  "installed_binary_sha256": "399ff69c431c066e40de318fba45c2b07f45a76b19939d247ee4828fc70c4215",
+  "transport": "RFC6455 WebSocket over pinned existing Unix socket",
+  "successful_methods": [
+    "initialize",
+    "initialized",
+    "thread/read(includeTurns=false)"
+  ],
+  "thread_whitelist": {
+    "id_equals_sessionId": true,
+    "source": "vscode",
+    "ephemeral": false,
+    "runtime_status": "active",
+    "activeFlags": [],
+    "turns_returned_count": 0
+  },
+  "limits": [
+    "No input/start/resume/steer/model request sent.",
+    "Runtime canAcceptDirectInput field present; value NOT retained; generated Thread definition omits it.",
+    "turn/start has no expected-idle CAS; clientUserMessageId is NOT proven server dedup.",
+    "thread/turns/list and thread/items/list are schema-supported, not runtime-probed here."
+  ],
+  "official_protocol": "https://learn.chatgpt.com/docs/app-server",
+  "private_evidence": [
+    {
+      "locator": "handoff/codex/autonomous-resume/wake-gap-prep/current-process-seam.json",
+      "sha256": "0a8be89ed762bc755f5e2621f3bd4ecb2a214541361233bb6eee59036739f246"
+    },
+    {
+      "locator": "handoff/codex/autonomous-resume/wake-gap-prep/same-daemon-readonly-probe.json",
+      "sha256": "b728d5a1a1ba4debc54938286b687a4f898ce33d57489f0e2c6f6f42d24b9951"
+    },
+    {
+      "locator": "handoff/codex/autonomous-resume/wake-gap-prep/same-daemon-websocket-readonly-probe.json",
+      "sha256": "0a1312c7f64bfba33274a22a811b8913bb68d42c8904b1cd3bd4754c42be7d59"
+    },
+    {
+      "locator": "handoff/codex/autonomous-resume/wake-gap-prep/same-daemon-protocol-selected.json",
+      "sha256": "779512d2d8541f090ac0b4551d03fad92a7bdefb1ec1bc66fb4f087bdfb345d5"
+    },
+    {
+      "locator": "handoff/codex/autonomous-resume/wake-gap-prep/thread-direct-input-schema.json",
+      "sha256": "b1d449dd0adc410aa9a499a377d4637ffdc8a277069e92eef507c2193190ad6f"
+    },
+    {
+      "locator": "handoff/codex/autonomous-resume/wake-gap-prep/current-existing-thread-feasibility.md",
+      "sha256": "6659c0e3798748c4a384c3fd383f95a2bc46d176525f065b157e0b885693906a"
+    },
+    {
+      "locator": "handoff/codex/autonomous-resume/wake-gap-prep/current-existing-thread-feasibility-inputs.json",
+      "sha256": "a7fe42103d8711c3d7987d2d629f98b79b62f062ad962628ea0b6b0f272c3e16"
+    },
+    {
+      "locator": "handoff/codex/autonomous-resume/wake-gap-prep/bounded-turn-lifecycle-schema.json",
+      "sha256": "c0554530f3aac7d3824e6d67f9c0e3847475e3367562b9de2e22d95668394bd3"
+    }
+  ],
+  "installed_schema_pins": [
+    {
+      "path": "v2/ThreadReadParams.json",
+      "sha256": "dfe040c6ac71d30795b8be3f3ff232e66f362a37f883b491e5d1ea367f470db4"
+    },
+    {
+      "path": "v2/ThreadReadResponse.json",
+      "sha256": "59d458102e90380c1a436346aba78ad3cd64178b022113a63a0d0731a925d60f"
+    },
+    {
+      "path": "v2/ThreadTurnsListParams.json",
+      "sha256": "2a8b93d7d4437cc25e16a1dde16d8db3c338d39e16c5eece2a56e943a21577d7"
+    },
+    {
+      "path": "v2/ThreadTurnsListResponse.json",
+      "sha256": "eba82395d4479bb28091bbe6f39c929c7c66a30d7b0eeabedac39057ce72aceb"
+    },
+    {
+      "path": "v2/ThreadItemsListParams.json",
+      "sha256": "d5cf9784413f1d1abba756e04e48b273a9d12ab2c5675442e91b6a4ee55e19f0"
+    },
+    {
+      "path": "v2/ThreadItemsListResponse.json",
+      "sha256": "0ecf37ff62571c8411aab271ea65d22be4da1108cc2fd2dffb15a7034bfedb28"
+    },
+    {
+      "path": "v2/TurnStartParams.json",
+      "sha256": "835e0d4ca1a0ddc4fb6db1e2b3249dd67f07c50ac2506092ba81543efc92829b"
+    },
+    {
+      "path": "v2/TurnStartResponse.json",
+      "sha256": "20e837d07826b9c01578ff40b962ab08f58a355a9984e96226733498514e9bad"
+    },
+    {
+      "path": "v2/TurnSteerParams.json",
+      "sha256": "857e7a2b061ae46ed6aedea6a5fddd3a6ce14f0334bf7eafaf10d4cbe68ec78b"
+    }
+  ]
+}
