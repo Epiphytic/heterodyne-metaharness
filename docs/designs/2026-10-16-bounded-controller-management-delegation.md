@@ -1,8 +1,9 @@
-# Bounded controller management delegation d2
+# Bounded controller management delegation d3
 
 Design task `btq-so7ma`, Codex author, 2026-10-16. **Proposed only:** no grant,
-implementation or deployment. Actual Claude R1 requested revision (42 findings);
-its report and consumed round remain preserved. Two rounds remain. All questions
+implementation or deployment. Actual Claude R1 requested revision (42 findings) and R2 requested revision
+(24 findings) on `251d6b5fbb53ab2385195586c9a3dee22d76a6b4`. Both actual
+issued rounds and reports remain preserved; only final R3 remains. All questions
 and consent use authenticated Marmot/admind, never terminal/chat substitutes.
 
 ## 1. Scope, prerequisites and trust
@@ -17,14 +18,27 @@ is itself an explicit operational authorization through Marmot, not an extra cod
 review or a design change when the immutable rules and installed code are unchanged.
 
 [Inputs](../reviews/bounded-controller-delegation-inputs.json) and
-[R1 dispositions](../reviews/so7ma-r1-dispositions.md) distinguish historical
-contracts, observations and proposals. `btq-zcd1l` d2 is a **proposed prerequisite**
-for nonimplementation kinds; no approval or deployment is inferred from its
-signed source. Resolve its genuinely approved/deployed compatible revision first.
+[R1 dispositions](../reviews/so7ma-r1-dispositions.md) and
+[R2 dispositions](../reviews/so7ma-r2-dispositions.md) distinguish historical
+contracts, observations and proposals. `btq-zcd1l` d3 is a **proposed prerequisite**
+for the shared management journal/dispatcher and all endpoint role classification,
+including implementation tasks, as well as nonimplementation kinds. No approval
+or deployment is inferred from that proposed revision. Its final R3 at
+`30a904b10c30a386c5867e6d7b8cd8f494b33ca0` returned REVISE16; all three Z rounds
+are consumed and any d4 correction remains unreviewed pending exact Marmot resolution.
+Resolve its genuinely
+approved/deployed compatible revision first; this design extends that one surface.
 Implementation task pins and native final approval blockers remain mandatory.
 The historical controller integration design at full `3158263d049ea0a6b5cd398b40df95b704836d4d`
 in the separate heterodyne-metaharness repository governs lifecycle evidence,
-not delegated authority. Its source prose alone is not approval evidence; deployment
+not delegated authority. The original management d2 is genuinely approved by native
+`btq-ovvzt`, Liam at `2026-10-15T19:58:20Z`, ADR
+`391516cd919234e69626970cb2e61b94299ed60e`, digest
+`64ff5d9c77c75a9c69c8ba6d0c6aa28f74bb84f5fe354973dd94704a93c05f31`.
+Its historical channel was cli recording the user’s approval while admind was
+latched, not a fabricated Marmot reference. Scope was implementation/offline only,
+excluding deployment/master merge/recovery; archive pending prose is historical.
+Its source prose alone is not approval evidence; deployment
 must retain genuine native approval provenance. This amendment never resets review
 history. Count distinct actual **issued** model invocations, including failed,
 aborted, running and unresolved issuance; proven unspawned reservations differ.
@@ -43,7 +57,12 @@ adapter and compatible pinned Hermes management installer. Every API below is
 **proposed**, not currently callable. Code review and explicit deployment approval
 must precede use. Current explicit operator merge authority supersedes historical
 additional master-go wording; no new per-merge question is imposed. New/changed
-designs and deployments retain their real approvals, links and deviations.
+designs and deployments retain their real approvals, links and deviations. Human
+Marmot approval of this changed design ratifies this mechanism; no local manifest
+can manufacture that decision. Terminal access permits read-only diagnostics and
+repair already covered by exact existing authority only. It never substitutes for
+Marmot consent, including exceptional recovery. Durable unanswered asks remain in
+admind/outbox during outages; legacy terminal-consent hints are superseded.
 
 ## 2. Exact descriptor, facts and canonical bytes
 
@@ -87,7 +106,8 @@ Unicode scalar values (reject surrogate code points), NFC already normalized
 unknown keys, floats/NaN/infinity, negative/out-of-range integers, unexpected null,
 empty/duplicate IDs and unknown versions. Arrays preserve operation order; sets
 are sorted and unique as schema specifies. Schema integer domains are explicit:
-version=1 and ordinal=0..31; no arbitrary numeric fields. SHA256 covers **all exact
+version=1; array index is the implicit ordinal 0..31, not an accepted field. No
+arbitrary numeric fields or explicit ordinal key. SHA256 covers **all exact
 canonical descriptor bytes**, with no embedded self-hash or self-signature.
 Signed Git commit/path/blob bind these bytes; installed allowed-signers trust must
 verify signatures, never enroll a key because the artifact names it. Keep golden
@@ -121,12 +141,23 @@ Same-endpoint edge-type replacement is excluded: native one-edge-per-pair behavi
 cannot safely promise add-before-remove. Unknown native/protection roles refuse;
 use the separately deployed Z classifier and exact data-only endpoint purpose facts,
 never title-only role inference or approval-card waiver of known gate evidence.
+For every removal/replacement, the same grant card must visibly present each
+endpoint purpose, decisive native excerpt and protection inventory required by Z.
+Exact full facts digests are bound by the immutable signed descriptor link and
+private canonical reproduction manifest; the displayed12-hex digest is only a
+human correlation hint, never the apply/authorization comparison. This is an explicit finite alternative to Z’s per-operation
+card, not an omission/waiver; unknown/genuine gates still refuse. If these facts
+do not fit, reduce the operation set before signing.
 
 Descriptor preparation reads the **whole ordered graph plan**. At operation i,
 before facts equal initial facts plus only the exact verified deltas of earlier
 operations; endpoint reverse edges/counts follow that same prediction. Verify the
 predicted progression mechanically before posting, not independent incompatible
-initial snapshots. Exact unrelated comments/content drift still holds; this is an
+initial snapshots. Later operations are admitted only after every preceding
+operation is verified complete. A held, declined, no-intent-aborted, expired or
+unknown earlier operation blocks the entire suffix; no skip or refund. A new
+finite descriptor/card may cover the remaining actual state after safe settlement.
+The card explicitly discloses this serial suffix dependency. Exact unrelated comments/content drift still holds; this is an
 intentional availability cost. Only deterministic fields changed by the recorded
 native steps (including native update timestamps with verified associated delta)
 are normalized under the same explicit Z readback contract, never blanket ignored.
@@ -161,55 +192,91 @@ ID and question. This is not installed CLI syntax yet. For first installation, t
 pure `admind delegation render --offline --descriptor-ref REF --facts-file FILE`
 produces the same closed render bundle without daemon writes. Existing supported
 ask posting delivers that exact body through admind; after deployment, proposed
-`prepare --existing-ask ID` imports it only by independently reproducing all body,
-choice and attachment bytes and verifying actual stored delivery/decision. No trust
-is assigned to the poster's assertions. A changed body or unsupported attachment
-refuses import. Offline rendering/posting does not activate or reserve anything.
-The deployment card can therefore also grant finite scope without needing the new
-RPC before its own installation; activation still waits for actual deployed proof.
+`prepare --existing-ask ID` imports it only by independently reproducing all body, choices, immutable links and the
+closed local render-manifest bytes against the actual stored ask. Existing AskPost
+has no attachment field: none is sent or inferred. A body mismatch or unsupported
+shape refuses import. Offline rendering/posting does not reserve or activate.
 
-Trusted daemon renderer displays every task/kind, exact operation/reason, before/
-after ownership or edges, stopped-holder and reconciled-worktree evidence summary,
-controller/run scope, expiry, both policies/required approvers, source links,
-exclusions, no fresh covered-operation questions, same-UID trust and five-second
-initiation limit. Show public grant nonce, 12-hex digest prefix and immutable GitHub
-artifact link; exact full hash is structured attachment data, not free text that
-triggers existing high-entropy secret heuristics. Context-specific nonce/hash
-validation is not a generic secret-scanner bypass. Run existing escaping, secret
-and link checks on all human prose and structured allowlisted digest fields.
+Trusted renderer displays every task/kind, exact operation/reason, before/after
+ownership or edges, Z endpoint-purpose/protection facts, stopped-holder/reconciled
+worktree summary, controller/run scope, expiry, both policies/eligible approvers,
+source links, exclusions, no fresh covered-operation questions, same-UID trust,
+serial-suffix blocking, restart invalidation, likely clock holds after NTP/suspend,
+and five-second initiation limit. Show public32-hex grant ID, informational12-hex
+descriptor digest prefix and exact immutable GitHub blob link pinned to its40-hex
+signed commit/path. Full64-hex descriptor/facts digests remain in canonical local
+render manifest and linked descriptor, verified exactly; no authorization uses the
+short display prefix. This existing LinkSpec form survives the old daemon’s hex
+redactor. Do not put bare64-hex text in old question bodies or claim a typed field
+can bypass the unchanged daemon. All body/choices/links use existing checks; no
+secret-scanner bypass or attachment prerequisite is needed.
 
-Use one existing question body only, <=40 lines and <=3500 characters, including
-forms/footer; actual renderer must satisfy existing narrower deployed limits too.
-No claimed multipart question API. Pure render preflight before publication ensures
-all mandatory facts fit; if not, reduce operations **before signing/publishing**.
-32 is a hard ceiling, not a guarantee a 32-operation card fits. Never truncate,
-post a partial card or hide operation facts in optional More/digests. Mechanical
-scope reduction creates no new model invocation or design review round.
+A combined deployment+grant uses existing **question** AskPost with A=approve exact
+deployment and disclosed finite grant, B=decline/leave paused, recommended B. It is
+not native kind:approval and sets no bead targets/pins; the real stored authenticated
+question decision is retained by deployment verification. Native design approval
+Beads remain separate genuine prerequisites. The trusted body includes design link,
+reviewed release closure and deviations (including explicit none), plus every grant
+fact above. Pure renderer enforces **36 lines/3200 characters including generated
+form/footer**, within native40/3500, on the entire combined output. Reduce operations
+before signing if necessary; 32 is only a ceiling. Require typical one-operation
+combined and standalone positive fixtures. No multipart, optional hidden facts or
+partial post. If even one safe operation cannot fit, standalone later scope is the
+supported bounded alternative, not an invented transport. No mandatory new card
+merely due installation order.
 
-`prepare` persists exact trusted rendered-body/choices/attachment digest. Proposed
-`controller-management-grant-v1` attachment binds canonical descriptor bytes,
-commit/path/blob/hash, private-facts digest, eligible policy principal set and action.
-Do not set ask.targets to replace existing implementation primary pins. Bind the
-real generated question ask ID and outbox part/receipt. Consent eligibility begins
-only after every required card part has confirmed sent delivery; v1 is one part.
-An answer processed before the durable delivery event cannot count: require fresh
-explicit answer afterward, based on Store sequence ordering, not remote timestamps.
-Receipt success is delivery evidence, not human consent.
+Local closed `delegation-render-v1` manifest records canonical descriptor digest,
+commit/path/blob, private-facts digest, exact body/form/choices/recommended/links
+and their hash, policy mapping and render candidate identity. It is data for
+reproduction, not an AskPost attachment or authority. Store binds the actual ask ID
+and sent card receipt. New daemon adds one transactionally ordered delegation
+event sequence containing card-delivery and eligible answer events, not comparisons
+between existing outbox.seq and ask_answers.seq. Only A events after that durable
+delivery event count. Receipt proves delivery, never operator acceptance.
 
-Choice A explicitly activates this exact descriptor; B leaves paused/declines.
-No recommended activation reaction: require explicit textual A with exact grant
-nonce in the registered thread (`A <grant_id>`); reactions/free text do not grant.
-Serialize native authenticated answer intake and activation in the daemon work lock
-and Store transaction order. At activation, at least one current mapped queue-policy
-approver must have explicitly answered A after delivery, and **no recorded non-A**
-from any mapped policy approver may exist. Snapshot all eligible answer sequence
-IDs in the activation envelope; no first-answer/last-answer selection. This preserves
-historical Handoff.check_ask semantics, without inventing an every-operator consent
-gate. Any authenticated contrary answer or withdrawal tombstones pending generation
-or transactionally revokes active grant; later A never erases it. This also applies
-to a combined deployment-and-grant card. Changed policy, loss of every consenting
-principal's current authority, or contradictory history holds. New generation needs
-new genuine operational authority; ordinary unanswered principals do not block.
+**First-install exception requires a fresh reply, not a new question:** old Store
+cannot prove delivery-before-answer. On import after deployment, record an immutable
+baseline containing actual delivered card proof and the complete existing answer
+IDs/hashes. No pre-baseline A activates. The original card clearly says deployment
+may use its existing authenticated A, but grant activation requires another literal
+A in this **same thread after deployed import is acknowledged**. Proposed import
+queues a bounded same-thread status acknowledgement identifying the baseline and
+fresh-reply instruction; it is part of this requested card lifecycle, not unsolicited
+messaging. Import alone is not the eligibility boundary: the new daemon must verify
+that this post-install acknowledgement was actually delivered and record its ordered
+delivery event. Only a fresh A event strictly after that event can activate; an A
+received while acknowledgement delivery is pending remains ineligible. Do not infer
+this ordering from stock timestamps. Keep the question open/answered; do not post another approval card.
+Existing contrary answers are never erased by the baseline. Any unknown old history,
+failed delivery, refusal or inability to reproduce import holds; no inferred order
+from second-resolution timestamps. This extra first-install consent message is an
+explicit availability/interaction cost, not a hidden automatic grant.
+
+Before the new daemon is installed, the card instructs **B reply to its existing
+thread or existing `!answer ASK B`**, and requires admind’s recorded acknowledgement;
+`!grant` is explicitly unavailable then. Import checks every stored answer and
+terminal ask status; B/any non-A tombstones. Old answer-limit exhaustion/refusal
+means no grant import, never presumed consent. Do not cancel/supersede the card
+before import; ambiguous status/answer history HOLD. After installation, new revoke
+commands and priority withdrawal intake below apply even when ordinary ask limits
+are exhausted or the ask is terminal.
+
+Use existing A/B mapping exactly: recommended B means thumbs-up **declines**, as
+shown by the existing footer. Literal A (no grant nonce appended) selects A;
+`A <grant_id>` is not the syntax. Every mapped policy principal’s recorded answer
+whose mapped choice is not A, including free text/unknown reactions/nonce-bearing
+text, is contrary, matching legacy conservative check_ask semantics. The card warns
+to put clarifying questions through a separate Marmot question, not this decision
+thread. No reaction is advertised as activation; a stored reaction mapped B cannot
+accidentally grant. This explicit mapping avoids calling a choice=None free answer A.
+
+Serialize authenticated intake/activation under daemon work lock and Store order.
+At least one current mapped queue-policy approver must have eligible A and no
+recorded non-A may exist; bind the full answer sequence, not first/last selection.
+No unanimity gate. Any genuine contrary/withdrawal tombstones pending or revokes
+active grant transactionally; later A never erases it. Policy/membership changes or
+loss of current consenting authority HOLD. A new generation requires new genuine
+operational authority; unanswered principals alone do not block.
 
 ## 5. Proposed daemon API and revocation
 
@@ -229,11 +296,11 @@ inside reserve/permit/native execution. Existing per-request mode is unchanged.
 | New RPC | Exact semantics |
 | --- | --- |
 | `delegation.activate(grant_id, descriptor_hash, request_id)` | Idempotently recompute trusted artifact/render/delivery, current nonconflicting policy-approver consent, no tombstone, current release/policies/confirmed membership, no membership mutation/latch, stable epoch/time and valid interval. Register immutable activation envelope and return active or HOLD; caller supplies no decision assertion. |
-| `delegation.status(grant_id, descriptor_hash)` | Return registered/awaiting_delivery/awaiting_consent/active/held/revoked/expired/superseded, revision, activation ask, eligible policy principals and operation ledger. Reads never grant execution authority. |
+| `delegation.status(grant_id, descriptor_hash)` | Return registered/awaiting_delivery/awaiting_consent/active/held/revoked/expired/superseded/abandoned/declined, revision, activation ask, eligible policy principals and operation ledger. Reads never grant execution authority. |
 | `delegation.reserve(grant_id, operation_id, request_id, before_hash)` | After successful local preflight, atomically reserve exact next ordered operation; request ID durably exists locally before RPC. Identical retry returns same reservation, conflicting binding refuses. >=60s grant lifetime required; no refund/reset. |
 | `delegation.permit(reservation_id, step_id, attempt_id, before_hash)` | Fresh active authority, policy, time, revision and prior-step verification. Return at most 5s permit clipped to grant expiry, unique permit ID, UTC deadline and server boottime deadline/boot ID. One live attempt per step. |
 | `delegation.renew(reservation_id, step_id, prior_permit_id, attempt_id, no_native_intent_hash)` | Only an expired unstarted permit with exact durable executor proof of no native-intent record, same epoch and unchanged preflight. Atomically retire old attempt, issue new 5s attempt; at most 3 total permit attempts/step. No operation refund, no grant extension, no renewal after intent/uncertainty/revoke/expiry. |
-| `delegation.settle(reservation_id, step_id, event_id, evidence_hash, outcome)` | Append idempotent observational result: verified_exact_after, verified_no_intent, or unknown. Same event/hash retry stable; conflicting event/hash holds as integrity error. Original enrolled trusted actor may settle/read after expiry, policy change or revoke; this grants no effect. Later read-only evidence may upgrade unknown to verified_exact_after, preserving both events. |
+| `delegation.settle(reservation_id, step_id, event_id, evidence_hash, outcome)` | Append idempotent observational result: verified_exact_after, verified_no_intent, verified_not_dispatched, or unknown. Same event/hash retry stable; conflicting event/hash holds as integrity error. Original enrolled trusted actor may settle/read after expiry, policy change or revoke; this grants no effect. Old-epoch records may be settled after restart when the guard is consistent; epoch mismatch forbids effects, not observation. Later read-only evidence may upgrade unknown to verified_exact_after, preserving both events. Guard mismatch uses the recovery path below. |
 
 Proposed daemon Marmot grammar: `!grant revoke <32hex-grant-id>` in the registered
 authenticated operator group, or `!grant revoke` as a reply to its bound card.
@@ -244,11 +311,29 @@ revocation/tombstone in one Store transaction before acknowledgement**, includin
 registered not-yet-active grants. It does not post a second approval question or
 wait for a local client to redeem an answer. Any current mapped queue-policy
 approver may withdraw; mapped-policy-principal B/withdrawal in the activation thread
-uses this same transaction. Current-authorized withdrawal is never undone when
+uses this same transaction **before** ordinary answer_refusal, ask-status/count/byte limits.
+It records a minimal authenticated withdrawal event even if the original ask is
+terminal/full, without appending oversized arbitrary answer text. Late A never
+reopens a terminal question or restores a grant. Current-authorized withdrawal is never undone when
 that sender later loses membership. No free-form/foreign-group/unknown-ID revocation.
 `!grant status <id>` returns bounded state/expiry/outstanding steps; help and the
 activation card give exact revoke instructions. These are proposed command-handler
 extensions, not claims about today's verbs parser.
+
+Revocation intake is ahead of ordinary command authorised() readiness refusal.
+When authenticated native sender/group and fresh policy are available, it commits
+withdrawal even if a nonauthority readiness condition would deny other commands.
+If current authority cannot be established, retain a bounded authenticated potential
+withdrawal event and immediately HOLD that named grant pending resolution; it
+cannot grant anything. Unauthenticated/foreign-group/malformed events never enter
+this path. Resolve with fresh policy to recorded revoke or explicit rejected-event
+evidence; never silently discard an acknowledged potential withdrawal. Any gap in
+registered-group observing ingress, membership uncertainty or command processing
+health permanently holds affected grants, with no automatic resume after recovery:
+this prevents a lost offline revoke from being followed by resumed permits. Permit/
+renew/reserve require healthy observing revocation ingress and no pending withdrawal.
+Fresh operational consent is needed after such a visibility hold, not a liveness
+assumption. Bound/deduplicate these events using existing native message IDs.
 
 No new unsolicited audit-notice channel is authorized. Existing native/local durable
 audit remains; only bounded registered card delivery, command acknowledgements and
@@ -296,6 +381,22 @@ all host state is outside trusted-host scope, not claimed prevented. Clock recov
 uses authenticated Marmot diagnostics/repair authority for a stable new epoch;
 old held/revoked/expired grants never revive. No local clock edit grants consent.
 
+Guard mismatch does not block ordinary Marmot question/answer transport or read-only
+`delegation.status`/management inspect. Proposed `admind delegation recover --inspect`
+returns exact old/current guard/journal heads and retained operation digests without
+repair. Proposed `admind delegation recover --ask ASK --expect RECOVERY_DIGEST`
+accepts only a genuine current-policy authenticated Marmot question covering those
+exact heads, preserved unknown steps and creation of a new invalidating epoch.
+It takes the daemon work lock, durably retains both heads/original records, advances
+the external guard and SQLite to a new consistent invalidating incarnation, never
+rolls either back, and leaves all old grants invalid. Lost recovery response is
+idempotent by saved recovery ID/digest; inconsistent further drift HOLD. This is
+explicit new recovery support, not an existing API or a terminal approval route.
+After consistency, the original enrolled actor may append observational settlement
+for old-epoch reservations; no new permit or grant revival follows. Unknown native
+effects still require Z’s exact predecessor-bound Marmot reconciliation, independently
+of repairing delegation journal integrity.
+
 ## 7. Executor state machine and exact native boundary
 
 Acquire existing controller/receiving/holder locks in native order, pause pickup,
@@ -305,14 +406,22 @@ request ID and complete canonical facts first; lost reserve reply retries that
 same ID. Never generate another ID to evade consumed/ambiguous history. One grant
 operation at a time; native lane capacity remains an independent bound.
 
-Use a new scoped Queue subclass in the management adapter, not a generic caller
+Use Z’s management-owned format2 state machine and a new scoped Queue subclass in the management adapter, not a generic caller
 command hook. Its `bd_op` override intercepts an exact allowlist of expected mutation
 argv, target and step hash; read-only calls remain ordinary. Existing `Queue.bd_op`
 is the subprocess boundary used by Management._mutate_steps and Handoff.move.
+Do not let legacy Management._mutate_steps save issued or Handoff.move save moving
+as a native-intent proxy. The new management-owned adapter separates those states,
+overrides both dependency and reclaim reducers, and classifies a permit refusal
+as held_unissued, never catches it as a dispatched native error.
 Do not depend on entry into Handoff.move as the authorization instant: it can do
-worktree/fence/reservation work before its `bd_op`. Proposed adapter must hold
-all established locks and perform the last exact native-facts checks **before**
-requesting a permit. Inside override, validate permit/deadlines, fsync native-intent,
+worktree/fence/reservation work before its `bd_op`. Proposed adapter performs full preflight under established locks before
+requesting a permit, then performs final locked revalidation after receiving it. As in Z, release the entire parent/lane/holder lock stack
+before every admind RPC; retain only durable fence/reservation evidence. After
+reserve/permit, reacquire in original order and revalidate exact record/native facts
+within the unchanged permit window. Never retain lane while reacquiring parent.
+If this cannot finish within5s, HOLD or bounded no-intent renewal; do not extend
+the deadline. Inside the write-boundary override, validate permit/deadlines, fsync native-intent,
 then recheck boottime/UTC immediately before `subprocess.Popen` of the exact native
 write. No awaited/RPC/worktree work may intervene. If fsync used up the window,
 record intent_not_dispatched and HOLD; do not renew/reissue automatically. Native
@@ -320,15 +429,31 @@ process creation is the defined initiation boundary; scheduler and DB completion
 are not atomically tied to remote revocation. Preserve timeout/unknown handling.
 Never relax native gates or permit arbitrary argv to obtain this boundary.
 
-Durable states: prepared -> reserved -> permitted -> native_intent -> dispatched ->
-verified/unknown -> settled. `permitted` is a daemon authorization, distinct from
+Closed executor step states: prepared -> reserved -> permitted -> native_intent ->
+dispatched -> verified|unknown -> settled. Additional terminal no-dispatch state
+`intent_not_dispatched` is legal only after durable intent plus positive live-executor
+proof Popen was never invoked; its settle outcome is `verified_not_dispatched`.
+A crash leaving intent without that positive record is unknown, never inferred safe.
+Grant registration additionally has abandoned/declined terminal states as in status. `permitted` is a daemon authorization, distinct from
 executor `native_intent`. Preflight refusal records HOLD before intent; expired
 unstarted permit can use bounded renew only with proven absence of intent. Any
-native_intent, even crash before dispatch, prohibits automatic second invocation.
+native_intent, including proven intent_not_dispatched, prohibits automatic second
+invocation under that operation; positive no-dispatch can release resources safely,
+not refund or retry the slot. A crash without proof remains unknown.
 After dispatch/timeout/crash, recover by read-only full readback and settle; never
 infer retry authority from apparently unchanged state. Unknown effects retain
 fence/reservation/capacity and paused pickup until exact evidence or a **new scoped
-Marmot management card** authorizes specific reconciliation. No blind refund/abort.
+Marmot management card** authorizes specific reconciliation. No blind refund/abort. Before native intent, or with verified_not_dispatched,
+management’s format2 reducer may release only exact locally created fence/reservation/
+capacity/current artifacts after lock-protected native prestate and ownership proof,
+using the closed cleanup plan mechanically derived from the original typed operation
+and this request’s journaled local artifact IDs. This is not another caller-supplied
+descriptor field or arbitrary cleanup code; original scope explicitly covers only
+these exact local artifacts. No fresh card is needed for
+this originally disclosed no-effect cleanup; never call legacy moving-abort. No
+native comment/audit write occurs without its own permit. Durable local reason and
+cleanup evidence remain. If artifacts changed, ownership is ambiguous or native
+intent lacks positive non-dispatch proof, keep held for Z reconciliation.
 
 New authority_mode=per_request|delegated request schema rejects mixed/old structures.
 For reclaim, preserve real Handoff fence/reservation fields: its `ask` is the actual
@@ -345,7 +470,16 @@ Each operation has a mechanically derived closed step plan (at most three native
 writes: two dependency edges plus one audit; reclaim note/assignee is one atomic
 update plus its bounded existing audit). Arbitrary additional steps refuse.
 Audit write is a separately enumerated protocol step with same intent/permit
-rules; descriptor predicts its exact request-marked note/comment delta. It is not
+rules. Replace legacy dynamic audit templates for delegated mode only with exact
+precomputed canonical bytes: ASCII prefix `management-delegation-v1 ` followed
+by compact sorted-key canonical JSON `{v:1,grant:grant_id,op:operation_id,index:i,
+delta:delta,reason:reason}` with the descriptor’s exact public values and no
+trailing newline. This derived payload has no caller-supplied template. No consent names,
+response-time timestamps, steps/native_error or observed after-state enter native
+comment bytes. Those remain the private actual receipt/journal. The descriptor’s signed fields deterministically derive the exact audit bytes;
+sequential after_hash snapshots append those bytes. Do not include the descriptor
+hash in its own predicted native text: that would create a hash cycle. The private
+receipt instead binds audit hash to full descriptor hash. Native-generated timestamps use Z’s verified associated-delta normalization. It is not
 an unbounded message-send exception or another task operation slot.
 
 Dependency replacement verifies add first, then obtains a new permit for remove.
@@ -354,14 +488,19 @@ state; no rollback fiction. Reclaim's note+assignee native update remains one wr
 followed by native existing local-state/fence completion with exact readback. No
 automatic pickup/unpause/worker launch is included.
 
-HOLD is recoverable without effect authority: proposed `manage inspect --request ID`
-and `manage settle --request ID --evidence-file FILE` perform read-only native
-inspection and append observational evidence. A terminal verified/unknown journal
-can be archived as `superseded` only retaining immutable consumption and any native
-fence/reservation until existing authenticated management reconciliation proves
-safe release. New grant cannot bypass unresolved native ownership/reservation.
-Do not make every non-effect diagnostic require a new permission card; only a new
-mutation beyond the old finite grant needs genuine existing operational authority.
+HOLD uses Z’s **single grammar**: `manage ID --inspect` and
+`manage ID --settle --expect RECORD_DIGEST` through the pinned enrolled facade.
+No alternate request-first CLI grammar. Inspect is read-only; settle appends
+observational evidence bound to saved mode/IDs and exact current record, with no
+native writes. A delegated extension carries the exact readback evidence hash in
+that record, not a second arbitrary CLI file resolver. No automatic unknown archive
+or generic superseded outcome. Use compatible Z d3’s explicit predecessor candidate
+`manage ID --plan ... --predecessor RECORD_DIGEST --post`, genuine authenticated
+Marmot reconciliation and exact apply to archive/link retained old evidence before
+a new delta. Unknowns stay unknown; a new grant cannot bypass unresolved native
+ownership/reservation. Verified no-dispatch cleanup remains the bounded original
+scope above. No new permission for non-effect diagnostics; only a mutation beyond
+the finite grant requires real existing operational authority.
 
 ## 8. Delivery plan and executable acceptance contract
 
@@ -379,18 +518,19 @@ Required disposable offline tests (future acceptance, **not run for this design*
 | Boundary | Required assertions |
 | --- | --- |
 | Canonical bytes | UTF-8 golden vector, unicode/surrogates, duplicate/unknown keys, null/float/NaN, malformed UTC/IDs, signature mismatch; zero effects |
-| Bounds | 0/33 tasks or ops, duplicate task/op, >24h, inverted/exact expiry, parent/kind/routing/closed/gate changes refuse |
-| Consent | one or more current policy approvers A; no A, A then B, other-principal B, reaction, pre-delivery A, superseded/pending-revoked ID never activate |
-| Disclosure | exact rendered bytes/choices/attachment; hand-written understated card, oversized32 ops, secret/path/nonce/hash handling, partial/failed receipt refuse |
+| Bounds | 0/33 tasks or ops, duplicate task/op/grant ID registration, >24h, before not_before, inverted/exact expiry, permit clipped to expires_at, parent/kind/routing/closed/gate changes refuse |
+| Consent | one or more current policy approvers A; no A, A then B, other-principal B, recommended-B reaction, free text/nonce-less/nonce-bearing mapping; pre-delivery A and imported pre-baseline A never activate; fresh same-thread A, full/terminal withdrawal, superseded/pending-revoked ID |
+| Disclosure | exact rendered bytes/choices/links/local manifest; hand-written understated card, oversized32 ops, secret/path/nonce/hash handling, partial/failed receipt refuse |
 | Policies | separate queue/admind changes, mapping collision, absent confirmed principal, unknown membership and latch -> HOLD |
-| Revocation | phone command commits directly, duplicate inbound, removed-later sender, preactivation withdrawal, lost acknowledgement; no later permits |
+| Revocation | phone command commits directly; unauthorized sender, foreign group, unknown/malformed ID, >80 chars refuse; duplicate inbound, removed-later sender, preactivation B, lost acknowledgement, ask full/terminal, readiness drop/ingress gap; no resumed/later permits |
 | Time | RPC delay, suspend, UTC forward/back >1s, exact 5s boundary, fsync crossing deadline, daemon restart, stale DB backup, missing guard; no cached grant |
-| Native | full preflight/cap/holder lock before reserve/intent, wrong argv, reclaim worktree/PR effects, predicted endpoint progression, type-only replacement refusal |
+| Native | full preflight/cap/holder lock before reserve/intent, wrong argv, reclaim worktree/PR effects, Z role disclosure, predicted endpoint/audit progression, failed-prefix blocks suffix, type-only replacement refusal |
 | Crash | failure before/after reserve/permit/intent/Popen/readback/settle/audit; same ID retry, no automatic issued retry; three total permit attempts max |
-| Recovery | policy/revoke/expiry allows observational settlement, conflicting evidence hash holds, unknown->verified append only, retained capacity and explicit reconciliation |
+| Recovery | policy/revoke/expiry/old epoch allows observational settlement; guard mismatch read-only inspect then exact Marmot invalidating repair; conflicting evidence hash holds; unknown->verified append only; no-dispatch local cleanup vs ambiguous capacity retention and Z predecessor reconciliation |
 | Compatibility | native approval/pins/history/review cap and old Handoff ask routing intact; no imaginary current APIs or queue DB writes |
 
 Named fake native/admind/clock tests must cover each branch without live queue DBs,
 broad discovery, live scans/sends or model invocations. Human acceptance must include
-finite nonreactive scope, same-UID risk, nonconflicting authenticated activation, restart invalidation,
-clock holds and <=5s initiation boundary; no author-only acceptance of these risks.
+finite nonreactive scope, same-UID risk, nonconflicting authenticated activation,
+first-install same-thread fresh reply, serial suffix blocking, restart invalidation,
+likely clock holds after NTP/suspend and <=5s initiation boundary; no author-only acceptance of these risks.
