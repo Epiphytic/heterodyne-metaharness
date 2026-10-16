@@ -1,0 +1,139 @@
+{
+  "task": "btq-0bkbo",
+  "actual_round": 2,
+  "actual_verdict": "REVISE",
+  "findings": 25,
+  "report_sha256": "e329199e62d901c3b5ee3e054d5b0e1fdd6e12285651128644b4c4e46fadd7f6",
+  "private_verbatim_ledger": {
+    "artifact": "0bkbo-d3-r2-verbatim-dispositions.json",
+    "sha256": "f3f3555b0bea796fe2e24136151dc1e1def7e8f909ceb7ad0c2c7197f683cdcd"
+  },
+  "status": "author responses only, not reviewer acceptance",
+  "ordered_dispositions": [
+    {
+      "ordinal": 1,
+      "finding_object_sha256": "fb1efb9aa6ecea54335a8976d0a788396ae8073b7078f46de8021f6cb9633983",
+      "disposition": "Accept: generated typed evidence URLs each receive a separate budgeted line up to512 scalars, protected36-line/3200scalars explicit new human decision. PR/head links are separate."
+    },
+    {
+      "ordinal": 2,
+      "finding_object_sha256": "4fa49e788c5a8ec7def7043ecec2cf8596e57da4027a7a35ab56e8cb1ce74dd5",
+      "disposition": "Accept: OperatorDoc restores the no-forge approve-bead --doc operator lookup pointer, owner-bound to real digest; no invented URL or terminal consent."
+    },
+    {
+      "ordinal": 3,
+      "finding_object_sha256": "75383d16460f12370f91151d914bb78f585731f130e44c0697fe1bf59e0bd704",
+      "disposition": "Accept: protected36-line budget permits full multi-line effects and wrapped mandatory prose; remaining unrenderable valid asks have explicit intact-owner Marmot recovery and human disclosure."
+    },
+    {
+      "ordinal": 4,
+      "finding_object_sha256": "c1fa4f88642faf9e69c14f15b2bf9c9bcb775d628173f2793101a321ef4fbace",
+      "disposition": "Accept: source warnings coalesce across all selected workstreams/collections, capped at three summary lines for four sources; per-row unknown/count facts retained."
+    },
+    {
+      "ordinal": 5,
+      "finding_object_sha256": "89ac6bce537f0410c0071dc085e6aab6780e4e43c653bb984ce6acd9d451417e",
+      "disposition": "Accept explicit new bounded-display decision: maximal complete-row prefix within19pages, final20th part states actual shown/total plus Marmot owner lookup. No implied cursor or narrower nonexistent command."
+    },
+    {
+      "ordinal": 6,
+      "finding_object_sha256": "02fde081837639357dab68aa65e5a128ae39cf5753b05530c2bcc245d9005822",
+      "disposition": "Accept: ordinary missing required source ->Unavailable; protected missing/unavailable->Withheld(required-source), existing stale/unknown/future->Withheld(stale-approval). Missing protected pairs->Withheld(missing-required)."
+    },
+    {
+      "ordinal": 7,
+      "finding_object_sha256": "767653da6165a9ec7558a3d0b816619d9296de31a020d28ce9ea5e015bb4d775",
+      "disposition": "Accept: closed collection enum now covers ready/parked/held/deferred/needs-human/launches/pause plus all five digest collections."
+    },
+    {
+      "ordinal": 8,
+      "finding_object_sha256": "a81b3dfdb244a24b3202192e0b8659c0e8dfeee7a035ebe3b661e1ce692604cf",
+      "disposition": "Accept: exact whole command vocabulary is excluded only from path heuristic, including final fixed terminal notices; nested slash/dot paths remain screened."
+    },
+    {
+      "ordinal": 9,
+      "finding_object_sha256": "dcf32576e501b1278f34a20f64ed6945baef4c534a5c1124d77cb1c07c27c6b9",
+      "disposition": "Accept: SafeText uses literal screened plain text, no punctuation backslash escaping or assumed Markdown rendering; copyable labels remain literal."
+    },
+    {
+      "ordinal": 10,
+      "finding_object_sha256": "a701eac7820da0f74c88e126c957ca32ac6979d6a32348f97d7ce5f1d0dfa784",
+      "disposition": "Accept: exhaustion notices have explicit workstream and role; blocked notices explicit workstream,Nbeads,Mapprovals."
+    },
+    {
+      "ordinal": 11,
+      "finding_object_sha256": "c15100b74115f307e4a3bbbed44ccb80a61b63b0dab0af603c4000a80e0743d5",
+      "disposition": "Accept: current question reactions are ignored(question-reaction-unsupported), approval reaction during suspension is ignored(trust-suspended). No reaction maps to a choice."
+    },
+    {
+      "ordinal": 12,
+      "finding_object_sha256": "1506001dd0c5ad845800a509d62f2cae0104da03b6bccf8e447ed3ced011330f",
+      "disposition": "Accept: suspension holds approval decisions only; ordinary workstream intake/task steering/questions retain classification, preserving governing ADR."
+    },
+    {
+      "ordinal": 13,
+      "finding_object_sha256": "e43767f82ab4830fdd7795ff67b9b712bce43e759291e680cfd401deb7dd6977",
+      "disposition": "Accept: command candidate detection uses fixed Unicode White_Space table; non-ASCII-whitespace-prefixed slash yields InvalidCommand instead of intake."
+    },
+    {
+      "ordinal": 14,
+      "finding_object_sha256": "0ce7d6b03d24e5731dc68ab855bc08151f24bdd958e58f482e5f3b4c8dca0a36",
+      "disposition": "Accept: all seven explicit human decisions enumerate label-vs-private-path, candidate-order, UTC, wsd multipart and bounded overflow changes alongside original sequencing/protected/identifier changes."
+    },
+    {
+      "ordinal": 15,
+      "finding_object_sha256": "ade9e647552d2ab9ef59e7beb58d5b929972dfc3d14c7c9ec05634c139c2f2d6",
+      "disposition": "Accept: protected question Withheld has fixed question wording and no answer recorded; approval retains CannotApprove wording."
+    },
+    {
+      "ordinal": 16,
+      "finding_object_sha256": "1d5270f18418ce85e89b37974fba45d0c35366ae4755a3945a732c2cff0d4aff",
+      "disposition": "Accept: render rejects protected kinds; only atomic render_card_pair can produce protected workstream/control texts."
+    },
+    {
+      "ordinal": 17,
+      "finding_object_sha256": "afe2fc5a2a4d04cd40271ec07ffeb0857657f580432b3071ad79db662070733b",
+      "disposition": "Accept: ordinary data and FYI time footers explicit; Notice variant text only, Reminder one line, Digest pagination no generic footer; protected no time footer."
+    },
+    {
+      "ordinal": 18,
+      "finding_object_sha256": "ea265e1c7dc37223bc45d3a7f86e47e9a6020fe9442b9cb1d43705fe5836f434",
+      "disposition": "Accept: warning constant uses exact U+26A0 U+FE0F sequence."
+    },
+    {
+      "ordinal": 19,
+      "finding_object_sha256": "bf6814945938fc5b972780c9dc5569ff01446e61747a08ee540cdbaf40e7efc9",
+      "disposition": "Accept: older586 object explicitly historical superseded, a27 sole current governing ADR17; both native approval snapshots pinned and external repo resolution supplied."
+    },
+    {
+      "ordinal": 20,
+      "finding_object_sha256": "c2238dcf7e99089f74bbc73ccdd186a15b1ef4607a83e757c62e00e4aa9c692e",
+      "disposition": "Accept: header safe labels wrap before separate atomic mention line, all total limits rechecked; no partial pair success."
+    },
+    {
+      "ordinal": 21,
+      "finding_object_sha256": "8d70fe2b07ce5fb917ac74b62312f9e9c0b314c247eefb5be1a3b164960a7e0b",
+      "disposition": "Accept: canonical question instruction exactly Reply with a choice label. in all references."
+    },
+    {
+      "ordinal": 22,
+      "finding_object_sha256": "b9c62a98fb5e83fd8145c47c6a4a4bf37652cfae7139f1c1aab78f132b4599ed",
+      "disposition": "Accept: validate supplied ascending approval order, never sort; opaque order key canonical lowercasehex string decodes boundedbytes."
+    },
+    {
+      "ordinal": 23,
+      "finding_object_sha256": "20ba33d1e3970a767621068a3a25a5e986a17e1dd6403113d2070cd99d6db539",
+      "disposition": "Accept: unknown state uses emdash rather than needs-operator questionmark; unknown is not operator action request."
+    },
+    {
+      "ordinal": 24,
+      "finding_object_sha256": "acd3b95dde8217d05fd011c5f24646b4be3b7e6e31f0c235fd305dc517350233",
+      "disposition": "Accept: at most two complete packing passes based on marker digit width, deterministic final n<=20."
+    },
+    {
+      "ordinal": 25,
+      "finding_object_sha256": "00cf295c04c70e07746e8d5b9d6ccf7b13fa2d01b9361e9f5848853574a0ad35",
+      "disposition": "Accept: eventual human ask must explain all decisions/material residuals on-card with links as evidence, never rely solely on opening the design."
+    }
+  ]
+}
