@@ -244,7 +244,7 @@ def test_decision_attempt_not_misreported_as_native_success(store: Store) -> Non
     assert result.binding.status == "deciding"
 
 
-def test_daemon_uses_serialized_binding_and_normalizes_id(store: Store, tmp_path: Path) -> None:
+def test_daemon_reads_independent_snapshot_and_normalizes_id(store: Store, tmp_path: Path) -> None:
     seed(store)
     daemon = Admind.__new__(Admind)
     daemon.store = store
@@ -254,10 +254,10 @@ def test_daemon_uses_serialized_binding_and_normalizes_id(store: Store, tmp_path
         daemon.ask_post_lock = asyncio.Lock()
         await daemon.ask_post_lock.acquire()
         task = asyncio.create_task(daemon.on_ask(asks.AskBinding("K7M2"), ctl.Peer(1)))
-        await asyncio.sleep(0)
-        assert not task.done()
-        daemon.ask_post_lock.release()
-        return await task
+        try:
+            return await asyncio.wait_for(task, 1)
+        finally:
+            daemon.ask_post_lock.release()
     assert asyncio.run(exercise()).result == "ok"
 
 
@@ -329,10 +329,12 @@ def test_cli_parser_requires_json_and_does_not_take_evidence_paths() -> None:
         cli.build_parser().parse_args(["ask", "binding", ID, "--json", "--policy", "untrusted.json"])
 
 
-def test_snapshot_refuses_nested_writer_and_releases_after_exception(store: Store) -> None:
+def test_snapshot_is_independent_of_uncommitted_writer_and_releases_after_exception(store: Store) -> None:
     seed(store)
     with store.transaction():
-        assert read(store).code == "invalid-state"
+        store.db.execute("UPDATE asks SET status='cancelled'")
+        result = read(store)
+        assert result.binding is not None and result.binding.status == "open"
     with pytest.raises(ValueError), store.read_snapshot():
         raise ValueError("synthetic failure")
     assert not store.db.in_transaction
@@ -511,7 +513,7 @@ def test_binding_reader_does_not_occupy_event_loop(store: Store, tmp_path: Path,
             async with asyncio.timeout(1):
                 while not entered.is_set():
                     await asyncio.sleep(.001)
-            assert not task.done() and daemon.ask_post_lock.locked()
+            assert not task.done() and not daemon.ask_post_lock.locked()
         finally:
             release.set()
         assert (await task).result == "refused"

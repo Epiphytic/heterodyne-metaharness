@@ -638,7 +638,7 @@ grep -F 'id:<12 hex>' <state>/admind/audit.jsonl
 
 `admind ask binding ASK --json` reads the new `ask.binding.v1` operation over the running daemon's
 local ask socket. It returns a versioned, closed evidence envelope with the complete stored render
-inputs and canonical SHA-256, reproduced card parts and their local outbox delivery state, all retained
+inputs (including chunk size and historical approval in-flight counts) and canonical SHA-256, reproduced card parts and their local outbox delivery state, all retained
 answer/note records with native message and sender provenance, and separately named native decision
 attempts. Native `outcome`, `decided_by` and `current_attempt` are included separately;
 a settled attempt does not substitute for these stored fields. The recommendation comes from the stored form, including a recommendation other than A.
@@ -664,5 +664,11 @@ provenance; this does not make arbitrary answer text safe to expose.
 The CLI also emits fixed JSON for invalid IDs and incompatible/legacy replies (`invalid-state` or
 `invalid-reply`), and for a connected response deadline (`response-timeout`, exit 1). Exit 69 includes
 fixed JSON with `transport-unavailable`; it means connection/transport failed, not that an approval
-was declined. Error messages never echo peer text. The bounded read runs off the event loop while
-retaining daemon/store serialization. This interface requires deployment before use.
+was declined. A daemon cannot select these client-only failure codes, and an envelope for a different
+ask is rejected. Error messages never echo peer text. The bounded read uses an independent read-only
+SQLite WAL snapshot off the event loop; it holds neither the post lock nor the live Store lock while
+rendering. Uncommitted writes are excluded, and ordinary daemon reads/writes can continue. All returned
+approval prose is screened, including fields not printed on the card; only validated typed digest and
+Marmot reference identities are exempt. Historical raw prose that would redact still refuses. New
+settlement outcomes are redacted in the existing atomic decision transaction, without changing their
+native status/actor/attempt identity. This interface requires deployment before use.

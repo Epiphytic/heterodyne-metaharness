@@ -300,9 +300,12 @@ def ask_binding_command(s: AdmindSettings, ask_id: str) -> int:
             "refused", "ask.binding.v1 unavailable", code="invalid-state")).decode())
         return 1
     async def request() -> binding.AskBindingReply:
-        return await asyncio.wait_for(ctl.request(s.state_dir / asks.ASK_SOCKET, req, ASK_READ_SECONDS,
+        peer = await asyncio.wait_for(ctl.request(s.state_dir / asks.ASK_SOCKET, req, ASK_READ_SECONDS,
                                                   reply_type=binding.AskBindingReply,
                                                   max_reply=asks.MAX_REPLY), ASK_READ_SECONDS)
+        if peer.code in ("transport-unavailable", "response-timeout", "invalid-reply"):
+            raise ctl.CtlInvalidReply("client-only refusal from peer")
+        return peer
     try:
         reply = asyncio.run(request())
     except ctl.CtlInvalidReply:
@@ -312,7 +315,8 @@ def ask_binding_command(s: AdmindSettings, ask_id: str) -> int:
     except ctl.CtlUnavailable:
         reply = binding.AskBindingReply("refused", "ask.binding.v1 unavailable", code="transport-unavailable")
     if (reply.ask is not None or reply.asks is not None
-            or (reply.result == "ok" and (reply.binding is None or reply.code is not None))
+            or (reply.result == "ok" and (reply.binding is None or reply.code is not None
+                                          or reply.binding.inputs.ask_id != asks.normalise_id(ask_id)))
             or (reply.result != "ok" and (reply.code is None or reply.binding is not None))):
         reply = binding.AskBindingReply("refused", "ask.binding.v1 unavailable", code="invalid-reply")
     elif reply.result != "ok":

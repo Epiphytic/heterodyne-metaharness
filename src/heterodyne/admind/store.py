@@ -321,6 +321,8 @@ class Store:
                 raise PermissionError(f"{path} is not the regular file that was opened")
         finally:
             os.close(fd)
+        self.path = path.absolute()
+        self.file_identity = (opened.st_dev, opened.st_ino)
         self.lock = threading.RLock()
         self._depth = 0         # open transaction() nesting, guarded by self.lock
         # check_same_thread=False: calls are serialized by self.lock (see _locked), not by thread.
@@ -363,19 +365,42 @@ class Store:
 
     @contextlib.contextmanager
     def read_snapshot(self) -> Generator[sqlite3.Connection]:
-        """A consistent SELECT-only consumer view, without a writer reservation or nested mutation.
+        """Independent read-only WAL transaction; no live connection or Store lock is held.
 
-        The store lock excludes its worker threads; BEGIN is deferred/read-only in the consumer. Rollback
-        releases the snapshot even when validation refuses. This never commits or migrates anything.
+        Called in a worker thread. The first SELECT fixes the snapshot; ordinary Store writes can
+        continue on the event loop. Neither renderer work nor cancellation can retain the live RLock.
+        The private owned parent remains the existing same-UID trust boundary.
         """
-        with self.lock:
-            if self.db.in_transaction:
-                raise RuntimeError("read snapshot during write transaction")
-            self.db.execute("BEGIN")
+        info = self.path.stat(follow_symlinks=False)
+        if (not stat.S_ISREG(info.st_mode)
+                or (info.st_dev, info.st_ino) != self.file_identity):
+            raise RuntimeError("store identity changed")
+        with contextlib.closing(sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True,
+                                                isolation_level=None, timeout=1.0)) as db:
+            db.execute("PRAGMA query_only=ON")
+            db.execute("BEGIN")
             try:
-                yield self.db
+                yield db
             finally:
-                self.db.execute("ROLLBACK")
+                db.execute("ROLLBACK")
+
+    @staticmethod
+    def snapshot_ask(db: sqlite3.Connection, ask_id: str, max_bytes: int
+                     ) -> tuple[AskRow, str | None] | None:
+        """Bound materialization and obtain row/current attempt from the same independent snapshot."""
+        size = db.execute("SELECT length(CAST(body AS BLOB)) + length(CAST(title AS BLOB)) + "
+                          "coalesce(length(CAST(choices AS BLOB)),0) + "
+                          "coalesce(length(CAST(links AS BLOB)),0) + "
+                          "coalesce(length(CAST(outcome AS BLOB)),0) + "
+                          "coalesce(length(decided_by),0) + coalesce(length(attempt),0) FROM asks "
+                          "WHERE ask_id = ?", (ask_id,)).fetchone()
+        if size is None:
+            return None
+        if size[0] > max_bytes:
+            raise OverflowError("ask snapshot budget")
+        raw = db.execute(f"SELECT {_ASK}, attempt FROM asks WHERE ask_id = ?",  # noqa: S608
+                         (ask_id,)).fetchone()
+        return _ask(raw[:-1]), raw[-1]
 
     @_locked
     def close(self) -> None:
@@ -997,7 +1022,8 @@ class Store:
                             "WHERE ask_id = ? AND message_id = ?", (settled, exit_status, ask_id, message_id))
             self.db.execute("UPDATE asks SET status = ?, outcome = ?, decided_by = ?, attempt = ?, "
                             "updated_at = ? WHERE ask_id = ?",
-                            (new_status, outcome, decided_by, message_id if settled == "uncertain" else None,
+                            (new_status, None if outcome is None else redact(outcome), decided_by,
+                             message_id if settled == "uncertain" else None,
                              now(), ask_id))
             return True
 

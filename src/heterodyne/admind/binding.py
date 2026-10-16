@@ -1,6 +1,7 @@
 """ask.binding.v1: bounded source-owned evidence, never a new approval or authentication claim.
 
-The local reader takes one store read snapshot under daemon serialization. It returns the stored inputs
+The local reader takes one independent read-only WAL snapshot off the daemon event loop. It returns the
+stored inputs
 and exact original/full-repeat outbox bytes only if the current renderer reproduces them without
 redaction or shortening. A changed chunk configuration or legacy missing provenance is an explicit
 refusal. Delivery means the existing local outbox reports sent, not human acceptance. Decision attempts
@@ -16,7 +17,7 @@ import uuid
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 import msgspec
 
@@ -30,17 +31,19 @@ MAX_PARTS = 256
 MAX_REPEATS = 32
 MAX_BYTES = 900_000  # leaves room below ask.sock's 1 MiB reply limit
 MAX_INPUT_CHARS = 200_000
+MAX_INPUT_BYTES = MAX_INPUT_CHARS * 6  # JSON may ASCII-escape every native character
+HISTORY_BYTES = asks.MAX_ANSWER_TOTAL * 4 + asks.MAX_ANSWERS * 4096
 HEX_KEY = re.compile(r"[0-9a-f]{64}\Z")
 NATIVE_ID = re.compile(r"(?:r:)?[0-9a-f]{64}\Z")
 STATES = frozenset((*asks.ACTIVE, *asks.TERMINAL))
-RefusalCode = Literal["missing", "incomplete", "oversized", "redacted", "truncated", "render-mismatch",
-                      "invalid-state", "policy-unavailable", "clock-unavailable",
-                      "invalid-reply", "transport-unavailable", "response-timeout"]
+PeerRefusalCode = Literal["missing", "incomplete", "oversized", "redacted", "truncated", "render-mismatch",
+                      "invalid-state", "policy-unavailable", "clock-unavailable"]
+RefusalCode = PeerRefusalCode | Literal["invalid-reply", "transport-unavailable", "response-timeout"]
 
 
 class Refusal(Exception):
-    def __init__(self, code: RefusalCode) -> None:
-        self.code: RefusalCode = code
+    def __init__(self, code: PeerRefusalCode) -> None:
+        self.code: PeerRefusalCode = code
 
 
 class StoredForm(msgspec.Struct, forbid_unknown_fields=True):
@@ -68,6 +71,8 @@ class RenderInputs(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     bead: str | None
     digest: str | None
     refreshed_from: str | None
+    chunk_chars: int
+    approval_counts: tuple[int, int] | None
 
 
 class CardPart(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -176,9 +181,11 @@ def policy_snapshot(load: Callable[[], tuple[Operator, ...]]) -> list[PolicyPrin
         raise Refusal("policy-unavailable") from None
 
 
-def stored_inputs(row: AskRow) -> RenderInputs:
+def stored_inputs(row: AskRow, chunk_chars: int) -> RenderInputs:
     if row.kind not in ("question", "merge", "approval") or row.status not in STATES:
         raise Refusal("invalid-state")
+    if row.kind != "approval" and len(row.body) > MAX_INPUT_CHARS:
+        raise Refusal("oversized")
     if row.truncated:
         raise Refusal("truncated")
     if not 1 <= row.card_parts <= MAX_PARTS:
@@ -196,19 +203,60 @@ def stored_inputs(row: AskRow) -> RenderInputs:
     specs = msgspec.json.decode(row.links, type=list[ask_links.LinkSpec]) if row.links is not None else []
     inputs = RenderInputs(row.ask_id, row.kind, row.title, row.body, row.poster,
                           row.question_form, choices, recommended, specs,
-                          row.pr_url, row.head_sha, row.bead, row.digest, row.refreshed_from)
-    if len(canonical(inputs)) > MAX_INPUT_CHARS:
+                          row.pr_url, row.head_sha, row.bead, row.digest, row.refreshed_from,
+                          chunk_chars, approval_inputs(row) if row.kind == "approval" else None)
+    if len(canonical(inputs)) > MAX_INPUT_BYTES:
         raise Refusal("oversized")
-    if row.kind != "approval":
-        request = asks.AskPost(inputs.kind, row.title, row.body, row.pr_url, row.head_sha, row.bead,
-                               row.poster, inputs.form, choices, recommended, specs)
-        if asks.check(request) is not None:
-            raise Refusal("invalid-state")
-        if redact(asks.context(row)) != asks.context(row):
-            raise Refusal("redacted")
-    elif row.question_form is not None or row.choices is not None or row.links is not None:
-        raise Refusal("invalid-state")
+    validate_stored_request(row, inputs)
     return inputs
+
+
+def validate_stored_request(row: AskRow, inputs: RenderInputs) -> None:
+    """Reuse native request validation and redaction without changing persisted card bytes."""
+    if row.kind == "approval":
+        if any(value is not None for value in (row.question_form, row.choices, row.links)):
+            raise Refusal("invalid-state")
+        return
+    request = asks.AskPost(inputs.kind, row.title, row.body, row.pr_url, row.head_sha, row.bead,
+                           row.poster, inputs.form, inputs.choices, inputs.recommended, inputs.links)
+    if asks.check(request) is not None:
+        raise Refusal("invalid-state")
+    context = asks.context(row)
+    if redact(context) != context:
+        raise Refusal("redacted")
+
+
+def approval_inputs(row: AskRow) -> tuple[int, int]:
+    """Screen all returned native prose, not only fields that the phone renderer happens to show.
+
+    Digests and the authenticated via reference are typed identities, never generic prose exemptions.
+    Stored readout/layout bytes are not changed: unexpected redaction refuses the whole binding.
+    """
+    stored = msgspec.json.decode(row.body, type=StoredApproval)
+    raw = msgspec.to_builtins(stored.readout)
+    for key in ("digest", "posted_digest", "approved_digest", "denied_digest"):
+        value = raw.pop(key)
+        if value is not None and not HEX_KEY.fullmatch(value):
+            raise Refusal("invalid-state")
+    ref = raw.pop("via_ref")
+    if ref is not None and not re.fullmatch(r"marmot:id:[0-9a-f]{64}", ref):
+        # Non-Marmot historical references remain prose and receive the ordinary screen.
+        raw["via_ref"] = ref
+    _screen_prose(raw)
+    return _approval_counts(stored.details)
+
+
+def _screen_prose(value: object) -> None:
+    if isinstance(value, str):
+        if redact(value) != value:
+            raise Refusal("redacted")
+    elif isinstance(value, dict):
+        for key, item in cast(dict[object, object], value).items():
+            _screen_prose(key)
+            _screen_prose(item)
+    elif isinstance(value, list):
+        for item in cast(list[object], value):
+            _screen_prose(item)
 
 
 def _parts(db: sqlite3.Connection, prefix: str, count: int) -> list[CardPart]:
@@ -283,7 +331,8 @@ def _approval_counts(parts: list[str]) -> tuple[int, int]:
 
 def delivery(db: sqlite3.Connection, row: AskRow, chunk_chars: int) -> tuple[list[CardPart], bool, bool]:
     parts = _parts(db, f"ask:{row.ask_id}", row.card_parts)
-    if [p.text for p in parts] != _expected(row, chunk_chars, False):
+    original = _expected(row, chunk_chars, False)
+    if [p.text for p in parts] != original:
         raise Refusal("render-mismatch")
     if all(p.status == "sent" for p in parts):
         return parts, True, False
@@ -291,11 +340,12 @@ def delivery(db: sqlite3.Connection, row: AskRow, chunk_chars: int) -> tuple[lis
                          "ORDER BY created_at, rowid LIMIT ?", (row.ask_id, MAX_REPEATS + 1)).fetchall()
     if len(repeats) > MAX_REPEATS:
         raise Refusal("oversized")
+    expected = (original if row.kind == "approval" else _expected(row, chunk_chars, True)) if repeats else []
     for request, count in repeats:
         if not isinstance(request, str) or not HEX_KEY.fullmatch(request):
             raise Refusal("invalid-state")
         repeated = _parts(db, f"askr:{row.ask_id}:{request}", int(count))
-        if [p.text for p in repeated] != _expected(row, chunk_chars, True):
+        if [p.text for p in repeated] != expected:
             raise Refusal("render-mismatch")
         if all(p.status == "sent" for p in repeated):
             return repeated, True, True
@@ -328,7 +378,7 @@ def _history_budget(db: sqlite3.Connection, ask_id: str) -> None:
     ):
         budget = db.execute(query,
                             (ask_id, asks.MAX_ANSWERS + 1)).fetchone()
-        if budget[0] > asks.MAX_ANSWERS or budget[1] > asks.MAX_ANSWER_TOTAL * 4:
+        if budget[0] > asks.MAX_ANSWERS or budget[1] > HISTORY_BYTES:
             raise Refusal("oversized")
 
 
@@ -374,50 +424,52 @@ def histories(db: sqlite3.Connection, ask_id: str, policy: dict[str, str]
     return answers, decisions
 
 
+def _native_outcome(row: AskRow, current: str | None, attempts: list[DecisionAttempt]) -> None:
+    if current is not None and current not in {a.message_id for a in attempts}:
+        raise Refusal("incomplete")
+    for text in (row.outcome, row.decided_by):
+        if text is not None:
+            if len(text) > asks.MAX_ANSWER:
+                raise Refusal("oversized")
+            _screen_prose(text)
+
+
+def _snapshot_envelope(db: sqlite3.Connection, ask_id: str, chunk_chars: int,
+                       policy: list[PolicyPrincipal]) -> Envelope:
+    try:
+        captured = Store.snapshot_ask(db, ask_id, MAX_INPUT_BYTES)
+    except OverflowError:
+        raise Refusal("oversized") from None
+    if captured is None:
+        raise Refusal("missing")
+    row, current = captured
+    inputs = stored_inputs(row, chunk_chars)
+    parts, delivered, repeated = delivery(db, row, chunk_chars)
+    answers, attempts = histories(db, ask_id, {p.name: p.sender_key for p in policy})
+    _native_outcome(row, current, attempts)
+    at, boot = clock()
+    return Envelope(1, inputs, row.status, row.outcome, row.decided_by, current,
+                    sha256(inputs), delivered, "repeat" if repeated else "original", parts, False,
+                    answers, True, attempts, True, policy, sha256(policy), at, boot)
+
+
 def read(store: Store, ask_id: str, chunk_chars: int,
          load_policy: Callable[[], tuple[Operator, ...]]) -> AskBindingReply:
-    """Synchronous, inside the daemon's ask_post_lock; bounded refusal payloads never echo bad data."""
+    """Worker-only read: one independent WAL snapshot, no post lock or live Store lock."""
     try:
         if asks.normalise_id(ask_id) != ask_id:
             raise Refusal("invalid-state")
         policy = policy_snapshot(load_policy)
         with store.read_snapshot() as db:
-            size = db.execute("SELECT length(CAST(body AS BLOB)) + length(CAST(title AS BLOB)) + "
-                              "coalesce(length(choices),0) + coalesce(length(links),0) + "
-                              "coalesce(length(CAST(outcome AS BLOB)),0) + "
-                              "coalesce(length(decided_by),0) + coalesce(length(attempt),0) FROM asks "
-                              "WHERE ask_id = ?", (ask_id,)).fetchone()
-            if size is None:
-                raise Refusal("missing")
-            if size[0] > MAX_INPUT_CHARS:
-                raise Refusal("oversized")
-            row = store.ask(ask_id)
-            if row is None:
-                raise Refusal("missing")
-            inputs = stored_inputs(row)
-            parts, delivered, repeated = delivery(db, row, chunk_chars)
-            answers, attempts = histories(db, ask_id, {p.name: p.sender_key for p in policy})
-            if policy_snapshot(load_policy) != policy:
-                raise Refusal("policy-unavailable")
-            current, = db.execute("SELECT attempt FROM asks WHERE ask_id = ?", (ask_id,)).fetchone()
-            if current is not None and current not in {a.message_id for a in attempts}:
-                raise Refusal("incomplete")
-            for text in (row.outcome, row.decided_by):
-                if text is not None:
-                    if len(text) > asks.MAX_ANSWER:
-                        raise Refusal("oversized")
-                    if redact(text) != text:
-                        raise Refusal("redacted")
-            at, boot = clock()
-            result = Envelope(1, inputs, row.status, row.outcome, row.decided_by, current,
-                              sha256(inputs), delivered,
-                              "repeat" if repeated else "original", parts, False, answers, True, attempts,
-                              True, policy, sha256(policy), at, boot)
-            reply = AskBindingReply("ok", "ask.binding.v1 complete", binding=result)
-            if len(msgspec.json.encode(reply)) > MAX_BYTES:
-                raise Refusal("oversized")
-            return reply
+            result = _snapshot_envelope(db, ask_id, chunk_chars, policy)
+        if policy_snapshot(load_policy) != policy:
+            raise Refusal("policy-unavailable")
+        reply = AskBindingReply("ok", "ask.binding.v1 complete", binding=result)
+        if len(msgspec.json.encode(reply)) > MAX_BYTES:
+            raise Refusal("oversized")
+        return reply
     except Refusal as exc:
         return AskBindingReply("refused", "ask.binding.v1 unavailable", code=exc.code)
-    except (ValueError, TypeError, KeyError, OverflowError, chunk.TooWide, RuntimeError, sqlite3.Error):
+    except (ValueError, TypeError, KeyError, OverflowError, OSError, chunk.TooWide, RuntimeError,
+            sqlite3.Error):
         return AskBindingReply("refused", "ask.binding.v1 unavailable", code="invalid-state")
