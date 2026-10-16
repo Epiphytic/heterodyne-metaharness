@@ -1,0 +1,141 @@
+{
+  "schema": 1,
+  "review_report_sha256": "579da33ab67424d45e4b441730931c9c4eba3879ae312fccdd470a6d9e7803f6",
+  "actual_verdict": "REVISE",
+  "actual_finding_count": 16,
+  "round": 2,
+  "cap": 3,
+  "author_responses_not_review_clearance": true,
+  "findings": [
+    {
+      "number": 1,
+      "file": "docs/superpowers/specs/2026-10-16-scanner-execution-fd-prerequisite-d2.md",
+      "line": 144,
+      "finding": "Tracked base64 exhibits conceal historical host-specific paths from install-agnostic and secrets scans; retain private originals and public hashes instead.",
+      "disposition": "accept",
+      "response": "Removed all ten d2 exhibits, including every encoded copy. D3 pins original private bytes and historical d442 instead of defeating public source scanners.",
+      "original_summary_sha256": "23842389132c20899a43ec9406e2eb86764eb679d742890fc3462866cf64bc67",
+      "summary_note": "Faithful public paraphrase; raw original remains in SHA-pinned private report, not an encoded host-path copy."
+    },
+    {
+      "number": 2,
+      "file": "docs/superpowers/specs/2026-10-16-scanner-execution-fd-prerequisite-d2.md",
+      "line": 79,
+      "finding": "H's adr_revision is create-only and must equal 'the final signed amendment admission revision', yet step 3 and the manifest (null IDs 'until root obtains actual evidence') require real H/A_H/OPS IDs to be recorded before posting. That is circular unless the IDs live only in the receipt, and the spec never says where they go.",
+      "disposition": "accept",
+      "response": "Freeze reviewed/published design D first; root then freezes separate byte-identical native ADR archive/admission revision R referencing D. Create H/A_H pinned to R only afterward. Runtime native IDs, OPS evidence and decision remain in separate receipt; no edit or repin of D/R."
+    },
+    {
+      "number": 3,
+      "file": "docs/superpowers/specs/2026-10-16-scanner-execution-fd-prerequisite-d2.md",
+      "line": 84,
+      "finding": "Denial safety depends on a prose rule that H is never closed. bd releases a blocks edge on any closure, and scanner's unpark/manage path checks only btq-pxtig, so the R1 #1 failure comes back if H is ever closed for any reason. The spec defines no terminal state for H after a denial.",
+      "disposition": "accept",
+      "response": "Denial leaves H blocked/uncompleted indefinitely. Any later administrative retirement first needs authentic Marmot authorization and verified durable scanner hold."
+    },
+    {
+      "number": 4,
+      "file": "docs/superpowers/specs/2026-10-16-scanner-execution-fd-prerequisite-d2.md",
+      "line": 77,
+      "finding": "H's acceptance is defined as 'only this exact patch, fresh 92-case serial proof and genuine complete code review', but the landing section sends the d2 amendment, manifest, dispositions and all evidence archives (including the B1/B2 scanner patches and drivers) 'through the same reviewed prerequisite delivery'.",
+      "disposition": "accept",
+      "response": "H acceptance includes exact test patch plus final amendment docs/manifest/dispositions and H proof/review; excludes executing B1/B2 archive drivers."
+    },
+    {
+      "number": 5,
+      "file": "docs/reviews/scanner-boundary/execution-fd-prerequisite-d2-inputs.json",
+      "line": 256,
+      "finding": "required_result_fields leaves out evidence the spec requires: elapsed/per-node duration (spec 63-64 and step 1), installed-distribution inventory and editable import origins (160-162), the pyproject hash, B1 three-file and B2 target hashes, the .venv target, and the inherited environment.",
+      "disposition": "accept",
+      "response": "One authoritative result_contract enumerates durations, inventory/origins, pyproject, B1/B2, alias, sanitized env and complete source/tool/result fields."
+    },
+    {
+      "number": 6,
+      "file": "docs/superpowers/specs/2026-10-16-scanner-execution-fd-prerequisite-d2.md",
+      "line": 149,
+      "finding": "The bounded driver adaptation keeps env=os.environ.copy() and a HYPOTHESIS_STORAGE_DIRECTORY shared across attempts. The spec neither sanitizes nor records the inherited environment, nor requires a fresh per-run Hypothesis database, though it requires unique run paths.",
+      "disposition": "accept",
+      "response": "Empty child environment plus finite nonsecret allowlist, explicit pytest plugins and fresh per-run Hypothesis storage. No parent environment/secret dumps."
+    },
+    {
+      "number": 7,
+      "file": "docs/superpowers/specs/2026-10-16-scanner-execution-fd-prerequisite-d2.md",
+      "line": 193,
+      "finding": "The collection-delta predicate is loose: 'at its module position' is undefined, and 'reproduce the old list byte-for-byte semantically' never names the comparison (it should be legacy_node_list_sha256 of the list minus the added node == ce942161\u2026, with a raw-file comparison explicitly forbidden).",
+      "disposition": "accept",
+      "response": "Explicit full legacy SHA for list minus added node; exact immediate predecessor/successor pinned from fixed source. Raw file comparisons forbidden for this predicate."
+    },
+    {
+      "number": 8,
+      "file": "docs/superpowers/specs/2026-10-16-scanner-execution-fd-prerequisite-d2.md",
+      "line": 3,
+      "finding": "d2 'supersedes d1's admission/execution procedure' but drops several d1 prohibitions without carrying them over: no pre-test GC workaround, no disabling/dropping/reordering the node, no historical -n 8 shared-resource gate, no silent rebase onto newer main, no task rebinding, and the explicit no-scanner-only-partial-landing rule.",
+      "disposition": "accept",
+      "response": "Restored all six prohibitions, atomic B1+B2 landing, and exact076 source policy; no driver GC workaround or retry/reorder/rebind."
+    },
+    {
+      "number": 9,
+      "file": "docs/superpowers/specs/2026-10-16-scanner-execution-fd-prerequisite-d2.md",
+      "line": 91,
+      "finding": "The A_H ask shape is not constrained. Under approve-bead target semantics, a parked named target is skipped, an unparked one is auto-released open/unassigned on approval, and naming scanner conflicts with pxtig and refuses the whole decision. The spec does not say ask.targets must be exactly [H], or how and when H is unparked and by whom.",
+      "disposition": "accept",
+      "response": "ask.targets exactly H. H pre-pinned to R and parked through approval. Root verifies ADR ref resolves at R, native approval, OPS and slot before supported release/claim."
+    },
+    {
+      "number": 10,
+      "file": "docs/superpowers/specs/2026-10-16-scanner-execution-fd-prerequisite-d2.md",
+      "line": 206,
+      "finding": "Hosted CI is weakened from d1's 'Require hosted secrets and unfiltered CI tests' to 'Hosted secrets/unfiltered CI retain live opt-in rules', which no longer states a pass requirement.",
+      "disposition": "accept",
+      "response": "Hosted secrets and unfiltered tests must actually PASS before merge, alongside local gates; existing live opt-in rules stay in force."
+    },
+    {
+      "number": 11,
+      "file": "docs/superpowers/specs/2026-10-16-scanner-execution-fd-prerequisite-d2.md",
+      "line": 144,
+      "finding": "The archive description is inaccurate: it says 'Driver/patch archives use explicit base64 storage', but run_full and run_partial are raw and only the verifier and the B1/B2 patches are base64. Disposition 7 also calls appendix-a an 'AppendixA driver', though it is byte-identical to the committed tests/test_secret_scan_boundary.py at 1995977.",
+      "disposition": "accept",
+      "response": "Private artifact roles separately identify combined verifier/runner, identity plugin, negative probes, two runners, selector data and patches; Appendix A is a test module."
+    },
+    {
+      "number": 12,
+      "file": "docs/reviews/scanner-boundary/execution-fd-prerequisite-d2-inputs.json",
+      "line": 209,
+      "finding": "appendix-a.py.txt is a 13,097-byte copy of a blob already committed in 1995977. Pinning the git path/blob (and SHA256) would do the same job without a second tracked copy.",
+      "disposition": "accept",
+      "response": "Removed duplicate Appendix A. D3 pins real Git commit/path/blob, SHA and byte count only."
+    },
+    {
+      "number": 13,
+      "file": "docs/reviews/scanner-boundary/execution-fd-prerequisite-d2-inputs.json",
+      "line": 162,
+      "finding": "The same 'use' string ('never blindly execute old3372/fixed-directory drivers') is pasted onto all nine tooling entries, including the B1/B2 patches and the module list, and the blobs section repeats identical original/current/fixed entries that could be derived.",
+      "disposition": "accept",
+      "response": "One original/current test identity and one unchanged product identity replace repeated entries; each private artifact has a truthful distinct role."
+    },
+    {
+      "number": 14,
+      "file": "docs/superpowers/specs/2026-10-16-scanner-execution-fd-prerequisite-d2.md",
+      "line": 70,
+      "finding": "Altitude: the separate H task, A_H approval and blocks-edge construction works around native gate semantics (one design_approval per task; closing an approval as denied releases blocks edges). The root fix would be in the queue, for example denied approvals not satisfying blocks edges, or additional-approval gating.",
+      "disposition": "scope rebuttal",
+      "response": "A general additional-approval/denied-edge queue primitive is reasonable future work, but changes queue design beyond this exact test prerequisite. Supported separate H semantics plus explicit indefinite denial hold suffice for this bounded admission; no claim of universal administrative-override prevention."
+    },
+    {
+      "number": 15,
+      "file": "docs/superpowers/specs/2026-10-16-scanner-execution-fd-prerequisite-d2.md",
+      "line": 35,
+      "finding": "Retained residual (R1 #13): live non-dumpable same-uid processes on this shared host can trip recovery/timeout during the single serial 3373 and full runs. No pre-run quiescence check or process snapshot is required to support the mandated 'concrete diagnosis'.",
+      "disposition": "accepted residual with bounded diagnostic evidence",
+      "response": "Record read-only preflight PID/UID/start-ticks/errno snapshot and available diagnostic PIDs, never argv/env or a claim of quiescence. It cannot prevent later shared-host races; unexpected failures remain hard holds, not waived or rerun."
+    },
+    {
+      "number": 16,
+      "file": "docs/superpowers/specs/2026-10-16-scanner-execution-fd-prerequisite-d2.md",
+      "line": 62,
+      "finding": "Retained accepted residuals (R1 #11 and #12) in the admitted blob: gc.collect() runs on every one of about 200 fake sleeps, and none_left() returns a bare bool, so leak failures never show the new (fd, dev, ino) identities.",
+      "disposition": "accepted residual unchanged patch",
+      "response": "Exact9a14 blob deliberately unchanged. Record actual per-node duration and first failure; GC cost/bare-bool diagnostic weakness remains disclosed, no diagnostic rerun or broader test/production fix."
+    }
+  ]
+}
