@@ -2,6 +2,9 @@
 
 import json
 import os
+import select
+import subprocess
+import sys
 from collections.abc import Callable
 from pathlib import Path
 
@@ -49,8 +52,8 @@ def test_only_valid_settlement_evidence_settles(ledger: creates.Ledger, bad: str
 
 @pytest.mark.parametrize("how", sorted(creates.KINDS))
 def test_settlement_needs_no_submission_but_gone_needs_settlement(ledger: creates.Ledger, how: str) -> None:
-    (ledger.directory / f"{BOX}.json").unlink()
     assert ledger.put(BOX, "settled", how=how, at=1)
+    (ledger.directory / f"{BOX}.json").unlink()
     assert creates.settled(ledger.directory, BOX)
     assert creates.gone(ledger.directory, BOX) == (how == "never_submitted")
     assert ledger.put(BOX, "gone", by="watcher", at=2)
@@ -65,6 +68,77 @@ def test_evidence_is_private_durable_and_first_writer_wins(ledger: creates.Ledge
     assert (ledger.directory / f"{BOX}.settled.json").read_bytes() == before
     assert all(p.stat().st_mode & 0o077 == 0 for p in ledger.directory.iterdir())
     assert not any(p.name.endswith(".tmp") for p in ledger.directory.iterdir())
+
+
+@pytest.mark.parametrize("kind", ["observed", "gone", "settled"])
+def test_other_process_cannot_resurrect_evidence_during_cleanup(
+        ledger: creates.Ledger, monkeypatch: pytest.MonkeyPatch, kind: str) -> None:
+    assert ledger.put(BOX, "settled", how="operator", at=1)
+    assert ledger.observe(BOX, "watcher", 2)
+    assert ledger.put(BOX, "gone", by="watcher", at=3)
+    (ledger.directory / f"{BOX}.json").unlink()  # interrupted cleanup: no lane binding remains
+    real_sync = creates.sync
+    children: list[subprocess.Popen[str]] = []
+
+    def sync(path: Path) -> None:
+        real_sync(path)
+        if path != ledger.directory or children:
+            return
+        # A fresh process opens the same permanent inode while cleanup owns it.
+        code = '''
+import fcntl, os, sys
+from pathlib import Path
+from heterodyne.sandbox import creates
+from heterodyne.wsd.gate import open_lock_file
+book = creates.Ledger(Path(sys.argv[1]), Path(sys.argv[2]))
+fd = open_lock_file(book.directory / ".lock")
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    print("unlocked", flush=True)
+except BlockingIOError:
+    print("blocked", flush=True)
+finally:
+    os.close(fd)
+print(book.put(sys.argv[3], sys.argv[4], how="operator", by="other-lane", at=4), flush=True)
+'''
+        child = subprocess.Popen([sys.executable, "-c", code, str(ledger.directory), str(ledger.alerts),
+                                  BOX, kind], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        children.append(child)
+        assert child.stdout is not None
+        assert select.select([child.stdout], [], [], 10)[0], "child did not reach the shared lock"
+        assert child.stdout.readline().strip() == "blocked"
+
+    monkeypatch.setattr(creates, "sync", sync)
+    try:
+        ledger.cleanup(BOX)
+        out, err = children[0].communicate(timeout=10)
+        assert children[0].returncode == 0, err
+        assert out.strip() == "False"
+        assert ledger.names() == []
+        assert (ledger.directory / ".lock").is_file()
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+            child.communicate(timeout=10)
+
+
+@pytest.mark.parametrize("damage", ["absent", "malformed", "symlink", "fifo"])
+def test_observation_cannot_repair_missing_or_damaged_submission(
+        ledger: creates.Ledger, damage: str) -> None:
+    path = ledger.directory / f"{BOX}.json"
+    path.unlink()
+    if damage == "malformed":
+        path.write_text("{")
+    elif damage == "symlink":
+        path.symlink_to(ledger.directory / "missing")
+    elif damage == "fifo":
+        os.mkfifo(path)
+    assert not ledger.observe(BOX, "sweep", 1)
+    assert not ledger.put(BOX, "gone", by="sweep", at=2)
+    assert not ledger.put(BOX, "settled", how="operator", at=3)
+    assert not creates.settled(ledger.directory, BOX)
+    assert not (ledger.directory / f"{BOX}.observed.json").exists()
 
 
 class LoopStopped(BaseException):

@@ -422,6 +422,8 @@ class SandboxRuntime:
             self.c.tmux.kill(watcher)
         if not self.c.tmux.session_absent(watcher):
             raise RuntimeUnavailable("a finished create's watcher can't be confirmed absent")
+        if not ledger.close_notice(name, self.c.clock()):
+            raise RuntimeUnavailable("a finished create's close-out notice can't be written")
         ledger.cleanup(name)
 
     def _restore_creates(self, *, ws: str | None = None, key: str | None = None) -> None:

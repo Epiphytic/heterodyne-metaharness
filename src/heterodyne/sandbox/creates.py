@@ -4,17 +4,21 @@ Absence, observation, and ended or replaced records never settle a create. Only 
 valid settlement followed by confirmed deletion makes an entry done.
 """
 
+import contextlib
+import fcntl
 import json
 import os
 import re
 import secrets
 import stat
+from collections.abc import Generator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
 from heterodyne.config.secret_scan import sensitive_kind
 from heterodyne.fsutil import private_dir
+from heterodyne.wsd.gate import open_lock_file
 
 NAME = re.compile(r"hz[0-9a-f]{12}g[1-9][0-9]*")
 KINDS = frozenset({"returned", "never_submitted", "operator"})
@@ -92,6 +96,17 @@ class Ledger:
         self.directory, self.alerts = directory, alerts
         private_dir(directory)
 
+    @contextlib.contextmanager
+    def _locked(self) -> Generator[None]:
+        # One permanent inode for every lane/process; never removed with an entry.
+        # Only filesystem operations belong in this critical section.
+        fd = open_lock_file(self.directory / ".lock")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
+
     def names(self) -> list[str]:
         # Include orphan settlement/gone files left by an interrupted cleanup.
         return sorted({p.name.split(".", 1)[0] for p in self.directory.iterdir()
@@ -112,12 +127,27 @@ class Ledger:
     def put(self, name: str, kind: str, **fields: Any) -> bool:
         suffix = f".{kind}" if kind else ""
         body = json.dumps({"sandbox": name, **fields}, sort_keys=True).encode()
-        return write_once(self.directory / f"{name}{suffix}.json", body)
+        try:
+            with self._locked():
+                # A stale reader must not resurrect evidence after another lane cleaned up.
+                # Invalid/unreadable submission evidence is never repaired by observation.
+                if kind and self.submission(name) is None and not settled(self.directory, name):
+                    return False
+                return write_once(self.directory / f"{name}{suffix}.json", body)
+        except OSError:
+            return False
 
     def observe(self, name: str, by: str, at: int) -> bool:
         return self.put(name, "observed", by=by, at=at)
 
     def alert(self, name: str, at: int, *, close: bool = False) -> bool:
+        try:
+            with self._locked():
+                return self._alert(name, at, close=close)
+        except OSError:
+            return False
+
+    def _alert(self, name: str, at: int, *, close: bool) -> bool:
         entry = self.submission(name)
         if entry is None:
             return False
@@ -156,9 +186,10 @@ class Ledger:
         paths = [self.alerts / f"create-{name}.json", self.alerts / f"create-{name}-settled.json"]
         paths.extend(self.directory / f"{name}{suffix}.json"
                      for suffix in ("", ".observed", ".gone", ".settled"))
-        for path in paths:
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                continue
-            sync(path.parent)
+        with self._locked():
+            for path in paths:
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    continue
+                sync(path.parent)

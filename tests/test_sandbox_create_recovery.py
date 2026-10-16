@@ -302,7 +302,7 @@ def test_legacy_migration_is_idempotent(rig: RuntimeRig, phase: Phase, started: 
     assert record(rig, rec.key).create_ledger
 
 
-@pytest.mark.parametrize("point", range(1, 7))
+@pytest.mark.parametrize("point", range(1, 8))
 @pytest.mark.parametrize("after_sync", [False, True])
 def test_interrupted_cleanup_never_rearms_done_entries(rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch,
                                                        point: int, after_sync: bool) -> None:
@@ -347,16 +347,25 @@ def test_cleanup_unlink_and_directory_sync_order(rig: RuntimeRig, monkeypatch: p
     ledger.alert(rec.sandbox, 4)
     ledger.alert(rec.sandbox, 5, close=True)
     events: list[tuple[str, str]] = []
-    unlink, sync = Path.unlink, creates.sync
+    unlink, sync, cleanup = Path.unlink, creates.sync, creates.Ledger.cleanup
+    cleaning = False
+
+    def start(book: creates.Ledger, name: str) -> None:
+        nonlocal cleaning
+        cleaning = True
+        cleanup(book, name)
 
     def remove(path: Path, missing_ok: bool = False) -> None:
-        events.append(("unlink", path.name))
+        if cleaning:
+            events.append(("unlink", path.name))
         unlink(path, missing_ok=missing_ok)
 
     def flush(path: Path) -> None:
-        events.append(("sync", path.name))
+        if cleaning:
+            events.append(("sync", path.name))
         sync(path)
 
+    monkeypatch.setattr(creates.Ledger, "cleanup", start)
     monkeypatch.setattr(Path, "unlink", remove)
     monkeypatch.setattr(creates, "sync", flush)
     rig.runtime._restore_creates(ws="alpha")  # pyright: ignore[reportPrivateUsage]
@@ -641,3 +650,70 @@ def test_second_ledger_listing_failure_is_runtime_unavailable(
     monkeypatch.setattr(creates.Ledger, "names", names)
     with pytest.raises(RuntimeUnavailable, match="ledger"):
         rig.runtime.sessions("alpha")
+
+
+def test_other_lane_cleanup_between_teardown_check_and_observation_cannot_lock_recovery(
+        rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch) -> None:
+    rec = seed(rig)
+    ledger = book(rig)
+    sibling = f"{short_id(rec.key)}g2"
+    assert ledger.put(sibling, "", key=rec.key, ws="alpha", bead=rec.bead, generation=2,
+                      deadline=rec.deadline, pane=rec.tmux_session, at=1)
+    assert ledger.put(sibling, "settled", how="operator", at=2)
+    assert ledger.put(sibling, "gone", by="watcher", at=3)
+    (ledger.directory / f"{sibling}.json").unlink()
+    rig.backend.extra.add(sibling)
+    observe = creates.Ledger.observe
+    interleaved: list[str] = []
+
+    def other_lane_cleanup(book: creates.Ledger, name: str, by: str, at: int) -> bool:
+        if name == sibling:
+            # Teardown already read the valid orphan settlement. Another lane now
+            # completes its globally discoverable interrupted cleanup before the write.
+            rig.runtime._restore_creates(ws="beta")  # pyright: ignore[reportPrivateUsage]
+            assert sibling not in ledger.names()
+            interleaved.append(name)
+        return observe(book, name, by, at)
+
+    monkeypatch.setattr(creates.Ledger, "observe", other_lane_cleanup)
+    assert rig.runtime._teardown(rec, interrupt=False)  # pyright: ignore[reportPrivateUsage]
+    assert interleaved == [sibling]
+    assert sibling not in ledger.names()
+    assert sibling not in rig.backend.names()
+    for lane in ("alpha", "beta", "alpha"):
+        assert rig.runtime.sessions(lane) == []
+    assert not (ledger.directory / f"{sibling}.observed.json").exists()
+
+
+@pytest.mark.parametrize("close_write_fails", [False, True])
+def test_dead_watcher_cleanup_publishes_close_out_first_and_retains_on_failure(
+        rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch, close_write_fails: bool) -> None:
+    rec = seed(rig)
+    ledger = book(rig)
+    assert ledger.alert(rec.sandbox, 1)
+    assert ledger.put(rec.sandbox, "settled", how="operator", at=2)
+    assert ledger.put(rec.sandbox, "gone", by="watcher", at=3)
+    # The watcher died after gone, before publishing its close-out. No live pane remains.
+    closed = ledger.alerts / f"create-{rec.sandbox}-settled.json"
+    cleanup, write = creates.Ledger.cleanup, creates.write_once
+    checked: list[str] = []
+
+    def clean(book: creates.Ledger, name: str) -> None:
+        assert closed.is_file()
+        checked.append(name)
+        cleanup(book, name)
+
+    monkeypatch.setattr(creates.Ledger, "cleanup", clean)
+    if close_write_fails:
+        monkeypatch.setattr(creates, "write_once", lambda path, body:
+                            False if path == closed else write(path, body))
+        with pytest.raises(RuntimeUnavailable, match="close-out"):
+            rig.runtime.sessions("alpha")
+        assert ledger.submission(rec.sandbox) is not None
+        assert creates.gone(ledger.directory, rec.sandbox)
+        assert (ledger.alerts / f"create-{rec.sandbox}.json").is_file()
+        assert checked == []
+        monkeypatch.setattr(creates, "write_once", write)
+    assert rig.runtime.sessions("alpha") == []
+    assert checked == [rec.sandbox]
+    assert ledger.names() == []
