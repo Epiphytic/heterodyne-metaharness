@@ -259,5 +259,17 @@
       "fixes": "D4 author dispositions; no subsequent reviewer clearance",
       "native_task_authority": "none created by archive"
     }
-  ]
+  ],
+  "governing_adr": {
+    "repository": "/home/openclaw/repos/hermes-workstreams-v2-adr-r17",
+    "commit": "a27acecee8274e6ad8dc65def436614d42b5cb04",
+    "path": "docs/adr/0001-workstreams-v2.md",
+    "archive_path": "evidence/governing-adr/0001-workstreams-v2-a27.md",
+    "sha256": "3b6da7d95d2652619439192a5fbda0dc5e281e8e5bd87813e95ae8c5d860ea3c",
+    "authority": "btq-ovngv; not new Plan5 consent"
+  },
+  "combined_amendment_subject": {
+    "path": "docs/adr/2026-10-16-plan5-governing-amendment-admission.md",
+    "source": "Verbatim seven existing published F5e D4 §10 choices; administrative approval-scope filing, no design-content change"
+  }
 }
