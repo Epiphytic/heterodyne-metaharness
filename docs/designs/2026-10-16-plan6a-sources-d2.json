@@ -1,0 +1,238 @@
+{
+  "schema_version": 2,
+  "kind": "Plan6A d2 input provenance and author disposition pins; no new approval",
+  "task": "btq-0bkbo",
+  "source_base": "07637745fe75dc614109a0b8ba72d3489f262a97",
+  "review_history": {
+    "rounds_used": 1,
+    "maximum": 3,
+    "reviewed_commit": "7903439e1a7ce5d738e502d0e7589d073ab4ac16",
+    "actual_result": "REVISE",
+    "findings": 68,
+    "complete_retained_report": {
+      "artifact": "0bkbo-r1-retained-plan6a-final.json",
+      "sha256": "06b3566447ed4b64cc496f72af80f7ba6335cab29f75065af34c4e1fb6f047ee"
+    },
+    "private_ordered_verbatim_dispositions": {
+      "artifact": "0bkbo-d2-author/r1-verbatim-dispositions.json",
+      "sha256": "70a4a100083ed4ffc082dc90a265fb5bd01714260eed83d6f4f970a364569ab1",
+      "reason_private": "Original findings contain private path examples; no encoded public copies."
+    }
+  },
+  "artifacts": [
+    {
+      "path": "docs/designs/2026-10-16-plan6a-pure-marmot-presentation-d2.md",
+      "sha256": "733bbd172d49904661a97d817e6a52b3d556451164a3a8156dcde9100a0aa06c"
+    },
+    {
+      "path": "docs/reviews/2026-10-16-plan6a-design-r1-dispositions-d2.json",
+      "sha256": "0ee934a2141550356fc835828752f2552e71518d0bc6c836de7158afc12abb6c"
+    },
+    {
+      "path": "docs/reviews/2026-10-16-plan6a-design-r1-dispositions-d2.md",
+      "sha256": "8c62cc37f80152490be274bacb19b6f350b4faa88b3fd2cfa9d31f1370621ee1"
+    }
+  ],
+  "historical_authority": [
+    {
+      "native_issue": "btq-xywu0",
+      "historical_record": {
+        "adr_revision": "93d0e90b121a07db720d92924cda443a1cfc239c",
+        "approved_at": "2026-10-13T20:23:40Z",
+        "approved_by": "Liam",
+        "approved_digest": "183d522381d3246c90dfcb98cbd6de7844f635482b267065472a80c0783172df",
+        "context_digest": "183d522381d3246c90dfcb98cbd6de7844f635482b267065472a80c0783172df",
+        "decision": "approve",
+        "design_review": "reviewer=gpt-6.1-sol author=claude-opus-5-5 mode=cross-model",
+        "via": "marmot",
+        "via_ref": "marmot:id:194185aeb556"
+      },
+      "source_evidence": {
+        "kind": "existing private native snapshot, corroborated by root current native read",
+        "artifact": "release-resume-2026-10-16/native-workstream-issues.json",
+        "sha256": "984f34dcef44961472d1b6846842ac3f2752be39887f8f14bccafa4cb0da37d3",
+        "selected_issue_canonical_sha256": "d94c6e648b35ad6a124e64aec2b59fcb9841d9261f892fbfa5d0839966103160"
+      },
+      "limit": "Historical approval of ADR16 only; not approval of Plan6A d2."
+    }
+  ],
+  "inputs": [
+    {
+      "repository": "local-git:hermes-workstreams-v2-adr",
+      "commit": "93d0e90b121a07db720d92924cda443a1cfc239c",
+      "path": "docs/adr/0001-workstreams-v2.md",
+      "sha256": "13086760390dc786c233fe358048878e1fa657f374f61534d619a8d22b8d8b35",
+      "role": "governing ADR16; external repository, not asserted superseding all amendments"
+    },
+    {
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "docs/security-model.md",
+      "sha256": "19995465c697f681a4a9c769884a7142c32c88fd40e0aea4603cebd08cb01940",
+      "role": "admind-own guard d4 scope; other group suspension retained"
+    },
+    {
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "docs/superpowers/plans/2026-09-30-heterodyne-plan-2-admind.md",
+      "sha256": "50ec24a8354583b903b657a29c828ed9e7a3272924138b0c94dddf3ccb42f214",
+      "role": "guard amendment and existing admind ownership"
+    },
+    {
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "docs/superpowers/specs/2026-10-14-cxmkf-amendment-1.md",
+      "sha256": "f67e743f6fc91d5e4c1150155f90a96bdbc06b041fd2aecf4eaeae71e11ce84f",
+      "role": "recorded human card amendment; admind-specific"
+    },
+    {
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "docs/spikes/S4-marmot.md",
+      "sha256": "97da66ec0675308bc06bc7f736a4872225f7d3bee435ce5f8d569153b6d07f41",
+      "role": "transport spike limits; no reaction-removal proof"
+    },
+    {
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "docs/superpowers/plans/2026-09-29-heterodyne-v1-roadmap.md",
+      "sha256": "87ef1a4aa63e2f35aca075c9b0f63be7a1c93e9225099e8396f135a21a9df9a1",
+      "role": "full Plan6 predecessor and future phase boundaries"
+    },
+    {
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/wsd/daemon.py",
+      "sha256": "3c285bdc61d2dc1cc245e0c90fac54a3fa821ce45298d858c8b016e2a38c60bd",
+      "role": "inspected Wsd.status seam; not complete presentation projection"
+    },
+    {
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/wsd/ctl.py",
+      "sha256": "e11e93403ca8ab898fb3dab9c9238da70a4ef623af9bc0f0529af450ae63964b",
+      "role": "existing control protocol excluded from change"
+    },
+    {
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/asks.py",
+      "sha256": "6b6645f1fbba429b0f52277152f31745422332fe063792ce4748378091f37042",
+      "role": "existing whole-content approval renderer; not replaced"
+    },
+    {
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/commands.py",
+      "sha256": "5a340f1265d234014969a1afcc5d43277c92c59682401ff0768a62a54f1e2488",
+      "role": "existing admind grammar; not reused as wsd authorization"
+    },
+    {
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/chunk.py",
+      "sha256": "da14b25dfe4e97157fe2e7f09e7eaa5eb95df7b11d61f01e3bc2a4569476e529",
+      "role": "pure atomic/marker candidates; existing pack not sufficient unchanged"
+    },
+    {
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "663a9efb2f1f2dba4c4c8f864bb4da40eabedd77",
+      "path": "docs/superpowers/specs/2026-10-13-cxmkf-admind-card-kinds-design.md",
+      "sha256": "a10973b2ed760e55f77347ac5a22abd8daa93597ea73bfcfb004550a5b7cddb9",
+      "role": "historical approved admind card-kind design; source object outside baseline tree"
+    },
+    {
+      "repository": "local-git:hermes-workstreams-v2-adr",
+      "commit": "58615ac6cf8eed9419fc284482d40a82780cfe8d",
+      "path": "docs/adr/0001-workstreams-v2.md",
+      "sha256": "570339f06ba6ad682b996a3725fd624c831b7a0762c9d3c1fa770adf5d8cb3c9",
+      "role": "governing ADR17: admind card amendment only; no release-name resolution inferred"
+    },
+    {
+      "repository": "local-git:hermes-workstreams-v2-adr",
+      "commit": "a6903c5fe58a53f6726d18d163dca1d7d98d817b",
+      "path": "docs/reviews/0001-design-review-r30.md",
+      "sha256": "40685010a8e4c9b27cb7e2154c7b6357ffd9bae666235714140535cfef829cc2",
+      "role": "actual ADR16 R30 review record, separate from genuine human decision"
+    },
+    {
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/config/secret_scan.py",
+      "sha256": "92422444c6e632c54a2fe8a4e5c80554fcce0421e6ada2f383ae58fdfff0bc59",
+      "role": "immutable SECRET_VALUES/IDENTIFIER_VALUES reused; show not reused"
+    },
+    {
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/redact.py",
+      "sha256": "533ecbb089b57e643c1edf8745eb13dd908b5dc1cbd14f74f48e3a59883a0d8c",
+      "role": "mutable global path-sensitive redactor deliberately not reused"
+    },
+    {
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/config/__init__.py",
+      "sha256": "38087dbeb2f021da1062f197c99e4c922591ddff6f1749124ee379acd1e0d870",
+      "role": "inert import versus actual environment/config load audit seam"
+    },
+    {
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/wsd/ids.py",
+      "sha256": "b897e799345442c20bdd0c1b6f906079a7cb75cd5bf580627d15663506f84ae9",
+      "role": "actual SLUG grammar; no native identity generation reused"
+    },
+    {
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/__init__.py",
+      "sha256": "7b7515a07ee8136217e5ab82e6f56838a4f64d706200d73019b28d1bcf58baab",
+      "role": "pure package initialization"
+    },
+    {
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "pyproject.toml",
+      "sha256": "f772a967a4e3f944e4f0293a744a5f0157ead4cc77ee9d7fd8854c176bbeb911",
+      "role": "locked tooling interfaces; no formatter invented"
+    },
+    {
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "7903439e1a7ce5d738e502d0e7589d073ab4ac16",
+      "path": "docs/designs/2026-10-16-plan6a-pure-marmot-presentation.md",
+      "sha256": "5dc5a1dbb2fc8df933a8ec51da981992df71a520d532e180795a5232c8c57c8e",
+      "role": "immutable actual R1 reviewed design; REVISE68, not approved"
+    },
+    {
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "7903439e1a7ce5d738e502d0e7589d073ab4ac16",
+      "path": "docs/designs/2026-10-16-plan6a-sources.json",
+      "sha256": "f7465742b4746ad482626bd5bea98e615cf3bfdfa90debc388253b54efc13b1b",
+      "role": "immutable original input manifest; not superseded in history"
+    },
+    {
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "0ed49add285a203a758dad8e97598ffa1b83f28d",
+      "path": "docs/designs/2026-10-16-plan6b-authenticated-marmot-read-surface.md",
+      "sha256": "b3b007f5c79a679b2fc8f50930d4df271ae8de8cf833fc25155d018590b27558",
+      "role": "provisional frozen6B \u00a74.3/query matrix compatibility input; final review/human approval not asserted"
+    },
+    {
+      "repository": "local-git:hermes-workstreams-v2-adr-r17 (no remote)",
+      "commit": "a27acecee8274e6ad8dc65def436614d42b5cb04",
+      "path": "docs/adr/0001-workstreams-v2.md",
+      "sha256": "3b6da7d95d2652619439192a5fbda0dc5e281e8e5bd87813e95ae8c5d860ea3c",
+      "role": "current approved ADR17 on A1; genuine ovngv approval recorded in design"
+    }
+  ],
+  "repository_resolution": {
+    "https://github.com/Epiphytic/heterodyne-metaharness": "Canonical product repository; exact historical objects may require the already retained refs. No current-main claim.",
+    "local-git:hermes-workstreams-v2-adr": "Existing external Git object archive supplied by controller. No remote exists; exact commit/path/hash are the portable locator, with approved ADR excerpts/archive publication required before the new human ask."
+  },
+  "authority_limits": [
+    "All new departure decisions remain pending genuine native ADR amendment/admission after satisfactory capped review and GitHub publication.",
+    "6B compatibility input remains provisional, not authority or implemented API.",
+    "Input hashes identify observed bytes; they do not manufacture review, access or consent."
+  ]
+}
