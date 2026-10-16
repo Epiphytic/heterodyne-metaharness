@@ -1,0 +1,259 @@
+{
+  "version": 1,
+  "status": "UNREVIEWED d4 author repairs after FINAL R3 REVISE15; all3 rounds exhausted; no approval/implementation/deployment",
+  "task": "btq-w2jti",
+  "base": "07637745fe75dc614109a0b8ba72d3489f262a97",
+  "inputs": [
+    {
+      "repository": "heterodyne-metaharness-v2-btq-btq-w2jti",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/marmot/control.py",
+      "blob": "c5a054644f88d7a449eccbd8d64e52ce80d3ebbd",
+      "sha256": "5015667928bb080578dbcc19406a215d79fbcf2696e94b84026c2cf6e14a4862",
+      "authority": "Inspected source baseline, not live capability proof"
+    },
+    {
+      "repository": "heterodyne-metaharness-v2-btq-btq-w2jti",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/daemon.py",
+      "blob": "9c3f17f9505a42e2c9510c093149eddf653330d1",
+      "sha256": "6dd566effd2fbd2a569e533cf8449da5ae15244290e6a9cfc30560e685acb0fb",
+      "authority": "Inspected source baseline, not live capability proof"
+    },
+    {
+      "repository": "heterodyne-metaharness-v2-btq-btq-w2jti",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/store.py",
+      "blob": "605e8314fb57be770d1f86caf103c962c323225f",
+      "sha256": "5ae75889f8b1c58f9f4367bd2d76c8070154cfd8caa384eb8178f6c0c68d3359",
+      "authority": "Inspected source baseline, not live capability proof"
+    },
+    {
+      "repository": "heterodyne-metaharness-v2-btq-btq-w2jti",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/asks.py",
+      "blob": "a419c858ba5864c599ca90bfa89c0538e221ddcc",
+      "sha256": "6b6645f1fbba429b0f52277152f31745422332fe063792ce4748378091f37042",
+      "authority": "Inspected source baseline, not live capability proof"
+    },
+    {
+      "repository": "heterodyne-metaharness-v2-btq-btq-w2jti",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/alerts.py",
+      "blob": "c4e17009f6e38735283536abc0d401218f392e45",
+      "sha256": "61e9c252e06802e2e8f10dfbd835b5f8ef96991b7ae4c0d089f87926b149164d",
+      "authority": "Inspected source baseline, not live capability proof"
+    },
+    {
+      "repository": "heterodyne-metaharness-v2-btq-btq-w2jti",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/wsd/journal.py",
+      "blob": "de43ae720c5b3a3fb60664eb19532436af161fef",
+      "sha256": "b26aabb804941c8d98ed75ea0dc9b6af4e6f136f6541b3af399f9c5d561370c7",
+      "authority": "Inspected source baseline, not live capability proof"
+    },
+    {
+      "repository": "heterodyne-metaharness-v2-btq-btq-w2jti",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "docs/spikes/S4-marmot.md",
+      "blob": "405d63a0b65c7c0dbe6b2b9d6857c57aeb218880",
+      "sha256": "97da66ec0675308bc06bc7f736a4872225f7d3bee435ce5f8d569153b6d07f41",
+      "authority": "Inspected source baseline, not live capability proof"
+    },
+    {
+      "repository": "hermes-workstreams-v2-adr-r17",
+      "commit": "a27acecee8274e6ad8dc65def436614d42b5cb04",
+      "path": "docs/adr/0001-workstreams-v2.md",
+      "blob": "40e02d55e6b752dcb97fd5ac21b0e920e7194d47",
+      "sha256": "3b6da7d95d2652619439192a5fbda0dc5e281e8e5bd87813e95ae8c5d860ea3c",
+      "authority": "Current governing ADR; approval independently native ovngv"
+    },
+    {
+      "repository": "heterodyne-metaharness-v2-btq-btq-63iz7",
+      "commit": "e7b0b960e1a7b526a23109684e735121a8955d90",
+      "path": "docs/designs/2026-10-16-plan6b-authenticated-marmot-read-surface-d4.md",
+      "blob": "b98c4a515d948716fc50e8b7229adf2106fd34fc",
+      "sha256": "37f1ae13d13591fd196d988bb9cc97748e9cc5b65cd7cde6c735ed1a68060231",
+      "authority": "Frozen provisional6B d4; transport partition preserved, no source edits; final genuine compatible admission required"
+    },
+    {
+      "repository": "heterodyne-metaharness-v2-btq-btq-0bkbo",
+      "commit": "f283d1f52f119f15725e3589f81fcab3efbf6c30",
+      "path": "docs/designs/2026-10-16-plan6a-pure-marmot-presentation-d3.md",
+      "blob": "9f2a520d8a908a3f162719b74b2ffca18ed000b0",
+      "sha256": "9dc1e2478db787d1f148a4932484591e4e43b0fb6d1f17f0947ba2cdcfc9eff7",
+      "authority": "Provisional incompatible/unapproved proposal only, no implementation admission"
+    },
+    {
+      "repository": "heterodyne-metaharness-v2-btq-btq-e7knb",
+      "commit": "45e239a53bdb3bee82d6d44125c021abe296f60d",
+      "path": "docs/designs/2026-10-16-plan5-actions-and-executor-d4.md",
+      "blob": "3f8daea6ad2133436caf1aecb05003fc9a636519",
+      "sha256": "de7239b72a3ac2b63d1d05f4143212e6f4ea83193bfe1ac3b4279bb28ba8c5f8",
+      "authority": "Provisional incompatible/unapproved proposal only, no implementation admission"
+    },
+    {
+      "repository": "heterodyne-metaharness-v2-btq-btq-8d487",
+      "commit": "c9fa7942386556b5227d96cbe73b8ca4a9223efc",
+      "path": "docs/designs/2026-10-16-plan8-scheduling-reconciliation.md",
+      "sha256": "ce4e1b9016f89e7e4266d707beaa82dec7c542d6e3e51a524fde48b2f0fd1a14",
+      "authority": "Frozen provisional Plan8 d1 bytes; actual R1 REVISE28, not an approved/installed contract. Final compatible clock interface remains required.",
+      "private_handoff_relative_path": "plan6c-r1-architecture/plan8-input-snapshot/2026-10-16-plan8-scheduling-reconciliation.md",
+      "blob": "598ff0cec214c1db94a41b9b75e66b02928cc1c6"
+    },
+    {
+      "repository": "heterodyne-metaharness-v2-btq-btq-8d487",
+      "commit": "c9fa7942386556b5227d96cbe73b8ca4a9223efc",
+      "path": "docs/designs/2026-10-16-plan8-scheduling-reconciliation-inputs.json",
+      "sha256": "6617e701b7a6d32777b7da3550aed97491918a220f7626a165ad229c2c58564e",
+      "authority": "Frozen provisional Plan8 d1 bytes; actual R1 REVISE28, not an approved/installed contract. Final compatible clock interface remains required.",
+      "private_handoff_relative_path": "plan6c-r1-architecture/plan8-input-snapshot/2026-10-16-plan8-scheduling-reconciliation-inputs.json",
+      "blob": "d9e98bfc3137ab24bd31b9d9680e02adfc3bc45e"
+    },
+    {
+      "repository": "heterodyne-metaharness-v2-btq-btq-w2jti",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/notices.py",
+      "blob": "614dc8dedfb7737b7f3a5b34aac665316068720b",
+      "sha256": "e123b4adcf32369e72b1230525bfd31b4ea4f05286091bbef35dda0af9a790bd",
+      "authority": "Inspected source baseline, not live capability proof; actual local trust/NoticePost/redaction/atomic-file boundary"
+    },
+    {
+      "repository": "heterodyne-metaharness-v2-btq-btq-w2jti",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/ctl.py",
+      "blob": "234c47d7f4f3561b0cfdd867e5cb6e137e067c81",
+      "sha256": "13551cafa7d953dff0f96dd4da4bd9544ddad1035f1b0134e2c5c05d785d6483",
+      "authority": "Inspected source baseline, not live capability proof; actual local trust/NoticePost/redaction/atomic-file boundary"
+    },
+    {
+      "repository": "heterodyne-metaharness-v2-btq-btq-w2jti",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/redact.py",
+      "blob": "c5a3af2d8aa74742d337beed18370b7b16940153",
+      "sha256": "533ecbb089b57e643c1edf8745eb13dd908b5dc1cbd14f74f48e3a59883a0d8c",
+      "authority": "Inspected source baseline, not live capability proof; actual local trust/NoticePost/redaction/atomic-file boundary"
+    },
+    {
+      "repository": "heterodyne-metaharness-v2-btq-btq-w2jti",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/fsutil.py",
+      "blob": "9b8c033b59996202153621f5f0de3bf2c4937a17",
+      "sha256": "34b8ff22a0450f1809de4db13b75ddf99d84e287b81dcb6313ef14e2e149dee1",
+      "authority": "Inspected source baseline, not live capability proof; actual local trust/NoticePost/redaction/atomic-file boundary"
+    },
+    {
+      "repository": "heterodyne-metaharness-v2-btq-btq-w2jti",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/agents/base.py",
+      "blob": "b1a6933afd17e78fe0514ed9dabf7be89e311eed",
+      "sha256": "ca7c2ab3c8e96fc99f219ea959ee19a2638655071e4a8484e4c4d6e7d6ed880a",
+      "authority": "Actual private atomic/fsync file exemplar; fsutil supplies private_dir only"
+    },
+    {
+      "repository": "mdk-fork",
+      "commit": "37c248a11239e108afc9bd4ee62b8f60542012e3",
+      "path": "crates/agent-connector/src/messaging.rs",
+      "blob": "0eeae504c72cb3445ccb346a449bf5b67bb8e8d5",
+      "sha256": "b09a9fc1c5ab24c579d9caf063c32b252192f3c122648999561173fcc5e3181e",
+      "authority": "Inspected immutable source, NOT deployed binary equivalence or proven-unsent proof"
+    },
+    {
+      "repository": "mdk-fork",
+      "commit": "37c248a11239e108afc9bd4ee62b8f60542012e3",
+      "path": "crates/agent-connector/src/connection.rs",
+      "blob": "e05238047d1a0eb4bd4b54390511bdc003c78024",
+      "sha256": "b486b6f64b507d24b9a496abc5364ac090cefaac16acb90a167782163621d60e",
+      "authority": "Generic response projection after awaited handler; no transport proof"
+    },
+    {
+      "repository": "mdk-fork",
+      "commit": "37c248a11239e108afc9bd4ee62b8f60542012e3",
+      "path": "crates/agent-connector/src/error.rs",
+      "blob": "1115050ca2c108cdb8f6bade42d0798be73e87cb",
+      "sha256": "accb9062ad55742ae138f71dc1aff0adf5a6d64d1eba975cb922afdb772a307a",
+      "authority": "Error code/retryable projection is not a per-attempt non-dispatch proof"
+    }
+  ],
+  "native_approval": {
+    "issue": "btq-ovngv",
+    "canonical_sha256": "a0c27e6fa35f40d6d87cfecb8394d06705db756915784c587d6bb677e70688fa",
+    "approved_by": "Liam",
+    "approved_at": "2026-10-14T15:57:38Z",
+    "adr_revision": "a27acecee8274e6ad8dc65def436614d42b5cb04",
+    "via": "marmot",
+    "via_ref": "189fd6bb97ba"
+  },
+  "limits": [
+    "No code/live tests/services/model spikes or deployment",
+    "Future ports are proposals; freeze exact compatible source contracts before implementation review",
+    "All questions and approvals via authenticated Marmot admind",
+    "Maximum3 actual Claude built-in design reviews in this new Plan6C lineage"
+  ],
+  "design_sha256": "43c5a73b786323267aad0cc5ff2e60080f6aa56de428427dd0a5398c64f91229",
+  "actual_review_rounds_consumed": 3,
+  "prior_design_commit": "ee9203f5b2d8567a557b0876ada4dd54e99e0463",
+  "historical_6a_note": "f283d1f is the inspected provisional6A source only, not claimed latest or sufficient. Final compatible actual renderer/overflow contract is required before adapter implementation.",
+  "review_history": [
+    {
+      "sha256": "9c37b5cb38ec6ca5159a26a2dab38038b614ffc736ae07e5f3c648cd1585f43b",
+      "actual_json_findings": 33,
+      "verdict": "REVISE",
+      "private_handoff_relative_path": "review-w2jti-builtin-design-r1.log"
+    },
+    {
+      "sha256": "0a6e76a79749616eab5237497599e4acbc8e6da01dda55904b411fb3aa7c419e",
+      "actual_json_findings": 27,
+      "verdict": "REVISE",
+      "reviewed_commit": "020c72a96ab527e57be28a0b2a619444308ac018",
+      "private_handoff_relative_path": "review-w2jti-builtin-design-r2.log"
+    },
+    {
+      "sha256": "1a9d7816b95fbe67d5fee8cf718a904a808e8ee70e97e6779f6dea09db727f28",
+      "actual_json_findings": 15,
+      "verdict": "REVISE",
+      "reviewed_commit": "4acc2d5a2d6ee3e2266ff465271a72c419493723",
+      "private_handoff_relative_path": "review-w2jti-builtin-design-r3.log"
+    }
+  ],
+  "prior_d2_commit": "020c72a96ab527e57be28a0b2a619444308ac018",
+  "historical_r1_dispositions_sha256": "4d0c3eb179010f18534c275340309e5ff8de22fc3108bd72914ef403f078eee0",
+  "r2_dispositions_sha256": "59daa8b3e95d8795d33e13f9219fb3c72ab59a04f7586cd1ecc04c2ba9737d01",
+  "remaining_review_rounds": 0,
+  "prior_d3_commit": "4acc2d5a2d6ee3e2266ff465271a72c419493723",
+  "design_path": "docs/designs/2026-10-16-plan6c-durable-delivery-d4.md",
+  "r3_dispositions_sha256": "26ecfdffc5e273f5423ab983d2b9932ec43f999059fa6f831bc072e1e49cdc6d",
+  "new_d4_choices": [
+    "Automatic validated same-identity recovery before Store/create under approved deployment, no broken-daemon new card",
+    "Bounded complete-writer DATA recovery log with periodic SQLite checkpoints, no full per-effect backup",
+    "Canonical native-admission-preserving full copy profile, supplementary askd protection and legacy same-bead supersession fence",
+    "Durable caller producer intent, internal deterministic R29 intents, clock-unready retryable admission refusal",
+    "One finite authenticated Marmot episode-scoped recovery interaction, no per-part card or MAX_OPEN deadlock; uncertain retains possible-duplicate warning",
+    "All post-write PeerErrors unproven/uncertain; actual deployed safe-error proof not established",
+    "Known-old-target pointers, explicitly qualified unknown-map inventory response",
+    "Shared overflow mutable status remote only first lifetime state; exact Plan8 compatibility still blocked",
+    "Reuse existing delayed/not_before group release mechanism, no parallel scheduler"
+  ],
+  "historical_d3_files": [
+    {
+      "path": "docs/designs/2026-10-16-plan6c-durable-delivery.md",
+      "commit": "4acc2d5a2d6ee3e2266ff465271a72c419493723",
+      "sha256": "cf60b088c53123e127539a92d66f771385f2f2b4deb6cf399b76fcb77bae506f"
+    },
+    {
+      "path": "docs/reviews/plan6c-delivery-inputs.json",
+      "commit": "4acc2d5a2d6ee3e2266ff465271a72c419493723",
+      "sha256": "0b45fc1f0c335559ddea4015c5e34691fcc5cd91e5679da680b46d1b597a701b"
+    },
+    {
+      "path": "docs/reviews/plan6c-delivery-design-r1-disposition.md",
+      "commit": "4acc2d5a2d6ee3e2266ff465271a72c419493723",
+      "sha256": "4d0c3eb179010f18534c275340309e5ff8de22fc3108bd72914ef403f078eee0"
+    },
+    {
+      "path": "docs/reviews/plan6c-delivery-design-r2-disposition.md",
+      "commit": "4acc2d5a2d6ee3e2266ff465271a72c419493723",
+      "sha256": "59daa8b3e95d8795d33e13f9219fb3c72ab59a04f7586cd1ecc04c2ba9737d01"
+    }
+  ]
+}
