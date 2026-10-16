@@ -640,7 +640,8 @@ grep -F 'id:<12 hex>' <state>/admind/audit.jsonl
 local ask socket. It returns a versioned, closed evidence envelope with the complete stored render
 inputs and canonical SHA-256, reproduced card parts and their local outbox delivery state, all retained
 answer/note records with native message and sender provenance, and separately named native decision
-attempts. The recommendation comes from the stored form, including a recommendation other than A.
+attempts. Native `outcome`, `decided_by` and `current_attempt` are included separately;
+a settled attempt does not substitute for these stored fields. The recommendation comes from the stored form, including a recommendation other than A.
 Policy principals and their canonical fingerprint are read afresh; the envelope records Linux boot ID
 and BOOTTIME at the read. An answer's `current_policy` flag describes only its configured principal,
 not current group membership or new authority. Revoked actors and contrary answers remain in history.
@@ -654,5 +655,14 @@ commands, accept caller policy/files, or bypass a latch.
 Exit 1 returns a fixed typed refusal when evidence is missing, incomplete, oversized, redacted, truncated,
 not reproducible by the current renderer, or has invalid state, unavailable policy, or unavailable boot
 clock evidence. It never returns partial evidence as complete. Legacy records without durable sender
-provenance and cards rendered with an incompatible chunk configuration may therefore be refused.
-Exit 69 means the daemon could not be reached. This interface requires deployment before use.
+provenance, stored inputs rejected by current posting rules, and cards rendered with an incompatible
+chunk configuration may therefore be refused. An originally truncated card remains refused even after
+a full repeat. Free answer/note prose gets no public-digest exemption: if redaction would change it,
+the whole binding is refused without modifying the native record. Typed decision digests remain typed
+provenance; this does not make arbitrary answer text safe to expose.
+
+The CLI also emits fixed JSON for invalid IDs and incompatible/legacy replies (`invalid-state` or
+`invalid-reply`), and for a connected response deadline (`response-timeout`, exit 1). Exit 69 includes
+fixed JSON with `transport-unavailable`; it means connection/transport failed, not that an approval
+was declined. Error messages never echo peer text. The bounded read runs off the event loop while
+retaining daemon/store serialization. This interface requires deployment before use.

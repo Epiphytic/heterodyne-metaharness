@@ -372,3 +372,188 @@ def test_snapshot_stays_consistent_with_independent_wal_writer(store: Store) -> 
         assert store.db.execute("SELECT title FROM asks").fetchone()[0] == "Changed concurrently"
     finally:
         other.close()
+
+
+@pytest.mark.parametrize("kind", ["question", "merge"])
+@pytest.mark.parametrize("repeat", [False, True])
+def test_chunk_boundary_redaction_is_not_complete_evidence(store: Store, repeat: bool, kind: str) -> None:
+    # Longer than the AWS token boundary: safe whole, but a cut can expose a token suffix.
+    from heterodyne.admind.redact import redact
+    token = "AKIA" + "ABCDEFGHIJKLMNOPQRST"
+    base = seed(store) if kind == "question" else seed(
+        store, kind="merge", question_form=None, choices=None,
+        pr_url="https://github.com/example/project/pull/1", head_sha="ab" * 20)
+    for pad in range(400):
+        row = dataclasses.replace(base, body="w" * (120 + pad) + " " + token)
+        parts, truncated = asks.card_chunks(row, 200)
+        assert redact(asks.context(row)) == asks.context(row)
+        if any("<redacted" in part for part in parts):
+            break
+    else:
+        pytest.fail("fixture did not expose post-chunk redaction")
+    if repeat:
+        with pytest.raises(binding.Refusal) as exc:
+            binding._expected(row, 200, True)
+        assert exc.value.code == "redacted"
+    else:
+        store.db.execute("UPDATE asks SET body=?,card_parts=?,truncated=?", (row.body, len(parts), truncated))
+        store.db.execute("DELETE FROM outbox")
+        for i, part in enumerate(parts):
+            store.enqueue(f"ask:{ID}:{i}", part, None, ownership_kind="system")
+        result = binding.read(store, ID, 200, lambda: POLICY)
+        assert result.code == "redacted" and result.binding is None
+
+
+def test_binding_exposes_native_outcome_and_current_attempt(store: Store) -> None:
+    seed(store)
+    store.claim_inbound(MID, sender_key=OPERATOR_HEX)
+    assert store.begin_attempt(approvals.Attempt(ID, MID, "approve", "op", "marmot:id:" + MID,
+                                                "cd" * 32, None))
+    result = read(store)
+    assert result.binding is not None
+    assert result.binding.current_attempt == MID
+    assert result.binding.outcome is None and result.binding.decided_by is None
+    assert store.close_attempt(ID, MID, expect_status="deciding", settled="recorded", exit_status=0,
+                               new_status="approved", outcome="Approved", decided_by="op")
+    result = read(store)
+    assert result.binding is not None
+    assert result.binding.current_attempt is None
+    assert result.binding.outcome == "Approved" and result.binding.decided_by == "op"
+    assert result.binding.decision_attempts[0].settled == "recorded"
+
+
+@pytest.mark.parametrize("kind", ["answer", "note"])
+def test_overlong_history_is_oversized(store: Store, kind: str) -> None:
+    seed(store)
+    if kind == "answer":
+        answer(store, text="w" * (asks.MAX_ANSWER + 1))
+    else:
+        store.claim_inbound(MID, sender_key=OPERATOR_HEX)
+        store.begin_attempt(approvals.Attempt(ID, MID, "approve", "op", "ref", "cd" * 32,
+                                              "w" * (asks.MAX_ANSWER + 1)))
+    refused(store, "oversized")
+
+
+@pytest.mark.parametrize("failure", ["invalid-id", "old", "unavailable", "malformed", "timeout"])
+def test_cli_always_emits_fixed_typed_refusal(tmp_path: Path, monkeypatch, capsys, failure: str) -> None:
+    async def request(*args, **kwargs):
+        if failure == "old":
+            return binding.AskBindingReply("refused", "untrusted daemon text")
+        if failure == "unavailable":
+            raise ctl.CtlUnavailable("private details")
+        if failure == "malformed":
+            raise ctl.CtlInvalidReply("private details")
+        raise TimeoutError("private details")
+    monkeypatch.setattr(ctl, "request", request)
+    result = cli.ask_binding_command(make_settings(tmp_path), "invalid/id" if failure == "invalid-id" else ID)
+    assert result in (1, 69)
+    output = capsys.readouterr()
+    reply = json.loads(output.out)
+    assert reply["result"] == "refused" and reply["code"] is not None
+    assert reply["message"] == "ask.binding.v1 unavailable" and reply["binding"] is None
+    assert "private" not in output.out and "untrusted" not in output.out
+
+
+@pytest.mark.parametrize("payload", [b"{", b"", b"x" * 1000,
+    b'{"result":"refused","message":"future","code":"future-version"}'])
+def test_real_socket_bad_framing_and_schema_are_typed(tmp_path: Path, payload: bytes) -> None:
+    async def exercise():
+        async def respond(reader, writer):
+            await reader.readline()
+            writer.write(payload + b"\n")
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+        path = tmp_path / "ask.sock"
+        server = await asyncio.start_unix_server(respond, path=str(path))
+        async with server:
+            with pytest.raises(ctl.CtlInvalidReply):
+                await ctl.request(path, asks.AskBinding(ID), .1,
+                                  reply_type=binding.AskBindingReply, max_reply=500)
+    asyncio.run(exercise())
+
+
+def test_connected_response_timeout_is_distinct_from_unreachable(tmp_path: Path) -> None:
+    async def exercise():
+        finished = asyncio.Event()
+        async def respond(reader, writer):
+            await reader.readline()
+            await reader.read()
+            writer.close()
+            await writer.wait_closed()
+            finished.set()
+        path = tmp_path / "ask.sock"
+        server = await asyncio.start_unix_server(respond, path=str(path))
+        async with server:
+            with pytest.raises(ctl.CtlResponseTimeout):
+                await ctl.request(path, asks.AskBinding(ID), .01, reply_type=binding.AskBindingReply)
+            await asyncio.wait_for(finished.wait(), 1)
+        with pytest.raises(ctl.CtlUnavailable) as exc:
+            await ctl.request(tmp_path / "absent.sock", asks.AskBinding(ID))
+        assert not isinstance(exc.value, (ctl.CtlInvalidReply, ctl.CtlResponseTimeout))
+    asyncio.run(exercise())
+
+
+def test_binding_reader_does_not_occupy_event_loop(store: Store, tmp_path: Path, monkeypatch) -> None:
+    import threading
+    entered, release = threading.Event(), threading.Event()
+    def slow_read(*args):
+        entered.set()
+        assert release.wait(2)
+        return binding.AskBindingReply("refused", "ask.binding.v1 unavailable", code="incomplete")
+    monkeypatch.setattr(binding, "read", slow_read)
+    daemon = object.__new__(Admind)
+    daemon.store, daemon.s, daemon.load_operators = store, make_settings(tmp_path), lambda: POLICY
+    async def exercise():
+        daemon.ask_post_lock = asyncio.Lock()
+        task = asyncio.create_task(daemon.on_ask(asks.AskBinding(ID), ctl.Peer(1)))
+        try:
+            async with asyncio.timeout(1):
+                while not entered.is_set():
+                    await asyncio.sleep(.001)
+            assert not task.done() and daemon.ask_post_lock.locked()
+        finally:
+            release.set()
+        assert (await task).result == "refused"
+    asyncio.run(exercise())
+
+
+def test_missing_approval_digest_is_invalid_state(store: Store) -> None:
+    seed_approval(store)
+    store.db.execute("UPDATE asks SET digest=NULL")
+    refused(store, "invalid-state")
+
+
+def test_dangling_current_attempt_is_incomplete(store: Store) -> None:
+    seed(store)
+    store.db.execute("UPDATE asks SET attempt=?", (MID,))
+    refused(store, "incomplete")
+
+
+@pytest.mark.parametrize("text", ["Approve manifest " + "cd" * 32, "A\r\n"])
+def test_free_prose_digest_or_controls_never_gain_identifier_exemption(store: Store, text: str) -> None:
+    seed(store)
+    answer(store, text=text)
+    before = list(store.db.iterdump())
+    refused(store, "redacted")
+    assert list(store.db.iterdump()) == before
+
+
+def test_later_posting_rules_fail_closed_for_legacy_formless_card(store: Store, monkeypatch) -> None:
+    seed(store, question_form=None, choices=None)
+    assert read(store).result == "ok"
+    monkeypatch.setattr(asks, "REQUIRE_QUESTION_FORM", True)
+    refused(store, "invalid-state")
+
+
+def test_truncated_original_stays_refused_after_full_repeat(store: Store) -> None:
+    row = seed(store, body="Ordinary context.\n" * 400)
+    assert row.truncated
+    request = "ef" * 32
+    parts = asks.full_chunks(row, 4000)
+    store.db.execute("INSERT INTO ask_repeats VALUES(?,?,?,?)", (ID, request, len(parts), AT))
+    prefix = f"askr:{ID}:{request}"
+    for number, text in enumerate(parts):
+        store.enqueue(f"{prefix}:{number}", text, None, ownership_kind="system")
+    sent(store, prefix)
+    refused(store, "truncated")

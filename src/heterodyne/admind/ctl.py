@@ -57,6 +57,14 @@ class CtlUnavailable(Exception):
     """No daemon is listening (or it did not answer)."""
 
 
+class CtlInvalidReply(CtlUnavailable):
+    """A daemon replied, but its framing or schema was incompatible."""
+
+
+class CtlResponseTimeout(CtlUnavailable):
+    """A connected daemon did not finish a reply before the deadline."""
+
+
 class Peer(NamedTuple):
     """The connecting process, as far as the kernel says (audit only; R16)."""
     pid: int | None
@@ -254,7 +262,11 @@ async def request(path: Path, req: msgspec.Struct, timeout: float = 300.0, *, re
         await writer.drain()
         line = await asyncio.wait_for(reader.readline(), timeout)
         return msgspec.json.decode(line, type=reply_type)
-    except (OSError, TimeoutError, ValueError, msgspec.DecodeError) as exc:     # ValueError: framing
+    except TimeoutError:
+        raise CtlResponseTimeout from None
+    except (ValueError, msgspec.DecodeError):  # ValueError: framing
+        raise CtlInvalidReply from None
+    except OSError as exc:
         raise CtlUnavailable(type(exc).__name__) from None
     finally:
         await hang_up(writer)

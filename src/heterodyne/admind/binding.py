@@ -34,12 +34,23 @@ HEX_KEY = re.compile(r"[0-9a-f]{64}\Z")
 NATIVE_ID = re.compile(r"(?:r:)?[0-9a-f]{64}\Z")
 STATES = frozenset((*asks.ACTIVE, *asks.TERMINAL))
 RefusalCode = Literal["missing", "incomplete", "oversized", "redacted", "truncated", "render-mismatch",
-                      "invalid-state", "policy-unavailable", "clock-unavailable"]
+                      "invalid-state", "policy-unavailable", "clock-unavailable",
+                      "invalid-reply", "transport-unavailable", "response-timeout"]
 
 
 class Refusal(Exception):
     def __init__(self, code: RefusalCode) -> None:
         self.code: RefusalCode = code
+
+
+class StoredForm(msgspec.Struct, forbid_unknown_fields=True):
+    choices: list[str]
+    recommended: str
+
+
+class StoredApproval(msgspec.Struct, forbid_unknown_fields=True):
+    readout: approvals.Readout
+    details: list[str]
 
 
 class RenderInputs(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -101,6 +112,9 @@ class Envelope(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     version: Literal[1]
     inputs: RenderInputs
     status: str
+    outcome: str | None
+    decided_by: str | None
+    current_attempt: str | None
     render_input_sha256: str
     delivered: bool
     delivery_source: Literal["original", "repeat"]
@@ -175,9 +189,6 @@ def stored_inputs(row: AskRow) -> RenderInputs:
     if row.question_form is not None:
         if row.kind != "question" or row.question_form not in ("choices", "yes-no"):
             raise Refusal("invalid-state")
-        class StoredForm(msgspec.Struct, forbid_unknown_fields=True):
-            choices: list[str]
-            recommended: str
         form = msgspec.json.decode(row.choices or "", type=StoredForm)
         choices, recommended = form.choices, form.recommended
     elif row.choices is not None:
@@ -231,11 +242,9 @@ def _parts(db: sqlite3.Connection, prefix: str, count: int) -> list[CardPart]:
 
 def _expected(row: AskRow, chunk_chars: int, repeat: bool) -> list[str]:
     if row.kind == "approval":
-        class StoredApproval(msgspec.Struct, forbid_unknown_fields=True):
-            readout: approvals.Readout
-            details: list[str]
         stored = msgspec.json.decode(row.body, type=StoredApproval)
-        if stored.readout.id != row.bead or stored.readout.digest != row.digest:
+        if (row.digest is None or not HEX_KEY.fullmatch(row.digest)
+                or stored.readout.id != row.bead or stored.readout.digest != row.digest):
             raise Refusal("invalid-state")
         if len(stored.details) != row.card_parts:
             raise Refusal("incomplete")
@@ -249,11 +258,12 @@ def _expected(row: AskRow, chunk_chars: int, repeat: bool) -> list[str]:
         if card.card_chunks != stored.details:
             raise Refusal("render-mismatch")
         return card.card_chunks
-    if repeat:
-        return asks.full_chunks(row, chunk_chars)
-    parts, truncated = asks.card_chunks(row, chunk_chars)
+    # Reuse the approval renderer's whole-and-packed check BEFORE posting redacts its output.
+    parts, truncated = asks.checked_card_chunks(row, chunk_chars, repeat=repeat)
     if truncated:
         raise Refusal("truncated")
+    if isinstance(parts, str):
+        raise Refusal("redacted" if parts == asks.REDACTED else "render-mismatch")
     return parts
 
 
@@ -332,7 +342,9 @@ def histories(db: sqlite3.Connection, ask_id: str, policy: dict[str, str]
         raise Refusal("oversized")
     answers: list[BoundAnswer] = []
     for seq, kind, mid, operator, sender, text, choice, at in rows:
-        if seq != len(answers) + 1 or len(text) > asks.MAX_ANSWER:
+        if len(text) > asks.MAX_ANSWER:
+            raise Refusal("oversized")
+        if seq != len(answers) + 1:
             raise Refusal("incomplete")
         sender, current = _identity(mid, operator, sender, policy)
         if redact(text) != text:
@@ -350,8 +362,11 @@ def histories(db: sqlite3.Connection, ask_id: str, policy: dict[str, str]
     decisions: list[DecisionAttempt] = []
     for mid, operator, sender, action, ref, digest, note, at, settled, exit_status in attempts:
         sender, current = _identity(mid, operator, sender, policy)
-        if note is not None and (len(note) > asks.MAX_ANSWER or redact(note) != note):
-            raise Refusal("redacted")
+        if note is not None:
+            if len(note) > asks.MAX_ANSWER:
+                raise Refusal("oversized")
+            if redact(note) != note:
+                raise Refusal("redacted")
         decisions.append(msgspec.convert(dict(message_id=mid, operator=operator, sender_key=sender,
                                              current_policy=current, action=action, ref=ref, digest=digest,
                                              note=note, started_at=_at(at), settled=settled,
@@ -368,7 +383,9 @@ def read(store: Store, ask_id: str, chunk_chars: int,
         policy = policy_snapshot(load_policy)
         with store.read_snapshot() as db:
             size = db.execute("SELECT length(CAST(body AS BLOB)) + length(CAST(title AS BLOB)) + "
-                              "coalesce(length(choices),0) + coalesce(length(links),0) FROM asks "
+                              "coalesce(length(choices),0) + coalesce(length(links),0) + "
+                              "coalesce(length(CAST(outcome AS BLOB)),0) + "
+                              "coalesce(length(decided_by),0) + coalesce(length(attempt),0) FROM asks "
                               "WHERE ask_id = ?", (ask_id,)).fetchone()
             if size is None:
                 raise Refusal("missing")
@@ -382,8 +399,18 @@ def read(store: Store, ask_id: str, chunk_chars: int,
             answers, attempts = histories(db, ask_id, {p.name: p.sender_key for p in policy})
             if policy_snapshot(load_policy) != policy:
                 raise Refusal("policy-unavailable")
+            current, = db.execute("SELECT attempt FROM asks WHERE ask_id = ?", (ask_id,)).fetchone()
+            if current is not None and current not in {a.message_id for a in attempts}:
+                raise Refusal("incomplete")
+            for text in (row.outcome, row.decided_by):
+                if text is not None:
+                    if len(text) > asks.MAX_ANSWER:
+                        raise Refusal("oversized")
+                    if redact(text) != text:
+                        raise Refusal("redacted")
             at, boot = clock()
-            result = Envelope(1, inputs, row.status, sha256(inputs), delivered,
+            result = Envelope(1, inputs, row.status, row.outcome, row.decided_by, current,
+                              sha256(inputs), delivered,
                               "repeat" if repeated else "original", parts, False, answers, True, attempts,
                               True, policy, sha256(policy), at, boot)
             reply = AskBindingReply("ok", "ask.binding.v1 complete", binding=result)

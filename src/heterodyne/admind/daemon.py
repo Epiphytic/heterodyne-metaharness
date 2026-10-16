@@ -702,7 +702,8 @@ class Admind:
                 if ask_id is None:
                     return binding.AskBindingReply("refused", "ask.binding.v1 unavailable",
                                                    code="invalid-state")
-                return binding.read(self.store, ask_id, self.s.chunk_chars, self.load_operators)
+                return await asyncio.to_thread(binding.read, self.store, ask_id, self.s.chunk_chars,
+                                               self.load_operators)
         if isinstance(req, asks.AskPost):
             return await self.serialised_post(req, peer)
         if isinstance(req, NoticePost):

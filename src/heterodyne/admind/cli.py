@@ -296,7 +296,8 @@ def ask_binding_command(s: AdmindSettings, ask_id: str) -> int:
     req = asks.AskBinding(ask_id)
     why = asks.check(req)
     if why is not None:
-        print("admind: invalid ask ID", file=sys.stderr)
+        print(msgspec.json.encode(binding.AskBindingReply(
+            "refused", "ask.binding.v1 unavailable", code="invalid-state")).decode())
         return 1
     async def request() -> binding.AskBindingReply:
         return await asyncio.wait_for(ctl.request(s.state_dir / asks.ASK_SOCKET, req, ASK_READ_SECONDS,
@@ -304,11 +305,20 @@ def ask_binding_command(s: AdmindSettings, ask_id: str) -> int:
                                                   max_reply=asks.MAX_REPLY), ASK_READ_SECONDS)
     try:
         reply = asyncio.run(request())
-    except (ctl.CtlUnavailable, TimeoutError):
-        print(NOT_RUNNING, file=sys.stderr)
-        return EX_UNAVAILABLE
+    except ctl.CtlInvalidReply:
+        reply = binding.AskBindingReply("refused", "ask.binding.v1 unavailable", code="invalid-reply")
+    except (ctl.CtlResponseTimeout, TimeoutError):
+        reply = binding.AskBindingReply("refused", "ask.binding.v1 unavailable", code="response-timeout")
+    except ctl.CtlUnavailable:
+        reply = binding.AskBindingReply("refused", "ask.binding.v1 unavailable", code="transport-unavailable")
+    if (reply.ask is not None or reply.asks is not None
+            or (reply.result == "ok" and (reply.binding is None or reply.code is not None))
+            or (reply.result != "ok" and (reply.code is None or reply.binding is not None))):
+        reply = binding.AskBindingReply("refused", "ask.binding.v1 unavailable", code="invalid-reply")
+    elif reply.result != "ok":
+        reply = binding.AskBindingReply("refused", "ask.binding.v1 unavailable", code=reply.code)
     print(msgspec.json.encode(reply).decode())
-    return 0 if reply.result == "ok" else 1
+    return EX_UNAVAILABLE if reply.code == "transport-unavailable" else (0 if reply.result == "ok" else 1)
 
 
 def _ask_wait(s: AdmindSettings, req: asks.AskRequest, timeout: float, as_json: bool) -> int:

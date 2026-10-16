@@ -445,6 +445,17 @@ def full_chunks(row: AskRow, chunk_chars: int) -> list[str]:
     return _packed(row, redact(context(row)).rstrip("\n"), chunk_chars)
 
 
+def checked_card_chunks(row: AskRow, chunk_chars: int, *, repeat: bool = False
+                        ) -> tuple[list[str] | str, bool]:
+    """Evidence-only renderer: reject redaction on both whole text and packed parts, as approvals do.
+
+    Ordinary posting still uses the established redacting renderer. A binding must instead distinguish
+    faithful reproduction from output that was changed by redaction, including only after a split.
+    """
+    shown, truncated = (context(row).rstrip("\n"), False) if repeat else _shown(row)
+    return _checked(_tagged(row, shown, chunk.usable(chunk_chars)), chunk_chars), truncated
+
+
 # --- answers on question cards (K17q, K18q, K19) -------------------------------------------------
 def map_reaction(row: AskRow, emoji: str) -> str | None:
     """The choice a reaction records: an approve-set emoji is the recommended option; a deny-set emoji is
