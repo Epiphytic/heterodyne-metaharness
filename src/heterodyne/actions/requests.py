@@ -16,7 +16,7 @@ from heterodyne.actions.codec import (
     validate_request_inputs,
 )
 from heterodyne.actions.contracts import ActionConfig, Envelope, Intent, Origin, Record, Resolved
-from heterodyne.actions.policy import request_denial_key
+from heterodyne.actions.policy import denial_key, request_denial_key
 
 RequestPhase = Literal[
     "allocation-intent",
@@ -129,7 +129,7 @@ def observe_allocation(
         raise Refused("allocation-needs-authenticated-recovery")
     if elapsed_seconds < (1, 5, 30)[value.allocation_lookups]:
         raise Refused("allocation-lookup-not-due")
-    if len(ids) > 2 or len(set(ids)) != len(ids) or any(not BEAD_ID.fullmatch(i) for i in ids):
+    if len(ids) > 8 or len(set(ids)) != len(ids) or any(not BEAD_ID.fullmatch(i) for i in ids):
         raise Refused("invalid-allocation-readback")
     if not lookup_ok and ids:
         raise Refused("contradictory-allocation-readback")
@@ -138,8 +138,6 @@ def observe_allocation(
         envelope = assemble_envelope(
             value.intent, value.origin, value.resolved, approval, value.request_revision, value.config
         )
-        from heterodyne.actions.policy import denial_key
-
         return changed(
             value,
             allocation_lookups=value.allocation_lookups + 1,
@@ -228,12 +226,23 @@ def observe_filed(value: Request, *, digest: str, revision: int, native_readback
     return changed(value, phase="filed")
 
 
+def same_session(previous: Origin, current: Origin) -> bool:
+    """A generation changes; the actual originating logical identity does not."""
+    return (previous.workstream, previous.bead, previous.session_key, previous.repo_alias) == (
+        current.workstream,
+        current.bead,
+        current.session_key,
+        current.repo_alias,
+    )
+
+
 def groom(value: Request, intent: Intent, resolved: Resolved, source: str, *, origin: Origin) -> Request:
-    """Same originating session/generation only; clear all ask/sufficiency bindings before revalidation."""
+    """Same logical origin, monotone generation; require fresh park and landing readbacks."""
     if (
         value.phase not in {"ask-pinned", "sufficient"}
         or value.groom_revisions >= 2
-        or origin != value.origin
+        or not same_session(value.origin, origin)
+        or origin.generation < value.origin.generation
         or not source_syntax(source)
         or value.approval_id is None
     ):
@@ -241,15 +250,17 @@ def groom(value: Request, intent: Intent, resolved: Resolved, source: str, *, or
     envelope = assemble_envelope(
         intent, origin, resolved, value.approval_id, value.request_revision + 1, value.config
     )
-    from heterodyne.actions.policy import denial_key
-
+    identity = denial_key(envelope, value.config)
+    if identity in value.prior_denials:
+        raise Refused("same-session-denied-intent")
     return changed(
         value,
-        phase="parked",
+        phase="blocker-pending",
+        origin=origin,
         intent=intent,
         resolved=resolved,
         requested_source=source,
-        denial_identity=denial_key(envelope, value.config),
+        denial_identity=identity,
         envelope=envelope,
         request_revision=value.request_revision + 1,
         groom_revisions=value.groom_revisions + 1,
@@ -269,6 +280,9 @@ def settle_request(
     cleaned_shells: tuple[str, ...],
     blockers_clear: bool,
     native_terminal: bool,
+    decision: object = None,
+    dispatch: object = None,
+    recovery: object = None,
 ) -> Request:
     if (
         phase not in TERMINAL_REQUESTS
@@ -277,14 +291,80 @@ def settle_request(
         or not blockers_clear
         or not native_terminal
         or set(cleaned_shells) != set(value.shell_ids)
-        or not value.shell_ids
+        or (not value.shell_ids and phase != "reconciled-abandoned")
     ):
         raise Refused("request-cleanup-unproved")
     if value.phase in TERMINAL_REQUESTS:
         if value.phase == phase and value.cleanup_confirmed:
             return value
         raise Refused("terminal-request-conflict")
+    # These typed observations are fake-port facts; the durable journal also
+    # corroborates its committed decision/dispatch in the same transaction.
+    from heterodyne.actions.decisions import Decision
+    from heterodyne.actions.dispatch import Dispatch
+
+    if phase == "denied":
+        if (
+            value.phase != "filed"
+            or not isinstance(decision, Decision)
+            or decision.phase != "committed"
+            or decision.event.value != "deny"
+            or (decision.approval_id, decision.digest, decision.request_revision)
+            != (value.approval_id, value.context_digest, value.request_revision)
+        ):
+            raise Refused("request-denial-not-committed")
+    elif phase == "completed":
+        if (
+            value.phase != "filed"
+            or not isinstance(dispatch, Dispatch)
+            or not dispatch.settled
+            or dispatch.state != "succeeded"
+            or dispatch.dispatch_kind != "initial"
+            or (dispatch.approval_id, dispatch.digest, dispatch.revision)
+            != (value.approval_id, value.context_digest, value.request_revision)
+        ):
+            raise Refused("request-completion-not-proved")
+    elif phase == "cancelled":
+        if value.phase not in {
+            "allocated",
+            "blocker-pending",
+            "parked",
+            "landed",
+            "ask-pinned",
+            "sufficient",
+        }:
+            raise Refused("request-cancellation-not-unposted")
+    else:
+        if (
+            value.phase != "allocation-unknown"
+            or value.allocation_lookups != 3
+            or not isinstance(recovery, AbandonmentRecovery)
+            or (recovery.key, recovery.origin, recovery.expected_version, recovery.shell_ids)
+            != (value.key, value.origin, value.version, value.shell_ids)
+            or not recovery.authenticated_current
+            or not recovery.exact_repair_scope
+            or not recovery.native_readback
+            or not digest_syntax(recovery.evidence)
+            or not 1 <= len(recovery.operator_event) <= 256
+            or not recovery.operator_event.isascii()
+            or not all(32 <= ord(c) < 127 for c in recovery.operator_event)
+        ):
+            raise Refused("request-abandonment-not-authenticated")
     return changed(value, phase=phase, cleanup_confirmed=True)
+
+
+class AbandonmentRecovery(Record, frozen=True):
+    """Fake observation of exact authenticated abandonment, never raw cleanup consent."""
+
+    key: CreationKey
+    origin: Origin
+    expected_version: int
+    shell_ids: tuple[str, ...]
+    evidence: str
+    operator_event: str
+    authenticated_current: bool = False
+    exact_repair_scope: bool = False
+    native_readback: bool = False
 
 
 def request_bytes(value: Request) -> bytes:
@@ -342,8 +422,6 @@ def recover_allocation(value: Request, observation: AllocationRecovery) -> Reque
         value.request_revision,
         value.config,
     )
-    from heterodyne.actions.policy import denial_key
-
     return changed(
         value,
         phase="allocated",

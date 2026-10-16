@@ -86,18 +86,25 @@ authenticated repair observation with closed-orphan readbacks. That repair also
 cannot recreate a shell. The reducer then orders blocker creation, park while
 retaining the claim, exact requested-source landing, whole native ask binding,
 sufficiency, and filed readback. Source/generation/digest changes cannot skip these
-steps. Two same-origin grooming revisions clear old ask/judgement bindings.
+steps. Two same-session grooming revisions clear old ask/judgement bindings, retain
+session denial history, record a nondecreasing generation, and require a fresh
+park readback before landing. Prior denied canonical identities cannot be groomed
+back into an approvable request.
 
 `pin_ask` retains opaque whole canonical native bytes plus its supplied native
 digest. It does not compute, replace or authenticate that digest. The later native
 adapter must assemble and compare the full action data and native context, using
 the existing native algorithm. Passing fixture bytes here grants no authority.
 
-`decisions` separates first-event recording, one write intent, exact native
+`decisions` separates durable inbox recording, first valid decision, one write intent, exact native
 readback, close, pin finalization, and committed state. Close alone is insufficient.
 Unknown writes permit readback, not another write. Surface, current principal,
 purpose and current digest observations are all required. A heart's optional
 follow-up proposal has separate bookkeeping and cannot rewrite the original event.
+A revoked/stale prewrite event can be marked invalid; a write-issued event requires
+exact authenticated conflicting native readback before replacement. Every incoming
+event retains an inbox record, including duplicate/superseded decision handling.
+Denial reasons are bounded to 1024 Unicode scalars, with the same text-safety rules.
 Permission widening defaults to true (hard deny); callers must positively establish
 non-widening. This is a safety default, not a permission-model implementation.
 
@@ -113,6 +120,11 @@ not replay permission. Confirmed success plus cleanup releases locks. Exhausted
 absence needs exact currently authenticated fixed repair, which can settle the
 failed attempt and release its locks, but cannot retry it. Actual authentication,
 process-tree cleanup and effect evidence remain unavailable adapter obligations.
+Unconsumed held attempts also support exact authenticated no-effect settlement;
+ambiguous claims first exhaust the bounded readbacks. Persisted `dispatch_kind`
+distinguishes the retained initial attempt from separate read-only reconciliation
+rows. Each reconciliation has a distinct attempt and startup/claim nonce lineage;
+settling its row cannot release the initial attempt's resources or permit an effect.
 
 `FixtureJournal` only creates/opens explicitly private temporary fixture databases,
 with a separate application ID and exact schema. Its v1-to-v2 migration is an
@@ -121,7 +133,14 @@ versions and audit events commit together under BEGIN IMMEDIATE. Capacity is two
 outstanding requests per workstream/bead across sessions/generations, 128 globally,
 4096 retained requests and 16384 audit events. Full storage holds for explicit
 recovery; history is not silently pruned. Terminal capacity is freed only after
-all associated shells and blockers have consistent terminal readbacks. Native
+all associated shells and blockers have consistent terminal readbacks. Phase-specific
+settlement additionally requires a committed deny, a settled successful initial
+dispatch, a known-unposted cancellation, or exact authenticated allocation abandonment.
+Denial settlement and the session denial row commit atomically. Dispatch insertion
+corroborates the same journal's committed execution approve and exact digest/revision
+in its transaction; constructor booleans alone cannot authorize it. Repeated exact
+terminal reports/settlements are acknowledged without new events, including after
+restart and lost acknowledgements. Native
 Beads remain authoritative in any future integration.
 
 Sorted resource, canonical-effect and approval locks survive restart and uncertain
@@ -134,7 +153,7 @@ pretend that the previous denial did not occur. These fingerprints and fixture
 row locators are separate from native approval digests.
 
 Named synthetic offline tests are `test_actions_p0.py`, `test_actions_p1.py`,
-`test_actions_p1_dispatch.py`, and `test_actions_p1_hardening.py`. SQLite operations
+`test_actions_p1_dispatch.py`, `test_actions_p1_hardening.py`, and `test_actions_p1_r1.py`. SQLite operations
 only target temporary test files. Fake ports are in-memory and cannot reach a
 queue, session socket, effect target, model, service or network. Passing them does
 not establish live adapter readiness or authorize deployment.

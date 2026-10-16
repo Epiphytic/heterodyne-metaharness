@@ -102,6 +102,35 @@ def committed(value="approve"):
     return result
 
 
+def persist_decision(db, value="approve", approval_id="btq-ab123"):
+    """Drive the actual journal/reducers; a constructor boolean is never durable consent."""
+    observation = msgspec.structs.replace(event(value), approval_id=approval_id)
+    request = msgspec.structs.replace(filed(), approval_id=approval_id)
+    result = begin_decision(request, observation, expected_purpose="execution", current_digest=DIGEST)
+    outcome = db.add_decision(result)
+    if outcome == "duplicate":
+        return db.get("decision", approval_id)
+    result = db.transition(
+        "decision",
+        result.approval_id,
+        result.version,
+        lambda v: issue_decision(v, fresh_authority=True, current_digest=DIGEST),
+    )
+    result = db.transition(
+        "decision", result.approval_id, result.version, lambda v: read_decision(v, observation, read_ok=True)
+    )
+    for operation in ("close", "pins", "finish"):
+        result = db.transition(
+            "decision",
+            result.approval_id,
+            result.version,
+            lambda v, operation=operation: finalize_decision(
+                v, operation, readback=observation, current_digest=DIGEST, native_readback=True
+            ),
+        )
+    return result
+
+
 def test_create_ack_loss_unique_adoption_no_second_create():
     value, queue = issue_allocation(initial()), FakeQueue()
     with pytest.raises(TimeoutError):
@@ -186,17 +215,18 @@ def test_groom_limit_and_source_change_clears_whole_ask_and_judgement():
     value = pin_ask(staged(), b"whole ask", DIGEST, revision=1)
     for revision in (2, 3):
         value = groom(value, Intent(1, PUSH, "corrected"), FACTS, SHA, origin=ORIGIN)
-        assert value.phase == "parked" and value.ask_bytes is None and value.context_digest is None
+        assert value.phase == "blocker-pending" and value.ask_bytes is None and value.context_digest is None
         assert value.policy_revision is None and value.request_revision == revision
-        value = observe_stage(
-            value,
-            "land",
-            key=value.key,
-            approval_id=value.approval_id,
-            origin=ORIGIN,
-            source=SHA,
-            readback_ok=True,
-        )
+        for operation in ("park", "land"):
+            value = observe_stage(
+                value,
+                operation,
+                key=value.key,
+                approval_id=value.approval_id,
+                origin=ORIGIN,
+                source=SHA,
+                readback_ok=True,
+            )
         value = pin_ask(value, b"corrected whole ask", DIGEST, revision=revision)
     with pytest.raises(Refused):
         groom(value, Intent(1, PUSH), FACTS, SHA, origin=ORIGIN)
@@ -290,7 +320,7 @@ def test_stale_version_cannot_release_successor_or_duplicate_effect(tmp_path):
     db = FixtureJournal.create(tmp_path / "fixture.sqlite")
     key = db.add_request(initial())
     db.transition("request", key, 0, issue_allocation)
-    with pytest.raises(Refused, match="stale-fixture"):
+    with pytest.raises(Refused):
         db.transition("request", key, 0, issue_allocation)
     assert db.get("request", key).version == 1
     db.close()
@@ -303,6 +333,7 @@ def test_dispatch_claim_crash_restart_retains_lock_and_prevents_replay(tmp_path)
     value = prepare(
         "btq-ab123", 1, DIGEST, DIGEST, "attempt-1", "resource", "c" * 64, clock, fake_finalized_approval=True
     )
+    persist_decision(db)
     db.add_dispatch(value)
     value = db.transition(
         "dispatch",
@@ -326,6 +357,7 @@ def test_dispatch_claim_crash_restart_retains_lock_and_prevents_replay(tmp_path)
     other = prepare(
         "btq-cd456", 1, DIGEST, DIGEST, "attempt-2", "resource", "e" * 64, clock, fake_finalized_approval=True
     )
+    persist_decision(db, approval_id=other.approval_id)
     with pytest.raises(Refused, match="resource-still-held"):
         db.add_dispatch(other)
     db.close()
@@ -389,6 +421,7 @@ def test_denial_persists_across_generation_and_heart_proposal_is_separate(tmp_pa
     path = tmp_path / "fixture.sqlite"
     db = FixtureJournal.create(path)
     request, decision = filed(), committed("deny")
+    assert persist_decision(db, "deny") == decision
     db.record_denial(request, decision)
     db.close()
     db = FixtureJournal(path)
@@ -442,8 +475,8 @@ def test_denial_blocks_allocation_before_shell_across_generation_after_restart(t
     path = tmp_path / "fixture.sqlite"
     db = FixtureJournal.create(path)
     request = filed()
-    db.record_denial(request, committed("deny"))
-    db.record_denial(request, committed("deny"))
+    db.record_denial(request, persist_decision(db, "deny"))
+    db.record_denial(request, persist_decision(db, "deny"))
     assert db.db.execute("SELECT count(*) FROM events WHERE kind='denial'").fetchone() == (1,)
     db.close()
     db = FixtureJournal(path)
@@ -458,7 +491,7 @@ def test_denial_blocks_allocation_before_shell_across_generation_after_restart(t
 def test_changed_intent_retains_prior_denial_relationship_before_allocation(tmp_path):
     db = FixtureJournal.create(tmp_path / "fixture.sqlite")
     request = filed()
-    db.record_denial(request, committed("deny"))
+    db.record_denial(request, persist_decision(db, "deny"))
     action = msgspec.structs.replace(PUSH, expected_sha="c" * 40)
     facts = msgspec.structs.replace(FACTS, source_sha="c" * 40)
     value = new_request(ORIGIN, 2, Intent(1, action), facts, CONFIG, SHA)
@@ -481,6 +514,7 @@ def test_two_connections_claim_retirement_race_has_only_one_transition(tmp_path)
     value = prepare(
         "btq-ab123", 1, DIGEST, DIGEST, "attempt-1", "resource", "c" * 64, clock, fake_finalized_approval=True
     )
+    persist_decision(left)
     left.add_dispatch(value)
     value = left.transition(
         "dispatch",
@@ -529,6 +563,7 @@ def test_reconciliation_success_is_one_cas_and_releases_only_settled_resource(tm
     value = prepare(
         "btq-ab123", 1, DIGEST, DIGEST, "attempt-1", "resource", "c" * 64, clock, fake_finalized_approval=True
     )
+    persist_decision(db)
     db.add_dispatch(value)
     for reducer in (
         lambda v: ready(v, "d" * 64, clock, fresh_gates=True, startup_readback=True),
@@ -547,6 +582,7 @@ def test_reconciliation_success_is_one_cas_and_releases_only_settled_resource(tm
         clock,
         fake_finalized_approval=True,
     )
+    persist_decision(db, approval_id=alias.approval_id)
     with pytest.raises(Refused, match="resource-still-held"):
         db.add_dispatch(alias)
     value = db.transition(

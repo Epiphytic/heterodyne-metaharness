@@ -11,7 +11,7 @@ from heterodyne.actions.requests import Refused, Request, changed, digest_syntax
 
 Purpose = Literal["design", "execution", "permission", "confirm", "recovery"]
 DecisionPhase = Literal[
-    "pending", "write-issued", "native-written", "native-closed", "pins-finished", "committed"
+    "pending", "write-issued", "native-written", "native-closed", "pins-finished", "committed", "invalid"
 ]
 
 
@@ -40,6 +40,9 @@ class Decision(Record, frozen=True):
     version: int = 0
     native_event_id: str | None = None
     heart_proposal_pending: bool = False
+    request_revision: int = 1
+    invalid_reason: str | None = None
+    observed_native_event: DecisionObservation | None = None
 
 
 def _label(value: str, maximum: int) -> bool:
@@ -75,7 +78,7 @@ def begin_decision(
             _label(v, 256) for v in (event.event_id, event.surface_id, event.operator_id, event.via_ref)
         )
         or not _label(event.at, 64)
-        or len(event.denial_reason.encode("utf-8")) > 1024
+        or len(event.denial_reason) > 1024
     ):
         raise Refused("decision-observation-binding")
     from heterodyne.actions.codec import validate_text
@@ -87,6 +90,7 @@ def begin_decision(
         current_digest,
         event,
         heart_proposal_pending=heart and event.value == "approve",
+        request_revision=request.request_revision,
     )
 
 
@@ -136,3 +140,37 @@ def settle_heart_proposal(value: Decision, *, proposal_readback: bool) -> Decisi
     if not value.heart_proposal_pending:
         return value
     return changed(value, heart_proposal_pending=False)
+
+
+def invalidate_decision(
+    value: Decision,
+    *,
+    reason: Literal["authority-revoked", "digest-stale", "native-conflict"],
+    current_check: bool,
+    readback: DecisionObservation | None = None,
+    native_read_ok: bool = False,
+) -> Decision:
+    """Audit invalid prewrite event or exact conflicting native first event; never replay unknown writes."""
+    if (
+        not current_check
+        or value.phase not in {"pending", "write-issued"}
+        or reason not in {"authority-revoked", "digest-stale", "native-conflict"}
+    ):
+        raise Refused("decision-invalidation-not-bound")
+    if value.phase == "write-issued":
+        if (
+            reason != "native-conflict"
+            or not native_read_ok
+            or readback is None
+            or readback == value.event
+            or readback.approval_id != value.approval_id
+            or readback.digest != value.digest
+            or readback.purpose != value.purpose
+            or not readback.current_principal
+            or not readback.surface_bound
+            or not readback.authority_current
+        ):
+            raise Refused("decision-write-still-uncertain")
+    elif reason == "native-conflict":
+        raise Refused("decision-conflict-without-issued-write")
+    return changed(value, phase="invalid", invalid_reason=reason, observed_native_event=readback)

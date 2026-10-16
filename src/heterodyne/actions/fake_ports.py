@@ -96,8 +96,10 @@ class FakeEffect:
     issued: set[str] = field(default_factory=lambda: set())
     observations: dict[str, str] = field(default_factory=lambda: {})
 
-    def perform(self, attempt_id: str, *, claim_consumed_readback: bool) -> None:
-        if not claim_consumed_readback or attempt_id in self.issued:
+    def perform(
+        self, attempt_id: str, *, claim_consumed_readback: bool, dispatch_kind: str = "initial"
+    ) -> None:
+        if dispatch_kind != "initial" or not claim_consumed_readback or attempt_id in self.issued:
             raise Refused("fake-effect-claim-or-replay")
         self.issued.add(attempt_id)
         self.observations[attempt_id] = "succeeded"

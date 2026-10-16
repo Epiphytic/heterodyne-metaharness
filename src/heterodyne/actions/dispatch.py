@@ -6,6 +6,8 @@ Booleans are fake-port observations; they are not authentication or approval cap
 
 from typing import Literal
 
+import msgspec
+
 from heterodyne.actions.codec import BEAD_ID
 from heterodyne.actions.contracts import Record
 from heterodyne.actions.requests import Refused, changed, digest_syntax
@@ -45,6 +47,8 @@ class Dispatch(Record, frozen=True):
     cleanup_proven: bool = False
     settled: bool = False
     recovery_operator_event: str | None = None
+    dispatch_kind: Literal["initial", "reconcile"] = "initial"
+    parent_attempt_id: str | None = None
 
 
 def _clock(value: Clock) -> None:
@@ -308,10 +312,10 @@ class DispatchRecovery(Record, frozen=True):
 def settle_failed_dispatch(value: Dispatch, observation: DispatchRecovery) -> Dispatch:
     """Fixed failed-attempt settlement, never a retry, new claim or initial-effect capability."""
     if (
-        value.state not in {"uncertain", "failed"}
+        value.state not in {"held", "uncertain", "failed"}
         or value.settled
-        or value.reconciliation_lookups != 3
-        or not value.claim_consumed
+        or (value.claim_consumed and value.reconciliation_lookups != 3)
+        or (not value.claim_consumed and value.state != "held" and value.reconciliation_lookups != 3)
         or (
             observation.approval_id,
             observation.revision,
@@ -343,4 +347,38 @@ def settle_failed_dispatch(value: Dispatch, observation: DispatchRecovery) -> Di
         cleanup_proven=True,
         evidence=observation.evidence,
         recovery_operator_event=observation.operator_event,
+    )
+
+
+def prepare_reconciliation(value: Dispatch, attempt_id: str, startup_hash: str, now: Clock) -> Dispatch:
+    """Separate read-only invocation identity; never a new initial-effect record."""
+    if (
+        value.dispatch_kind != "initial"
+        or value.settled
+        or value.state not in {"held", "uncertain", "failed"}
+        or attempt_id == value.attempt_id
+        or startup_hash in (value.startup_hash, value.claim_hash)
+        or startup_hash in value.retired_startups
+        or startup_hash in value.retired_nonces
+    ):
+        raise Refused("reconcile-invocation-not-bound")
+    result = prepare(
+        value.approval_id,
+        value.revision,
+        value.digest,
+        value.target,
+        attempt_id,
+        value.resource,
+        startup_hash,
+        now,
+        fake_finalized_approval=True,
+    )
+    return msgspec.structs.replace(
+        result,
+        dispatch_kind="reconcile",
+        parent_attempt_id=value.attempt_id,
+        retired_startups=tuple(dict.fromkeys((*value.retired_startups, value.startup_hash))),
+        retired_nonces=tuple(
+            dict.fromkeys((*value.retired_nonces, *((value.claim_hash,) if value.claim_hash else ())))
+        ),
     )
