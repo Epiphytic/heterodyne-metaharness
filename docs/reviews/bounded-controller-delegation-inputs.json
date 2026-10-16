@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "status": "proposed design provenance only; no operational grant",
+  "task": "btq-so7ma",
+  "source_base": "07637745fe75dc614109a0b8ba72d3489f262a97",
+  "approved_inputs": [
+    {
+      "source_commit": "391516cd919234e69626970cb2e61b94299ed60e",
+      "source_path": "docs/designs/2026-10-15-operator-task-management.md",
+      "archive_path": "docs/reviews/approved-inputs/2026-10-15-operator-task-management.md",
+      "sha256": "3249c0a3b6207da6bc6172e5291895779a920d3afd56de6e38d0365df0ee2a39",
+      "bytes": 7332,
+      "note": "Exact historical d2 bytes; its pending prose retained, no fresh review or approval inferred."
+    }
+  ],
+  "proposed_prerequisites": [
+    {
+      "task": "btq-zcd1l",
+      "observed_revision": "e73eab04ac9eeb91ea7a5794cd04bbe2236fde4d",
+      "path": "docs/designs/2026-10-16-management-design-task-recovery.md",
+      "sha256": "0d5637f8bc341018edc68ca09a52c2be2cd21ac7ae6bc4f3a4232ee5fe5744a2",
+      "note": "Not claimed approved. Resolve actual final approved/deployed Z revision before implementation; changed protection contract needs compatibility review."
+    }
+  ],
+  "observed_installed_queue": "6fe57598468ff53bf74dfd9e1cf181ad3177c3f1",
+  "implementation_or_live_actions": false
+}
