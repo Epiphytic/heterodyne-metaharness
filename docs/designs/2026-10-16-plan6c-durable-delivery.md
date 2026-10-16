@@ -200,9 +200,13 @@ Once a complete copy becomes available, the overdue single reminder may issue.
 Reminder uncertainty consumes that one reminder: no automatic duplicate. Source
 closure/supersession cancels unsent reminder and digest entries transactionally.
 
-After the four-hour event, open cards enter the next UTC-date digest at00:00 UTC;
-one digest intent per date/control binding. Catch-up produces only the latest due
-date, records skipped dates locally and does not flood historical digests. The
+After the four-hour event, open cards enter the next UTC-date digest at08:00 UTC;
+one digest intent per date/control binding, matching the proposed Plan8 default.
+The trusted digest producer also supplies ADR9's closed-yesterday, needs-human
+and idle-workstream summaries with explicit source freshness/completeness. These
+are distinct summary items, not card decisions or invented receipt evidence.
+Catch-up produces only the latest due date, records skipped dates locally and
+does not flood historical digests. The
 digest is FYI, never an ask and never enters MAX_OPEN. A future renderer unable
 to fit all supplied summaries produces its approved explicit overflow output,
 not silent omission. Digest failure has ordinary receipt/uncertainty semantics,
