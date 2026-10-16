@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "status": "Proposed d2; actual R1 REVISE33; no implementation/approval",
+  "status": "Proposed d3; actual R1 REVISE33 and R2 REVISE27; no approval/implementation",
   "task": "btq-w2jti",
   "base": "07637745fe75dc614109a0b8ba72d3489f262a97",
   "inputs": [
@@ -109,6 +109,38 @@
       "authority": "Frozen provisional Plan8 d1 bytes; actual R1 REVISE28, not an approved/installed contract. Final compatible clock interface remains required.",
       "private_handoff_relative_path": "plan6c-r1-architecture/plan8-input-snapshot/2026-10-16-plan8-scheduling-reconciliation-inputs.json",
       "blob": "d9e98bfc3137ab24bd31b9d9680e02adfc3bc45e"
+    },
+    {
+      "repository": "heterodyne-metaharness-v2-btq-btq-w2jti",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/notices.py",
+      "blob": "614dc8dedfb7737b7f3a5b34aac665316068720b",
+      "sha256": "e123b4adcf32369e72b1230525bfd31b4ea4f05286091bbef35dda0af9a790bd",
+      "authority": "Inspected source baseline, not live capability proof; actual local trust/NoticePost/redaction/atomic-file boundary"
+    },
+    {
+      "repository": "heterodyne-metaharness-v2-btq-btq-w2jti",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/ctl.py",
+      "blob": "234c47d7f4f3561b0cfdd867e5cb6e137e067c81",
+      "sha256": "13551cafa7d953dff0f96dd4da4bd9544ddad1035f1b0134e2c5c05d785d6483",
+      "authority": "Inspected source baseline, not live capability proof; actual local trust/NoticePost/redaction/atomic-file boundary"
+    },
+    {
+      "repository": "heterodyne-metaharness-v2-btq-btq-w2jti",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/redact.py",
+      "blob": "c5a3af2d8aa74742d337beed18370b7b16940153",
+      "sha256": "533ecbb089b57e643c1edf8745eb13dd908b5dc1cbd14f74f48e3a59883a0d8c",
+      "authority": "Inspected source baseline, not live capability proof; actual local trust/NoticePost/redaction/atomic-file boundary"
+    },
+    {
+      "repository": "heterodyne-metaharness-v2-btq-btq-w2jti",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/fsutil.py",
+      "blob": "9b8c033b59996202153621f5f0de3bf2c4937a17",
+      "sha256": "34b8ff22a0450f1809de4db13b75ddf99d84e287b81dcb6313ef14e2e149dee1",
+      "authority": "Inspected source baseline, not live capability proof; actual local trust/NoticePost/redaction/atomic-file boundary"
     }
   ],
   "native_approval": {
@@ -126,15 +158,38 @@
     "All questions and approvals via authenticated Marmot admind",
     "Maximum3 actual Claude built-in design reviews in this new Plan6C lineage"
   ],
-  "design_sha256": "96b4eff889d30639b9f8fe724676e37dc8efabe1d8013fc9790eaff631a09e8f",
-  "actual_review_rounds_consumed": 1,
+  "design_sha256": "cf60b088c53123e127539a92d66f771385f2f2b4deb6cf399b76fcb77bae506f",
+  "actual_review_rounds_consumed": 2,
   "prior_design_commit": "ee9203f5b2d8567a557b0876ada4dd54e99e0463",
-  "raw_review": {
-    "sha256": "9c37b5cb38ec6ca5159a26a2dab38038b614ffc736ae07e5f3c648cd1585f43b",
-    "actual_json_findings": 33,
-    "verdict": "REVISE",
-    "private_handoff_relative_path": "review-w2jti-builtin-design-r1.log"
-  },
   "historical_6a_note": "f283d1f is the inspected provisional6A source only, not claimed latest or sufficient. Final compatible actual renderer/overflow contract is required before adapter implementation.",
-  "dispositions_sha256": "4d0c3eb179010f18534c275340309e5ff8de22fc3108bd72914ef403f078eee0"
+  "review_history": [
+    {
+      "sha256": "9c37b5cb38ec6ca5159a26a2dab38038b614ffc736ae07e5f3c648cd1585f43b",
+      "actual_json_findings": 33,
+      "verdict": "REVISE",
+      "private_handoff_relative_path": "review-w2jti-builtin-design-r1.log"
+    },
+    {
+      "sha256": "0a6e76a79749616eab5237497599e4acbc8e6da01dda55904b411fb3aa7c419e",
+      "actual_json_findings": 27,
+      "verdict": "REVISE",
+      "reviewed_commit": "020c72a96ab527e57be28a0b2a619444308ac018",
+      "private_handoff_relative_path": "review-w2jti-builtin-design-r2.log"
+    }
+  ],
+  "prior_d2_commit": "020c72a96ab527e57be28a0b2a619444308ac018",
+  "historical_r1_dispositions_sha256": "4d0c3eb179010f18534c275340309e5ff8de22fc3108bd72914ef403f078eee0",
+  "r2_dispositions_sha256": "59daa8b3e95d8795d33e13f9219fb3c72ab59a04f7586cd1ecc04c2ba9737d01",
+  "proposed_d3_decisions": [
+    "Atomic protected post/refresh before enqueue; no later association upgrade",
+    "Stable ask:/askr: native keys and separate attempt IDs; three automatic due0/5/30 then exact authenticated recovery allowance",
+    "Trusted same-UID producer convention, not authentication/enrollment",
+    "One logical decision ID across ask refresh; explicit initial/loss episode policy",
+    "Accepted-source intent anchor and rejected-capacity aggregate qualification",
+    "Local660s durable fallback is not independent remote escalation; no per-task escalation",
+    "admind sole global UTC08 digest with all asks and quota/needs-human/idle projections",
+    "Neutral shared writer/coalescing never gates WSD admission",
+    "Independent same-host catalog/source backup seal; explicit source restoration then automatic marked reissue; no unknown ask reconstruction",
+    "Fixed separately deployed recovery writer outside frozen6B response-only consumer"
+  ]
 }
