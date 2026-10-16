@@ -1,0 +1,114 @@
+{
+  "version": 1,
+  "status": "proposed integration addendum; no approval asserted",
+  "planning_task": "btq-18sfj",
+  "planning_publication": "b554ac42264397d319cbbd1bf5fbf638dba90b7c",
+  "integration_base": "07637745fe75dc614109a0b8ba72d3489f262a97",
+  "missing_historical_prerequisite": "50fc42fb95dde0cdf38410c54e4e89bc3227f37b",
+  "historical_evidence_manifest_sha256": "6ff80c6d030816908f7f6c8e2d035904af4d78e9f873bd178285511332fd43e3",
+  "current_source": [
+    {
+      "path": "src/heterodyne/config/secret_scan.py",
+      "sha256": "92422444c6e632c54a2fe8a4e5c80554fcce0421e6ada2f383ae58fdfff0bc59",
+      "bytes": 7779
+    },
+    {
+      "path": "src/heterodyne/admind/redact.py",
+      "sha256": "533ecbb089b57e643c1edf8745eb13dd908b5dc1cbd14f74f48e3a59883a0d8c",
+      "bytes": 5660
+    },
+    {
+      "path": "src/heterodyne/sandbox/creates.py",
+      "sha256": "37046f408d21a20375295295b5489752cde7558f5fdf9af0ccebbf1938a52f9b",
+      "bytes": 7858
+    },
+    {
+      "path": "src/heterodyne/admind/alerts.py",
+      "sha256": "61e9c252e06802e2e8f10dfbd835b5f8ef96991b7ae4c0d089f87926b149164d",
+      "bytes": 4920
+    },
+    {
+      "path": "tests/test_admind_approvals.py",
+      "sha256": "4ab483415172735897cdb6fb5a2945237eb4e1368792c27bb0eda1f1d3a6e176",
+      "bytes": 102655
+    },
+    {
+      "path": "tests/test_admind_r13_redact.py",
+      "sha256": "fc30468b789502e924bfaa6213e9593d180b443653580f860f0a3565d52c8afc",
+      "bytes": 14861
+    },
+    {
+      "path": "pyproject.toml",
+      "sha256": "f772a967a4e3f944e4f0293a744a5f0157ead4cc77ee9d7fd8854c176bbeb911",
+      "bytes": 1289
+    },
+    {
+      "path": "uv.lock",
+      "sha256": "450b91c21227d80eda778c734bd914c71c74a18371a536da33ee8e4221df6c56",
+      "bytes": 57039
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "sha256": "d1247b1377d00923d52c5d2e5703ebf7ac999436315174f0f915fd7ae47ac963",
+      "bytes": 3094
+    },
+    {
+      "path": "scripts/check_install_agnostic.py",
+      "sha256": "b583e1b7e673268d5c6353dee737f000a341b72ef26faa09dd87a298f870cfc7",
+      "bytes": 7283
+    },
+    {
+      "path": "src/heterodyne/config/layers.py",
+      "sha256": "4f701161db899952bf7d51ec6da4f9388c9ac28898041ff73d87480921179b2c",
+      "bytes": 8393
+    },
+    {
+      "path": "tests/test_config.py",
+      "sha256": "9a94899ffbae127b12656d80fdc7f3dcc85c35a31709d2ab3fa748589986abda",
+      "bytes": 13085
+    },
+    {
+      "path": "src/heterodyne/config/__init__.py",
+      "sha256": "38087dbeb2f021da1062f197c99e4c922591ddff6f1749124ee379acd1e0d870",
+      "bytes": 3245
+    },
+    {
+      "path": "src/heterodyne/admind/hook.py",
+      "sha256": "2200fb756519b9c85f134368fe038ec15c043468fd4ac28e33ea3cc6441dc707",
+      "bytes": 35267
+    },
+    {
+      "path": "src/heterodyne/units.py",
+      "sha256": "a10b831176de8994757ad50e2cfd3a6e43f6428fc22751d74807c53e2068b30a",
+      "bytes": 4307
+    },
+    {
+      "path": "tests/conftest.py",
+      "sha256": "951a0f17143e9a4dca2dd69af4b33d3e4423819a015e2d784676fbbce36cb60a",
+      "bytes": 2177
+    }
+  ],
+  "local_approval_snapshot": {
+    "filename": "next-project-queue-snapshot-2026-10-16.json",
+    "sha256": "d6f8e9cd77a9bfa7d8739bea9ec2bc34ed306a13f426653d0644c837b342ad57",
+    "record_id": "btq-bswl5",
+    "record_canonical_json_sha256": "37ec12fe246bf4e858fe99aab7869c805ba7aff00657f3ee61a73a443e6648fc",
+    "canonicalization": "json.dumps(sort_keys=True,separators=(comma,colon),ensure_ascii=True), UTF-8, no newline",
+    "scope": "plan5i parts1\u20134 implementation only; excludes merge/live/host changes",
+    "via_ref": "marmot:id:f2b47f6813a9",
+    "approved_digest": "a05221b86d2155e2c036ed204bc36e7d211395b87b3f6f66becbad55270c8fae"
+  },
+  "previous_reviewed_integration_base": "3aa124cd4c6e11343d8222cc7ac17d10bec98c34",
+  "exact_overlay_paths": [
+    "src/heterodyne/config/layers.py",
+    "tests/test_config.py"
+  ],
+  "expected_red_results_sha256": "52d8772fa92925addc23d87b203adb95aca60400681c86a405a190c07ec476e0",
+  "immutable_original_bundle": {
+    "repo": "scanner-frozen-artifact-bundle (private controller artifact repository)",
+    "commit": "95ee584b9e6ed543f8e8342c88bee61c0f2e1586",
+    "scope": "exact original 21 artifact bytes; no approval or new review asserted"
+  },
+  "native_deferred_plan5i_followup": "btq-fu366",
+  "parked_implementation_target": "btq-1wu2i"
+}
