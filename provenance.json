@@ -270,6 +270,24 @@
   },
   "combined_amendment_subject": {
     "path": "docs/adr/2026-10-16-plan5-governing-amendment-admission.md",
-    "source": "Verbatim seven existing published F5e D4 §10 choices; administrative approval-scope filing, no design-content change"
+    "source": "Verbatim seven existing published F5e D4 \u00a710 choices; administrative approval-scope filing, no design-content change"
+  },
+  "operator_policy_incorporation": {
+    "path": "docs/adr/2026-10-16-litno-operator-review-policy-addendum.md",
+    "policy_archive_path": "evidence/operator-review-policy/AGENTS-2026-10-16.md",
+    "policy_sha256": "a9c0f36f161a37c6c406cc47934f964682812b17261f13176740a85a156a2877",
+    "runtime_observation": "evidence/operator-review-policy/runtime-observation.json",
+    "authority": "Direct current operator instructions; separate genuine human design decision remains pending",
+    "no_new_review": true
+  },
+  "early_target_scope": {
+    "keys": [
+      "P0",
+      "P1",
+      "P2",
+      "Q0"
+    ],
+    "later_targets": "proposed only; separately pinned admission required",
+    "graph": "evidence/f5e/staged-target-graph.DRAFT.json"
   }
 }

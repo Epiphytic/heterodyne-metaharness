@@ -19,3 +19,9 @@ Original governing ADR: a27acecee8274e6ad8dc65def436614d42b5cb04:docs/adr/0001-w
    authoritative Bead dispatch/result states, object budgets and staged acceptance.
 
 Exact operative contracts and safety gates remain in the copied D4; the numbered list is not a replacement for that full text. The single approval effect must explicitly adopt both and bind their files at this archive revision. No deployment, operational grant or source implementation is authorized until the genuine approval and applicable native/task/source prerequisites hold. No second routine design review or duplicate human decision is proposed.
+
+## Exact early implementation scope of this approval batch
+
+The seven governing choices above are enacted together with approval of the exact D4 contracts. Initial implementation authority covers only four genuine per-repository Stage0 targets created and pinned before the native ask: P0 pure policy/envelope/registry, P1 pure request/decision/dispatch reducers, P2 narrow pure sufficiency/permission contracts, and Q0 queue purpose-aware conditional adapter code with fake-backend checks. All posting, model/provider calls, native operational effects, installation and deployment remain disabled. The proposed graph is filed at `evidence/f5e/staged-target-graph.DRAFT.json`; its keys are not real task IDs.
+
+P0 has no implementation dependency; P1 requires P0; P2 and Q0 each require P0 and P1. The early pure stage does not depend on completion of all fu366/scanner integration. Later P3/P4/P5/P6, an unresolved H1 provider bridge, and deployment are proposals only, requiring separately source-pinned admitted real targets and their actual integration prerequisites. Approval of this batch does not silently authorize those later targets. H1's real repository/provider interface must be established before task creation. Existing genuine native approval pins and task requirements still apply.

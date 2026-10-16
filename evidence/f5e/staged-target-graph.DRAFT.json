@@ -1,0 +1,215 @@
+{
+  "status": "Administrative proposed target graph; NO real targets or native edges created",
+  "design": "45e239a53bdb3bee82d6d44125c021abe296f60d",
+  "early_admissible_keys": [
+    "P0",
+    "P1",
+    "P2",
+    "Q0"
+  ],
+  "early_scope": "\u00a75 lines247\u2013251 expressly permits pure module/fake-backend/disabled-path development under its own approved scope; \u00a79 lines673\u2013674 defines Stage0. Therefore no whole-fu366/scanner implementation edge on pure Stage0; requires approved combined amendment and actual task admission. \u00a78 unresolved dependencies hold affected integration/enablement, not falsely independent production effects.",
+  "graph": [
+    {
+      "key": "P0",
+      "actual_native_id": null,
+      "repository": "/home/openclaw/repos/heterodyne-metaharness-v2",
+      "title": "Implement Plan5 pure action envelope, policy/materiality and closed registry",
+      "stage": 0,
+      "requires_proposed_keys": [],
+      "requires_existing_native_ids": [],
+      "source_locations": [
+        "D4 \u00a7\u00a73\u20134,5 lines247\u2013254,9 lines673\u2013674"
+      ],
+      "scope": "Strict tagged codecs, full-ask canonical fields, typed origin/policy projections, deterministic floor/denial key, all five adapters unavailable by default. Pure input/output and synthetic values only. Reject duplicate keys/unknown types/secret-bearing unsafe rendering/ref grammar errors. No origin authentication, scanner implementation, native reader, model evaluator or effects claimed.",
+      "common": "Requires genuine combined F5e governing amendment/design approval naming this actual task and its repository, exact archive revision, valid native pins/blocker and actual own claim/worktree. No live API, credentials, principal changes, model calls, sends, installation, services or deployment. Proposed APIs remain proposed until implemented and proven; code review and actual relevant named offline checks precede acceptance."
+    },
+    {
+      "key": "P1",
+      "actual_native_id": null,
+      "repository": "/home/openclaw/repos/heterodyne-metaharness-v2",
+      "title": "Implement Plan5 pure request, decision and dispatch reducers with offline durability fixtures",
+      "stage": 0,
+      "requires_proposed_keys": [
+        "P0"
+      ],
+      "requires_existing_native_ids": [],
+      "source_locations": [
+        "\u00a7\u00a75\u20137; \u00a79 Stage0"
+      ],
+      "scope": "Durable state-machine/reducer and migration code with temporary stores and fake queue/session/effect ports; two-outstanding-per-bead capacity, creation-key unknown/adoption, first decision, pin-finalization stages, one-use claim/report, cleanup uncertainty and no replay. No current journal schema guess: select exact schema against actual claimed base; no native shell creation, production migration or posting.",
+      "common": "Requires genuine combined F5e governing amendment/design approval naming this actual task and its repository, exact archive revision, valid native pins/blocker and actual own claim/worktree. No live API, credentials, principal changes, model calls, sends, installation, services or deployment. Proposed APIs remain proposed until implemented and proven; code review and actual relevant named offline checks precede acceptance."
+    },
+    {
+      "key": "P2",
+      "actual_native_id": null,
+      "repository": "/home/openclaw/repos/heterodyne-metaharness-v2",
+      "title": "Implement narrow pure sufficiency/permission judgement contracts and concern/groom state",
+      "stage": 0,
+      "requires_proposed_keys": [
+        "P0",
+        "P1"
+      ],
+      "requires_existing_native_ids": [],
+      "source_locations": [
+        "\u00a78 item2; \u00a712; \u00a710 choice4"
+      ],
+      "scope": "Closed typed input/result schemas, digest/source/policy/model binding, 60-second deadline handling using fake provider, sufficient/enrich/groom/unknown and allow/deny/escalate mapping. Unknown cannot post; bounded same-origin grooming state only. This is the EARLY narrow subset, not full Plan7 intake or actual Hermes model service. Preserve later full Plan7 dependency toward this shared subset, never reverse it.",
+      "common": "Requires genuine combined F5e governing amendment/design approval naming this actual task and its repository, exact archive revision, valid native pins/blocker and actual own claim/worktree. No live API, credentials, principal changes, model calls, sends, installation, services or deployment. Proposed APIs remain proposed until implemented and proven; code review and actual relevant named offline checks precede acceptance."
+    },
+    {
+      "key": "Q0",
+      "actual_native_id": null,
+      "repository": "/home/openclaw/repos/beads-task-queue",
+      "title": "Implement Plan5 purpose-aware conditional native queue adapter and offline fake-backend contracts",
+      "stage": 0,
+      "requires_proposed_keys": [
+        "P0",
+        "P1"
+      ],
+      "requires_existing_native_ids": [],
+      "source_locations": [
+        "\u00a75 lines243\u2013245; \u00a76 lines269\u2013281,303\u2013319; \u00a710 choice3"
+      ],
+      "scope": "Per-repository queue task and genuine design pins. Implement proposed conditional allocate/key lookup/draft/finalize/dispatch-claim/report interfaces using fake backend; preserve existing design approval validation and exact native digest. Absence of purpose remains legacy/unclassified, no inference/migration. Capability refusal when actual backend cannot guarantee CAS; fake success is not proof of configured Dolt reader grants or installed APIs.",
+      "common": "Requires genuine combined F5e governing amendment/design approval naming this actual task and its repository, exact archive revision, valid native pins/blocker and actual own claim/worktree. No live API, credentials, principal changes, model calls, sends, installation, services or deployment. Proposed APIs remain proposed until implemented and proven; code review and actual relevant named offline checks precede acceptance."
+    },
+    {
+      "key": "P3",
+      "actual_native_id": null,
+      "repository": "/home/openclaw/repos/heterodyne-metaharness-v2",
+      "title": "Integrate Plan5 action intake, scanner-safe parking/groom/resume and native conditional request adapter",
+      "stage": 1,
+      "requires_proposed_keys": [
+        "P0",
+        "P1",
+        "P2",
+        "Q0"
+      ],
+      "requires_existing_native_ids": [
+        "btq-bikr3",
+        "btq-1wu2i",
+        "btq-d1v9d"
+      ],
+      "source_locations": [
+        "\u00a78 items1,5; \u00a75 lines177\u2013245"
+      ],
+      "scope": "Source-bound integration on accepted Plan5i/S/T10 base: actual launch provenance, generation ownership, native blocker/shell sequencing, exact landed source and same logical-session restricted grooming. Requires real source receipts/interfaces; cannot claim resume capability from DTOs. Full scanner/payload retention contracts preserved.",
+      "common": "Requires genuine combined F5e governing amendment/design approval naming this actual task and its repository, exact archive revision, valid native pins/blocker and actual own claim/worktree. No live API, credentials, principal changes, model calls, sends, installation, services or deployment. Proposed APIs remain proposed until implemented and proven; code review and actual relevant named offline checks precede acceptance."
+    },
+    {
+      "key": "H1",
+      "actual_native_id": null,
+      "repository": "/home/openclaw/repos/hermes-workstream-harness",
+      "title": "Integrate admitted Hermes judgement provider with early Plan5 typed sufficiency/permission ports",
+      "stage": 1,
+      "requires_proposed_keys": [
+        "P2"
+      ],
+      "requires_existing_native_ids": [],
+      "source_locations": [
+        "\u00a78 item2; \u00a712"
+      ],
+      "scope": "Actual provider/launcher implementation ONLY after source-backed repository boundary and concrete supported provider contract are supplied in admission receipt. No invented backend API/model-purpose field. Export typed pinned source/model/revision contract, bounded provider outcomes, offline stub tests; no actual model invocation here. If correct implementation repository is product instead, create that real repo task before approval; do not silently relabel this repository. Does not depend on full Plan7.",
+      "common": "Requires genuine combined F5e governing amendment/design approval naming this actual task and its repository, exact archive revision, valid native pins/blocker and actual own claim/worktree. No live API, credentials, principal changes, model calls, sends, installation, services or deployment. Proposed APIs remain proposed until implemented and proven; code review and actual relevant named offline checks precede acceptance.",
+      "repository_binding_status": "PROPOSED; concrete provider/source contract required before this target can be posted as executable"
+    },
+    {
+      "key": "P4",
+      "actual_native_id": null,
+      "repository": "/home/openclaw/repos/heterodyne-metaharness-v2",
+      "title": "Implement all-kinds Marmot single-writer submission, recovery and coordinated cutover fencing",
+      "stage": 1,
+      "requires_proposed_keys": [
+        "P1",
+        "P2",
+        "Q0",
+        "P3",
+        "H1"
+      ],
+      "requires_existing_native_ids": [],
+      "source_locations": [
+        "\u00a76; \u00a78 item6; \u00a710 choices1\u20133,5\u20136"
+      ],
+      "scope": "Admind-authenticated bounded event ingestion, exact digest first decision, purpose-aware native finalization, heart proposal durability, confirm/recovery and supported-writer fence with fake transports. Existing interim relay continues until separately approved coupled release; no actual cutover while development. Requires concrete accepted Plan6 display/transport compatibility if reused; no full Plan6 milestone dependency by assumption.",
+      "common": "Requires genuine combined F5e governing amendment/design approval naming this actual task and its repository, exact archive revision, valid native pins/blocker and actual own claim/worktree. No live API, credentials, principal changes, model calls, sends, installation, services or deployment. Proposed APIs remain proposed until implemented and proven; code review and actual relevant named offline checks precede acceptance."
+    },
+    {
+      "key": "P5",
+      "actual_native_id": null,
+      "repository": "/home/openclaw/repos/heterodyne-metaharness-v2",
+      "title": "Implement isolated Plan5 executor, object ingress, reader resolver and fixed broker/installer plan",
+      "stage": 1,
+      "requires_proposed_keys": [
+        "P0",
+        "P1",
+        "Q0"
+      ],
+      "requires_existing_native_ids": [],
+      "source_locations": [
+        "\u00a77; \u00a78 items3,7"
+      ],
+      "scope": "Offline code for fixed root-owned broker/one-use claim/report, effector object closure and canonical read-only resolver, process/cgroup cleanup, sanitized imports/argv. Temporary subprocess fixtures only. Actual separate-principal denied-write proof, root ownership/sudoers/cgroup/credential placement and configured backend guarantees remain independently required deployment/scratch acceptance receipts, not claims from fake tests.",
+      "common": "Requires genuine combined F5e governing amendment/design approval naming this actual task and its repository, exact archive revision, valid native pins/blocker and actual own claim/worktree. No live API, credentials, principal changes, model calls, sends, installation, services or deployment. Proposed APIs remain proposed until implemented and proven; code review and actual relevant named offline checks precede acceptance."
+    },
+    {
+      "key": "P6",
+      "actual_native_id": null,
+      "repository": "/home/openclaw/repos/heterodyne-metaharness-v2",
+      "title": "Integrate and verify enabled push/PR/merge action matrices on accepted Plan5 source",
+      "stage": 1,
+      "requires_proposed_keys": [
+        "P3",
+        "H1",
+        "P4",
+        "P5"
+      ],
+      "requires_existing_native_ids": [],
+      "source_locations": [
+        "\u00a7\u00a77\u20139"
+      ],
+      "scope": "Pinned final source/base/queue/provider compatibility, fake-target success/failure/unknown/no-replay matrices, final tests and code review. Deploy/notify remain unavailable everywhere. No real forge submission or scratch acceptance. Stage1 completion/availability needs all genuine writer/gatekeeper/read-only/adapter proofs; no release claim from code alone.",
+      "common": "Requires genuine combined F5e governing amendment/design approval naming this actual task and its repository, exact archive revision, valid native pins/blocker and actual own claim/worktree. No live API, credentials, principal changes, model calls, sends, installation, services or deployment. Proposed APIs remain proposed until implemented and proven; code review and actual relevant named offline checks precede acceptance."
+    },
+    {
+      "key": "DEPLOY",
+      "actual_native_id": null,
+      "repository": "/home/openclaw/repos/heterodyne-metaharness-v2",
+      "title": "Plan exact Plan5 coupled deployment and scratch acceptance",
+      "stage": 2,
+      "requires_proposed_keys": [
+        "P6"
+      ],
+      "requires_existing_native_ids": [],
+      "source_locations": [
+        "\u00a78 item9; \u00a79 lines676\u2013690"
+      ],
+      "scope": "Future separately scoped deployment design/ask with exact release/config/installed-state deviations, migration backup/rollback, actual reader grants/sudoers/process proof and scratch target authority. NOT an implementation target in this design-approval batch and no deployment authority now.",
+      "common": "Requires genuine combined F5e governing amendment/design approval naming this actual task and its repository, exact archive revision, valid native pins/blocker and actual own claim/worktree. No live API, credentials, principal changes, model calls, sends, installation, services or deployment. Proposed APIs remain proposed until implemented and proven; code review and actual relevant named offline checks precede acceptance."
+    }
+  ],
+  "per_repository": {
+    "product": [
+      "P0",
+      "P1",
+      "P2",
+      "P3",
+      "P4",
+      "P5",
+      "P6",
+      "DEPLOY"
+    ],
+    "queue": [
+      "Q0"
+    ],
+    "hermes_candidate": [
+      "H1"
+    ]
+  },
+  "s_delegation": "No generic implementation edge on full S. If management recovery/dependency changes are delegated, genuine joint Z/S installed contract + exact finite operational grant are required independently; no design consent or source implementation confers that authority.",
+  "f5i": "Do not block early Stage0 on design brainstorm fu366. P3 integration requires actual accepted stage2 receiving source/contract; existing real btq-bikr3 is proposed gate but root must verify task acceptance covers exact required source. Direct scanner/T10 pins remain checked rather than inferred from CLOSED.",
+  "missing": [
+    "Actual target IDs and fresh native prerequisite status/approval records are controller-owned future work.",
+    "H1 actual Hermes provider repository/source/contract unresolved: explicit executable admission HOLD for that target; early pure P2 remains possible.",
+    "Exact source/interface receipts for Stage1; no whole-project ready claim."
+  ]
+}

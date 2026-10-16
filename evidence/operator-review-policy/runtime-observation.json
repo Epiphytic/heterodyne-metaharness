@@ -1,0 +1,10 @@
+{
+  "kind": "read-only metadata/hash observation; no CLI/model execution",
+  "package_metadata_version": "2.1.301",
+  "package_json_sha256": "e2c5eab93f177f3f3df1ce2757c66245a054bee6f89373c5400b6f8a0fe2962b",
+  "executable_sha256": "bc1aad9982c7b59c7d889ff92595d61cf46e0a6eae074cb551d932a989bcd222",
+  "package_path": "/home/openclaw/.nvm/versions/node/v22.22.0/lib/node_modules/@anthropic-ai/claude-code/package.json",
+  "executable_path": "/home/openclaw/.nvm/versions/node/v22.22.0/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+  "matches_d4_initial_pin": true,
+  "runtime_enforcement_verified": false
+}
