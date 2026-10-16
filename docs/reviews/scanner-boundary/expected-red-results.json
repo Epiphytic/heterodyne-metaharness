@@ -1,0 +1,97 @@
+{
+  "version": 1,
+  "status": "proposed d2 expected data; no test execution claimed",
+  "historical_redcheck_sha256": "56506e99f0cd74f5a9000fef2b9572facd416d878f0d809d1d23bf4c0ddb5d3c",
+  "node_mask": "replace each lowercase hex run length>=16 with <hexN>; reject any resulting collision",
+  "stages": {
+    "t1": {
+      "total": 88,
+      "failing_nodes": [
+        "tests/test_secret_scan_boundary.py::test_a_continuation_hides_the_rest_of_an_embedded_token[aws]",
+        "tests/test_secret_scan_boundary.py::test_a_continuation_hides_the_rest_of_an_embedded_token[gho]",
+        "tests/test_secret_scan_boundary.py::test_a_continuation_hides_the_rest_of_an_embedded_token[ghp]",
+        "tests/test_secret_scan_boundary.py::test_a_continuation_hides_the_rest_of_an_embedded_token[github_pat]",
+        "tests/test_secret_scan_boundary.py::test_a_continuation_hides_the_rest_of_an_embedded_token[jwt]",
+        "tests/test_secret_scan_boundary.py::test_a_continuation_hides_the_rest_of_an_embedded_token[nsec]",
+        "tests/test_secret_scan_boundary.py::test_a_continuation_hides_the_rest_of_an_embedded_token[slack]",
+        "tests/test_secret_scan_boundary.py::test_a_distinctive_prefix_inside_a_word_is_found[aws-9]",
+        "tests/test_secret_scan_boundary.py::test_a_distinctive_prefix_inside_a_word_is_found[aws-Z]",
+        "tests/test_secret_scan_boundary.py::test_a_distinctive_prefix_inside_a_word_is_found[aws-v]",
+        "tests/test_secret_scan_boundary.py::test_a_distinctive_prefix_inside_a_word_is_found[gho-9]",
+        "tests/test_secret_scan_boundary.py::test_a_distinctive_prefix_inside_a_word_is_found[gho-Z]",
+        "tests/test_secret_scan_boundary.py::test_a_distinctive_prefix_inside_a_word_is_found[gho-v]",
+        "tests/test_secret_scan_boundary.py::test_a_distinctive_prefix_inside_a_word_is_found[ghp-9]",
+        "tests/test_secret_scan_boundary.py::test_a_distinctive_prefix_inside_a_word_is_found[ghp-Z]",
+        "tests/test_secret_scan_boundary.py::test_a_distinctive_prefix_inside_a_word_is_found[ghp-v]",
+        "tests/test_secret_scan_boundary.py::test_a_distinctive_prefix_inside_a_word_is_found[github_pat-9]",
+        "tests/test_secret_scan_boundary.py::test_a_distinctive_prefix_inside_a_word_is_found[github_pat-Z]",
+        "tests/test_secret_scan_boundary.py::test_a_distinctive_prefix_inside_a_word_is_found[github_pat-v]",
+        "tests/test_secret_scan_boundary.py::test_a_distinctive_prefix_inside_a_word_is_found[jwt-9]",
+        "tests/test_secret_scan_boundary.py::test_a_distinctive_prefix_inside_a_word_is_found[jwt-Z]",
+        "tests/test_secret_scan_boundary.py::test_a_distinctive_prefix_inside_a_word_is_found[jwt-v]",
+        "tests/test_secret_scan_boundary.py::test_a_distinctive_prefix_inside_a_word_is_found[nsec-9]",
+        "tests/test_secret_scan_boundary.py::test_a_distinctive_prefix_inside_a_word_is_found[nsec-Z]",
+        "tests/test_secret_scan_boundary.py::test_a_distinctive_prefix_inside_a_word_is_found[nsec-v]",
+        "tests/test_secret_scan_boundary.py::test_a_distinctive_prefix_inside_a_word_is_found[slack-9]",
+        "tests/test_secret_scan_boundary.py::test_a_distinctive_prefix_inside_a_word_is_found[slack-Z]",
+        "tests/test_secret_scan_boundary.py::test_a_distinctive_prefix_inside_a_word_is_found[slack-v]",
+        "tests/test_secret_scan_boundary.py::test_a_github_token_after_a_letter_is_found",
+        "tests/test_secret_scan_boundary.py::test_a_hook_tool_call_with_embedded_tokens_in_keys_and_values_is_redacted",
+        "tests/test_secret_scan_boundary.py::test_a_long_lowercase_sk_body_inside_a_word_fails_closed",
+        "tests/test_secret_scan_boundary.py::test_a_token_after_63_hex_digits_is_redacted_whole[aws]",
+        "tests/test_secret_scan_boundary.py::test_a_token_after_63_hex_digits_is_redacted_whole[jwt]",
+        "tests/test_secret_scan_boundary.py::test_a_unit_value_with_an_embedded_token_is_refused",
+        "tests/test_secret_scan_boundary.py::test_an_alert_with_an_embedded_token_is_withheld",
+        "tests/test_secret_scan_boundary.py::test_an_aws_key_glued_to_a_capital_is_found",
+        "tests/test_secret_scan_boundary.py::test_an_sk_key_inside_a_word_is_found[ant]",
+        "tests/test_secret_scan_boundary.py::test_an_sk_key_inside_a_word_is_found[digits]",
+        "tests/test_secret_scan_boundary.py::test_an_sk_key_inside_a_word_is_found[groups-]",
+        "tests/test_secret_scan_boundary.py::test_an_sk_key_inside_a_word_is_found[groups_]",
+        "tests/test_secret_scan_boundary.py::test_an_sk_key_inside_a_word_is_found[hex]",
+        "tests/test_secret_scan_boundary.py::test_an_sk_key_inside_a_word_is_found[letters]",
+        "tests/test_secret_scan_boundary.py::test_an_sk_key_inside_a_word_is_found[mixed]",
+        "tests/test_secret_scan_boundary.py::test_an_sk_key_inside_a_word_is_found[underscore]",
+        "tests/test_secret_scan_boundary.py::test_any_alphanumeric_lead_still_finds_the_token",
+        "tests/test_secret_scan_boundary.py::test_overlapping_kinds_in_hook_keys_and_values_leave_no_piece",
+        "tests/test_secret_scan_boundary.py::test_overlapping_kinds_leave_no_piece_of_either[pat then jwt]",
+        "tests/test_secret_scan_boundary.py::test_overlapping_kinds_leave_no_piece_of_either[sk then jwt, by -]",
+        "tests/test_secret_scan_boundary.py::test_overlapping_kinds_leave_no_piece_of_either[sk then jwt]",
+        "tests/test_secret_scan_boundary.py::test_the_sk_thresholds_inside_a_word[<hex256>-True]",
+        "tests/test_secret_scan_boundary.py::test_the_sk_thresholds_inside_a_word[<hex32>-True]",
+        "tests/test_secret_scan_boundary.py::test_the_stated_sk_false_positives[mask-eth0-bond0-vlan100-uplink-primary]",
+        "tests/test_secret_scan_boundary.py::test_the_stated_sk_false_positives[task-nightly-release-candidate-rc2026-b]"
+      ]
+    },
+    "t2s2": {
+      "total": null,
+      "failing_nodes": [
+        "tests/test_admind_approvals.py::test_approval_card_refuses_a_chunk_redaction_would_change",
+        "tests/test_admind_approvals.py::test_quoted_line_stays_within_the_cap",
+        "tests/test_admind_r13_redact.py::test_a_marker_that_makes_a_boundary_is_redacted_again",
+        "tests/test_admind_r13_redact.py::test_an_escape_next_to_hex_is_redacted_in_one_pass"
+      ]
+    },
+    "t2s5": {
+      "total": 7,
+      "failing_nodes": [
+        "tests/test_secret_scan_boundary.py::test_overlapping_kinds_in_hook_keys_and_values_leave_no_piece",
+        "tests/test_secret_scan_boundary.py::test_overlapping_kinds_leave_no_piece_of_either[pat then jwt]",
+        "tests/test_secret_scan_boundary.py::test_overlapping_kinds_leave_no_piece_of_either[sk then jwt, by -]",
+        "tests/test_secret_scan_boundary.py::test_overlapping_kinds_leave_no_piece_of_either[sk then jwt]"
+      ]
+    },
+    "create-alert-before-patch": {
+      "total": 6,
+      "failing_nodes": [
+        "tests/test_sandbox_scanner_integration.py::test_embedded_create_field_uses_safe_fallback[ws-letter]",
+        "tests/test_sandbox_scanner_integration.py::test_embedded_create_field_uses_safe_fallback[ws-digit]",
+        "tests/test_sandbox_scanner_integration.py::test_embedded_create_field_uses_safe_fallback[bead-letter]",
+        "tests/test_sandbox_scanner_integration.py::test_embedded_create_field_uses_safe_fallback[bead-digit]"
+      ],
+      "passing_nodes": [
+        "tests/test_sandbox_scanner_integration.py::test_ordinary_create_alert_ids_and_fields",
+        "tests/test_sandbox_scanner_integration.py::test_close_out_precedes_cleanup"
+      ]
+    }
+  }
+}
