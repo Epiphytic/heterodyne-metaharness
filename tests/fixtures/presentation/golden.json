@@ -1,0 +1,5 @@
+{
+  "task": "Task: btq-demo\n⏳ running\ncodex · author · feature\ntitle: Example\nduration_us: 100 us at render time\nObserved 2026-10-16T12:03:04.123456Z; rendered 2026-10-16T12:03:04.123456Z",
+  "approval": "Approval (design) btq-demo\nWhat: Build example\nEffect:\n```\nset mode safe\n```\nExcludes: deployment\nWhy: Enable inspection\nContext: Bounded synthetic example\nhttps://github.com/example/project/blob/1111111111111111111111111111111111111111/docs/design.md#L2-L5\n👍 approve · 👎 deny · ❤️ always · reply to steer\nContext digest: abcdef012345",
+  "question": "Question: Continue example?\nContext: Synthetic context\nContinue?\nReply yes or no.\nContext digest: abcdef012345"
+}

@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "proposed_input": {
+    "commit": "0ed49add285a203a758dad8e97598ffa1b83f28d",
+    "path": "docs/designs/2026-10-16-plan6b-authenticated-marmot-read-surface.md",
+    "sha256": "b3b007f5c79a679b2fc8f50930d4df271ae8de8cf833fc25155d018590b27558",
+    "authority": "provisional compatibility fixture only; no ingress or integration approval inferred"
+  },
+  "queries": [
+    [
+      "Workstreams",
+      null,
+      "Workstreams"
+    ],
+    [
+      "Status",
+      null,
+      "Status: control"
+    ],
+    [
+      "Status",
+      "project",
+      "Status: project"
+    ],
+    [
+      "BeadStatus",
+      null,
+      "Bead: btq-demo"
+    ],
+    [
+      "Approvals",
+      null,
+      "Approvals"
+    ],
+    [
+      "Queue",
+      null,
+      "Queue: all"
+    ],
+    [
+      "QueueFor",
+      "project",
+      "Queue: project"
+    ]
+  ]
+}
