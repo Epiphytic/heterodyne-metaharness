@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "status": "proposed integration addendum; no approval asserted",
+  "planning_task": "btq-18sfj",
+  "planning_publication": "d9b916e31dbfa27b30f2f3873327d4ef0c24cbee",
+  "integration_base": "3aa124cd4c6e11343d8222cc7ac17d10bec98c34",
+  "missing_historical_prerequisite": "50fc42fb95dde0cdf38410c54e4e89bc3227f37b",
+  "historical_evidence_manifest_sha256": "6ff80c6d030816908f7f6c8e2d035904af4d78e9f873bd178285511332fd43e3",
+  "current_source": [
+    {
+      "path": "src/heterodyne/config/secret_scan.py",
+      "sha256": "92422444c6e632c54a2fe8a4e5c80554fcce0421e6ada2f383ae58fdfff0bc59",
+      "bytes": 7779
+    },
+    {
+      "path": "src/heterodyne/admind/redact.py",
+      "sha256": "533ecbb089b57e643c1edf8745eb13dd908b5dc1cbd14f74f48e3a59883a0d8c",
+      "bytes": 5660
+    },
+    {
+      "path": "src/heterodyne/sandbox/creates.py",
+      "sha256": "37046f408d21a20375295295b5489752cde7558f5fdf9af0ccebbf1938a52f9b",
+      "bytes": 7858
+    },
+    {
+      "path": "src/heterodyne/admind/alerts.py",
+      "sha256": "61e9c252e06802e2e8f10dfbd835b5f8ef96991b7ae4c0d089f87926b149164d",
+      "bytes": 4920
+    },
+    {
+      "path": "tests/test_admind_approvals.py",
+      "sha256": "4ab483415172735897cdb6fb5a2945237eb4e1368792c27bb0eda1f1d3a6e176",
+      "bytes": 102655
+    },
+    {
+      "path": "tests/test_admind_r13_redact.py",
+      "sha256": "fc30468b789502e924bfaa6213e9593d180b443653580f860f0a3565d52c8afc",
+      "bytes": 14861
+    },
+    {
+      "path": "pyproject.toml",
+      "sha256": "f772a967a4e3f944e4f0293a744a5f0157ead4cc77ee9d7fd8854c176bbeb911",
+      "bytes": 1289
+    },
+    {
+      "path": "uv.lock",
+      "sha256": "450b91c21227d80eda778c734bd914c71c74a18371a536da33ee8e4221df6c56",
+      "bytes": 57039
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "sha256": "d1247b1377d00923d52c5d2e5703ebf7ac999436315174f0f915fd7ae47ac963",
+      "bytes": 3094
+    },
+    {
+      "path": "scripts/check_install_agnostic.py",
+      "sha256": "b583e1b7e673268d5c6353dee737f000a341b72ef26faa09dd87a298f870cfc7",
+      "bytes": 7283
+    }
+  ],
+  "local_approval_snapshot": {
+    "filename": "next-project-queue-snapshot-2026-10-16.json",
+    "sha256": "d6f8e9cd77a9bfa7d8739bea9ec2bc34ed306a13f426653d0644c837b342ad57",
+    "record_id": "btq-bswl5",
+    "record_canonical_json_sha256": "37ec12fe246bf4e858fe99aab7869c805ba7aff00657f3ee61a73a443e6648fc",
+    "canonicalization": "json.dumps(sort_keys=True,separators=(comma,colon),ensure_ascii=True), UTF-8, no newline",
+    "scope": "plan5i parts1\u20134 implementation only; excludes merge/live/host changes",
+    "via_ref": "marmot:id:f2b47f6813a9",
+    "approved_digest": "a05221b86d2155e2c036ed204bc36e7d211395b87b3f6f66becbad55270c8fae"
+  }
+}

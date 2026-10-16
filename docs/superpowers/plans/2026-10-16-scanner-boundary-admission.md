@@ -9,6 +9,11 @@ Inputs and exact source pins are in
 review limitations are in
 [the reconciliation](../specs/2026-10-16-scanner-boundary-reconciliation.md).
 
+The distinct proposed current-main alternative is now specified in
+[integration addendum d1](../specs/2026-10-16-scanner-current-main-integration-d1.md).
+It is pending its own bounded integration review and human decision; neither
+publication supersedes the historical prerequisite without that actual admission.
+
 ## Recommended continuation
 
 Preserve design d3, plan r5, historical ask r5 and all six historical review
