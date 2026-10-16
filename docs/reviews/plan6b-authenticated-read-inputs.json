@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "task": "btq-63iz7",
-  "status": "proposed d2 after actual R1 REVISE; parent inspection, remaining review, publication and native human approval pending",
+  "status": "proposed d3 after actual R1 and R2 REVISE; parent inspection, final R3, publication and native human approval pending",
   "source_base": "07637745fe75dc614109a0b8ba72d3489f262a97",
   "design_path": "docs/designs/2026-10-16-plan6b-authenticated-marmot-read-surface.md",
-  "design_sha256": "896756d7f7007e8d050f7308b85933713600ee8bce5f5575e2a28086f7215f40",
+  "design_sha256": "b3b007f5c79a679b2fc8f50930d4df271ae8de8cf833fc25155d018590b27558",
   "inputs": [
     {
       "repository": "heterodyne-metaharness",
@@ -148,7 +148,7 @@
       "path": "src/heterodyne/admind/daemon.py",
       "bytes": 190140,
       "sha256": "6dd566effd2fbd2a569e533cf8449da5ae15244290e6a9cfc30560e685acb0fb",
-      "role": "actual64hex message/event/target validation; not universal group length"
+      "role": "actual strict native provenance, AskPost/Get handling and fresh policy intersected with confirmed keys; current sender proof not exported by AskGet"
     },
     {
       "repository": "heterodyne-metaharness",
@@ -181,6 +181,30 @@
       "bytes": 146751,
       "sha256": "ec2bc67b227326c80bf5d9a32eb661b220ea9af6942ef31bff04d8c06941bd2e",
       "role": "Queue constructor/state/writer credentials/native20s timeout and unbounded paused-ready behavior"
+    },
+    {
+      "repository": "heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/asks.py",
+      "bytes": 31088,
+      "sha256": "6b6645f1fbba429b0f52277152f31745422332fe063792ce4748378091f37042",
+      "role": "actual AskPost/Get/AnswerView/AskSummary shapes; body and current sender-key proof absent from AskView"
+    },
+    {
+      "repository": "heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/notices.py",
+      "bytes": 4746,
+      "sha256": "e123b4adcf32369e72b1230525bfd31b4ea4f05286091bbef35dda0af9a790bd",
+      "role": "actual closed NoticePost route owner and notice limits; no invented response-only unsolicited send"
+    },
+    {
+      "repository": "heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/cli.py",
+      "bytes": 26442,
+      "sha256": "83858ebea0b71c777f865264d80c6537902206b0f2ca9024518f11ce160b843f",
+      "role": "actual private ask client; CLI store startup is not a read-consumer capability"
     }
   ],
   "private_controller_inputs": [
@@ -217,16 +241,17 @@
     "snapshot_is_current_native_validation": false
   },
   "unresolved_admission": [
-    "actual final compatible approved and implemented Plan6A pin",
+    "final R3 and genuine native Marmot design approval; no approval claimed",
     "explicit early-read-only sequencing human decision or full Plan5 predecessor",
-    "actual supported trust recovery and initial registered baseline before deployment",
-    "separate reviewed implementation and deployment approvals",
-    "implement the explicit sections4.1\u20134.2 read port/adapters and prove consumed native field/ordering contracts offline; unsupported facts return Unavailable"
+    "actual final compatible approved and implemented Plan6A pin/profile",
+    "implementation admission under the approved design and real code review; separate deployment approval",
+    "prove the bounded owner/native producer contract with actual disposable read-role/effect fixtures; no writer fallback",
+    "reviewed owner-side exact request/answer/current-principal recovery compatibility adapter and initial trusted registered baseline before deployment"
   ],
   "implementation_or_live_actions": false,
   "proposed_projection_contract": {
     "version": 1,
-    "defined_in": "design sections4.1\u20134.2",
+    "defined_in": "design sections4.1–4.2",
     "selectors": [
       "Workstreams",
       "Status",
@@ -243,9 +268,23 @@
     ],
     "existing_api_claim": false,
     "new_read_adapters_required": true,
-    "no_native_order_or_total_proof": "Unavailable; no guessed totals or ordering"
+    "no_native_order_or_total_proof": "Unavailable; no guessed totals or ordering",
+    "result_tags": [
+      "Available",
+      "Unavailable",
+      "Rejected",
+      "Busy",
+      "NeedsDetails"
+    ],
+    "scope_digest_excludes": [
+      "ProducerBinding",
+      "release_commit",
+      "run_id",
+      "boot_id",
+      "generation"
+    ]
   },
-  "revision": "d2",
+  "revision": "d3",
   "review_history": [
     {
       "round": 1,
@@ -261,13 +300,29 @@
       "requested_effort": "high",
       "actual_inner_model": null,
       "verification_pass_reported": false
+    },
+    {
+      "round": 2,
+      "verdict": "REVISE",
+      "raw_sha256": "b4d8c2beef17c0591e5f3bdb6b3f676879325cfa9c015dbb08472e6820374779",
+      "actual_fenced_json_count": 21,
+      "reviewed_source": "dd58209001061d5228ca9f50ce2ee618e7acf367",
+      "disposition_path": "docs/reviews/plan6b-authenticated-read-design-r2-disposition.md",
+      "disposition_sha256": "072306b3bfac2741f182cc6cf37cb70b438b490585c0dc32f74ee7767f876624",
+      "actual_returncode": 0,
+      "requested_model": "opus",
+      "requested_effort": "high",
+      "actual_inner_model": null,
+      "verification_pass_reported": false,
+      "ended_at": "2026-10-16T07:32:04.212740+00:00"
     }
   ],
   "unresolved_prerequisites": [
-    "Genuine remaining design review/native Marmot approval including early-sequencing choice; no approval claimed",
-    "Exact genuinely approved/implemented6A source/schema and bounded compatibility artifact before implementation integration; provisional7903439 remains only inspectedinput",
-    "Supported read-role/owner port and verified finite native operation shapes before deployment; no Queue writer fallback",
-    "Implemented/tested supported config/epoch recovery/approval validation and initial trusted route baseline before deployment",
-    "Separate exactdeploymentapproval; no consumer startup or live acceptance in design/library work"
+    "Genuine final design review/native Marmot approval including explicit early-sequencing and minimum safety-alert/recovery scope",
+    "Exact genuinely approved/implemented 6A pin and explicit cached/outage/render-time/fixed-notice compatibility profile; provisional7903439 is only inspected input",
+    "Provisioned read role, fixed operation shapes and owner mode=ro port proven with actual isolated native effects before deployment",
+    "Actual AskPost/Get are insufficient alone: reviewed owner-side proof must bind retained full request/body and real answer sender to current policy intersected with confirmed keys; absent proof HOLD",
+    "Supported private 6B journal/config/archive/doctor/recovery tooling and trusted initial baseline before deployment",
+    "Separate exact deployment approval; no consumer startup or live acceptance in design/library work"
   ]
 }
