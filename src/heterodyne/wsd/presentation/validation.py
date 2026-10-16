@@ -203,7 +203,11 @@ def _semantic(value: Any) -> None:
     if isinstance(value, d.ApprovalSummary) and _ORDER.fullmatch(value.opaque_order_key) is None:
         fail()
     if isinstance(value, d.Candidate):
+        if len(value.blocker_labels) > 100:
+            fail("bounds")
         _unique(value.blocker_labels)
+        for label in value.blocker_labels:
+            _label(label)
     if isinstance(value, d.ChoiceQuestion):
         if not 2 <= len(value.choices) <= 6:
             fail("bounds")

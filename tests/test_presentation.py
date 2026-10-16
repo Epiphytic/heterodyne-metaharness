@@ -350,9 +350,7 @@ class SafetyTests(unittest.TestCase):
                 self.assertFalse(result.complete)
                 self.assertIn("title: [withheld]", "\n".join(result.parts))
                 blocked = render_card_pair(protected(approval(what=text)), POLICY)
-                self.assertEqual(blocked.reason, "unsafe-content") if text != "\n" else self.assertIsInstance(
-                    blocked, d.Pair
-                )
+                self.assertEqual(blocked.reason, "unsafe-content")
                 if isinstance(blocked, d.Withheld):
                     self.assertNotIn("👍", blocked.text)
         policy = dataclasses.replace(POLICY, login_dir_forms=("private-alias",))
@@ -1114,12 +1112,15 @@ class DetailedRowsTests(unittest.TestCase):
 
     def test_protected_exact_physical_line_limit_and_email_boundaries(self):
         policy = dataclasses.replace(POLICY, max_chars=3200)
-        card = approval(context_summary="\n".join("Complete context" for _ in range(25)))
+        exact = "\n".join("Complete effect" for _ in range(25))
+        card = approval(exact_effect=d.EffectText((d.LiteralText(exact),)))
         pair = render_card_pair(protected(card), policy)
         self.assertIsInstance(pair, d.Pair)
         self.assertEqual(len(pair.workstream_single_part.splitlines()), 36)
         self.assertEqual(len(pair.control_single_part.splitlines()), 36)
-        oversized = dataclasses.replace(card, context_summary=card.context_summary + "\nOne more line")
+        oversized = dataclasses.replace(
+            card, exact_effect=d.EffectText((d.LiteralText(exact + "\nOne more line"),))
+        )
         self.assertEqual(render_card_pair(protected(oversized), policy).reason, "content-too-large")
         for email in ("x@example.com", "+x.y@example.com", "prefix+x@example.com", "word(x@example.com)"):
             with self.subTest(email=email):

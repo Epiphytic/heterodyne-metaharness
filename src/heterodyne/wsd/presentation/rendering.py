@@ -1,7 +1,7 @@
 """Pure rendering. No calls to source owners, no clocks, no output effects."""
 
 import re
-from dataclasses import fields
+from dataclasses import fields, is_dataclass
 from datetime import datetime
 from typing import Any, cast
 
@@ -425,6 +425,27 @@ def _required(card: d.Approval | d.Question) -> bool:
     )
 
 
+def _protected_line_fields(value: Any) -> bool:
+    """LF belongs only to D4's explicit multiline literals, never card framing."""
+    if isinstance(value, str):
+        return "\n" not in value
+    if isinstance(value, tuple):
+        return all(_protected_line_fields(item) for item in cast(tuple[Any, ...], value))
+    if is_dataclass(value) and not isinstance(value, type):
+        multiline_fields: dict[type[Any], str] = {
+            d.LiteralText: "text",
+            d.Inline: "full_text",
+            d.PlainQuestion: "context",
+            d.ChoiceQuestion: "context",
+        }
+        multiline = multiline_fields.get(type(value))
+        return all(
+            field.name == multiline or _protected_line_fields(getattr(value, field.name))
+            for field in fields(value)
+        )
+    return True
+
+
 def _card_lines(
     card: d.Approval | d.Question, policy: d.RenderPolicy, refs: tuple[Span, ...]
 ) -> tuple[Span, ...] | None:
@@ -510,6 +531,8 @@ def render_card_pair(view: d.PresentationView, policy: d.RenderPolicy = _DEFAULT
         return withheld(view.kind, "missing-mention")
     if not _required(card):
         return withheld(view.kind, "missing-required")
+    if not _protected_line_fields(card):
+        return withheld(view.kind, "unsafe-content")
     refs: list[Span] = []
     if isinstance(card, d.Approval):
         for ref in card.evidence:
