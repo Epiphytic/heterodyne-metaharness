@@ -40,7 +40,8 @@
           "line": 1031,
           "text": "def transaction(self) -> Generator[None]:"
         }
-      ]
+      ],
+      "repository": "heterodyne-metaharness-v2"
     },
     {
       "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
@@ -69,7 +70,8 @@
           "line": 127,
           "text": "class AskView(msgspec.Struct, frozen=True):"
         }
-      ]
+      ],
+      "repository": "heterodyne-metaharness-v2"
     },
     {
       "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
@@ -110,7 +112,8 @@
           "line": 1447,
           "text": "async def reconcile_asks(self, snapshot: list[tuple[str, str, str]]) -> None:"
         }
-      ]
+      ],
+      "repository": "heterodyne-metaharness-v2"
     },
     {
       "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
@@ -131,7 +134,8 @@
           "line": 166,
           "text": "async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:"
         }
-      ]
+      ],
+      "repository": "heterodyne-metaharness-v2"
     },
     {
       "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
@@ -148,7 +152,8 @@
           "line": 292,
           "text": "def _ask_wait(s: AdmindSettings, req: asks.AskRequest, timeout: float, as_json: bool) -> int:"
         }
-      ]
+      ],
+      "repository": "heterodyne-metaharness-v2"
     },
     {
       "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
@@ -162,7 +167,8 @@
         "R16",
         "R17",
         "R24"
-      ]
+      ],
+      "repository": "heterodyne-metaharness-v2"
     },
     {
       "commit": "59ffe75c32932b60597fd2c43a945a98e383957a",
@@ -174,7 +180,23 @@
       "status_table_lines": [
         51,
         63
-      ]
+      ],
+      "repository": "harness-improvements"
+    },
+    {
+      "repository": "heterodyne-metaharness-v2",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/platform.py",
+      "git_blob": "4c4fa27b4cb9c561ec5006702b2f91b482985093",
+      "sha256": "46037d88a923e866bcebcb7902d3ab56490f182b48e468ed06967325cc8a7246",
+      "bytes": 4793,
+      "anchors": [
+        {
+          "line": 63,
+          "text": "def peer_pid_checked(sock: socket.socket) -> int:"
+        }
+      ],
+      "reuse": "Extend existing checked SO_PEERCRED seam to expose UID/GID; retain PID wrapper. Proposed, not implemented."
     }
   ],
   "private_evidence": [
@@ -196,11 +218,13 @@
     "wake_changed": false
   },
   "work_scope": "design/ADR/source-map only; no implementation, live reads, model invocation or approval claimed",
-  "review_state": "initial d1; controller ONE HIGH review pending",
+  "review_state": "one actual HIGH review of81e307f; actual REVISE10; single author incorporation; no second review/validation; genuine human approval pending",
   "implementation_limitations": [
     "Exact producer receipt adapter and source-pinned consumer compatibility require implementation evidence.",
     "Local UID check is proposed, not existing producer enrollment; same-UID administrative trust remains.",
     "No independent external-effect proof is asserted by admind; controller receipt is an attestation.",
-    "Original operation policy and authenticated human consent remain separate from fulfillment."
-  ]
+    "Original operation policy and authenticated human consent remain separate from fulfillment.",
+    "Operator confirmation is a new bounded notice/reply association capability, not an installed verb; fulfilled conflicts require visible recovery rather than receipt replacement."
+  ],
+  "author_incorporation": "high-review-incorporation.json"
 }

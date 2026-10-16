@@ -1,0 +1,147 @@
+{
+  "schema": "fulfilled-question-author-incorporation-v1",
+  "author": "Codex",
+  "reviewed_commit": "81e307fbbf4250613722119ad511f90e13d90cb8",
+  "actual_review_rounds": 1,
+  "actual_review_outcome": "changes required before human design approval; REVISE",
+  "raw_log_sha256": "42d4710691dfe48e5c0324fa737de7d6c904a1c3372779af25faefdbb4dffdbf",
+  "no_second_review_or_validation": true,
+  "human_approval": "not obtained by this filing",
+  "findings": [
+    {
+      "ordinal": 1,
+      "actual_finding": {
+        "file": "docs/designs/2026-10-16-fulfilled-question-lifecycle.md",
+        "line": 30,
+        "summary": "The operator-confirmation route can't be staged for exactly the workflows it is meant for: `prepare` requires `--receipt FILE` in the closed `operation-completion-v1` schema (operation ID, producer namespace, terminal result digest), yet \u00a73 sends receipt-less workflows to operator confirmation and forbids writing a receipt adapter.",
+        "failure_scenario": "A historical answered question was completed by a workflow with no machine receipt. There is nothing valid to pass to `admind ask fulfillment prepare --receipt`, so no pending intent or digest exists, and `!fulfill` has nothing to confirm. The `(producer namespace, operation ID)` uniqueness key is also undefined for operator-only fulfillment. The ask stays capacity-active forever unless someone cancels it, which the design discourages. The design needs a separate operator-intent schema (ask identity, answers digest, declared evidence, no producer receipt)."
+      },
+      "author_disposition": "incorporated",
+      "design_sections": "\u00a73 operator schema; \u00a74 propose",
+      "change": "Separate receipt-less declaration and server-generated operator intent identity; no fabricated producer receipt."
+    },
+    {
+      "ordinal": 2,
+      "actual_finding": {
+        "file": "docs/designs/2026-10-16-fulfilled-question-lifecycle.md",
+        "line": 26,
+        "summary": "`!fulfill <ask-id> <full-intent-sha256>` makes the operator type a 64-hex digest that only appears in terminal `prepare --json` output. `prepare` 'never ... sends a card', so the operator never sees the intent's contents or the digest in Marmot.",
+        "failure_scenario": "This breaks ~/.claude/CLAUDE.md, which says 'Liam can't copy/paste from the terminal ... Never refer him to a bead, file, or step number for content.' Liam can't get the digest into chat, and even if he could, he would be approving an opaque hash he can't check. Fix: have staging post a bounded, uncapped confirmation notice that summarises the intent, and bind a reply-to `!fulfill` to that message, the same way `!approve` binds to a card."
+      },
+      "author_disposition": "incorporated",
+      "design_sections": "\u00a73 operator confirmation",
+      "change": "Bounded uncapped readable notice plus authenticated reply-to !fulfill; no terminal digest transfer. Addresses actual usability/current Marmot scope without adopting personal reviewer settings as authority."
+    },
+    {
+      "ordinal": 3,
+      "actual_finding": {
+        "file": "docs/designs/2026-10-16-fulfilled-question-lifecycle.md",
+        "line": 15,
+        "summary": "The design never handles `commit_approval` (daemon.py:879-884). It sets every `open` or `answered` ask with the same bead to `superseded`, whatever its kind, so a fulfilled question changes status even though the design says it 'remains answered' and that `get` keeps returning `answered`.",
+        "failure_scenario": "Question k7m2 (bead X) is answered and fulfilled. A later approval ask for bead X is posted. k7m2 becomes `superseded`, a 'superseded' notice goes to Marmot, and `get` no longer shows `answered`. The fulfillment receipt and the history/wake views now disagree. Supersession must skip fulfilled asks, or the design must say what it does to them."
+      },
+      "author_disposition": "incorporated",
+      "design_sections": "\u00a75 writers; \u00a76 supersession",
+      "change": "Same-bead supersession checks overlay in transaction and skips valid fulfilled records; conflicts not silently retired."
+    },
+    {
+      "ordinal": 4,
+      "actual_finding": {
+        "file": "docs/designs/2026-10-16-fulfilled-question-lifecycle.md",
+        "line": 85,
+        "summary": "Rollback lets the old code add answers to, cancel, or supersede fulfilled asks, because the old `answer_refusal` and `cancel_ask` accept any `answered` row. On roll-forward the old receipt still hides the ask, since `capacity_active` (line 61) only checks that a receipt exists, not that it still matches the answers.",
+        "failure_scenario": "Roll back, and an operator replies to fulfilled question q with a new instruction; old code appends it. Roll forward, and q is hidden from capacity, `!asks` and reminders, even though it now has an answer nobody acted on. Roll-forward has to re-check each receipt's answers digest and the `answered` status, and treat a mismatch as a capacity-active conflict."
+      },
+      "author_disposition": "incorporated",
+      "design_sections": "\u00a76 binding projection; \u00a78 rollback",
+      "change": "Rebuild validity from actual retained status/ask/answers before serving on roll-forward; mismatch is capacity-active conflict preserving history."
+    },
+    {
+      "ordinal": 5,
+      "actual_finding": {
+        "file": "docs/designs/2026-10-16-fulfilled-question-lifecycle.md",
+        "line": 51,
+        "summary": "The trusted apply on ask.sock takes `work_lock` and then `ask_post_lock`. The worker holds `work_lock` across long awaits (approve-bead decisions, the `!asks` backstop reconciliation), so this route is not 'analogous to existing local cancellation availability'; `cancel_ask` takes neither lock.",
+        "failure_scenario": "During a slow approval decision, `fulfillment apply` waits past the 30s CLI read deadline (`ASK_READ_SECONDS`). The client sees an unknown response, queries, finds nothing, and retries while the first handler is still queued. The real cause of the race is that `answer_ask` checks for refusal outside its transaction (daemon.py:957-985). Re-checking for a fulfillment inside that transaction lets apply use only the Store transaction. The posting lock isn't needed either, because fulfillment only lowers the active count."
+      },
+      "author_disposition": "incorporated",
+      "design_sections": "\u00a75 transaction boundary",
+      "change": "Use only Store transaction; move answer refusal/fulfillment/bounds check inside answer transaction. No work/post lock or await in apply."
+    },
+    {
+      "ordinal": 6,
+      "actual_finding": {
+        "file": "docs/designs/2026-10-16-fulfilled-question-lifecycle.md",
+        "line": 57,
+        "summary": "Making `(producer namespace, operation ID)` unique means one completed operation can fulfil only one question. When one operation answers several questions, the rest are stranded.",
+        "failure_scenario": "Two questions about the same deploy are both answered and one deploy completes both. The second apply returns `conflict`. The operator route also needs a receipt (finding 1), so the second ask keeps a slot until it is cancelled. Either allow a receipt to list several bound asks, or key uniqueness on `(operation, ask)`."
+      },
+      "author_disposition": "incorporated",
+      "design_sections": "\u00a73 operation core; \u00a75 keys",
+      "change": "Per-operation-per-ask uniqueness with consistent shared core; independently bound asks may share completed operation."
+    },
+    {
+      "ordinal": 7,
+      "actual_finding": {
+        "file": "docs/designs/2026-10-16-fulfilled-question-lifecycle.md",
+        "line": 75,
+        "summary": "The pending-intent lifecycle needs 'explicit stale-intent disposal' and 'explicit stale cleanup', but none of the \u00a74 commands (prepare/apply/get/reconcile) does that. The 24h expiry also contradicts 'retain the pending record' when Marmot is unavailable (line 26).",
+        "failure_scenario": "A new answer arrives after `prepare`, so the intent goes stale. 'At most one current digest per ask' then blocks a fresh `prepare`, and there is no command to discard the stale one; the ask waits for the 24h expiry. A Marmot outage longer than 24h silently drops the operator's pending record. The intent digest also covers `route`, so an intent prepared for the controller can't be confirmed by the operator as a fallback."
+      },
+      "author_disposition": "incorporated",
+      "design_sections": "\u00a74 dispose/replace; \u00a77 retention",
+      "change": "Explicit exact-intent retirement/replacement, expiry tombstones preserved, fresh notice association; no staged controller dependency or route alias."
+    },
+    {
+      "ordinal": 8,
+      "actual_finding": {
+        "file": "docs/designs/2026-10-16-fulfilled-question-lifecycle.md",
+        "line": 19,
+        "summary": "Only `kind=question` is eligible in v1, but answered `merge` asks stay `answered` and hold a capacity slot in exactly the same way (`answer_ask` sets `answered` for both). The design gives them no path out, so the capacity problem remains for merges.",
+        "failure_scenario": "Several answered merge asks whose merges finished keep their 20-cap slots after this ships. The only way out is cancellation, the historical repair the design says not to generalise, so posts are still refused with 'there are already 20 active asks'."
+      },
+      "author_disposition": "incorporated",
+      "design_sections": "\u00a72 eligibility",
+      "change": "Include answered merge asks with actual PR/head completion binding; no inference from merge answer."
+    },
+    {
+      "ordinal": 9,
+      "actual_finding": {
+        "file": "docs/designs/2026-10-16-fulfilled-question-lifecycle.md",
+        "line": 36,
+        "summary": "Fulfillments are unique on 'ask identity', which includes `ask_sha256` and a versioned canonical encoding, rather than on `ask_id` within the store. Changing the encoding version gives the same ask a new identity, and a second fulfillment row is allowed.",
+        "failure_scenario": "After a canonical-encoding v2 change, the same ask hashes to a different `ask_sha256`, the unique constraint misses it, and two fulfillment receipts and two notices exist for one ask. Enforce `UNIQUE(ask_id)` and treat the digests as checked bindings, not part of the key."
+      },
+      "author_disposition": "incorporated",
+      "design_sections": "\u00a74 stable identity; \u00a78 storage",
+      "change": "Store-scoped UNIQUE ask_id independent of canonical hash/version; encoding migration retains original binding version."
+    },
+    {
+      "ordinal": 10,
+      "actual_finding": {
+        "file": "docs/designs/2026-10-16-fulfilled-question-lifecycle.md",
+        "line": 25,
+        "summary": "The trusted route is built heavily (persisted prepare-then-apply staging, an evidence-root adapter, a new UID check) yet grants no more authority than the existing same-UID `cancel` (ctl.py: 'anything able to use it can already act as admind'). It also reinvents a peer-credential read that `platform.peer_pid_checked` already does.",
+        "failure_scenario": "Three new tables and a two-round-trip staging protocol carry the routine controller path, where one atomic compare-and-set `apply`, checked against the expected answers digest, would do; staging is only needed for the operator route. `platform.peer_pid_checked` already reads the full SO_PEERCRED ucred and discards the uid, so extend it instead of adding a second credential reader."
+      },
+      "author_disposition": "incorporated",
+      "design_sections": "\u00a73 trusted route; \u00a74 apply; \u00a75 transaction",
+      "change": "One atomic trusted CAS; staging only for operator route; extend existing platform credential seam, explicitly same-UID residual trust."
+    }
+  ],
+  "additional_notes": [
+    {
+      "subject": "legacy wake noise",
+      "disposition": "Existing \u00a76 acknowledges redundant wake; full identity/own terminal receipt required before suppression, no wake design alteration."
+    },
+    {
+      "subject": "encoded request cap",
+      "disposition": "\u00a74 reduces file input to24KiB and independently rejects actual encoded request beyond64KiB."
+    },
+    {
+      "subject": "source repository provenance",
+      "disposition": "Every source entry now names its Git repository; platform credential seam added as eighth source."
+    }
+  ],
+  "proof_scope": "Author documentation incorporation only. No runtime code, tests, model invocation, native actions, deployment, human approval or reviewer clearance."
+}
