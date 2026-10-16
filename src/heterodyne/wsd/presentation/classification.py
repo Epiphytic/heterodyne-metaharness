@@ -1,8 +1,10 @@
 """Finite ingress classification. Results describe routing, never authorize it."""
 
-import re
 import unicodedata
 
+from heterodyne.wsd.ids import SLUG
+
+from .commands import MUTATIONS, READ_COMMANDS
 from .dto import (
     Classification,
     ClassificationInput,
@@ -18,8 +20,6 @@ _WHITE = frozenset(
     "\t\n\v\f\r \u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006"
     "\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
 )
-_SLUG = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}\Z")
-_MUTATIONS = frozenset(("/approve", "/deny", "/pause", "/resume", "/stop", "/harness", "/trust-group"))
 
 
 def _command(body: str) -> Classification:
@@ -28,12 +28,12 @@ def _command(body: str) -> Classification:
     tokens = body.strip(" ").split(" ")
     tokens = [token for token in tokens if token]
     name, args = tokens[0], tokens[1:]
-    if name in _MUTATIONS:
+    if name in MUTATIONS:
         return Classification("UnsupportedIn6A", "mutation")
-    if name not in ("/workstreams", "/status", "/approvals", "/queue"):
+    if name not in READ_COMMANDS:
         return Classification("InvalidCommand", "unknown-command")
     maximum = 1 if name in ("/status", "/queue") else 0
-    if len(args) > maximum or any(_SLUG.fullmatch(arg) is None for arg in args):
+    if len(args) > maximum or any(SLUG.fullmatch(arg) is None for arg in args):
         return Classification("InvalidCommand", "arguments")
     query = {
         "/workstreams": "Workstreams",

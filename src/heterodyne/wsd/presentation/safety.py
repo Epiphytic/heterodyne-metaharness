@@ -1,11 +1,13 @@
 """Whole-field checks and narrowly typed spans carried through final layout."""
 
+import html
 import re
 import unicodedata
 from dataclasses import dataclass
 
 from heterodyne.config.secret_scan import IDENTIFIER_VALUES, SECRET_VALUES
 
+from .commands import MUTATIONS, READ_COMMANDS
 from .dto import RenderPolicy
 
 _EXTRA = tuple(
@@ -15,16 +17,18 @@ _EXTRA = tuple(
         r"did:\S+",
         r"(?<![a-z0-9._%+-])[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}",
         r"[0-9a-f]{40,}",
-        r"(?<!\S)/(?!workstreams(?=$|[\s,;:!?\)\]])|status(?=$|[\s,;:!?\)\]])|"
-        r"approvals(?=$|[\s,;:!?\)\]])|queue(?=$|[\s,;:!?\)\]])|approve(?=$|[\s,;:!?\)\]])|"
-        r"deny(?=$|[\s,;:!?\)\]])|pause(?=$|[\s,;:!?\)\]])|resume(?=$|[\s,;:!?\)\]])|"
-        r"stop(?=$|[\s,;:!?\)\]])|harness(?=$|[\s,;:!?\)\]])|trust-group(?=$|[\s,;:!?\)\]]))\S*",
         r"[a-z]:\\|\\\\",
         r"nostr:|nprofile1|npub1",
     )
 )
 _LINK = re.compile(r"[a-z][a-z0-9+.-]{0,31}://|www\.|mailto:|(?<!\S)//|\]\(|\]:|[<>`]", re.IGNORECASE)
-_RESERVED = re.compile(r"↳ part |👍 approve · 👎 deny · ❤️ always · reply to steer")
+_COMMAND_NAMES = "|".join(re.escape(name[1:]) for name in (*READ_COMMANDS, *sorted(MUTATIONS)))
+_PATH = re.compile(r"(?<![\w/])(?:~/|/)(?!(?:" + _COMMAND_NAMES + r")(?=$|[\s,;:!?\)\]]))\S*", re.IGNORECASE)
+_RESERVED = re.compile(
+    r"↳[^\S\n]*part\s+|👍\s*approve\s*·\s*👎\s*deny\s*·\s*❤\ufe0f?\s*always\s*·\s*reply\s+to\s+steer"
+    r"|(?m:^[^\S\n]*(?:What|Effect|Excludes|Why|Context(?:\s+digest)?|Question|Recommended|Evidence)\s*:)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -75,12 +79,27 @@ def generated(
 
 
 def join(parts: tuple[Span, ...] | list[Span], separator: str = "\n") -> Span:
-    out = Span("")
+    texts: list[str] = []
+    public: list[tuple[int, int]] = []
+    syntax: list[tuple[int, int]] = []
+    template: list[tuple[int, int]] = []
+    atoms: list[tuple[int, int]] = []
+    offset = 0
     for index, part in enumerate(parts):
         if index:
-            out += generated(separator)
-        out += part
-    return out
+            texts.append(separator)
+            template.append((offset, offset + len(separator)))
+            offset += len(separator)
+        texts.append(part.text)
+        for source, target in (
+            (part.public, public),
+            (part.syntax, syntax),
+            (part.template, template),
+            (((0, len(part.text)),) if part.atomic else part.unbreakable, atoms),
+        ):
+            target.extend((a + offset, b + offset) for a, b in source)
+        offset += len(part.text)
+    return Span("".join(texts), tuple(public), tuple(syntax), tuple(template), unbreakable=tuple(atoms))
 
 
 def _covered(start: int, end: int, ranges: tuple[tuple[int, int], ...]) -> bool:
@@ -89,6 +108,9 @@ def _covered(start: int, end: int, ranges: tuple[tuple[int, int], ...]) -> bool:
 
 def safe(span: Span, policy: RenderPolicy, *, multiline: bool = False, final: bool = False) -> bool:
     text = span.text
+    # Entity decoding differs between clients; refuse encoded material rather than edit it.
+    if "&" in text and html.unescape(text) != text:
+        return False
     for index, char in enumerate(text):
         if char == "\n" and (multiline or final):
             continue
@@ -107,7 +129,7 @@ def safe(span: Span, policy: RenderPolicy, *, multiline: bool = False, final: bo
         for match in pattern.finditer(text):
             if not _covered(*match.span(), span.public):
                 return False
-    for pattern, exceptions in ((_LINK, span.syntax), (_RESERVED, span.template)):
+    for pattern, exceptions in ((_LINK, span.syntax), (_PATH, span.syntax), (_RESERVED, span.template)):
         for match in pattern.finditer(text):
             if not _covered(*match.span(), exceptions):
                 return False

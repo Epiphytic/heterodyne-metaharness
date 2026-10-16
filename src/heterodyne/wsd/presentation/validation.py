@@ -5,11 +5,13 @@ import re
 import types
 from dataclasses import fields, is_dataclass
 from datetime import UTC, datetime
+from functools import cache
 from typing import Any, Literal, NoReturn, TypeVar, Union, cast, get_args, get_origin, get_type_hints
+
+from heterodyne.wsd.ids import SLUG
 
 from . import dto as d
 
-SLUG = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}\Z")
 HEX40 = re.compile(r"[0-9a-f]{40}\Z")
 HEX12 = re.compile(r"[0-9a-f]{12}\Z")
 _COMPONENT = re.compile(r"[A-Za-z0-9_.-]+\Z")
@@ -46,6 +48,11 @@ def canonical_bytes(value: Any) -> bytes:
     return json.dumps(
         primitive(value), sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
     ).encode("utf-8")
+
+
+@cache
+def _hints(expected: type) -> dict[str, Any]:
+    return get_type_hints(expected)
 
 
 def _shape(value: Any, expected: Any, substitutions: dict[Any, Any] | None = None) -> None:
@@ -97,9 +104,12 @@ def _shape(value: Any, expected: Any, substitutions: dict[Any, Any] | None = Non
     elif isinstance(expected, type) and is_dataclass(expected):
         if type(value) is not expected:
             fail()
-        if expected is d.Rows and len(value.items) > 100:
-            fail("bounds")
-        hints = get_type_hints(expected)
+        if expected is d.Rows:
+            if type(value.items) is not tuple:
+                fail()
+            if len(value.items) > 100:
+                fail("bounds")
+        hints = _hints(expected)
         for field in fields(expected):
             _shape(getattr(value, field.name), hints[field.name], substitutions)
     else:
@@ -156,8 +166,6 @@ def _semantic(value: Any) -> None:
             value.count is not None or value.completeness != "unavailable"
         ):
             fail()
-    if isinstance(value, d.Rows) and len(cast(d.Rows[Any], value).items) > 100:
-        fail("bounds")
     if isinstance(value, d.RenderPolicy):
         if not 200 <= value.max_chars <= 4000:
             fail("bounds")

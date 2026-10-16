@@ -194,7 +194,12 @@ class Ordinary:
                 )
                 if unknown:
                     self.complete = False
-                out.append(generated("reason: ") + self.text("unknown" if unknown else _reason(item)))
+                rendered = (
+                    generated("none")
+                    if item is None and not unknown
+                    else self.scalar("reason", d.Unknown() if unknown else item)
+                )
+                out.append(generated("reason: ") + rendered)
             else:
                 rendered = self.scalar(field.name, item)
                 if isinstance(value, d.DecisionSummary) and field.name == "kind" and item == "approval":
@@ -272,7 +277,12 @@ class Ordinary:
         if isinstance(payload, d.Fyi):
             return (self.text(payload.body), generated("FYI: no reply needed"))
         if isinstance(payload, d.Task):
-            if payload.state == "unknown" or isinstance(payload.reason, d.Unknown):
+            if (
+                payload.state == "unknown"
+                or isinstance(payload.reason, d.Unknown)
+                or isinstance(payload.reason, d.Quota)
+                and payload.reason.resume_at is None
+            ):
                 self.complete = False
             state = payload.state if payload.reason is None else _reason(payload.reason)
             return (
@@ -319,6 +329,8 @@ class Ordinary:
                 + self.text(notice.reason)
             ]
         if isinstance(notice, d.AllAccountsExhausted):
+            if notice.reset is None:
+                self.complete = False
             return [
                 self.text(notice.workstream, atomic=True)
                 + generated(": all ")
@@ -406,14 +418,15 @@ def _required(card: d.Approval | d.Question) -> bool:
     )
 
 
-def _card_lines(card: d.Approval | d.Question, policy: d.RenderPolicy) -> tuple[Span, ...] | None:
+def _card_lines(
+    card: d.Approval | d.Question, policy: d.RenderPolicy, refs: tuple[Span, ...]
+) -> tuple[Span, ...] | None:
     if isinstance(card, d.Approval):
         exact = effect(card.exact_effect, policy)
         if exact is None:
             return None
         runs = [len(match.group()) for match in re.finditer(r"`+", exact.text)]
         fence = generated("`" * max(3, max(runs, default=0) + 1), syntax=True, atomic=True)
-        refs = tuple(line for ref in card.evidence for line in (evidence(ref, policy) or ()))
         return (
             generated("Approval" + (f" ({card.purpose})" if card.purpose else "") + " ")
             + Span(card.bead, atomic=True),
@@ -490,9 +503,14 @@ def render_card_pair(view: d.PresentationView, policy: d.RenderPolicy = _DEFAULT
         return withheld(view.kind, "missing-mention")
     if not _required(card):
         return withheld(view.kind, "missing-required")
-    if isinstance(card, d.Approval) and any(evidence(ref, policy) is None for ref in card.evidence):
-        return withheld(view.kind, "unsupported-reference")
-    lines = _card_lines(card, policy)
+    refs: list[Span] = []
+    if isinstance(card, d.Approval):
+        for ref in card.evidence:
+            rendered = evidence(ref, policy)
+            if rendered is None:
+                return withheld(view.kind, "unsupported-reference")
+            refs.extend(rendered)
+    lines = _card_lines(card, policy, tuple(refs))
     if lines is None or not safe(join(lines), policy, multiline=True, final=True):
         return withheld(view.kind, "unsafe-content")
     mention = generated("nostr:" + policy.operator_npub, public=True, atomic=True)
