@@ -1,0 +1,238 @@
+{
+  "schema": "zcd1l-design-inputs-v1",
+  "task": "btq-zcd1l",
+  "draft": "d4 UNREVIEWED",
+  "design_base": "07637745fe75dc614109a0b8ba72d3489f262a97",
+  "previous_design_head": "30a904b10c30a386c5867e6d7b8cd8f494b33ca0",
+  "authority": "UNREVIEWED author revision;3/3 review rounds exhausted; no implementation/deployment/recovery authority",
+  "source_method": "read-only Git object/source inspection; no executable imports, tests, queue operations or model calls",
+  "sources": [
+    {
+      "repo": "beads-task-queue",
+      "commit": "6fe57598468ff53bf74dfd9e1cf181ad3177c3f1",
+      "path": "bin/btq",
+      "sha256": "ec2bc67b227326c80bf5d9a32eb661b220ea9af6942ef31bff04d8c06941bd2e"
+    },
+    {
+      "repo": "beads-task-queue",
+      "commit": "6fe57598468ff53bf74dfd9e1cf181ad3177c3f1",
+      "path": "bin/btq-manage.py",
+      "sha256": "670ea807fd546f939f3441823dee2e1980e03f7026be580a62d7f91a4e6582b6"
+    },
+    {
+      "repo": "beads-task-queue",
+      "commit": "6fe57598468ff53bf74dfd9e1cf181ad3177c3f1",
+      "path": "bin/btq-supervise",
+      "sha256": "e1509441219e38a40185bf596ada3ed33610f69d0032db9af47e630a5403fae9"
+    },
+    {
+      "repo": "beads-task-queue",
+      "commit": "6fe57598468ff53bf74dfd9e1cf181ad3177c3f1",
+      "path": "tests/test_manage.py",
+      "sha256": "cce0eaa7db2c08e1f5c941a77353b9e5bc1b662c4e76a779214c78f0da4df6f7"
+    },
+    {
+      "repo": "beads-task-queue",
+      "commit": "6fe57598468ff53bf74dfd9e1cf181ad3177c3f1",
+      "path": "docs/MANAGE.md",
+      "sha256": "8ebfe8f2ecd4f78ac850765dd7f3c76bd89f9e830b324e3c880e3ff88ee68270"
+    },
+    {
+      "repo": "beads-task-queue",
+      "commit": "6fe57598468ff53bf74dfd9e1cf181ad3177c3f1",
+      "path": "docs/OPS.md",
+      "sha256": "0ecb17e6a7a5d9288aeeb27490a60059721d528f39a828f4479f13e903b15dfc"
+    },
+    {
+      "repo": "harness-improvements",
+      "commit": "e0a1a018fe23c6502cc8b3d544d369a3068b911f",
+      "path": "scripts/install_workstream_controller.py",
+      "sha256": "fb1a9802ac5ac3dfbf250ae402c3e5ffd5aca4c1cdd1e0b81b52945c835b38d1"
+    },
+    {
+      "repo": "harness-improvements",
+      "commit": "e0a1a018fe23c6502cc8b3d544d369a3068b911f",
+      "path": "scripts/workstream_manage.py",
+      "sha256": "c6805737dc1422a06cb61b8ed5c872d18faa41ceba62af42a71fb790da555bca"
+    },
+    {
+      "repo": "harness-improvements",
+      "commit": "e0a1a018fe23c6502cc8b3d544d369a3068b911f",
+      "path": "scripts/workstream_controller.py",
+      "sha256": "6cace6aa900363af6e13306899f21d03acc356c22165d883226ebcb7003f1529"
+    },
+    {
+      "repo": "heterodyne-metaharness-v2",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/asks.py",
+      "sha256": "6b6645f1fbba429b0f52277152f31745422332fe063792ce4748378091f37042"
+    },
+    {
+      "repo": "heterodyne-metaharness-v2",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/daemon.py",
+      "sha256": "6dd566effd2fbd2a569e533cf8449da5ae15244290e6a9cfc30560e685acb0fb"
+    },
+    {
+      "repo": "heterodyne-metaharness-v2",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/store.py",
+      "sha256": "5ae75889f8b1c58f9f4367bd2d76c8070154cfd8caa384eb8178f6c0c68d3359"
+    }
+  ],
+  "approved_archive": {
+    "source_repo": "heterodyne-metaharness-v2",
+    "source_commit": "391516cd919234e69626970cb2e61b94299ed60e",
+    "source_path": "docs/designs/2026-10-15-operator-task-management.md",
+    "archive_path": "docs/reviews/approved-inputs/2026-10-15-operator-task-management.md",
+    "sha256": "3249c0a3b6207da6bc6172e5291895779a920d3afd56de6e38d0365df0ee2a39"
+  },
+  "installed_baseline": [
+    {
+      "path": "USER_LIBEXEC/workstream-controller/management-9e3f6f4a38237bd7197098a9463e2b910c109936bf6053595e06a87e1b64b607/bin/btq",
+      "sha256": "ec2bc67b227326c80bf5d9a32eb661b220ea9af6942ef31bff04d8c06941bd2e"
+    },
+    {
+      "path": "USER_LIBEXEC/workstream-controller/management-9e3f6f4a38237bd7197098a9463e2b910c109936bf6053595e06a87e1b64b607/bin/btq-manage.py",
+      "sha256": "670ea807fd546f939f3441823dee2e1980e03f7026be580a62d7f91a4e6582b6"
+    },
+    {
+      "path": "USER_LIBEXEC/workstream-controller/c6805737dc1422a06cb61b8ed5c872d18faa41ceba62af42a71fb790da555bca-manage.py",
+      "sha256": "c6805737dc1422a06cb61b8ed5c872d18faa41ceba62af42a71fb790da555bca"
+    },
+    {
+      "path": "USER_LIBEXEC/workstream-controller/1defdb83b2b4e73784759982e628c1240e76fcc3cc89d00bed3452b2d9a65503-management.json",
+      "sha256": "1defdb83b2b4e73784759982e628c1240e76fcc3cc89d00bed3452b2d9a65503"
+    },
+    {
+      "path": "USER_LIBEXEC/workstream-controller/6cace6aa900363af6e13306899f21d03acc356c22165d883226ebcb7003f1529.py",
+      "sha256": "6cace6aa900363af6e13306899f21d03acc356c22165d883226ebcb7003f1529"
+    },
+    {
+      "path": "USER_LIBEXEC/workstream-controller/84716a3801c970dba83c44efed5d0d1c3e21a81f19aa5887a5a4c2c90e547132.json",
+      "sha256": "84716a3801c970dba83c44efed5d0d1c3e21a81f19aa5887a5a4c2c90e547132"
+    },
+    {
+      "path": "USER_LIBEXEC/workstream-controller/dd952fe46a650d6ada3512f10fd0cd03b30000c291a2817d802f8c25789f3cf6-lane.py",
+      "sha256": "dd952fe46a650d6ada3512f10fd0cd03b30000c291a2817d802f8c25789f3cf6"
+    }
+  ],
+  "closure": [
+    "bin/btq",
+    "bin/btq-manage.py",
+    "bin/btq-supervise"
+  ],
+  "retained_prerequisite_evidence": {
+    "fn9r": {
+      "path": "HANDOFF_CODEX/management-admind-policy-prerequisite",
+      "decision": "Liam A2026-10-16T05:25:51Z",
+      "deployed": "2026-10-16T05:26:23Z",
+      "policy_before_sha256": "672a56e2d4d0c958d987b92879e7244dc30b2080c5dcf5ef675c4f1e70d99ec4",
+      "policy_after_sha256": "c3ffa23ccde426574d0bde3441cbdfe6e7a63a4554c414155e8642b4917fafa6",
+      "doctor_exit": 0,
+      "doctor_is_transport_health": false
+    },
+    "sbjv": {
+      "path": "HANDOFF_CODEX/design-task-reopen",
+      "decision": "Liam A2026-10-16T05:47:37Z",
+      "applied": "2026-10-16T05:51:26Z",
+      "scope": "exact historical status-only OPS repair; not generic authority",
+      "source": "parent controller authenticated record verification"
+    }
+  },
+  "current_document_hashes": {
+    "docs/designs/2026-10-16-management-design-task-recovery-d4.md": "171ffd925ff55d8aeb487a7234d6ce3442ab73f8707ae85f028803bd6ee0e097",
+    "docs/reviews/zcd1l-r3-dispositions.md": "52cf9d5c0f91b2f22532b808b38b71d0035412513d49a3c0f9184cbf430aed22"
+  },
+  "limits": [
+    "No current new API support claimed.",
+    "No implementation, runtime, model, queue or live tests performed.",
+    "Current merge authority is operator instruction, not fabricated native approval.",
+    "Bel configured principal retained under explicit operator authority; no policy change."
+  ],
+  "locator_conventions": {
+    "repositories": "local Git repository names; exact commits/blobs establish source identity",
+    "USER_LIBEXEC": "operator-configured user libexec evidence prefix, not an installer default",
+    "HANDOFF_CODEX": "controller retained handoff evidence directory; exact local locator retained privately"
+  },
+  "actual_reviews": [
+    {
+      "round": 1,
+      "reviewed_head": "e73eab04ac9eeb91ea7a5794cd04bbe2236fde4d",
+      "outcome": "REVISE",
+      "finding_count": 24,
+      "retained_report": "HANDOFF_CODEX/review-zcd1l-builtin-design-r1.log",
+      "report_sha256": "2e73f4fcd5140b5fdba15336c24b42a036c2d82c07022b253ed0e38341f0f672"
+    },
+    {
+      "round": 2,
+      "reviewed_head": "e1eb90a28c1fab011d73f2860abe0cfb1c96b430",
+      "outcome": "REVISE",
+      "finding_count": 25,
+      "retained_report": "HANDOFF_CODEX/review-zcd1l-builtin-design-r2.log",
+      "report_sha256": "d2257627e037fad7b70738bb104da7d7dfe2c024e805e6a7ca15f0e6517e9cd8",
+      "extracted_findings": "HANDOFF_CODEX/review-zcd1l-builtin-design-r2-findings-extracted.json",
+      "extracted_findings_sha256": "c34cee4f144ef739d05d415f8012be7adbb96baaabcfdd2aea6a57f77acd7c1f"
+    },
+    {
+      "round": 3,
+      "reviewed_head": "30a904b10c30a386c5867e6d7b8cd8f494b33ca0",
+      "outcome": "REVISE",
+      "finding_count": 16,
+      "retained_report": "HANDOFF_CODEX/review-zcd1l-builtin-design-r3.log",
+      "report_sha256": "1511c100d2a00eaefd5e9ab7b31a425e723783f8e9b846c8156508e790727341",
+      "extracted_findings": "HANDOFF_CODEX/review-zcd1l-builtin-design-r3-findings-extracted.json",
+      "extracted_findings_sha256": "9e73b67d68101eec17b4522cdefd5f8b51db28301a801b42c77bc8dbc919da80"
+    }
+  ],
+  "issued_rounds": 3,
+  "remaining_maximum": 0,
+  "normative_design": "docs/designs/2026-10-16-management-design-task-recovery-d4.md",
+  "original_native_approval": {
+    "id": "btq-ovvzt",
+    "status": "closed",
+    "decision": "approve",
+    "approver": "Liam",
+    "at": "2026-10-15T19:58:20Z",
+    "adr_revision": "391516cd919234e69626970cb2e61b94299ed60e",
+    "approved_digest": "64ff5d9c77c75a9c69c8ba6d0c6aa28f74bb84f5fe354973dd94704a93c05f31",
+    "via": "cli",
+    "marmot_reference": null,
+    "design_review": {
+      "reviewer": "claude-opus-5-5",
+      "author": "Codex",
+      "mode": "cross-model"
+    },
+    "scope": "implementation/offline only; excluded deployment/master merge/recovery",
+    "provenance": "parent controller fresh native read; historical close_reason recorded operator approved/proceed while admind latched; no fabricated Marmot receipt"
+  },
+  "controller_baseline_observations": {
+    "source_commit": "e0a1a018fe23c6502cc8b3d544d369a3068b911f",
+    "harness_head": "ba5bddcb1c677b101e0bb991541fb489893adfaf",
+    "harness_digest": "0c26a69c14deefcc8b2169fc48ed670632fb47a897a803f52fef4a19099eb943",
+    "harness_diff_digest": "093c49c101e2735895f088ac7e0103d79207d0b4dfc22f76a45094f52bbaa71f",
+    "helper_digest": "6cace6aa900363af6e13306899f21d03acc356c22165d883226ebcb7003f1529",
+    "lane_module_digest": "dd952fe46a650d6ada3512f10fd0cd03b30000c291a2817d802f8c25789f3cf6",
+    "queue_digest": "ec2bc67b227326c80bf5d9a32eb661b220ea9af6942ef31bff04d8c06941bd2e",
+    "wrapper_digest": "9a60e1eb501951e81149843ba39694145f5234e6ad37f3684ed651ea10ea9692",
+    "private_install_capture": "HANDOFF_CODEX/queue-controller-rollout-2026-10-16/05-controller-fresh-install.stdout",
+    "private_management_capture": "HANDOFF_CODEX/queue-controller-rollout-2026-10-16/06-management-install.stdout"
+  },
+  "historical_d3": {
+    "head": "30a904b10c30a386c5867e6d7b8cd8f494b33ca0",
+    "files": {
+      "docs/reviews/zcd1l-management-inputs.json": "40d7851837efc4b3fef78540e72cff69044b95840c439bd7dbf7db8466bb50e1",
+      "docs/designs/2026-10-16-management-design-task-recovery.md": "41ad49bc9a1ffe6938888e23fafa26d8618a0a739a9ec4c6c4720dc8edc9bc2a",
+      "docs/reviews/zcd1l-r1-dispositions.md": "35df169733e04846b3d6ae6724464a028b5d9046dbcca9f8b2afda8513ac0847",
+      "docs/reviews/zcd1l-r2-dispositions.md": "0abd2f6569554fcd17ec0324b1d148b0e3c501a32b28c611c5cebe8a2b4d3d1d"
+    }
+  },
+  "proposed_prerequisites": [
+    {
+      "name": "source-owned ask.binding.v1 read-only API",
+      "status": "not installed; separately reviewed/deployed dependency, no self-bootstrap",
+      "scope": "admind typed asks/control/CLI/daemon readout/Store query plus safe offline tests",
+      "authority": "existing Marmot-only operator-controlled deployment verification; no local file or old summary-only RPC authority"
+    }
+  ]
+}
