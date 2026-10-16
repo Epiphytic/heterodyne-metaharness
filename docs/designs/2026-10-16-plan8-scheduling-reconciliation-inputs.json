@@ -1,0 +1,160 @@
+{
+  "status": "Proposed d1; unreviewed/unapproved",
+  "author": "Codex",
+  "task": "btq-8d487",
+  "at": "2026-10-16T08:40:56.508236+00:00",
+  "source_base": "07637745fe75dc614109a0b8ba72d3489f262a97",
+  "governing_adr": "a27acecee8274e6ad8dc65def436614d42b5cb04",
+  "actual_review_rounds": 0,
+  "design": {
+    "path": "docs/designs/2026-10-16-plan8-scheduling-reconciliation.md",
+    "sha256": "ce4e1b9016f89e7e4266d707beaa82dec7c542d6e3e51a524fde48b2f0fd1a14"
+  },
+  "inputs": [
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/wsd/daemon.py",
+      "sha256": "3c285bdc61d2dc1cc245e0c90fac54a3fa821ce45298d858c8b016e2a38c60bd"
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/wsd/cli.py",
+      "sha256": "c47e8ac918f554d20cb053a9f286141b9a51ada38f947d81723493137e00bb21"
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/wsd/ctl.py",
+      "sha256": "e11e93403ca8ab898fb3dab9c9238da70a4ef623af9bc0f0529af450ae63964b"
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/wsd/settings.py",
+      "sha256": "42c7192ee9265f77d106b28d8ac3084e70e040ccdeb64800a1e83ebd09969ea4"
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/wsd/unit.py",
+      "sha256": "ec78fa7817d6ccdd1890c3eda503a6fc7d6ac1d74d38b65fa039f92ddbddfa4f"
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/wsd/journal.py",
+      "sha256": "b26aabb804941c8d98ed75ea0dc9b6af4e6f136f6541b3af399f9c5d561370c7"
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/wsd/runtime.py",
+      "sha256": "c6fc0de85dd22fa619e585af61fad303f833390122b71a50a9117c93db62bf8d"
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/daemon.py",
+      "sha256": "6dd566effd2fbd2a569e533cf8449da5ae15244290e6a9cfc30560e685acb0fb"
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/alerts.py",
+      "sha256": "61e9c252e06802e2e8f10dfbd835b5f8ef96991b7ae4c0d089f87926b149164d"
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/settings.py",
+      "sha256": "5f8838d254eed88257bd93ed14655011cff961fb5bb4255605ef6ae198031ae2"
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/store.py",
+      "sha256": "5ae75889f8b1c58f9f4367bd2d76c8070154cfd8caa384eb8178f6c0c68d3359"
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "deploy/install.sh",
+      "sha256": "48b87826530a282ab0ad5ccbbb4bbb0c3c3c2f5acd4bf89bf13dfe39945bdf1e"
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "docs/superpowers/plans/2026-09-29-heterodyne-v1-roadmap.md",
+      "sha256": "87ef1a4aa63e2f35aca075c9b0f63be7a1c93e9225099e8396f135a21a9df9a1"
+    },
+    {
+      "kind": "git_object",
+      "repository": "local-git:hermes-workstreams-v2-adr-r17 (no remote)",
+      "commit": "a27acecee8274e6ad8dc65def436614d42b5cb04",
+      "path": "docs/adr/0001-workstreams-v2.md",
+      "sha256": "3b6da7d95d2652619439192a5fbda0dc5e281e8e5bd87813e95ae8c5d860ea3c",
+      "authority": "Controller-supplied genuine btq-ovngv provenance; author did not query queue"
+    },
+    {
+      "kind": "private_research",
+      "path": "plan8-preparation/map.md",
+      "sha256": "e062b1eda2c9ad7e629e19ef4feee5e50d95248a2a2305f984c33d81bc986c57",
+      "authority": "Historical preparation only; old586 ADR pin explicitly superseded for this design"
+    },
+    {
+      "kind": "private_research",
+      "path": "plan8-preparation/inputs.json",
+      "sha256": "76ffe001b90578879cb5156bda596c0cf3babbdd473e61cb534015c8a5572d9f",
+      "authority": "Historical preparation only; old586 ADR pin explicitly superseded for this design"
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "ee9203f5b2d8567a557b0876ada4dd54e99e0463",
+      "path": "docs/designs/2026-10-16-plan6c-durable-delivery.md",
+      "sha256": "8cfefd6935b411ec8134237770a951963782dc258f4bd7538d6b1c145134e8fb",
+      "authority": "UNREVIEWED proposed Plan6C interface; not installed, not implementation approval"
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "ee9203f5b2d8567a557b0876ada4dd54e99e0463",
+      "path": "docs/reviews/plan6c-delivery-inputs.json",
+      "sha256": "70eece1b7b3349be08273650a472660c458c7f719142f75ab83b810b8cdf96e8",
+      "authority": "UNREVIEWED proposed Plan6C interface; not installed, not implementation approval"
+    }
+  ],
+  "discovery": "Semble code search and bounded source reads; ripwire reuse map saved privately; no runtime imports or executions",
+  "boundaries": [
+    "No runtime/source implementation",
+    "No tests/model/queue/services/sends/install/commit/push",
+    "No assertion of installed units enabled/running or authentic approval based on source text"
+  ],
+  "genuine_adr_authority": {
+    "approval_bead": "btq-ovngv",
+    "approved_by": "Liam",
+    "approved_at": "2026-10-14T15:57:38Z",
+    "marmot_relay_identifier": "189fd6bb97ba",
+    "adr_commit": "a27acecee8274e6ad8dc65def436614d42b5cb04",
+    "provenance": "Exact authenticated authority facts supplied by controller; no author native queue lookup or reauthentication"
+  },
+  "repository_resolution": {
+    "local-git:hermes-workstreams-v2-adr-r17 (no remote)": "Existing external ADR object archive; exact commit/path/hash, not a fabricated GitHub URL.",
+    "private_research": "Controller evidence directory artifact-relative paths. Historical research, not public authority."
+  }
+}
