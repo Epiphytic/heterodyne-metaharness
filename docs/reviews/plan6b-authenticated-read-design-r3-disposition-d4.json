@@ -1,0 +1,146 @@
+{
+  "status": "UNREVIEWED d4 author dispositions; actual R3 REVISE19; all 3 allowed rounds consumed; no further review without exact authenticated Marmot exception",
+  "raw_report_sha256": "78cb6a757d305a3cf0269a014097b98db1cc0d37f8a483b1896b6c14f2e88ab5",
+  "extracted_findings_sha256": "5406fa8e198738e5cf2375b26f4ecf6ded62e189bd50cc66fc23f73f1c429e9e",
+  "private_exact_ledger": {
+    "root": "operator-handoff-2026-10-15/codex",
+    "path": "63iz7-d4-author/r3-verbatim-findings.json",
+    "sha256": "28a911dd6b351c70a2a586b2122fd337be1f00f18be7e876216cfc07375efa6f"
+  },
+  "finding_hash_convention": "SHA256 UTF-8 json.dumps(original finding,sort_keys=True,separators=(comma,colon),ensure_ascii=True), no newline; full original summary/scenario preserved privately",
+  "findings": [
+    {
+      "number": 1,
+      "finding_sha256": "50e3d76392f01cfc5724c1f58e7b284194c90d8e22f21aee29f994e697e0f885",
+      "source_file": "docs/designs/2026-10-16-plan6b-authenticated-marmot-read-surface.md",
+      "source_line": 92,
+      "disposition": "Accepted: recovery question is recommended no and exact original request is checked. Thumbs-up maps to no; exactly one affirmative answer is required. No reaction-as-yes inference."
+    },
+    {
+      "number": 2,
+      "finding_sha256": "6d9be400f7880b0c75ec8e9a6a3c8609ca76a525841f4de8949e936029338a16",
+      "source_file": "docs/designs/2026-10-16-plan6b-authenticated-marmot-read-surface.md",
+      "source_line": 90,
+      "disposition": "Accepted: human title uses only safe labels and a 12-hex display prefix; full request/digest is retained and bound by proposed owner association, never claimed human-visible after redaction."
+    },
+    {
+      "number": 3,
+      "finding_sha256": "b591089bc3bcf0bdb5fcb5a5e3c61b77a92939e347bc1c4ba14532f96e89db01",
+      "source_file": "docs/designs/2026-10-16-plan6b-authenticated-marmot-read-surface.md",
+      "source_line": 71,
+      "disposition": "Accepted: final genuinely approved and implemented compatible 6A is mandatory before any 6B implementation, including offline adapter/consumer work; provisional source is historical inspection only."
+    },
+    {
+      "number": 4,
+      "finding_sha256": "62fc9a64d04668f6d72081b6c450857ff32ccdf8554a3e689951bd2f3dab13b8",
+      "source_file": "docs/designs/2026-10-16-plan6b-authenticated-marmot-read-surface.md",
+      "source_line": 94,
+      "disposition": "Accepted: definite NoticePost latched/rate-hour/undelivered refusals keep bounded pending alert and bounded later-owner-wake attempts; uncertain post never blindly retries. Existing admind rearm is separate. AskPost refusal stays unposted."
+    },
+    {
+      "number": 5,
+      "finding_sha256": "e314b659e4abfb7dceba0fd02645d23f8e7a2f80dcea4ae6195c5a52bd2d60d1",
+      "source_file": "docs/designs/2026-10-16-plan6b-authenticated-marmot-read-surface.md",
+      "source_line": 151,
+      "disposition": "Accepted with explicit availability limit: bounded restore may publish only a provably complete latest ledger with every key/uncertain attempt and retained high-water/tail proof. Missing/unknown history holds; no empty reset or guaranteed recovery from total loss."
+    },
+    {
+      "number": 6,
+      "finding_sha256": "f18754278dd39392da0828483bfaae525bc74c1ab76fc29f7a40515fd995b0cf",
+      "source_file": "docs/designs/2026-10-16-plan6b-authenticated-marmot-read-surface.md",
+      "source_line": 39,
+      "disposition": "Accepted: configured logical owner/UID/release allowlist plus verified peer and same-connection nonce obtains boot/run dynamically; reconnect creates new authenticated domain, not acceptance under old handshake."
+    },
+    {
+      "number": 7,
+      "finding_sha256": "33b2919e0e957becc6b71fea3d47d8e9c7525bbf30bb3cd7ecfdc37045bd542f",
+      "source_file": "docs/designs/2026-10-16-plan6b-authenticated-marmot-read-surface.md",
+      "source_line": 149,
+      "disposition": "Accepted: controller owns actual admind recovery/storage questions. Consumer has only fixed SafetyAlertPort NoticePost and local doctor state; no AskPost capability expansion."
+    },
+    {
+      "number": 8,
+      "finding_sha256": "ecc3e8f827fdc644c09d8627d9e4835cf9705e57d8b94f7b00dccdf8add97358",
+      "source_file": "docs/designs/2026-10-16-plan6b-authenticated-marmot-read-surface.md",
+      "source_line": 141,
+      "disposition": "Accepted residual and corrected budget: per-send cap is 30 seconds, matching client default. S4 same-key dedup observation is acknowledged; V1 deliberately does not retry unknown effects without retention/readback guarantees. Deployment requires latency/timeout/expiry measurements; silence/truncation remain disclosed residuals."
+    },
+    {
+      "number": 9,
+      "finding_sha256": "19809a6d891c6eb26c95c31793ece8d2e695757eb236f06ea47c7c8e4ba4a0f5",
+      "source_file": "docs/designs/2026-10-16-plan6b-authenticated-marmot-read-surface.md",
+      "source_line": 139,
+      "disposition": "Accepted availability tradeoff: reserve group turn before rendering; at most three delivered parts, per-query noninterleaved turn, one waiting query, 120-second multipart and 180-second admission bounds. Busy/expired no-send outcomes are explicit; no promise every query receives a reply."
+    },
+    {
+      "number": 10,
+      "finding_sha256": "77ae0661990070e83fd8d02e703752e5014d985dee1bd2cf0a31ea5d3b68bc66",
+      "source_file": "docs/designs/2026-10-16-plan6b-authenticated-marmot-read-surface.md",
+      "source_line": 41,
+      "disposition": "Accepted: at most four distinct native queue identities and four TOTAL fixed bulk operations per projection, shared-identity grouping; refuse excess registrations. Acceptance distinguishes 100 bindings within budget from five distinct identities."
+    },
+    {
+      "number": 11,
+      "finding_sha256": "583883f119da182170839b8c0cd6248ee7dbbf97e0b560028ab6047ca36338b4",
+      "source_file": "docs/designs/2026-10-16-plan6b-authenticated-marmot-read-surface.md",
+      "source_line": 67,
+      "disposition": "Accepted: typed pause true/false/unknown is required and representable; unknown makes view incomplete, not false or a missing required-section failure. Candidate inventory/order proof remains independently required."
+    },
+    {
+      "number": 12,
+      "finding_sha256": "cf811a95f8c23247838afc9f1cee73a96165d62d7496595b2a95153f79144583",
+      "source_file": "docs/designs/2026-10-16-plan6b-authenticated-marmot-read-surface.md",
+      "source_line": 155,
+      "disposition": "Accepted: presentation mapping explicitly covers historical same-scope old-run cache with original producer/time and fresh authorization; producer-restarted unavailable applies only without eligible historical cache."
+    },
+    {
+      "number": 13,
+      "finding_sha256": "c02853a6d886489bde2d906f69e140f52086d9490f2c59f5173e5c0c51b7f9e9",
+      "source_file": "docs/designs/2026-10-16-plan6b-authenticated-marmot-read-surface.md",
+      "source_line": 92,
+      "disposition": "Accepted: recovery principal is current admind operators intersected with confirmed authenticated keys; read principals remain Policy.approvers. Proposed owner proof enforces the explicit narrower recovery role."
+    },
+    {
+      "number": 14,
+      "finding_sha256": "98f05baa2d2eb1c014c887611d5e8a7f298f22ef7de6e1738c88d9bb952882dc",
+      "source_file": "docs/designs/2026-10-16-plan6b-authenticated-marmot-read-surface.md",
+      "source_line": 92,
+      "disposition": "Accepted proposed prerequisite: owner adapter atomically rechecks authority/answers and seals terminal ask before returning single-use bounded proof; stock AskGet/cancel does not claim this capability. Proof consume plus epoch change is conditional local transaction; absent adapter holds deployment."
+    },
+    {
+      "number": 15,
+      "finding_sha256": "5c67a837bd10d3ac41a5813f504ae4d7d09911a1463ae91bbb486e8450f15650",
+      "source_file": "docs/designs/2026-10-16-plan6b-authenticated-marmot-read-surface.md",
+      "source_line": 49,
+      "disposition": "Accepted: all ambiguous, malformed-routing, absent or outside-scope targets expose identical not-found tag/text. Ambiguity exists only as internal closed diagnostic; no public existence oracle."
+    },
+    {
+      "number": 16,
+      "finding_sha256": "ee9241530aeee78cda53b15d843d9c5f3e6147b2cb4f30d1fc59a13bc0537b64",
+      "source_file": "docs/designs/2026-10-16-plan6b-authenticated-marmot-read-surface.md",
+      "source_line": 155,
+      "disposition": "Accepted: cache key is configured logical producer name, projection schema, ContentScope digest, selector. Epoch already lives in ContentScope; no extra epoch or boot/run in stable identity."
+    },
+    {
+      "number": 17,
+      "finding_sha256": "88d66a9a5164d0d047a7d991856f632421c64a2e5bc57580b25abd64732af931",
+      "source_file": "docs/designs/2026-10-16-plan6b-authenticated-marmot-read-surface.md",
+      "source_line": 39,
+      "disposition": "Accepted reuse: source read connection explicitly follows existing journal._validate/_check_snapshot exact-schema mode=ro pattern with bounded separate connection, deferred SELECTs and documented WAL sidecars."
+    },
+    {
+      "number": 18,
+      "finding_sha256": "8ed045b77343c586d84205190b8bc1916fb9526b4ad18728551127f1ec9b163d",
+      "source_file": "docs/designs/2026-10-16-plan6b-authenticated-marmot-read-surface.md",
+      "source_line": 41,
+      "disposition": "Accepted wording: active personal/repository rules remain applicable within current operator authority. Historical classifier limitations do not change Codex permissions; real design/code/deployment gates stay intact."
+    },
+    {
+      "number": 19,
+      "finding_sha256": "a9609f0926a7fd14663283c9f8402747cdaa90ef31d7909e04b52e9fa3554967",
+      "source_file": "docs/reviews/plan6b-authenticated-read-inputs.json",
+      "source_line": 254,
+      "disposition": "Accepted for current artifacts: d4 prose, manifest and author dispositions use spaced numeric/phase tokens. Old exact reports and signed R1/R2 artifacts remain unchanged history; no claim their historical style was retroactively fixed."
+    }
+  ]
+}
