@@ -1,0 +1,132 @@
+{
+  "schema": 1,
+  "status": "proposed design only; no new implementation or approval",
+  "planning_task": "btq-1a845",
+  "implementation_task": "btq-1wu2i",
+  "canonical_source_base": "07637745fe75dc614109a0b8ba72d3489f262a97",
+  "historical_fix_commit": "9a14b3b2664e4ea0c5452c9eea013bf37aab658f",
+  "historical_fix_parent": "2c0c5b5b775ee652d2ce32c192091aa2314e5b32",
+  "historical_fix_signature": "G",
+  "historical_fix_changed_paths": [
+    "tests/test_sandbox_hostread.py"
+  ],
+  "blobs": {
+    "original_test": {
+      "git_blob": "306b1fcc632be1eaad921b532bd93e47428c8bda",
+      "bytes": 51572,
+      "sha256": "032a568e849094af2832b2de9bf8927001362c1859e8b0a68d88e9ab7f482e17"
+    },
+    "current_test": {
+      "git_blob": "306b1fcc632be1eaad921b532bd93e47428c8bda",
+      "bytes": 51572,
+      "sha256": "032a568e849094af2832b2de9bf8927001362c1859e8b0a68d88e9ab7f482e17"
+    },
+    "fixed_test": {
+      "git_blob": "53b1af47be9a4d71d7bd80fafe3719d7aa62b375",
+      "bytes": 53849,
+      "sha256": "35e94c4b67a8f50a7f73e2c16e838b137c3917ae034dc6b384c0922346f19f86"
+    },
+    "original_product": {
+      "git_blob": "2864c87cef46443a039422eeb2f0f1d0fe85f082",
+      "bytes": 23084,
+      "sha256": "692a17d1c8b87cf1e36f142ccc499707744c312171d547070861d536c0948e77"
+    },
+    "current_product": {
+      "git_blob": "2864c87cef46443a039422eeb2f0f1d0fe85f082",
+      "bytes": 23084,
+      "sha256": "692a17d1c8b87cf1e36f142ccc499707744c312171d547070861d536c0948e77"
+    },
+    "fixed_product": {
+      "git_blob": "2864c87cef46443a039422eeb2f0f1d0fe85f082",
+      "bytes": 23084,
+      "sha256": "692a17d1c8b87cf1e36f142ccc499707744c312171d547070861d536c0948e77"
+    }
+  },
+  "overlay_proof": {
+    "original_test_equals_current": true,
+    "product_unchanged": true,
+    "exact_patch_check_on_current_exit": 0,
+    "patch_sha256": "bb6847b2835c6934226c1beddac6dddd4d345efc0d8a844ae2b1c16dacc122ac",
+    "patch_bytes": 4823
+  },
+  "historical_code_review": {
+    "round": 1,
+    "verdict": "APPROVE",
+    "model": "not recorded in retained report or brief; do not infer from commit co-author",
+    "brief": {
+      "path": "tmp-docs/brief-hostread-fix2-c1.md",
+      "sha256": "8f0700829d1d90ef2d6ab1dfed038114643a43000847dda74ea5373050aa6b94"
+    },
+    "report": {
+      "path": "tmp-docs/review-hostread-fix2-c1.md",
+      "sha256": "5f26a52d4581af1713cf980e1a2f4d0ddaea49e3659251075395627c43f7a6fb"
+    },
+    "reported_validation": {
+      "python": "3.12.3",
+      "serial_passed": 92,
+      "parallel_n8_passed": 92,
+      "instrumented_regression_passed": 1
+    },
+    "fresh_validation_claimed": false
+  },
+  "preserved_scanner_protocol": {
+    "planning_commit": "c21f85f",
+    "approval_artifacts_commit": "24a687ccbb246f17a34b15a7ae8c0a07e4af2364",
+    "native_approval": "btq-pxtig",
+    "approved_digest": "e2a5f3d08708d82358db6ed75550675fa14bd78397f6dedea66e75761f36144b",
+    "expected_data_sha256": "52d8772fa92925addc23d87b203adb95aca60400681c86a405a190c07ec476e0"
+  },
+  "collection_delta": {
+    "before": 3372,
+    "after_expected": 3373,
+    "added_node": "tests/test_sandbox_hostread.py::test_a_leaked_fd_that_another_test_left_closing_meanwhile_is_no_leak",
+    "unchanged_scanner_expected_failures": 4,
+    "fresh_collection_required": true
+  },
+  "failed_runs": [
+    {
+      "artifact_directory": "codex/scanner-1wu2i-implementation/t2s2",
+      "actual_exit": 1,
+      "total": 3372,
+      "failed": 5,
+      "fd_count_before": 43,
+      "fd_count_after": 25,
+      "log_sha256": "f710ffb2e6cf39dd0f7ec8bae76be606f45735921bea0a8f1394686a57d9fd9b",
+      "junit_sha256": "541a8e68d2821ce38bdc79af6d61845cb97dcd0bc07befd1d923ffa90bdce5f3",
+      "collection_sha256": "3659430f4bd3e12edf6ff2295c30bd27538c25eaaaa14c8a2b6c954d00224f09"
+    },
+    {
+      "artifact_directory": "codex/scanner-1wu2i-implementation/t2s2-rerun",
+      "actual_exit": 1,
+      "total": 3372,
+      "failed": 5,
+      "fd_count_before": 40,
+      "fd_count_after": 25,
+      "log_sha256": "183bb2b1646ae0f36a1940925fd0f9ef38e220e7031b3530fbd58fdd3d9f6c91",
+      "junit_sha256": "8ccb8af767a59bdfcae9452eaad370d220644c2ff1fc02af4d59492151112d7b",
+      "collection_sha256": "3659430f4bd3e12edf6ff2295c30bd27538c25eaaaa14c8a2b6c954d00224f09"
+    }
+  ],
+  "private_diagnosis": [
+    {
+      "path": "codex/scanner-1wu2i-implementation/hostread-diagnosis-result.json",
+      "sha256": "745824b64791ae5caaf9f3b30d24c3d6cfe45fba551cef7ed84d064b9ca85f13"
+    },
+    {
+      "path": "codex/scanner-1wu2i-implementation/fd-gc-natural-diagnosis.json",
+      "sha256": "4e9a0a91da34fe70f3e7bc0476f95c2ee9948365abba672cfaef81cf34195b7b"
+    },
+    {
+      "path": "codex/scanner-1wu2i-implementation/sqlite-gc-reproduction.json",
+      "sha256": "8cc35f77e30c790cef7e985b228b79e2595460acd80c862dc0da319dab2aadcd"
+    },
+    {
+      "path": "codex/scanner-1wu2i-implementation/t2s2-unexpected-failure-diagnosis.json",
+      "sha256": "1dddf672cd0a90dd26a3503ef2f85aa0d8fcae3d5dc10d1e8f76fed8ae11cbd6"
+    }
+  ],
+  "private_evidence_root": {
+    "logical_id": "operator-handoff-2026-10-15",
+    "resolution": "Controller-retained dated private handoff directory; path and artifact_directory entries are relative to it, not repository paths."
+  }
+}
