@@ -1,17 +1,17 @@
 {
   "format": 1,
-  "status": "PROPOSED_UNREVIEWED_D1",
+  "status": "PROPOSED_D2_AFTER_ACTUAL_R1_REVISE",
   "task": "btq-jzat7",
   "author": "Codex",
-  "actual_design_review_rounds_used": 0,
+  "actual_design_review_rounds_used": 1,
   "human_design_approval": null,
   "implementation_authorized": false,
   "product_base": "07637745fe75dc614109a0b8ba72d3489f262a97",
   "spec": {
     "path": "docs/designs/2026-10-16-plan7a-intake-and-sufficiency-contracts.md",
-    "sha256": "1fc2b61f1f12fd9a1a3ea20dcc875000c5af8319604771bb6e8bed610e9bdcb7"
+    "sha256": "34fd73ca1e197701164f111c6665cdb4c7a11112ddb6eea3f85fcce579de261b"
   },
-  "source_repository_locator_note": "Logical names resolve via root private source-map.json. Design repositories have no asserted public remote. Actual Git objects and bytes were verified; no copied or encoded ADR archive is created. Product sources are canonical Epiphytic/heterodyne-metaharness.",
+  "source_repository_locator_note": "Logical repository locators below are private local object locations, not public remotes. No unpinned source-map is required. Product is Epiphytic/heterodyne-metaharness. Actual Git bytes are verified; no approval is inferred from these paths.",
   "sources": [
     {
       "repository": "governing-adr17-design-repository",
@@ -89,12 +89,62 @@
       "path": "bin/btq",
       "git_blob": "4d5a1d463673bec99da4186715efd889a1e311b3",
       "sha256": "ec2bc67b227326c80bf5d9a32eb661b220ea9af6942ef31bff04d8c06941bd2e"
+    },
+    {
+      "repository": "governing-adr17-design-repository",
+      "commit": "58615ac6cf8eed9419fc284482d40a82780cfe8d",
+      "path": "docs/adr/0001-workstreams-v2.md",
+      "git_blob": "1b3251254be2b0fe6005441c2ad2c68894d273b7",
+      "sha256": "570339f06ba6ad682b996a3725fd624c831b7a0762c9d3c1fa770adf5d8cb3c9"
+    },
+    {
+      "repository": "Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/config/layers.py",
+      "git_blob": "d2c6f03677cfc1fafba3be07bb8ef34498e19586",
+      "sha256": "4f701161db899952bf7d51ec6da4f9388c9ac28898041ff73d87480921179b2c"
+    },
+    {
+      "repository": "Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/wsd/btq.py",
+      "git_blob": "13b53be03e03082cb5c3b95f9bf8190faaef94c7",
+      "sha256": "1bda049fb8b42b0e9c1b34d71423ee5c75dbf1d535cf04566ca0b89a82cae1d7"
     }
   ],
   "historical_approval_evidence": [
     {
       "id": "btq-ovngv",
-      "evidence_source": "historical native snapshot pinned below; no fresh queue call",
+      "evidence_source": {
+        "private_handoff_relative_path": "release-resume-2026-10-16/native-workstream-issues.json",
+        "snapshot_sha256": "984f34dcef44961472d1b6846842ac3f2752be39887f8f14bccafa4cb0da37d3",
+        "json_pointer": "/38",
+        "native_issue_canonical_sha256": "a178b9c54797e70667c95dd0d8decca90a3495212824b0b1219df48934ec6dd6",
+        "pinned_ask_refs": [
+          {
+            "id": "a27acecee8274e6ad8dc65def436614d42b5cb04",
+            "kind": "file",
+            "path": "docs/adr/0001-workstreams-v2.md",
+            "repo": "~/repos/hermes-workstreams-v2-adr-r17"
+          },
+          {
+            "id": "b2c98953f476ba744ec455892c5a6f33ace60cc9..a27acecee8274e6ad8dc65def436614d42b5cb04",
+            "kind": "range",
+            "repo": "~/repos/hermes-workstreams-v2-adr-r17"
+          },
+          {
+            "id": "a6903c5fe58a53f6726d18d163dca1d7d98d817b..d524cade1859ef17962e698a8c24b6462a59bc3a",
+            "kind": "range",
+            "repo": "~/repos/hermes-workstreams-v2-adr-r17"
+          },
+          {
+            "id": "a27acecee8274e6ad8dc65def436614d42b5cb04",
+            "kind": "file",
+            "path": "docs/reviews/adr-r17-rebase-note.md",
+            "repo": "~/repos/hermes-workstreams-v2-adr-r17"
+          }
+        ]
+      },
       "metadata": {
         "adr_revision": "a27acecee8274e6ad8dc65def436614d42b5cb04",
         "approved_by": "Liam",
@@ -109,7 +159,48 @@
     },
     {
       "id": "btq-xywu0",
-      "evidence_source": "historical native snapshot pinned below; no fresh queue call",
+      "evidence_source": {
+        "private_handoff_relative_path": "release-resume-2026-10-16/native-workstream-issues.json",
+        "snapshot_sha256": "984f34dcef44961472d1b6846842ac3f2752be39887f8f14bccafa4cb0da37d3",
+        "json_pointer": "/112",
+        "native_issue_canonical_sha256": "d94c6e648b35ad6a124e64aec2b59fcb9841d9261f892fbfa5d0839966103160",
+        "pinned_ask_refs": [
+          {
+            "id": "93d0e90b121a07db720d92924cda443a1cfc239c",
+            "kind": "file",
+            "path": "docs/adr/0001-workstreams-v2.md",
+            "repo": "~/repos/hermes-workstreams-v2-adr-r16"
+          },
+          {
+            "id": "28e3df4d3ec80468b60845e552ab2da5e1b0b7c5..93d0e90b121a07db720d92924cda443a1cfc239c",
+            "kind": "range",
+            "repo": "~/repos/hermes-workstreams-v2-adr-r16"
+          },
+          {
+            "id": "a6903c5fe58a53f6726d18d163dca1d7d98d817b",
+            "kind": "file",
+            "path": "docs/reviews/0001-design-review-r30.md",
+            "repo": "~/repos/hermes-workstreams-v2-adr-r16"
+          },
+          {
+            "id": "e47dbf504a8c78f5e9724a44b95a9bb29a81238a",
+            "kind": "file",
+            "path": "docs/superpowers/plans/2026-10-12-plan4b-accounts-usage-failover.md",
+            "repo": "~/repos/heterodyne-metaharness-v2-plan4b"
+          },
+          {
+            "id": "6235e054c78e351ee51a1cf07f3572630a9c15cf..e47dbf504a8c78f5e9724a44b95a9bb29a81238a",
+            "kind": "range",
+            "repo": "~/repos/heterodyne-metaharness-v2-plan4b"
+          },
+          {
+            "id": "e47dbf504a8c78f5e9724a44b95a9bb29a81238a",
+            "kind": "file",
+            "path": "docs/reviews/plan4b-r5.md",
+            "repo": "~/repos/heterodyne-metaharness-v2-plan4b"
+          }
+        ]
+      },
       "metadata": {
         "adr_revision": "93d0e90b121a07db720d92924cda443a1cfc239c",
         "approved_by": "Liam",
@@ -150,5 +241,28 @@
     "Existing Hermes endpoint matching proposed contracts remains unverified.",
     "Future Plan5/6 designs are not implementation prerequisites or installed claims.",
     "Exact later native admission and immutable publication are root responsibilities; no future IDs fabricated."
-  ]
+  ],
+  "actual_design_review_maximum": 3,
+  "review_history": [
+    {
+      "round": 1,
+      "actual_verdict": "REVISE",
+      "raw_report_private_path": "review-jzat7-builtin-design-r1.log",
+      "raw_report_sha256": "5c287ac2abd3bf456424c852270156eb3f56247d1a853bc217bcec43122f59b5",
+      "actual_json_entries": 27,
+      "findings_extracted_sha256": "edaa57ce486334b316cff35f671ef976d908a3a98c4ad6dd88747f7f30200d35"
+    }
+  ],
+  "r1_author_disposition": {
+    "path": "docs/reviews/plan7a-design-r1-disposition.md",
+    "sha256": "ccd23f829329cbfc0bb891abdc335c863d4be8bbace91338f0eb7f61b3f7f6f1"
+  },
+  "directory_fact_check": {
+    "product_commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+    "docs_tree": "f1b54f5427df9eb3a9c1792cdae88da1496fc3df",
+    "existing_design_directory": "docs/design",
+    "existing_design_tree": "bd68a174f0556159a5ddc0d33c0a936ca6a02936",
+    "plural_designs_present": false,
+    "decision": "Root retains existing reviewed jzat7 path; baseline convention not claimed."
+  }
 }
