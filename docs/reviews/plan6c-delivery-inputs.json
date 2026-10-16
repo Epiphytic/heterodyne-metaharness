@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "status": "UNREVIEWED design only; no effects, no approval",
+  "status": "Proposed d2; actual R1 REVISE33; no implementation/approval",
   "task": "btq-w2jti",
   "base": "07637745fe75dc614109a0b8ba72d3489f262a97",
   "inputs": [
@@ -74,7 +74,7 @@
       "path": "docs/designs/2026-10-16-plan6b-authenticated-marmot-read-surface-d4.md",
       "blob": "b98c4a515d948716fc50e8b7229adf2106fd34fc",
       "sha256": "37f1ae13d13591fd196d988bb9cc97748e9cc5b65cd7cde6c735ed1a68060231",
-      "authority": "Provisional incompatible/unapproved proposal only, no implementation admission"
+      "authority": "Frozen provisional6B d4; transport partition preserved, no source edits; final genuine compatible admission required"
     },
     {
       "repository": "heterodyne-metaharness-v2-btq-btq-0bkbo",
@@ -91,6 +91,24 @@
       "blob": "3f8daea6ad2133436caf1aecb05003fc9a636519",
       "sha256": "de7239b72a3ac2b63d1d05f4143212e6f4ea83193bfe1ac3b4279bb28ba8c5f8",
       "authority": "Provisional incompatible/unapproved proposal only, no implementation admission"
+    },
+    {
+      "repository": "heterodyne-metaharness-v2-btq-btq-8d487",
+      "commit": "c9fa7942386556b5227d96cbe73b8ca4a9223efc",
+      "path": "docs/designs/2026-10-16-plan8-scheduling-reconciliation.md",
+      "sha256": "ce4e1b9016f89e7e4266d707beaa82dec7c542d6e3e51a524fde48b2f0fd1a14",
+      "authority": "Frozen provisional Plan8 d1 bytes; actual R1 REVISE28, not an approved/installed contract. Final compatible clock interface remains required.",
+      "private_handoff_relative_path": "plan6c-r1-architecture/plan8-input-snapshot/2026-10-16-plan8-scheduling-reconciliation.md",
+      "blob": "598ff0cec214c1db94a41b9b75e66b02928cc1c6"
+    },
+    {
+      "repository": "heterodyne-metaharness-v2-btq-btq-8d487",
+      "commit": "c9fa7942386556b5227d96cbe73b8ca4a9223efc",
+      "path": "docs/designs/2026-10-16-plan8-scheduling-reconciliation-inputs.json",
+      "sha256": "6617e701b7a6d32777b7da3550aed97491918a220f7626a165ad229c2c58564e",
+      "authority": "Frozen provisional Plan8 d1 bytes; actual R1 REVISE28, not an approved/installed contract. Final compatible clock interface remains required.",
+      "private_handoff_relative_path": "plan6c-r1-architecture/plan8-input-snapshot/2026-10-16-plan8-scheduling-reconciliation-inputs.json",
+      "blob": "d9e98bfc3137ab24bd31b9d9680e02adfc3bc45e"
     }
   ],
   "native_approval": {
@@ -108,5 +126,15 @@
     "All questions and approvals via authenticated Marmot admind",
     "Maximum3 actual Claude built-in design reviews in this new Plan6C lineage"
   ],
-  "design_sha256": "8cfefd6935b411ec8134237770a951963782dc258f4bd7538d6b1c145134e8fb"
+  "design_sha256": "96b4eff889d30639b9f8fe724676e37dc8efabe1d8013fc9790eaff631a09e8f",
+  "actual_review_rounds_consumed": 1,
+  "prior_design_commit": "ee9203f5b2d8567a557b0876ada4dd54e99e0463",
+  "raw_review": {
+    "sha256": "9c37b5cb38ec6ca5159a26a2dab38038b614ffc736ae07e5f3c648cd1585f43b",
+    "actual_json_findings": 33,
+    "verdict": "REVISE",
+    "private_handoff_relative_path": "review-w2jti-builtin-design-r1.log"
+  },
+  "historical_6a_note": "f283d1f is the inspected provisional6A source only, not claimed latest or sufficient. Final compatible actual renderer/overflow contract is required before adapter implementation.",
+  "dispositions_sha256": "4d0c3eb179010f18534c275340309e5ff8de22fc3108bd72914ef403f078eee0"
 }
