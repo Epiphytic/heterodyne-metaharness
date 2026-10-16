@@ -1,0 +1,258 @@
+{
+  "schema": 1,
+  "purpose": "Planning only; no permission to integrate or deploy",
+  "base": "2c0c5b5b775ee652d2ce32c192091aa2314e5b32",
+  "current_main": "07637745fe75dc614109a0b8ba72d3489f262a97",
+  "historical_source": "50fc42fb95dde0cdf38410c54e4e89bc3227f37b",
+  "common_paths": [
+    "docs/wsd.md",
+    "src/heterodyne/sandbox/build.py",
+    "src/heterodyne/sandbox/runtime.py",
+    "src/heterodyne/wsd/cli.py",
+    "src/heterodyne/wsd/ctl.py",
+    "src/heterodyne/wsd/daemon.py",
+    "src/heterodyne/wsd/runtime.py",
+    "tests/fakes/fake_runtime.py",
+    "tests/sandbox_env.py",
+    "tests/test_admind_r1.py",
+    "tests/test_admind_r2.py",
+    "tests/test_sandbox_build.py",
+    "tests/test_wsd_daemon.py"
+  ],
+  "historical_changed_paths": [
+    "docs/superpowers/specs/2026-10-13-g08sd-crash-loop-accounting-design.md",
+    "docs/wsd.md",
+    "src/heterodyne/agents/base.py",
+    "src/heterodyne/agents/codex.py",
+    "src/heterodyne/defaults/defaults.toml",
+    "src/heterodyne/harness/digests.py",
+    "src/heterodyne/sandbox/build.py",
+    "src/heterodyne/sandbox/events.py",
+    "src/heterodyne/sandbox/runtime.py",
+    "src/heterodyne/sandbox/spec.py",
+    "src/heterodyne/session/server.py",
+    "src/heterodyne/session/shim.py",
+    "src/heterodyne/tmux.py",
+    "src/heterodyne/wsd/alerts.py",
+    "src/heterodyne/wsd/approvals.py",
+    "src/heterodyne/wsd/asks.py",
+    "src/heterodyne/wsd/beads.py",
+    "src/heterodyne/wsd/brief.py",
+    "src/heterodyne/wsd/btq.py",
+    "src/heterodyne/wsd/cli.py",
+    "src/heterodyne/wsd/ctl.py",
+    "src/heterodyne/wsd/daemon.py",
+    "src/heterodyne/wsd/gitwip.py",
+    "src/heterodyne/wsd/harness.py",
+    "src/heterodyne/wsd/ids.py",
+    "src/heterodyne/wsd/journal.py",
+    "src/heterodyne/wsd/notices.py",
+    "src/heterodyne/wsd/park.py",
+    "src/heterodyne/wsd/recovery.py",
+    "src/heterodyne/wsd/relay.py",
+    "src/heterodyne/wsd/review.py",
+    "src/heterodyne/wsd/runtime.py",
+    "src/heterodyne/wsd/scheduler.py",
+    "src/heterodyne/wsd/session_events.py",
+    "src/heterodyne/wsd/settings.py",
+    "src/heterodyne/wsd/states.py",
+    "src/heterodyne/wsd/sweep.py",
+    "src/heterodyne/wsd/upgrade.py",
+    "src/heterodyne/wsd/workstream.py",
+    "tests/fakes/fake_agent_cli.py",
+    "tests/fakes/fake_approve_bead.py",
+    "tests/fakes/fake_ask_sock.py",
+    "tests/fakes/fake_btq.py",
+    "tests/fakes/fake_runtime.py",
+    "tests/sandbox_env.py",
+    "tests/test_admind_r1.py",
+    "tests/test_admind_r2.py",
+    "tests/test_fake_btq.py",
+    "tests/test_harness_digests.py",
+    "tests/test_sandbox_build.py",
+    "tests/test_sandbox_events.py",
+    "tests/test_sandbox_runtime.py",
+    "tests/test_sandbox_scheduler.py",
+    "tests/test_session_requests.py",
+    "tests/test_session_server.py",
+    "tests/test_tmux.py",
+    "tests/test_wsd_approvals.py",
+    "tests/test_wsd_asks_approvals.py",
+    "tests/test_wsd_asks_questions.py",
+    "tests/test_wsd_asks_release.py",
+    "tests/test_wsd_beads.py",
+    "tests/test_wsd_bridge_flow.py",
+    "tests/test_wsd_brief.py",
+    "tests/test_wsd_cli.py",
+    "tests/test_wsd_ctl.py",
+    "tests/test_wsd_daemon.py",
+    "tests/test_wsd_daemon_events.py",
+    "tests/test_wsd_defer.py",
+    "tests/test_wsd_harness.py",
+    "tests/test_wsd_ids.py",
+    "tests/test_wsd_journal.py",
+    "tests/test_wsd_journal_upgrade.py",
+    "tests/test_wsd_notes.py",
+    "tests/test_wsd_notices.py",
+    "tests/test_wsd_park.py",
+    "tests/test_wsd_refusals.py",
+    "tests/test_wsd_relay.py",
+    "tests/test_wsd_review.py",
+    "tests/test_wsd_session_events.py",
+    "tests/test_wsd_settings.py",
+    "tests/test_wsd_signals.py",
+    "tests/test_wsd_state_notices.py",
+    "tests/test_wsd_sweep.py",
+    "tests/wsd_env.py"
+  ],
+  "current_changed_paths": [
+    "deploy/prepare_admind_guard.py",
+    "docs/admind-guard-recovery.md",
+    "docs/admind.md",
+    "docs/adr/0001-workstreams-v2.md",
+    "docs/security-model.md",
+    "docs/superpowers/plans/2026-09-30-heterodyne-plan-2-admind.md",
+    "docs/wsd.md",
+    "src/heterodyne/admind/daemon.py",
+    "src/heterodyne/admind/guard.py",
+    "src/heterodyne/admind/guard_state.py",
+    "src/heterodyne/admind/membership.py",
+    "src/heterodyne/admind/store.py",
+    "src/heterodyne/config/layers.py",
+    "src/heterodyne/sandbox/backend.py",
+    "src/heterodyne/sandbox/build.py",
+    "src/heterodyne/sandbox/creates.py",
+    "src/heterodyne/sandbox/reaper.py",
+    "src/heterodyne/sandbox/runtime.py",
+    "src/heterodyne/wsd/cli.py",
+    "src/heterodyne/wsd/ctl.py",
+    "src/heterodyne/wsd/daemon.py",
+    "src/heterodyne/wsd/runtime.py",
+    "tests/admind_waits.py",
+    "tests/fakes/fake_backend.py",
+    "tests/fakes/fake_runtime.py",
+    "tests/live/test_live_sandbox.py",
+    "tests/sandbox_env.py",
+    "tests/test_admind_approvals.py",
+    "tests/test_admind_au11.py",
+    "tests/test_admind_daemon.py",
+    "tests/test_admind_guard_membership.py",
+    "tests/test_admind_guard_migration.py",
+    "tests/test_admind_logic.py",
+    "tests/test_admind_r1.py",
+    "tests/test_admind_r13_details.py",
+    "tests/test_admind_r13_lanes.py",
+    "tests/test_admind_r13_membership.py",
+    "tests/test_admind_r13_operators.py",
+    "tests/test_admind_r13_redact.py",
+    "tests/test_admind_r13_replies.py",
+    "tests/test_admind_r2.py",
+    "tests/test_admind_t9r1.py",
+    "tests/test_admind_t9r2.py",
+    "tests/test_admind_t9r7.py",
+    "tests/test_admind_t9r8.py",
+    "tests/test_admind_threading.py",
+    "tests/test_config.py",
+    "tests/test_prepare_admind_guard.py",
+    "tests/test_sandbox_build.py",
+    "tests/test_sandbox_create_recovery.py",
+    "tests/test_sandbox_creates.py",
+    "tests/test_sandbox_openshell_backend.py",
+    "tests/test_sandbox_spec.py",
+    "tests/test_wsd_daemon.py",
+    "tests/test_wsd_lifetime.py"
+  ],
+  "source_tree": "b73d0979610f50c3283d6a643a5777f30f5b0d2c",
+  "current_tree": "22b3ddcefa073e882b991d0e82cb9356e3c0ae45",
+  "scanner_future_head": null,
+  "deferred_consumers": [
+    "src/heterodyne/wsd/asks.py",
+    "src/heterodyne/wsd/notices.py",
+    "src/heterodyne/wsd/harness.py"
+  ],
+  "source_scanner_consumers": {
+    "src/heterodyne/wsd/asks.py": {
+      "sha256": "fc14c2ddbf9da213814d728d3405d1ad0a12e4d774d4a8a44867dbf88258297f",
+      "sensitive_kind_lines": [
+        {
+          "line": 23,
+          "text": "from heterodyne.config.secret_scan import sensitive_kind"
+        },
+        {
+          "line": 247,
+          "text": "kind = sensitive_kind(text) or sensitive_kind(shown)"
+        },
+        {
+          "line": 261,
+          "text": "kind = sensitive_kind(text) or sensitive_kind(shown)"
+        },
+        {
+          "line": 269,
+          "text": "kind = sensitive_kind(title) or sensitive_kind(shown)"
+        },
+        {
+          "line": 279,
+          "text": "return line if sensitive_kind(line) is None and not _TITLE_BAD.search(line) else NO_LINE"
+        },
+        {
+          "line": 285,
+          "text": "and sensitive_kind(text) is None)"
+        },
+        {
+          "line": 326,
+          "text": "if found is None or sensitive_kind(rest) is not None:"
+        },
+        {
+          "line": 413,
+          "text": "if any(sensitive_kind(t) is not None for t in (*texts.values(), *shown)):"
+        },
+        {
+          "line": 491,
+          "text": "return REASON_WITHHELD if sensitive_kind(reason) is not None else \" \".join(reason.split())"
+        },
+        {
+          "line": 599,
+          "text": "if sensitive_kind(text) is not None:"
+        },
+        {
+          "line": 1034,
+          "text": "if sensitive_kind(summary) is None:"
+        },
+        {
+          "line": 1250,
+          "text": "kind = sensitive_kind(answer)"
+        }
+      ]
+    },
+    "src/heterodyne/wsd/notices.py": {
+      "sha256": "3762e5d2066eb7e3fc50d797259b4e1cfed16ed8abde918de8d9c1f05a004bd4",
+      "sensitive_kind_lines": [
+        {
+          "line": 25,
+          "text": "from heterodyne.config.secret_scan import sensitive_kind"
+        },
+        {
+          "line": 117,
+          "text": "found = sensitive_kind(title) or sensitive_kind(body)"
+        },
+        {
+          "line": 326,
+          "text": "found = sensitive_kind(title)"
+        },
+        {
+          "line": 330,
+          "text": "found = sensitive_kind(cut)"
+        }
+      ]
+    },
+    "src/heterodyne/wsd/harness.py": {
+      "sha256": "ee90fa554bcb3c1921e3e43d8c3d54e0f924e8b93c99fe84a71b575afe6d70f2",
+      "sensitive_kind_lines": [
+        {
+          "line": 293,
+          "text": "kinds = [k for k in map(secret_scan.sensitive_kind, texts) if k is not None]"
+        }
+      ]
+    }
+  }
+}
