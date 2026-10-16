@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "task": "btq-e7knb",
+  "status": "author revision after actual R1 REVISE; no R2 or human approval claimed",
+  "reviewed_source": "79aec6f",
+  "original_design_sha256": "b24fa4e0e5bbab7025b639f88dceb6cc9918ab945b3ca76d23ad63048bd5c38a",
+  "actual_r1_report_sha256": "29ea537bc0108e489148125507f8b13f9616ba9b4e0c6f3816022f1e658b7e0b",
+  "actual_r1_verdict": "REVISE",
+  "actual_r1_round": 1,
+  "actual_structured_findings": 10,
+  "revised_design_path": "docs/designs/2026-10-16-plan5-actions-and-executor.md",
+  "revised_design_sha256": "23d3b604c799d959929aaac1c540fcd7ee108a13b7b8f829735636b84de1b7a6",
+  "governing_adr_commit": "93d0e90b121a07db720d92924cda443a1cfc239c",
+  "governing_adr_path": "docs/adr/0001-workstreams-v2.md",
+  "governing_adr_sha256": "13086760390dc786c233fe358048878e1fa657f374f61534d619a8d22b8d8b35",
+  "supervisor_archive_sha256": "46b0102cb4919aa97d75a7f5a0337d1ef537e8e54d72e5210b4bc6d1bd56670d",
+  "archive_changed": false,
+  "new_review_invoked": false,
+  "implementation_or_live_actions": false
+}

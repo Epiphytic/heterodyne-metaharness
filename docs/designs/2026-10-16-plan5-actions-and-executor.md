@@ -1,6 +1,6 @@
 # Plan 5: typed policy and a separate action executor
 
-Status: design proposal for btq-e7knb; future work only. No implementation,
+Status: revised design proposal d2 for btq-e7knb; future work only. No implementation,
 installation, action execution, or new approval authority is granted by this
 file. The controller must publish and review the exact revision and obtain a
 new authenticated design approval before implementation admission.
@@ -31,7 +31,8 @@ This proposal is written against product commit
 - `wsd/daemon.py:assemble` supplies that holding reconciler. There is no reason
   to treat existing callbacks or human approvals as a functioning executor.
 - admind is an independent operational admin channel. Its current guarded
-  authority and design-approval flow remain independent of this future path.
+  authority and design-approval flow remain unchanged until the coordinated
+  all-kinds decision-writer cutover in §6.
 
 The unmerged Plan5i consumers and scanner integration are separately owned by
 btq-fu366. This design does not select their commits, change their retention
@@ -46,8 +47,11 @@ Retain the held draft unchanged at product branch plan5a commit
 `22f3e5c`). It explicitly says HELD, not reviewed, not approved. Its large
 embedded implementation is not copied into this design or treated as accepted
 code. Its open review points are author-recorded issues, not a successful review.
-No fresh review budget for unchanged historical content is asserted here. Root
-must retain actual review artifacts and count any applicable prior rounds when
+Actual review of this proposal at `79aec6f` was design round 1 of 3,
+**REVISE**, with ten structured findings (the report introduction says eight
+problems). This d2 addresses all ten; no new review or approval is claimed.
+The original report and source remain retained. No fresh review budget for
+unchanged historical content is asserted here. Root must retain actual review artifacts and count any applicable prior rounds when
 presenting this proposal; no review has been invoked by this author.
 
 This proposal expands from the held three-action slice to the future Plan5
@@ -62,14 +66,14 @@ Historical questions are resolved or remain gated as follows:
 | Held point | Treatment here |
 |---|---|
 | D4 envelope fields outside payload | Exact canonical action envelope includes idempotency key and approval revision; actor identity is attached from authenticated decision and checked separately, without a self-referential digest (§4). |
-| D6 draft digest at create | Compute a candidate, persist whole ask, read back and recompute using the existing shared digest contract; only that read-back digest may be posted. |
-| D9 writable Beads/journal forgery | Sandbox has access to neither; host daemon and database administrators remain trusted. Executor needs proven independent read-only access. No claim of protection from a compromised daemon/DB administrator. |
+| D6 draft digest at create | Staged ID allocation, then whole-ask installation only after its gate; read back and recompute shared digest before any card or blocking edge (§5). |
+| D9 writable Beads/journal forgery | Sandbox reaches neither. Beads is authoritative for decisions, dispatch claims, execution state and results; wsd is the only writer. The effector has proven read-only access and submits bounded authenticated reports to wsd. Host daemon/DB administrators remain trusted. |
 | D16 action label routing versus purpose | A typed readout purpose is authoritative. Labels may index, never select decision writers or substitute for an action payload. |
 | Resume text only through status | Durable decision/result notice is delivered on actual resume, with status as recovery view; consumer integration must prove this seam. |
 | Drain shorter than action timeout | Shutdown has explicit stop admission and bounded wait; interrupted in-flight work is uncertain and reconciles, regardless of configured durations. |
 | Root-owned executor copies | Immutable reviewed release plus root-owned configuration and launcher required; source checkouts are not executable authority. |
 | Read-only Beads user unproven | Blocking integration spike and deployment prerequisite (§8), not an assumed ACL recipe. |
-| Relay retire versus submit (§17 #9) | Propose submission for typed action approvals only (§6). This is an explicit operator decision in this design approval, not a choice the implementation may infer. |
+| Relay retire versus submit (§17 #9) | Select submission for ALL approval kinds at coordinated cutover (§6). No direct design, terminal or forge decision writer remains active beside wsd. The interim path remains unchanged until that cutover is ready. |
 
 ## 3. Policy and materiality
 
@@ -98,8 +102,15 @@ require a fresh ask and show their relationship to the earlier denial.
 Materiality is separate from permission. Rewriting intake changes a target
 workstream/repository, requirement, question into action, or destructive/outward
 effect => `kind:confirm`, no worker routing label and no dispatch until an
-authenticated confirmation. Typos/reference resolution alone are minor. The
-classification proposes a result; it neither authorizes an action nor approves
+authenticated confirmation. A typo or reference resolution is minor only when
+the original request already
+uniquely identifies the same canonical repository/workstream and resolving it
+introduces no choice or changed requirement/effect. Ambiguous reference, a new
+target choice or a different canonical target requires authenticated
+`kind:confirm` before routing. Preserve the original text and display the proposed
+interpretation; neither a resolver nor a fallback may guess that choice into an
+action request. Confirmation does not itself approve a design or outward
+effect. The classification proposes a result; it neither authorizes an action nor approves
 a design. The §5.1 raw-text/unreviewed fallback preserves original intent;
 it cannot bypass later permissions, design approval, or executable validation.
 Changes to an approved action's effect invalidate it; enrichment replaces the
@@ -124,16 +135,24 @@ resources; agents cannot submit paths, remotes or transport endpoints.
 | deploy | target alias only from configured targets; envelope binds immutable release/artifact and target-definition revision resolved from that alias; reject mutable or unversioned target definitions. No generic deployment adapter is enabled by this document. |
 | notify | channel_ref and exact text; configured channel only, bounded secret-checked text, no arbitrary recipient; adapter must provide a correlation/receipt/reconciliation contract before enablement. |
 
+Availability is separate from registry decoding: all five adapters are unavailable
+by default. Push/PR/merge are candidate Stage 1 capabilities, not enabled merely
+because this table names them. An unresolved native claim/result/reader API,
+undefined target reconciliation/receipt contract or unpassed acceptance matrix
+keeps the affected adapter unavailable. Deploy/notify remain disabled until
+separate reviewed contracts, approvals and deployment gates; future table rows
+do not constitute executable capability.
+
 Canonical action data consists of schema version, typed effect and resolved
-immutable target facts, request-origin identity, idempotency_key equal to the
-approval ID, and approval revision. Here approval revision is an immutable
-request revision identifier assigned before hashing, distinct from the
-`decided_digest` of the full ask. The authenticated approver is added to the
-execution envelope after decision, and must match the committed decision fields;
-it is not an agent-selected identity or a field hashed into its own digest.
-The operator sees the effect and immutable target facts verbatim. The shared
-ADR/btq context_digest remains unchanged: title, description, whole ask and
-resolved references; workflow and decision metadata stay excluded.
+immutable target facts, trusted request-origin identity, idempotency_key equal
+to the allocated approval ID, and immutable request revision assigned before
+hashing. Allocation therefore precedes whole-ask construction, using the staged
+protocol in §5. The authenticated approver is added to the execution envelope
+only after decision and must match the committed decision; it is neither agent
+selected nor hashed into its own digest. The operator sees the effect and exact
+target facts verbatim. The shared ADR/btq context_digest remains unchanged:
+title, description, whole ask and resolved references; workflow and decision
+metadata remain excluded.
 
 This explicitly interprets ADR's payload revision as a request revision, while
 `decided_digest` binds the complete content. If review concludes ADR requires
@@ -165,15 +184,35 @@ selected against the final base, not taken from Plan5a's historical v4 proposal.
 Migrations preserve history and refuse partial schemas. A full spool cannot
 silently lose a request already acknowledged as durable.
 
-Filing on the owning workstream lane validates current origin and target facts,
-creates an unroutable approval bead, reads back its whole immutable ask and
-resolved digest, adds the blocking edge and parks the originating task. Bounded
-file/post failures are retriable by recorded state, not repeated bead creation.
-No card before deterministic lint; implement ADR §5.9 sufficient/enrich/groom
-at the gatekeeper release boundary. A release without the gatekeeper may use
-only the ADR's existing interim relay exception, explicitly labelled in its
-release acceptance; this is not permanent exemption or full Plan7 completion.
-A release shipping both must enforce judgement on every relayed ask too.
+Filing uses a durable origin-scoped creation key and recorded stages. Record
+creation intent before allocating one unposted, unroutable approval shell tagged
+with that key. Read back its stable native ID, construct the ID-bound whole ask,
+pass deterministic lint and mandatory sufficiency judgement, install the whole
+ask once at that gate and read back its resolved digest. An incomplete shell is
+not a filed ask, cannot receive a card or decision, cannot block the originating
+task and cannot satisfy a completed-filing acknowledgement. Only after the whole
+ask and digest are verified may filing add the blocking edge, park the task and
+post the exact card, with each stage recorded for recovery.
+
+A lost creation acknowledgement reconciles the unique creation key through a
+supported bounded native lookup. Exactly one matching shell may be adopted;
+multiple matches, unavailable lookup or ambiguous ownership hold for supported
+operator reconciliation, never blind repeated creation. Preserve the shell and
+history on failure. Retrying later stages reuses the same ID and revision;
+materially changed content follows the normal new ask/revision protocol and
+cannot reuse an already approved envelope. A pre-implementation spike must prove
+native allocation, unique-key lookup, conditional installation and partial-state
+visibility. Missing APIs block coding of this path rather than permitting an
+assumed preallocated ID or an apparently completed half-formed ask.
+
+New Plan5 action cards and execution remain disabled until mandatory ADR §5.9
+sufficiency judgement is available and enforced. The existing narrowly scoped
+interim admind-relay exception is not extended to typed wsd actions. Pure module,
+fake-backend and disabled-path development may proceed under their own approved
+implementation scope; this does not enable posting or effects. At coordinated
+wsd/gatekeeper cutover, every ask, including formerly interim relay asks, passes
+the mandatory gate. A permanent or new type-specific exception would require a
+separately reviewed and genuinely approved ADR change, outside this design.
 
 Resume requires the actual dependency/decision state and retained ownership.
 Denial resumes with explicit denial text; success resumes with approved exact
@@ -183,30 +222,62 @@ nor a comment standing alone is a decision or a completion receipt.
 
 ## 6. Single decision writer and Marmot handoff
 
-Proposed §17 #9 choice: admind authenticates and submits **typed action** events
-to wsd's decision queue, including targeted approval ID, shown digest, stable
-surface event ID and authenticated operator identity. Existing design approvals
-continue through their current native `approve-bead` gate. Unknown purposes
-refuse; no label-based guess at which path owns an ask. The interface must be
-jointly specified with the current admind/consumer contracts before coding it.
-A transport reply is distinct from a durable decision read-back; ambiguous
-submissions reconcile by event identity, never fall back to another writer.
+The §17 #9 choice is submission for every approval kind, including design/ADR,
+non-action asks and executable actions. Sender authentication is retained by
+admind, which submits bounded events containing the approval ID, exact shown
+digest, surface/event identity and authenticated sender. Any later enabled
+GitHub, Radicle or terminal approval entrypoint must submit to the same wsd
+queue, never write decisions independently. Purpose selects
+validated behavior after decision; it never selects an independent decision
+writer. Labels cannot confer authority. A transport acknowledgement does not
+prove a committed decision; ambiguous submission reconciles by event identity
+and never falls back to a second writer.
 
-One serial decision queue executes ADR §5.4: durable inbox dedup on surface and
-event, fresh policy/authority check, bead read, posted/current digest equality,
-conditional first-decision write and exact read-back, then inbox committed.
-Conflicting later decisions are superseded. Crash after bead write is repaired
-from that bead's matching event/digest; journal loss does not invent a decision.
-Failed writes remain pending and escalate after the ADR retry limit. Independent
-host scripts must not write action decisions behind this queue.
+For this delivery all operator questions, design approvals, deployment approvals
+and action decisions remain on Marmot through admind, under the operator's current
+delivery requirement. Terminal/chat are diagnostics, not consent; terminal and
+forge decision entrypoints stay disabled/fenced here. The ADR's wider surface
+architecture is not permission to enable those channels in this deployment.
+Any later channel enablement needs an explicit reviewed policy/deployment choice
+and the same single writer, never a second direct writer.
 
-Approval starts execution; it does not close the action bead. Denial closes with
-no execution. A heart reaction files a policy-rule proposal only: the existing
-rule set is unchanged until its separately approved application. Fresh authority
-and current policy are rechecked at the privileged effect boundary; removals,
-hard-deny changes, digest changes or target changes prevent execution. A newer
-policy that remains equally restrictive may proceed only if the implementation
-can prove the same approved effect; otherwise reissue for approval.
+One serial wsd decision queue implements ADR §5.4: persist and deduplicate the
+inbox event; freshly check sender authority and policy; read the bead; compare
+the shown and current digest; conditionally commit the first valid decision;
+read back the exact event, digest, decision, operator and decision time; then
+mark the inbox event committed. Preserve native design approval validation and
+metadata through a supported finalization adapter invoked only by that serial
+writer. It must not remain a separately callable direct decision writer. Later
+conflicting events are recorded as superseded. Bead-write/readback ambiguity
+stays pending and reconciles against the authoritative bead; the journal is not
+approval authority. Apply the ADR's bounded write retries and needs-human path.
+
+Cutover is a coordinated deployment prerequisite, not a per-request label
+switch. Before enabling the queue, retire or convert every old direct writer,
+including admind's design path, terminal approve-bead and forge consumers. A
+recorded writer mode/release fence must reject old direct entrypoints while the
+queue is enabled. If any entrypoint or native finalization API cannot satisfy
+this, the future queue and executor remain disabled and the existing interim
+relay remains unchanged. Operator recovery first fences/stops admission and
+uses supported authenticated management APIs under existing authority, with
+new questions/decisions only through Marmot/admind; it cannot add a concurrent
+direct decision writer or manufacture approved metadata.
+
+Approval starts execution only after all execution admission gates pass; it
+does not close the action bead. Denial closes with no execution.
+
+An authenticated heart commits an ordinary approval through the same digest,
+authority and first-decision checks AND files an idempotent policy-rule proposal,
+as required by ADR §5.4 and the existing reaction contract. Rule proposal filing
+has a durable association with the decision event and an independent recovery
+state. Proposal failure cannot undo the committed decision, repeat execution or
+silently install a rule. Rule application requires its own genuine approval.
+
+Fresh authority and current policy are rechecked at the privileged effect
+boundary; removals, hard-deny changes, digest changes or target changes prevent
+execution. A newer policy that remains equally restrictive may proceed only
+if the implementation can prove the same approved effect; otherwise reissue
+for approval.
 
 ## 7. Executor, credentials and target reconciliation
 
@@ -228,46 +299,126 @@ extra arguments/environment/alternate binaries. The installer must not grant
 wsd the ability to act as the effector through Python, a shell, package manager
 or another helper. Credential setup is a separate operator deployment step.
 
-Executor independently reads the approval through verified read-only access,
-requires committed approve fields and exact envelope/digest binding, validates
-current policy and targets, and verifies decision provenance from the trusted
-queue commit record. No CLI parameter can override any of those facts. The
-journal is operational evidence, not a substitute for the bead decision. The
-service user and database administration are in the trusted host boundary;
-protection against a malicious host with authority to forge both stores is not
-claimed. Sandbox-only code must be unable to reach either store or sudo.
+Executor independently reads the approval through a supported, verified
+read-only Beads principal. It requires the complete committed decision fields,
+validated whole ask and matching digest, approved operator, request revision,
+immutable target pins and dispatch attempt. These authoritative Bead fields are
+the queue commit record; a journal row or a writable sidecar is not a substitute.
+Recompute the digest using the shared native contract and revalidate current
+policy and targets. No CLI parameter may override these facts. The service user
+and database administrators remain trusted host principals; this design does
+not claim protection from a host administrator able to forge those records.
+Sandbox code can reach neither store, the report endpoint nor sudo.
 
-Fetch allowed objects into an effector-owned bare object store, without running
-Git in an agent-writable checkout or reading its hooks/config. Configured source
-paths/remotes are fixed; use explicit protocol, refspec and environment rules,
-reject symlink/ownership substitution, and disable credential forwarding to
-local untrusted transports. Revalidate immutable commit/body/head facts in this
-store. Pin artifact bytes and trusted definitions independently of agent paths.
-Git/forge adapters and queue readers must expose bounded typed results; a
-truncated or invalid response is unknown, not proof of absence.
+No privileged Git invocation may use an agent-writable repository, its local
+transport/upload-pack, configuration, hooks, helpers or alternate object store.
+Unprivileged wsd, without effector credentials, stages a bounded self-contained
+Git bundle from the configured source; all resulting bytes are untrusted. The
+handoff is a fixed service-to-effector directory protocol, never an agent-chosen
+path or command. The effector opens the expected regular file without following
+symlinks, validates the opened descriptor/size, copies it into its private store
+and uses only that private copy thereafter. Agent path replacement cannot alter
+the bytes under verification. Reject unsupported object formats, incomplete
+closures, malformed bundles and exceeded byte/object/time limits.
 
-A per-approval executor lock serializes all run/reconcile/settle operations;
-wsd also serializes the execution lane. Persist executing intent before effect.
-Before an initial action, query whether that exact idempotent effect already
-exists. After timeout, crash, lost output or ambiguous target reply, persist
-uncertain and run reconciliation only; never replay the effect speculatively.
+Verify/import the bundle only in the effector-owned bare store using fixed
+executables, sanitized environment, root-owned configuration and disabled hooks,
+helpers and external transports. Bundle data cannot install configuration,
+remotes or alternates. Independently verify the complete approved object closure
+and exact commit/body/head facts before any credentialed adapter call. No
+privileged process runs Git with an agent checkout as its working repository.
+Credentials never enter the unprivileged staging environment. Prove the exact
+bundle/parser, descriptor-transfer and configuration isolation behavior using
+negative probes before admitting an adapter. Git/forge responses remain bounded
+and typed; invalid or truncated output is unknown, not proof of absence.
+
+wsd alone persists execution intent, dispatch attempts, state transitions,
+results, evidence and closure on Beads through supported native APIs. The
+journal tracks operational delivery/deduplication only. The effector cannot
+write Beads and has no separate authoritative execution database. It submits
+bounded typed claim/result reports over host IPC authenticated by the effector
+OS peer identity and bound to approval ID, attempt ID, request revision, digest
+and the recorded launch. The endpoint accepts no arbitrary metadata, commands
+or file paths. Wrong peer, stale attempt, mismatched pins or oversized reports
+are rejected without state changes. The exact native conditional-write and IPC
+contracts must be demonstrated before enabling effects.
+
+The dispatch record contains approval ID, request revision, decided digest,
+typed target pins, unique attempt ID, purpose, expected prior state and one-use
+claim state. Supported native reads must return these together without a partial
+record being interpreted as admission. The serial writer accepts claim/result
+transitions only against that exact record and expected prior state, then reads
+back the committed tuple; mismatch is uncertainty. A report also binds the
+trusted recorded launch identity, not just an effector UID or client-claimed
+attempt. The integration spike must prove that the OS-authenticated connection
+belongs to that invocation across sudo/exec/restarts and cannot be reused by a
+second concurrent invocation. No new privileged argv, agent-provided path or
+unverified process identity may supply that proof. If the configured native API
+or host IPC cannot enforce this, all effects remain disabled pending a concrete
+reviewed interface correction; no implied SQL or effector-writable fallback.
+
+The sole privileged command remains the fixed launcher `run <approval-id>`.
+Before invoking it, wsd records and reads back a dispatch attempt with an
+explicit purpose: initial effect or read-only reconciliation. Absence, damaged
+state, missing fields and ambiguous writes never imply permission to perform
+an initial effect. For an initial attempt, the effector first verifies the
+committed approval and requests its one-use dispatch claim. The single writer
+durably consumes that claim and records executing before acknowledging it;
+the effector independently reads back that exact consumed claim before acting.
+Only the invocation holding the matching launch claim may proceed. A lost
+acknowledgement, restart or crash after claim consumption yields uncertainty
+and reconciliation only. It does not restore initial permission or create a
+new initial claim. Before the effect, query whether the exact approved effect
+already exists, using the action's evidence contract.
+
+A per-approval effector lock outside temporary cleanup paths serializes all
+invocations; wsd also serializes the execution lane. A reconciliation dispatch
+uses the same `run <approval-id>` command, with purpose read from its persisted
+record, and permits target reads only. It cannot become an initial effect due
+to current target absence. There is no privileged reconcile, settle, force or
+retry mode. Lock acquisition, claim validation and effect admission must fail
+closed across concurrent invocations and process restarts. Unreadable durable
+state stops admission and exposes a recoverable needs-human condition.
 
 | Action | Positive evidence | Uncertain/conflicting evidence |
 |---|---|---|
-| push | configured destination is exactly expected_sha | different destination or unreadable remote holds; no force correction |
+| push | approved expected_sha is demonstrably reachable from the configured destination; the retained pre-effect tip, ancestry checks and non-force submission match the same target and attempt | unreadable/incomplete history, rewrite, conflicting ancestry or unbound submission holds; no force correction or speculative second push |
 | open_pr | unique marker bound to approval/revision plus matching repo/head/base/body facts | multiple candidates, missing visibility or mismatched head holds; no second create |
 | merge | exact PR and approved head demonstrably merged, verified forge result | unrelated merge/head drift or unavailable result holds; no second merge |
 | deploy | target adapter proves approved artifact active and health contract satisfied | partial rollout/unknown version needs-human; no automatic rollback outside approved target contract |
 | notify | receipt for the exact approved message/correlation key | unknown delivery stays needs-human; never duplicate-send on missing receipt |
 
-Success stores evidence and closes approval; definitive failure stores evidence,
-keeps it open/needs-human; uncertainty stays open and unresolved. Reconciliation
-may be retried as read-only bounded work with backoff; executing again requires
-a new approval. Shutdown timeout never implies failure or releases the blocker.
-Manual settlement requires authenticated operator authority, exact action and
-recorded target evidence; a note cannot turn an unobserved effect into verified
-success. Capture an explicit operator-attested disposition if machine proof is
-impossible, preserving that distinction in the resume/result record.
+For push_branch, record the configured destination's observed pre-effect tip
+(or proven absence for creation) and verify that publishing the exact approved
+commit is a non-force fast-forward from that state. Submit only that pinned
+commit. Target reads and retained adapter receipts must identify the same
+repository, destination and attempt. If the destination already contains the
+approved commit, record read-only idempotent success without another push. A
+later legitimate descendant does not erase proof that the approved commit is
+published. Reconciliation requires complete ancestry evidence sufficient for
+this claim; shallow, truncated, unavailable or conflicting history is unknown,
+never proof of absence. No mismatch authorizes force, reset or a repair push.
+
+After effect execution, the effector sends a typed result/evidence report to
+wsd. The writer validates its bound attempt, persists the result and action
+state and reads them back before acknowledging. Success with the prescribed
+positive evidence closes the approval; definitive failure records evidence and
+leaves it open/needs-human; ambiguous outcome remains open/uncertain. Lost result
+acknowledgement reconciles the bead and target; it never authorizes a repeated
+effect. If wsd is unavailable, no new claim is granted. An already consumed
+attempt remains executing/uncertain until supported read-only reconciliation
+can establish its result. Shutdown timeout cannot imply failure or release a
+blocker. A genuinely new effect attempt requires a new approval.
+
+Manual settlement is an authenticated operator event sent to the same serial
+writer. It binds the exact action, current attempt and recorded target evidence;
+wsd may schedule a read-only reconciliation dispatch through the sole launcher.
+A comment is not a result or decision. If machine proof is impossible, retain
+an explicitly operator-attested disposition and its exact authorized scope;
+never label it machine-verified success. Closure/resume from such a disposition
+requires explicit operator authority for that disposition and must show the
+attestation and remaining uncertainty. No manual event can rewrite the original
+approval, grant another initial effect or silently release a different blocker.
 
 ## 8. Dependencies and staged implementation admission
 
@@ -284,15 +435,19 @@ These are proposed implementation slices, not newly claimed tasks:
    decision state machines with migrations and crash checkpoints; fake effects.
 4. Integrate generation-authenticated session requests and park/resume delivery,
    preserving Plan5i contracts rather than adding a second request pipeline.
-5. Resolve and approve §17 #9 interface with admind, including full displayed
-   payload, sender authority, receipts, restart and ambiguous-answer behavior.
-6. Isolated executor with push/PR/merge adapters and fake target reconciliation;
-   gatekeeper availability/release enforcement explicitly tested.
-7. Independently specify versioned deploy targets and receipt-capable notify
-   adapters before enabling those registry entries. No placeholder success.
-8. Review code and exact source pin; propose operator-approved deployment with
-   direct design link, deviations, ownership/sudoers/database proof, fresh
-   stopped backup/migration rehearsal, rollback and live scratch acceptance.
+5. Specify and prove all-kinds decision submission with admind and fencing of
+   terminal/forge direct writers, including native design finalization and
+   full displayed payload,
+   authenticated sender, durable receipts, cutover fencing and ambiguous answers.
+6. Prove the sole-launcher/one-use-claim/report interface, mandatory gatekeeper,
+   object ingress and read-only principal; admit push/PR/merge only after their
+   complete fake-target success/failure/uncertainty and crash matrices pass.
+7. Keep deploy and notify unavailable. Each requires a separately reviewed and
+   approved target/receipt contract and its own complete matrix before enablement.
+8. Review exact source and propose a separately approved initial deployment with
+   direct design link, deviations, writer cutover, database/IPC/sudoers proof,
+   stopped backup/migration rehearsal, rollback and scratch acceptance limited
+   to enabled push/PR/merge. Later adapters require their own deployment approval.
 
 Implementation admission stops if required scanner/retention, current-base
 release revisions or queue/decision interfaces remain unresolved. Release
@@ -329,33 +484,66 @@ Required contract cases:
 - Executor argv/env/config/import/credential isolation; no agent-writable Git
   execution, symlink/config/helper injection or inherited sudo environment;
   read-only reader demonstrably rejects writes.
-- Five target adapters' success/failure/uncertainty matrices; descendants cleaned
-  on timeout, conflicting remote state never overwritten, marker collision never
-  duplicates PR, missing notify receipt never sends again, partial deployment
-  never claims health. Disabled adapter always refuses.
+- Every enabled adapter has a complete success/failure/uncertainty matrix and
+  restart proof. Initial push/PR/merge cases cover later destination descendants,
+  ancestry conflicts, PR marker collisions, ambiguous replies and no speculative
+  second effect. Disabled deploy/notify entries always refuse and are advertised
+  as unavailable; placeholder success is forbidden. Their later enablement adds
+  receipt/health/partial-rollout and no-duplicate-send cases under separately
+  reviewed contracts rather than claiming those tests already exist.
+
 - Journal migrations preserve history, identity, decisions and pending holds;
   partial schema and failed migration rollback; stale close/settle cannot race
   active execution. Mutation probes must kill removed digest/head/provenance
   checks, speculative retry, broadened sudo argv and weakened tier floor.
 
-Live acceptance requires its own deployment approval and a scratch repository,
-explicit test channel and disposable deployment target. Demonstrate actual
-separate-user permissions, forbidden sudo forms, no credentials in sandbox,
-real approve/deny, restart during uncertain action and target reconciliation.
-Record exact reviewed source, config/target revisions, artifact hashes,
-observed receipts, before/after state and rollback limits without credential
-contents. Neither this document nor a passing offline test authorizes that run.
+- All-kinds single-writer cutover: design/ADR, non-action, action, terminal and
+  forge entrypoints cannot race an independent direct writer; native design
+  validation is retained. Heart produces exactly one ordinary decision and an
+  independently recoverable proposal; proposal loss does not repeat the effect.
+- Allocation/finalization interruption at every stage: zero cards/edges for
+  incomplete shells, unique adoption after lost creation reply, duplicate-key
+  ambiguity held, and whole-ask digest computed only after native read-back.
+- One-use execution claim and typed result reports interrupted before/after each
+  write, read-back and acknowledgement, including concurrent launches and writer
+  outage. Missing/consumed/damaged dispatch records never become initial effects;
+  reconcile mode cannot mutate targets; forged/stale reports cannot close tasks.
+- Object ingress rejects agent Git config/upload-pack/helpers, replaced symlinks,
+  malformed or oversized bundles, incomplete object closure and inherited
+  credentials. No privileged Git process executes within an agent repository.
+
+Stage 0 is pure policy/codec/state-machine work using offline fakes, with posting
+and effects disabled. Stage 1 completion requires the all-kinds writer cutover,
+mandatory gatekeeper, proven read-only access and enabled push/PR/merge matrices,
+plus refusal/unavailable exposure for deploy and notify. Stage 1 live acceptance
+requires its own deployment approval and a scratch repository; exercise actual
+separate-user permissions, forbidden sudo forms, credential exclusion, approve/
+deny, uncertain restart and read-only target reconciliation only for the enabled
+adapters. It does not require a nonexistent deployment/notify adapter or authorize
+production messages. Record source/config/target pins, receipts, before/after
+state and rollback limits without credential contents.
+
+Later deploy and notify stages each require their own reviewed contract, human
+approval, complete offline matrix and separately scoped live deployment/test
+channel approval. Full five-action Plan5 completion is claimed only after all
+five adapters pass their applicable gates. Neither this design nor offline
+success authorizes a live run. Plan6/7/8 milestones retain their independent
+scope and acceptance; mandatory sufficiency for these action cards is not a
+claim that all Plan7 intake behavior is complete.
 
 ## 10. Explicit choices for the operator
 
-Approval of the reviewed design must cover: action-only admind submission to
-wsd (§17 #9), request revision/envelope interpretation (§4), initially disabled
-deploy/notify entries until their target contracts are approved, and staged
-acceptance without claiming whole-roadmap completion. An ADR conflict stops
-implementation for a separately reviewed amendment. Unanswered choices remain
-blocking; no timeout, supervisor status override or escalation path fabricates
-an approval. Recovery remains available through the independent admind/operator
-channel and supported task-management APIs, preserving records and real gates.
+Approval of the revised design must cover all-kinds admind submission to the
+sole wsd decision writer and fencing of terminal/forge decision entrypoints,
+coordinated retirement of direct
+writers, native design finalization, the request revision and ID-allocation
+protocol, authoritative Bead execution claims/results with read-only effector
+reports, safe object ingress, mandatory gatekeeper before action enablement and
+staged push/PR/merge acceptance only after exact supported interfaces and
+adapter contracts pass, with all undefined adapters (including deploy/notify)
+disabled. These choices do not expand the interim exception or authorize implementation/deployment on their
+own. Unresolved native API or ADR conflicts stop for a concrete reviewed
+amendment; timeout and management overrides cannot fabricate approval.
 
 ## 11. Unchanged approved supervisor design publication
 
