@@ -1,9 +1,13 @@
+import hashlib
 import shutil
 from pathlib import Path
 
 import pytest
 
+from heterodyne.admind import unit as admind_unit
 from heterodyne.config import ConfigError, load
+from heterodyne.units import Renderer
+from heterodyne.wsd import unit as wsd_unit
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -95,6 +99,54 @@ def test_inline_secret_rejected_reference_accepted(cfg: Path) -> None:
 def test_unknown_env_var_rejected(cfg: Path) -> None:
     with pytest.raises(ConfigError, match="HETERODYNE_ROLES"):
         load(None, env(cfg, HETERODYNE_ROLES="x"))
+
+
+@pytest.mark.parametrize("renderer", [admind_unit.render, wsd_unit.render])
+@pytest.mark.parametrize("release", [
+    hashlib.sha1(b"release sha1 fixture", usedforsecurity=False).hexdigest(),
+    hashlib.sha256(b"release sha256 fixture").hexdigest(),
+])
+def test_rendered_unit_environment_loads_without_metadata_overrides(
+        cfg: Path, renderer: Renderer, release: str) -> None:
+    # Include % to exercise systemd escaping when recovering the actual generated environment.
+    text = renderer("/usr/bin/python3", {"PATH": "/usr/bin:/bin"}, config_dir=str(cfg),
+                    state_dir=str(cfg / "state%dir"), release=release)
+    rendered = dict(line.removeprefix("Environment=").replace("%%", "%").split("=", 1)
+                    for line in text.splitlines() if line.startswith("Environment="))
+    assert rendered["HETERODYNE_RELEASE"] == release
+    assert len(rendered["HETERODYNE_UNIT_REV"]) == 12
+    actual = load(None, {"HOME": str(cfg), **rendered})
+    baseline = load(None, {"HOME": str(cfg), **{k: v for k, v in rendered.items()
+                          if k not in {"HETERODYNE_RELEASE", "HETERODYNE_UNIT_REV"}}})
+    assert actual == baseline
+    assert actual.get("paths.state_dir") == str(cfg / "state%dir")
+
+
+@pytest.mark.parametrize("name,length", [("HETERODYNE_RELEASE", 40), ("HETERODYNE_UNIT_REV", 12)])
+@pytest.mark.parametrize("case", ["empty", "short", "long", "uppercase", "nonhex", "space", "newline"])
+def test_invalid_unit_metadata_rejected_without_echo(cfg: Path, name: str, length: int, case: str) -> None:
+    valid = hashlib.sha256(b"invalid metadata fixture").hexdigest()[:length]
+    invalid = {"empty": "", "short": valid[:-1], "long": valid + "0", "uppercase": valid.upper(),
+               "nonhex": "g" + valid[1:], "space": " " + valid, "newline": valid + "\n"}[case]
+    with pytest.raises(ConfigError, match=name) as caught:
+        load(None, env(cfg, **{name: invalid}))
+    if invalid:
+        assert invalid not in str(caught.value)
+
+
+def test_unit_metadata_preserves_overrides_unknown_rejection_and_secret_scan(cfg: Path) -> None:
+    metadata = {"HETERODYNE_RELEASE": hashlib.sha256(b"release fixture").hexdigest(),
+                "HETERODYNE_UNIT_REV": hashlib.sha256(b"unit fixture").hexdigest()[:12]}
+    c = load(None, env(cfg, **metadata, HETERODYNE_LOG_LEVEL="debug"))
+    assert c.get("debug.log_level") == "debug"
+    assert c.sources["debug.log_level"] == "env:HETERODYNE_LOG_LEVEL"
+    with pytest.raises(ConfigError, match="HETERODYNE_RELEASE_EXTRA"):
+        load(None, env(cfg, **metadata, HETERODYNE_RELEASE_EXTRA="x"))
+    # Recognized metadata must still be scanned before format validation, without echoing its value.
+    secret = "sk-" + "synthetic-not-a-real-secret-value"
+    with pytest.raises(ConfigError, match="secret") as caught:
+        load(None, env(cfg, **{**metadata, "HETERODYNE_RELEASE": secret}))
+    assert secret not in str(caught.value)
 
 
 def test_restrict_applies_to_effective_policy(cfg: Path) -> None:
