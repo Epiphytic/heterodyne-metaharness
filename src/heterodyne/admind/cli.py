@@ -17,7 +17,7 @@ import msgspec
 
 from heterodyne import config as hconfig
 from heterodyne import units
-from heterodyne.admind import approvals, asks, ctl, initialised, links, refs, unit
+from heterodyne.admind import approvals, asks, binding, ctl, initialised, links, refs, unit
 from heterodyne.admind.agent import TMUX_SOCKET, AdminAgent, tmux_launcher
 from heterodyne.admind.audit import Audit
 from heterodyne.admind.commands import CommandRunner
@@ -247,6 +247,8 @@ def notice_command(s: AdmindSettings, args: argparse.Namespace) -> int:
 def ask_command(s: AdmindSettings, args: argparse.Namespace) -> int:
     """`admind ask post|get|wait|list|cancel`. Exit 0 on success, 1 when refused or failed (the reason on
     stderr), 69 when no daemon answers, 3 when `wait` times out."""
+    if args.ask_command == "binding":
+        return ask_binding_command(s, args.ask_id)
     req: asks.AskRequest
     if args.ask_command == "post":
         post = _ask_post(args)
@@ -287,6 +289,26 @@ def ask_command(s: AdmindSettings, args: argparse.Namespace) -> int:
         for line in rest:           # the K14 warning: for the poster, not for a script reading the ID
             print(f"admind: {_terminal(line)}", file=sys.stderr)
     return 0 if reply.result in ("posted", "ok") else 1
+
+
+def ask_binding_command(s: AdmindSettings, ask_id: str) -> int:
+    """Only the daemon reads native state. The client cannot supply policy, files or answer evidence."""
+    req = asks.AskBinding(ask_id)
+    why = asks.check(req)
+    if why is not None:
+        print("admind: invalid ask ID", file=sys.stderr)
+        return 1
+    async def request() -> binding.AskBindingReply:
+        return await asyncio.wait_for(ctl.request(s.state_dir / asks.ASK_SOCKET, req, ASK_READ_SECONDS,
+                                                  reply_type=binding.AskBindingReply,
+                                                  max_reply=asks.MAX_REPLY), ASK_READ_SECONDS)
+    try:
+        reply = asyncio.run(request())
+    except (ctl.CtlUnavailable, TimeoutError):
+        print(NOT_RUNNING, file=sys.stderr)
+        return EX_UNAVAILABLE
+    print(msgspec.json.encode(reply).decode())
+    return 0 if reply.result == "ok" else 1
 
 
 def _ask_wait(s: AdmindSettings, req: asks.AskRequest, timeout: float, as_json: bool) -> int:
@@ -502,6 +524,9 @@ def _ask_parser(ask: argparse.ArgumentParser) -> None:
             one.add_argument("--json", action="store_true")
         if name == "wait":
             one.add_argument("--timeout", type=float, default=WAIT_TIMEOUT)
+    bound = sub.add_parser("binding", help="read complete source-owned ask.binding.v1 evidence")
+    bound.add_argument("ask_id")
+    bound.add_argument("--json", action="store_true", required=True)
     sub.add_parser("list", help="active asks and the 20 most recent others").add_argument(
         "--json", action="store_true")
 

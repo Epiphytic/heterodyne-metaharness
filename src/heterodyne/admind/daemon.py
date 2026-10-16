@@ -34,6 +34,7 @@ from heterodyne.admind import (
     approvals,
     asks,
     backstop,
+    binding,
     chunk,
     commands,
     ctl,
@@ -695,6 +696,13 @@ class Admind:
     async def on_ask(self, req: asks.AskRequest, peer: ctl.Peer) -> asks.AskReply:
         """A request on ask.sock, already checked by `asks.check`. Get, list and cancel work while
         latched (R17); a post does not."""
+        if isinstance(req, asks.AskBinding):
+            async with self.ask_post_lock:
+                ask_id = asks.normalise_id(req.ask_id)
+                if ask_id is None:
+                    return binding.AskBindingReply("refused", "ask.binding.v1 unavailable",
+                                                   code="invalid-state")
+                return binding.read(self.store, ask_id, self.s.chunk_chars, self.load_operators)
         if isinstance(req, asks.AskPost):
             return await self.serialised_post(req, peer)
         if isinstance(req, NoticePost):

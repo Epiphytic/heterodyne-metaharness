@@ -633,3 +633,26 @@ Every record about asks has kind `ask`. Asks are recorded by IDs and lengths, ne
 ```sh
 grep -F 'id:<12 hex>' <state>/admind/audit.jsonl
 ```
+
+### Complete local ask binding evidence
+
+`admind ask binding ASK --json` reads the new `ask.binding.v1` operation over the running daemon's
+local ask socket. It returns a versioned, closed evidence envelope with the complete stored render
+inputs and canonical SHA-256, reproduced card parts and their local outbox delivery state, all retained
+answer/note records with native message and sender provenance, and separately named native decision
+attempts. The recommendation comes from the stored form, including a recommendation other than A.
+Policy principals and their canonical fingerprint are read afresh; the envelope records Linux boot ID
+and BOOTTIME at the read. An answer's `current_policy` flag describes only its configured principal,
+not current group membership or new authority. Revoked actors and contrary answers remain in history.
+
+Exit 0 means complete evidence was returned, not that an operator approved anything. `delivered` means
+the original or a full repeat's outbox parts are marked sent; it does not prove remote visibility or
+human acceptance. Decision attempts remain attempts, including uncertain or unsettled ones. Existing
+`get` and `list` response formats are unchanged. The reader does not write SQLite, execute native task
+commands, accept caller policy/files, or bypass a latch.
+
+Exit 1 returns a fixed typed refusal when evidence is missing, incomplete, oversized, redacted, truncated,
+not reproducible by the current renderer, or has invalid state, unavailable policy, or unavailable boot
+clock evidence. It never returns partial evidence as complete. Legacy records without durable sender
+provenance and cards rendered with an incompatible chunk configuration may therefore be refused.
+Exit 69 means the daemon could not be reached. This interface requires deployment before use.

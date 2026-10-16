@@ -361,6 +361,22 @@ class Store:
         with self.transaction():
             migrate(self.db)
 
+    @contextlib.contextmanager
+    def read_snapshot(self) -> Generator[sqlite3.Connection]:
+        """A consistent SELECT-only consumer view, without a writer reservation or nested mutation.
+
+        The store lock excludes its worker threads; BEGIN is deferred/read-only in the consumer. Rollback
+        releases the snapshot even when validation refuses. This never commits or migrates anything.
+        """
+        with self.lock:
+            if self.db.in_transaction:
+                raise RuntimeError("read snapshot during write transaction")
+            self.db.execute("BEGIN")
+            try:
+                yield self.db
+            finally:
+                self.db.execute("ROLLBACK")
+
     @_locked
     def close(self) -> None:
         self.db.close()
