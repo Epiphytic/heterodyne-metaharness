@@ -1,0 +1,145 @@
+{
+  "schema": "hostread-admission-receipt-1",
+  "state": "Recorded actual prerequisite edge and conditional future recovery scope; H design approval still pending; no execution/resume authority now",
+  "D": "1ebff10074d0f4f8613fea28c56969455be253ab",
+  "R": "1ebff10074d0f4f8613fea28c56969455be253ab",
+  "H": "btq-d551q",
+  "A_H": "btq-yjyb2",
+  "H_state": "blocked/parked current parent, root readback artifact retained",
+  "H_pins": {
+    "design_approval": "btq-yjyb2",
+    "adr_revision": "1ebff10074d0f4f8613fea28c56969455be253ab"
+  },
+  "ask_targets": [
+    "btq-d551q"
+  ],
+  "dependency_change": {
+    "source": "btq-1wu2i",
+    "blocker": "btq-d551q",
+    "type": "blocks",
+    "status": "present in retained fresh native snapshot; original edge application reported DONE by controller"
+  },
+  "dependency_authorization_request": {
+    "card": "djxd",
+    "request": "huno1s2h53cf",
+    "digest_prefix": "15d726019790",
+    "decision": {
+      "card": "djxd",
+      "operator": "Liam",
+      "choice": "A",
+      "at": "2026-10-16T19:59:16+00:00"
+    },
+    "authority": "Authenticated scope decision; retained supported management request huno1s2h53cf, digest prefix15d726019790; fresh native snapshot proves edge present"
+  },
+  "OPS_resume_authority": {
+    "card": "pc65",
+    "operator": "Liam",
+    "choice": "A",
+    "at": "2026-10-16T21:11:42+00:00",
+    "scope": "One conditional later scanner recovery and normal own-lane claim only after genuinely completed hostread delivery, valid unchanged original pxtig approval/pins, all blockers satisfied, fresh exact stopped blocked/unassigned scanner state and reconciled history/worktree/effects. Fresh supported management authorization required at actual application; this scope answer is not a future fact-bound apply token.",
+    "now": "No scanner resume, claim, tests, status change or deployment authorized/executed by this receipt."
+  },
+  "after_native_state_and_edges": {
+    "H": {
+      "status": "blocked",
+      "pins": {
+        "adr_revision": "1ebff10074d0f4f8613fea28c56969455be253ab",
+        "design_approval": "btq-yjyb2"
+      },
+      "dependencies": [
+        [
+          "btq-yjyb2",
+          "blocks"
+        ]
+      ]
+    },
+    "A_H": {
+      "status": "open",
+      "targets": [
+        "btq-d551q"
+      ],
+      "adr_revision": "1ebff10074d0f4f8613fea28c56969455be253ab"
+    },
+    "scanner": {
+      "status": "blocked",
+      "assignee": null,
+      "pins": {
+        "adr_revision": "24a687ccbb246f17a34b15a7ae8c0a07e4af2364",
+        "design_approval": "btq-pxtig"
+      },
+      "dependency_ids": [
+        "btq-d551q",
+        "btq-pxtig"
+      ]
+    }
+  },
+  "authentic_H_design_decision": null,
+  "native_approval_valid_readback": "Not asserted: H human design decision remains pending.",
+  "original_scanner_pin_expectations": {
+    "approval": "btq-pxtig",
+    "approved_digest": "e2a5f3d08708d82358db6ed75550675fa14bd78397f6dedea66e75761f36144b",
+    "adr_artifact_revision": "24a687ccbb246f17a34b15a7ae8c0a07e4af2364",
+    "verify_current_issue_metadata_unchanged": true
+  },
+  "before_snapshot": "retained-scanner-before-hostread-edge-snapshot",
+  "review_history": "Actual R1 REVISE13, R2 REVISE16, R3 REVISE14; d4 incorporated author repairs. Current AGENTS policy supersedes further design-review/cap request. No invented APPROVE.",
+  "signature": "This receipt is signed by its containing Git commit; no operator signature or new human decision fabricated.",
+  "finalization_requirements": [
+    "H genuine design approval still required. Attach this receipt as additive ref without changing original D/R or approved ask targets.",
+    "Later scanner recovery requires H completed, unchanged valid originalpxtig, satisfied blockers and fresh supported authorization; no advance resume now.",
+    "Append later actual H decision/native approval-valid evidence separately; do not mutate historical pending/receipt records."
+  ],
+  "source_evidence": [
+    {
+      "locator": "hostread-implementation-created.json",
+      "sha256": "833e2a6d3bc240be1f0f373907a5a6d614e8275b70d19081114c7f47938a0716",
+      "bytes": 6851
+    },
+    {
+      "locator": "hostread-approval-created.json",
+      "sha256": "32de3f3cead0ac0f330a67da5064add64015a551242aae51998db3006151e16b",
+      "bytes": 5007
+    },
+    {
+      "locator": "hostread-approval-completed-target.json",
+      "sha256": "c2da0ad5687ee30934482cec1c8ec59a6926acaa428e81da5f02b221b85150e7",
+      "bytes": 5499
+    },
+    {
+      "locator": "scanner-before-hostread-edge.json",
+      "sha256": "dbd85d704583caf5dc0704bdcb22219c4a05b63d1268c99513cc0c8622c82103",
+      "bytes": 11878
+    },
+    {
+      "locator": "scanner-hostread-edge-change.json",
+      "sha256": "51f47e40fdd7bc0dd6ef6e71ca774598f8d5f76c02f2c43efa143b6b073d62c5",
+      "bytes": 352
+    },
+    {
+      "locator": "scanner-hostread-edge-effects.txt",
+      "sha256": "483990330a9800bcd46cc3f8e350bcbe105f7db7bba6d28992cd3b81771a2f84",
+      "bytes": 834
+    },
+    {
+      "locator": "djxd-readback.json",
+      "sha256": "00cb0015d48045c10f167b06e16392d45a150a2d9a7b56e5a2865ba42ee3d420",
+      "bytes": 391
+    },
+    {
+      "locator": "pc65-latest.json",
+      "sha256": "77f834938f00ab26b84c32d634241d5659856eda1a554950c29c50144b6cbd8d",
+      "bytes": 401
+    },
+    {
+      "locator": "hostread-pc65-approved-fresh-native.json",
+      "sha256": "c103e87cdebdddc8af69f6be466cd30889d36975865898be08a5bf9f1c76185c",
+      "bytes": 35161
+    },
+    {
+      "locator": "scanner-later-resume-authority-card.md",
+      "sha256": "566e3ffe287deb91991f92f9cfac14664c2f51eaa806d692bb85283fd5f1cbba",
+      "bytes": 3917
+    }
+  ],
+  "filing_limits": "Private raw answers/native snapshots/transcripts/host paths omitted; source hashes retained. Answer field text not copied. No new model/review/native/queue/send/test action."
+}

@@ -1,0 +1,11 @@
+{
+  "schema": "hostread-admission-receipt-publication-1",
+  "primary_design_revision_unchanged": "1ebff10074d0f4f8613fea28c56969455be253ab",
+  "primary_approval": "btq-yjyb2",
+  "target": "btq-d551q",
+  "receipt_path": "docs/receipts/2026-10-16-hostread-d4-admission-receipt.json",
+  "receipt_sha256": "7bf29b7bec3556c226492c088597b6c0e5788782c7a78fa7a8ee7768aee850be",
+  "state": "Conditional later recovery scope recorded; H design decision pending; scanner remains blocked. No immediate recovery or deployment.",
+  "source": "Actual retained authenticated djxd/pc65 readbacks plus current native facts, referenced by hashes in receipt. Exact raw private records are not published.",
+  "signature": "Containing signed root Git commit; no synthetic human signature or design approval."
+}
