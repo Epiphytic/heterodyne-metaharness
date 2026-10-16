@@ -1,0 +1,287 @@
+{
+  "format": 1,
+  "status": "PROPOSED_UNREVIEWED_D3",
+  "task": "btq-4dnri",
+  "author": "Codex",
+  "actual_design_review_rounds_used": 2,
+  "human_design_approval": null,
+  "implementation_authorized": false,
+  "live_execution_authorized": false,
+  "clock": {
+    "start": null,
+    "end": null,
+    "qualifying_seconds": null
+  },
+  "product_base": "07637745fe75dc614109a0b8ba72d3489f262a97",
+  "spec": {
+    "path": "docs/designs/2026-10-16-plan9-release-corpus-and-acceptance-d3.md",
+    "sha256": "de8711b1e18c9884b9fd94d09d60fc3317cac34866f9b1c2b2ba7d255b880bd0"
+  },
+  "source_locator_note": "Logical repository labels resolve via controller private source-map. No public remote asserted for private ADR repositories. Exact source objects/bytes verified. No copied or opaque encoded archives. Product076 baseline is a source pin, not loaded-release proof.",
+  "sources": [
+    {
+      "repository": "governing-adr17-design-repository",
+      "commit": "a27acecee8274e6ad8dc65def436614d42b5cb04",
+      "path": "docs/adr/0001-workstreams-v2.md",
+      "git_blob": "40e02d55e6b752dcb97fd5ac21b0e920e7194d47",
+      "sha256": "3b6da7d95d2652619439192a5fbda0dc5e281e8e5bd87813e95ae8c5d860ea3c"
+    },
+    {
+      "repository": "adr16-design-repository",
+      "commit": "93d0e90b121a07db720d92924cda443a1cfc239c",
+      "path": "docs/adr/0001-workstreams-v2.md",
+      "git_blob": "4b608411f364760c93ad10155bdcbe23d7b9d992",
+      "sha256": "13086760390dc786c233fe358048878e1fa657f374f61534d619a8d22b8d8b35"
+    },
+    {
+      "repository": "Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "docs/superpowers/plans/2026-09-29-heterodyne-v1-roadmap.md",
+      "git_blob": "b5654e5d5eeb7e205c6cb4103dd4b57ddcb6c9f0",
+      "sha256": "87ef1a4aa63e2f35aca075c9b0f63be7a1c93e9225099e8396f135a21a9df9a1"
+    },
+    {
+      "repository": "Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "docs/spikes/admind-acceptance.md",
+      "git_blob": "b4547ab19e8e1ce22ef64e96ae38ffad0887f3db",
+      "sha256": "97cbf6ce276a742aca84a655a3edbb5bf59b6d217f0e11f5ea11f587e9e8c1e5"
+    },
+    {
+      "repository": "Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/wsd/recovery.py",
+      "git_blob": "b40524d4ce9dae0d15755cec1681fa5bd123c7ee",
+      "sha256": "948b48cff76e7b167dbdb1534f2ca4ff27d9be2cbe97ace54adaf48eb23b1953"
+    },
+    {
+      "repository": "Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/wsd/daemon.py",
+      "git_blob": "3264856f84fb7de7a51d0fbea6e484b9074b422f",
+      "sha256": "3c285bdc61d2dc1cc245e0c90fac54a3fa821ce45298d858c8b016e2a38c60bd"
+    },
+    {
+      "repository": "Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "tests/test_wsd_recovery.py",
+      "git_blob": "6e50aec167578c48b3bed7b69ddcb955ffb3875b",
+      "sha256": "0bc8ec7c70fde33422e7fbeeb8f8947abb599123b33e60226bd3ce0aabf05050"
+    },
+    {
+      "repository": "Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "tests/test_deploy_platform.py",
+      "git_blob": "d767077150ad28b16708e7f00a421f18a3863d6c",
+      "sha256": "a8818c8e38b2a5cad81de83aebad2bfe4ffdf81724706c063b6ca8983870b754"
+    },
+    {
+      "repository": "Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "tests/live/test_live_sandbox.py",
+      "git_blob": "74c1fa15788c10ac5e04cebaab300fe676cbbb06",
+      "sha256": "33dec35166ff20d5cf8e5f1480e6a617979c2523986579e218430b576c5f70f9"
+    },
+    {
+      "repository": "Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "deploy/store-helper/README.md",
+      "git_blob": "0c1f80f2d6967b63bd116750b9f244f7fa041779",
+      "sha256": "010fc6bed0edb45d5ec0ae24e2889cdb959049824ae880d70e712293e39bc5df"
+    },
+    {
+      "repository": "beads-task-queue",
+      "commit": "6fe57598468ff53bf74dfd9e1cf181ad3177c3f1",
+      "path": "bin/btq",
+      "git_blob": "4d5a1d463673bec99da4186715efd889a1e311b3",
+      "sha256": "ec2bc67b227326c80bf5d9a32eb661b220ea9af6942ef31bff04d8c06941bd2e"
+    },
+    {
+      "repository": "Epiphytic/heterodyne-metaharness",
+      "commit": "c9fa7942386556b5227d96cbe73b8ca4a9223efc",
+      "path": "docs/designs/2026-10-16-plan8-scheduling-reconciliation.md",
+      "git_blob": "598ff0cec214c1db94a41b9b75e66b02928cc1c6",
+      "sha256": "ce4e1b9016f89e7e4266d707beaa82dec7c542d6e3e51a524fde48b2f0fd1a14",
+      "status": "UNAPPROVED_PROVISIONAL_SOURCE_NOT_AUTHORITY",
+      "immutable_url": "https://github.com/Epiphytic/heterodyne-metaharness/blob/c9fa7942386556b5227d96cbe73b8ca4a9223efc/docs/designs/2026-10-16-plan8-scheduling-reconciliation.md"
+    }
+  ],
+  "historical_approval_evidence": [
+    {
+      "id": "btq-ovngv",
+      "evidence_source": "release-resume-2026-10-16/native-workstream-issues.json (private_inputs exact hash); historical snapshot, not fresh queue read",
+      "metadata": {
+        "adr_revision": "a27acecee8274e6ad8dc65def436614d42b5cb04",
+        "approved_by": "Liam",
+        "approved_at": "2026-10-14T15:57:38Z",
+        "approved_digest": "c874eb3d81c0647f53005e5cfb1b35f33ca30bf6617bc10e84d24079d7ba6fbb",
+        "context_digest": "c874eb3d81c0647f53005e5cfb1b35f33ca30bf6617bc10e84d24079d7ba6fbb",
+        "decision": "approve",
+        "design_review": "reviewer=gpt-6.1-sol author=claude-opus-5-5 mode=cross-model",
+        "via": "marmot",
+        "via_ref": "marmot:id:189fd6bb97ba"
+      }
+    },
+    {
+      "id": "btq-xywu0",
+      "evidence_source": "release-resume-2026-10-16/native-workstream-issues.json (private_inputs exact hash); historical snapshot, not fresh queue read",
+      "metadata": {
+        "adr_revision": "93d0e90b121a07db720d92924cda443a1cfc239c",
+        "approved_by": "Liam",
+        "approved_at": "2026-10-13T20:23:40Z",
+        "approved_digest": "183d522381d3246c90dfcb98cbd6de7844f635482b267065472a80c0783172df",
+        "context_digest": "183d522381d3246c90dfcb98cbd6de7844f635482b267065472a80c0783172df",
+        "decision": "approve",
+        "design_review": "reviewer=gpt-6.1-sol author=claude-opus-5-5 mode=cross-model",
+        "via": "marmot",
+        "via_ref": "marmot:id:194185aeb556"
+      }
+    }
+  ],
+  "private_inputs": [
+    {
+      "private_handoff_relative_path": "plan9-preparation/assessment.md",
+      "sha256": "d321df9bd310f5984a69547271d65d9b2f71bfcbe2108a78ff5ecb548d47e5da",
+      "role": "Historical Plan9 assessment; obsolete586/tz5o8 authority claim is corrected in d2"
+    },
+    {
+      "private_handoff_relative_path": "plan9-preparation/evidence.json",
+      "sha256": "940941a1cfe78e28244b97820d1d222afea3e619089cfd6867389d590f774aff",
+      "role": "Historical preparation/source discovery; obsolete authority claim corrected, no release proof"
+    },
+    {
+      "private_handoff_relative_path": "deployment-and-next-work-receipt-2026-10-16.json",
+      "sha256": "9c8e68f78c2abc7e5659ddb5894bbbcf6e9cb00f7370c112b187cfaee73f72d2",
+      "role": "Actual bounded deployment/next-work receipt; only recorded scope and timestamp"
+    },
+    {
+      "private_handoff_relative_path": "deployed-main-07637745-hosted-ci-result.json",
+      "sha256": "38a661a218a25fa89ef55eb1a9f66ea4e71c0f38a7bcc63f2e7f39a5b06153e4",
+      "role": "Actual bounded hosted CI evidence at recorded source/time; not elapsed acceptance"
+    },
+    {
+      "private_handoff_relative_path": "guard-retry-07637745/deployment-result.json",
+      "sha256": "24c68202e520a975012ef5ecb50099889b6d5f40eaabd757fbb750927f9a42db",
+      "role": "Actual bounded deployment/next-work receipt; only recorded scope and timestamp"
+    },
+    {
+      "private_handoff_relative_path": "guard-rearm-07637745/result.json",
+      "sha256": "124a811ff5e12ac1d9ab4a1ff4123f39b27de7790feb693a08d70ac1a9004e0f",
+      "role": "Actual bounded guard rearm result; operational intervention, not acceptance time"
+    },
+    {
+      "private_handoff_relative_path": "release-resume-2026-10-16/native-workstream-issues.json",
+      "sha256": "984f34dcef44961472d1b6846842ac3f2752be39887f8f14bccafa4cb0da37d3",
+      "role": "Exact source of historical ovngv and xywu0 approval projections; not a fresh queue read"
+    },
+    {
+      "private_handoff_relative_path": "plan7-preparation/evidence.json",
+      "sha256": "efbfb3eed427650768525c5738a95b2e4c5829b97493f2e0740dcbfae1e54af3",
+      "role": "Historical related intake/predecessor discovery, not installed/approved Plan7 proof"
+    },
+    {
+      "private_handoff_relative_path": "review-4dnri-builtin-design-r1.log",
+      "sha256": "e2c7531a0104e7765ba69eb1fa5280a8ec84d0a66e2b356668dcc3bb1fe0a012",
+      "role": "Actual original R1 report bytes; REVISE20, no inferred clearance"
+    },
+    {
+      "private_handoff_relative_path": "review-4dnri-builtin-design-r1-findings-extracted.json",
+      "sha256": "0edbea5c31993f4b17ec560e0bb966c78aa46a50c9549b04f66343f898ab3ed3",
+      "role": "Exact ordered20 actual findings; input to verbatim author dispositions"
+    },
+    {
+      "private_handoff_relative_path": "review-4dnri-builtin-design-r1-result.json",
+      "sha256": "c195327bce9b9eabe0c740c4df47377bbb95be0288fd209856bdd2b1ad5d81eb",
+      "role": "Actual R1 invocation/exit metadata, not a new review"
+    },
+    {
+      "private_handoff_relative_path": "plan7a-plan8-d1-github-publication-verified.json",
+      "sha256": "70e25fac6e43187a77950b19aec81eb7639b386b5d4b0b2dc3c1ed021190f749",
+      "role": "Historical exact Plan8 source publication proof; not design approval"
+    },
+    {
+      "private_handoff_relative_path": "review-4dnri-builtin-design-r2.log",
+      "sha256": "6817cd4e504e3e96d3bead1678b5ac5b66b12eb85a32f50373a9150fcaa401b1",
+      "role": "Actual R2 evidence; 22 ordered findings, no inferred clearance"
+    },
+    {
+      "private_handoff_relative_path": "review-4dnri-builtin-design-r2-findings-extracted.json",
+      "sha256": "dc493378b5ae8b09c1e645252c97fa15d229e694536e0b0b477167c1d789bb50",
+      "role": "Actual R2 evidence; 22 ordered findings, no inferred clearance"
+    },
+    {
+      "private_handoff_relative_path": "review-4dnri-builtin-design-r2-result.json",
+      "sha256": "d677ed4b37d98700bd9182566538f05e059b172472cdeeda69c9c40340998b8b",
+      "role": "Actual R2 evidence; 22 ordered findings, no inferred clearance"
+    }
+  ],
+  "decisions_requiring_human_design_approval": [
+    "early evidence protocol retains all Plans5–8 execution gates",
+    "exact same-boot BOOTTIME 72h, <=1s UTC cross-check, 300/600s autonomous full-audit checkpoint continuity with no recurring operator declarations",
+    "stable immutable component Identity, explicit isolated drill projections and proven bounded cache invalidations",
+    "both adapter steering paths preclock; all six drills; natural typed migrated corpus during clock",
+    "all questions/approvals Marmot-only under current operator instruction, explicitly stricter than historical terminal exception",
+    "phase1 production forge ingress/bridge/polling disabled despite ADR9 job mention; isolated fake poll tests only",
+    "user schedules original obligation remains unless genuinely native-approved separate ADR amendment",
+    "atomic checkpoint-ended stop/seal/recovery and final complete nonclosed three-repository migration/second delta; current release equality at archival"
+  ],
+  "limits": [
+    "No tests, models, task/queue operations, live migration/observation, install, deployment, archive or sends.",
+    "Future final predecessor sources/runbooks/observer remain required; no provisional implementation or CLI assumed.",
+    "Historical snapshots/receipts prove only their own recorded scopes, not current task state or full release.",
+    "Native admission and immutable GitHub publication remain controller responsibilities."
+  ],
+  "actual_review_lineage": [
+    {
+      "round": 1,
+      "outcome": "REVISE",
+      "finding_count": 20,
+      "reviewed_commit": "1197d1adb034e2e737de2a33d72df2482e107d10",
+      "reviewer": "Claude through actual built-in /code-review invocation; actual invocation metadata retained privately",
+      "requested_model": "opus",
+      "actual_reported_model_identity": "not inferred from requested alias",
+      "raw_report_sha256": "e2c7531a0104e7765ba69eb1fa5280a8ec84d0a66e2b356668dcc3bb1fe0a012",
+      "extracted_findings_sha256": "0edbea5c31993f4b17ec560e0bb966c78aa46a50c9549b04f66343f898ab3ed3",
+      "invocation_result_sha256": "c195327bce9b9eabe0c740c4df47377bbb95be0288fd209856bdd2b1ad5d81eb"
+    },
+    {
+      "round": 2,
+      "outcome": "REVISE",
+      "finding_count": 22,
+      "reviewed_commit": "bc72695263d0972d21724e26ef50f6c9c41ac124",
+      "raw_report_sha256": "6817cd4e504e3e96d3bead1678b5ac5b66b12eb85a32f50373a9150fcaa401b1",
+      "extracted_findings_sha256": "dc493378b5ae8b09c1e645252c97fa15d229e694536e0b0b477167c1d789bb50",
+      "invocation_result_sha256": "d677ed4b37d98700bd9182566538f05e059b172472cdeeda69c9c40340998b8b",
+      "requested_model": "opus",
+      "actual_reported_model_identity": "not inferred from requested alias"
+    }
+  ],
+  "historical_d1": {
+    "commit": "1197d1adb034e2e737de2a33d72df2482e107d10",
+    "spec": {
+      "path": "docs/designs/2026-10-16-plan9-release-corpus-and-acceptance.md",
+      "sha256": "c1292a22fdb4fd49175c9d139ba1688b378e489ba2ba22bf5478e5b838e981f0"
+    },
+    "manifest_path": "docs/reviews/plan9-d1-inputs.json",
+    "manifest_sha256": "4a4468b1cc13278bb96e411bafe0fddc2cef45a1f79e0f4ced18b2792af541f0"
+  },
+  "author_dispositions": [
+    {
+      "path": "docs/reviews/plan9-d3-r2-dispositions.json",
+      "sha256": "3b742d6c193002d9a20583c57687ca17c0547f079945b81551d717de9304b8b0"
+    },
+    {
+      "path": "docs/reviews/plan9-d3-r2-dispositions.md",
+      "sha256": "539f81557bce9ca6177899f9edfa731f9fc310196a20b0a40019ded9e94e5ad5"
+    }
+  ],
+  "historical_d2": {
+    "commit": "bc72695263d0972d21724e26ef50f6c9c41ac124",
+    "spec": {
+      "path": "docs/designs/2026-10-16-plan9-release-corpus-and-acceptance-d2.md",
+      "sha256": "fca7c7e45c9b2668c2ec9a6afb9954510c6522c84862e695f8c4101126f5b005"
+    },
+    "manifest_path": "docs/reviews/plan9-d2-inputs.json",
+    "manifest_sha256": "dfb8dec4a8654838967bc7e0a97feac8cf577aa84b8000de059711d8e9bf62c6"
+  }
+}
