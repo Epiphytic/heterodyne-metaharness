@@ -36,8 +36,9 @@ from heterodyne.harness import selection
 from heterodyne.harness import verify as hv
 from heterodyne.harness.selection import InstallPin
 from heterodyne.harness.store import Store
-from heterodyne.sandbox import sessiongit
+from heterodyne.sandbox import creates, sessiongit
 from heterodyne.sandbox.backend import Backend, BackendError, BackendUnavailable, ExecResult, Watch
+from heterodyne.sandbox.reaper import LINGER_SECONDS
 from heterodyne.sandbox.selftest import ProbeContext, SelfTest, SelfTestFailed
 from heterodyne.sandbox.settings import SandboxSettings, WsSandbox
 from heterodyne.sandbox.spec import (
@@ -164,6 +165,7 @@ class SessionRecord(msgspec.Struct, frozen=True, kw_only=True):
     ended_at: int = 0                 # the `ended` write's clock
     install_name: str = ""            # plan 4c T8: the generation's verified install and manifest digest
     install_digest: str = ""
+    create_ledger: bool = False       # migration was completed; cleanup must not recreate an old entry
 
 
 def read_record(layout: SessionLayout) -> SessionRecord | None:
@@ -287,6 +289,8 @@ def _canonical(login_files: tuple[Path, ...]) -> tuple[tuple[Path, ...], tuple[t
 @dataclass(frozen=True)
 class RuntimeConfig:
     sessions: Path                    # <wsd state>/sessions
+    creates: Path                     # <state>/creates, outside every sandbox bind
+    alerts: Path                      # <state>/alerts, shared with same-user admind
     credlocks: Path                   # <wsd state>/credlocks: the D8 lock directory (wsd.credlock)
     settings: SandboxSettings
     accounts: Accounts
@@ -339,16 +343,168 @@ class SandboxRuntime:
         """Per generation, like the sandbox it watches (`sandbox_name`): no later launch replaces it."""
         return f"wsd-{short_id(key)}-r{generation}"
 
+    def _ledger(self) -> creates.Ledger:
+        try:
+            return creates.Ledger(self.c.creates, self.c.alerts)
+        except OSError:
+            raise RuntimeUnavailable("the create ledger can't be opened") from None
+
+    def _submission(self, ledger: creates.Ledger, rec: SessionRecord) -> bool:
+        return ledger.put(rec.sandbox, "", key=rec.key, ws=rec.ws, bead=rec.bead,
+                          generation=rec.generation, deadline=rec.deadline, pane=rec.tmux_session,
+                          at=self.c.clock()) and ledger.submission(rec.sandbox) is not None
+
+    def _recover_create(self, ledger: creates.Ledger, rec: SessionRecord) -> None:
+        if ledger.submission(rec.sandbox) is None:
+            return
+        if rec.created:
+            ledger.put(rec.sandbox, "settled", how="returned", at=self.c.clock())
+        elif not rec.create_started:
+            ledger.put(rec.sandbox, "settled", how="never_submitted", at=self.c.clock())
+
+    def _watcher_live(self, name: str) -> bool:
+        return self.c.tmux.has_session(name) and not self.c.tmux.pane_dead(name)
+
+    def _arm(self, entry: dict[str, Any]) -> None:
+        """Confirm startup with a unique ready receipt and a live pane, never a retained dead pane."""
+        ledger, tmux = self._ledger(), self.c.tmux
+        key, generation, sandbox = entry["key"], entry["generation"], entry["sandbox"]
+        name = self.reaper_name(key, generation)
+        ready = ledger.directory / f".ready-{sandbox}-{secrets.token_hex(8)}"
+        attempted = False
+        try:
+            if tmux.has_session(name):
+                if not tmux.pane_dead(name):
+                    return
+                tmux.kill(name)
+                if not tmux.session_absent(name):
+                    raise RuntimeUnavailable("a dead watcher can't be removed")
+            layout = self.layout(key)
+            watch = Watch(generation, layout.reaped(generation), entry["pane"], tmux.binary,
+                          tmux.socket_name, tmux.socket_path, ledger.directory, ledger.alerts, ready)
+            argv = self.backend.reaper_argv(sandbox, entry["deadline"], layout.record, watch)
+            private_dir(self.c.sessions)
+            attempted = True
+            tmux.new_session(name, self.c.sessions, argv)
+            until = self.c.wait_clock() + 10
+            while True:
+                live = self._watcher_live(name)
+                if ready.is_file():
+                    if not live:
+                        break
+                    ready.unlink()
+                    creates.sync(ledger.directory)
+                    return
+                if not live or self.c.wait_clock() >= until:
+                    break
+                self.c.sleep(0.2)
+        except (*TMUX_ERRORS, OSError):
+            pass
+        finally:
+            with contextlib.suppress(OSError):
+                ready.unlink(missing_ok=True)
+        if attempted:
+            with contextlib.suppress(*TMUX_ERRORS):
+                tmux.kill(name)
+        raise RuntimeUnavailable(f"the watcher of {sandbox} did not start")
+
     def _reaper(self, rec: SessionRecord) -> None:
-        """D13's backstop: a process in wsd's tmux server (its own systemd scope, so it outlives wsd) that
-        deletes the sandbox at the deadline, whether or not wsd, its queue or its reconciliation works."""
-        name = self.reaper_name(rec.key, rec.generation)
-        self.c.tmux.kill(name)
-        layout, tmux = self.layout(rec.key), self.c.tmux
-        watch = Watch(rec.generation, layout.reaped(rec.generation), rec.tmux_session, tmux.binary,
-                      tmux.socket_name, tmux.socket_path)
-        argv = self.backend.reaper_argv(rec.sandbox, rec.deadline, layout.record, watch)
-        self.c.tmux.new_session(name, self.c.sessions, argv)
+        entry = self._ledger().submission(rec.sandbox)
+        if entry is None:
+            raise RuntimeUnavailable("the create's submission can't be read")
+        self._arm(entry)
+
+    def _cleanup_create(self, ledger: creates.Ledger, name: str) -> None:
+        watcher = f"wsd-{name.split('g')[0]}-r{name.rsplit('g', 1)[1]}"
+        if self.c.tmux.has_session(watcher):
+            if not self.c.tmux.pane_dead(watcher):
+                return
+            self.c.tmux.kill(watcher)
+        if not self.c.tmux.session_absent(watcher):
+            raise RuntimeUnavailable("a finished create's watcher can't be confirmed absent")
+        if not ledger.close_notice(name, self.c.clock()):
+            raise RuntimeUnavailable("a finished create's close-out notice can't be written")
+        ledger.cleanup(name)
+
+    def _restore_creates(self, *, ws: str | None = None, key: str | None = None) -> None:
+        """Migrate once, restore protection, then sweep late/finished creates and crash cleanup."""
+        ledger = self._ledger()
+        try:
+            records = {r.sandbox: r for r in self._records()}
+            for rec in records.values():
+                if (ws is not None and rec.ws != ws) or (key is not None and rec.key != key):
+                    continue
+                if rec.create_ledger:
+                    continue
+                needed = ((rec.create_started and not rec.created) or
+                          (rec.created and rec.phase != Phase.ENDED))
+                if needed:
+                    if not self._submission(ledger, rec):
+                        raise RuntimeUnavailable("a legacy create can't be recorded")
+                    self._recover_create(ledger, rec)
+                    if rec.created and not creates.settled(ledger.directory, rec.sandbox):
+                        raise RuntimeUnavailable("a returned legacy create can't be settled")
+                self._phase(self.layout(rec.key), rec, create_ledger=True)
+            names = ledger.names()       # Enumeration failures never mean an empty ledger.
+            for name in names:
+                entry = ledger.submission(name)
+                if entry is not None:
+                    if (ws is not None and entry["ws"] != ws) or (key is not None and entry["key"] != key):
+                        continue
+                    rec = records.get(name)
+                    if rec is not None:
+                        self._recover_create(ledger, rec)
+                elif not creates.settled(ledger.directory, name):
+                    raise RuntimeUnavailable("a create ledger entry is unreadable")
+                # Orphan settlements are interrupted cleanup, not a reason to arm a new watcher.
+                if creates.gone(ledger.directory, name):
+                    self._cleanup_create(ledger, name)
+                    continue
+                if entry is not None:
+                    self._arm(entry)
+                before = creates.settled(ledger.directory, name)
+                rec = records.get(name)
+                stale = rec is None or rec.phase == Phase.ENDED
+                if stale:
+                    listed = self.backend.names()
+                    if name in listed:
+                        ledger.observe(name, "sweep", self.c.clock())
+                    if not self.backend.delete(name):
+                        raise RuntimeUnavailable("a late sandbox of an earlier generation can't be deleted")
+                    if before:
+                        ledger.put(name, "gone", by="sweep", at=self.c.clock())
+                    if creates.gone(ledger.directory, name):
+                        self._cleanup_create(ledger, name)
+        except (*TMUX_ERRORS, OSError, BackendError, BackendUnavailable):
+            raise RuntimeUnavailable("create protection can't be confirmed") from None
+
+    def settle_sandbox(self, ws: str, sid: str, generation: int) -> str:
+        """Host operator accepts the remaining late-create risk after linger and an absent listing."""
+        if not SHORT_ID.fullmatch(sid) or generation <= 0:
+            raise ResolveRefused("invalid session or generation")
+        ledger, name = self._ledger(), f"{sid}g{generation}"
+        entry = ledger.submission(name)
+        if entry is None or entry["ws"] != ws:
+            raise ResolveRefused("the create is unknown")
+        evidence = creates.settlement(ledger.directory, name)
+        if evidence is not None and evidence["how"] != "operator":
+            raise ResolveRefused("the create is already settled by another kind")
+        if evidence is None:
+            if self.c.clock() < entry["deadline"] + LINGER_SECONDS:
+                raise ResolveRefused("its watcher is still within its linger")
+            try:
+                if name in self.backend.names():
+                    raise ResolveRefused("the sandbox may exist; its watcher will delete it first")
+            except (BackendUnavailable, BackendError):
+                raise ResolveRefused("the sandbox may exist; its watcher will delete it first") from None
+            if not ledger.put(name, "settled", how="operator", by="wsctl", at=self.c.clock()):
+                raise RuntimeUnavailable("the operator settlement can't be written")
+            evidence = creates.settlement(ledger.directory, name)
+            if evidence is None or evidence["how"] != "operator":
+                raise ResolveRefused("the create is already settled by another kind")
+        observed = creates.read(ledger.directory / f"{name}.observed.json", name)
+        return ("never observed" if observed is None else
+                f"observed at least once by {observed.get('by')} at {observed.get('at')}")
 
     # --- AgentRuntime ---
 
@@ -356,12 +512,17 @@ class SandboxRuntime:
         return self.backend.available()
 
     def sessions(self, ws: str) -> list[Session]:
+        self._restore_creates(ws=ws)
         try:
             names = self.backend.names()
         except BackendUnavailable:
             raise RuntimeUnavailable("the sandbox backend can't list its sandboxes") from None
         records = self._records()
         known = {short_id(r.key) for r in records}
+        try:
+            known.update(n.split("g")[0] for n in self._ledger().names())
+        except OSError:
+            raise RuntimeUnavailable("the create ledger can't be read") from None
         if any(NAME.fullmatch(n) and n.rsplit("g", 1)[0] not in known for n in names):
             raise RuntimeUnavailable("a sandbox has no session record")
         listed: list[Session] = []
@@ -393,6 +554,7 @@ class SandboxRuntime:
             raise LaunchFailed(str(exc)) from None
         if pinned.git_dir == pinned.common:
             raise LaunchFailed("a sandbox can't hold the main worktree: its git directory is inside it")
+        self._restore_creates(key=spec.session_key)
         layout = self.layout(spec.session_key)
         prev = read_record(layout)
         if prev is None and os.path.lexists(layout.git):
@@ -432,7 +594,7 @@ class SandboxRuntime:
                             phase=Phase.CREATING, sandbox=name, tmux_session=self.tmux_name(spec.session_key),
                             ran=prev.ran if prev else False, native_id=prev.native_id if prev else None,
                             worktree=str(spec.worktree), repo=str(spec.repo), install_name=installed.name,
-                            install_digest=installed.digest)
+                            install_digest=installed.digest, create_ledger=True)
         write_record(layout, rec)
         try:
             self._registered(adapter, installed)
@@ -764,15 +926,25 @@ class SandboxRuntime:
         # Codex T12 r1 #2, r2: a create is possible from here, and the record says so before the watcher
         # starts, so the watcher never reads it as settled while this launch could still submit one, however
         # long it stalls (`reaper.settled`).
-        rec = self._phase(layout, rec, seeded=True, create_started=True,
-                          deadline=min(exposed + c.settings.max_lifetime_seconds,
-                                       checked.expiry - c.settings.stop_margin_seconds))
-        self._reaper(rec)                    # the backstop exists before the sandbox does
+        deadline = min(exposed + c.settings.max_lifetime_seconds,
+                       checked.expiry - c.settings.stop_margin_seconds)
+        ledger = self._ledger()
+        planned = msgspec.structs.replace(rec, deadline=deadline)
+        if not self._submission(ledger, planned):
+            raise _StepFailed("the create's submission can't be written")
+        rec = self._phase(layout, rec, seeded=True, create_started=True, deadline=deadline)
+        try:
+            self._reaper(rec)
+        except RuntimeUnavailable as exc:
+            raise _StepFailed(str(exc)) from None
         if c.clock() >= rec.deadline:
-            # T11 r3: past the deadline nothing is created, and the record says so before the launch ends.
+            if not ledger.put(rec.sandbox, "settled", how="never_submitted", at=c.clock()):
+                raise _StepFailed("the unsubmitted create can't be settled")
             rec = self._phase(layout, rec, create_started=False)
             raise _StepFailed("the launch stalled past its deadline before the sandbox was created")
         self.backend.create(sp, scratch)
+        # Even if this write fails, persist created=True: R2 repairs it on recovery.
+        ledger.put(rec.sandbox, "settled", how="returned", at=c.clock())
         rec = self._phase(layout, rec, created=True)
         self._still_checked(adapter, spec, protected.chosen_files, checked)
         if c.clock() >= rec.deadline:
@@ -987,6 +1159,9 @@ class SandboxRuntime:
         unconfirmed and the next pass retries it (the reaper still bounds a lifetime). Any other end
         still stops, since a restart would find the same cause."""
         layout = self.layout(rec.key)
+        ledger = self._ledger()
+        self._recover_create(ledger, rec)
+        was_settled = creates.settled(ledger.directory, rec.sandbox)
         owed: dict[str, str] = {}
         if lifetime or rec.stop_reason == "lifetime":
             mark = rec.wip_mark or f"lifetime:{rec.key}:{rec.generation}"
@@ -1003,7 +1178,9 @@ class SandboxRuntime:
         if not self._teardown(rec, interrupt=interrupt) or not journaled:
             return False                     # the reaper stays: it is the backstop until the end is confirmed
         self._watch(self.c.clock(), due_only=False)    # T9: the tree as the generation left it, `stopping`
-        if rec.created:              # a create that failed or timed out may still land: its watcher stays
+        if was_settled:
+            ledger.put(rec.sandbox, "gone", by="teardown", at=self.c.clock())
+        if creates.gone(ledger.directory, rec.sandbox) and ledger.close_notice(rec.sandbox, self.c.clock()):
             with contextlib.suppress(*TMUX_ERRORS):
                 self.c.tmux.kill(self.reaper_name(rec.key, rec.generation))
         try:
@@ -1102,7 +1279,14 @@ class SandboxRuntime:
         prefix = f"{short_id(rec.key)}g"
         try:
             mine = [n for n in self.backend.names() if n.startswith(prefix)]
-            confirmed = [self.backend.delete(n) for n in mine]
+            ledger = self._ledger()
+            confirmed: list[bool] = []
+            for name in mine:
+                # Unknown pre-upgrade/reappearing siblings have no create to recover.
+                # Delete them without inventing an unreadable observed-only entry.
+                if ledger.submission(name) is not None or creates.settled(ledger.directory, name):
+                    ledger.observe(name, "teardown", self.c.clock())
+                confirmed.append(self.backend.delete(name))
             deleted = all(confirmed) and not any(n.startswith(prefix) for n in self.backend.names())
         except (BackendUnavailable, BackendError):
             deleted = False
@@ -1256,6 +1440,14 @@ class SandboxRuntime:
         """Why something may still write the session's directory, or "": its pane or a reaper of any
         generation on wsd's tmux server, or a sandbox of any generation. A listing that fails is
         RuntimeUnavailable, never taken as absent."""
+        ledger = self._ledger()
+        try:
+            entries = ledger.names()
+        except OSError:
+            raise RuntimeUnavailable("the create ledger can't be listed") from None
+        for name in entries:
+            if name.startswith(f"{sid}g") and not creates.gone(ledger.directory, name):
+                return f"an earlier create of generation {name.rsplit('g', 1)[1]} is not settled and deleted"
         try:
             panes = self.c.tmux.session_names()
         except TMUX_ERRORS:

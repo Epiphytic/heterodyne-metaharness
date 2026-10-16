@@ -2614,3 +2614,69 @@ def test_resolve_takes_the_config_directory_for_selections(tmp_path: Path,
     selection.write(d, {"codex": Selection("codex", pin)})
     chosen = assemble(s, Journal(s.journal), factory(World(tmp_path / "btq-state")), FakeRuntime())
     assert chosen.schedulers["alpha"].d.selections("codex") == pin
+
+
+@pytest.mark.parametrize(("change", "allowed"), [
+    ({}, True), ({"ws": None}, False), ({"session": None}, False), ({"generation": None}, False),
+    ({"generation": 0}, False), ({"generation": -1}, False), ({"session": "../host"}, False),
+    ({"action": "discard"}, False), ({"tip": TIP}, False), ({"all": True}, False),
+])
+def test_sandbox_settlement_control_validation(change: dict[str, Any], allowed: bool) -> None:
+    req = ctl.CtlRequest("sandbox-settle", ws=WS, session=SID, generation=1)
+    req = msgspec.structs.replace(req, **change)
+    assert (ctl.refusal(req) == "") is allowed
+
+
+def test_wsctl_sandbox_settle_only_sends_host_control_request(tmp_path: Path,
+                                                            monkeypatch: pytest.MonkeyPatch) -> None:
+    asked: list[ctl.CtlRequest] = []
+    monkeypatch.setattr(cli, "_settings", lambda: settings(tmp_path))
+    monkeypatch.setattr(cli, "_ask", lambda s, req: asked.append(req) or ctl.CtlReply("ok", "done"))
+    assert cli.wsctl_main(["sandbox", "settle", WS, SID, "--generation", "2"]) == 0
+    assert asked == [ctl.CtlRequest("sandbox-settle", ws=WS, session=SID, generation=2)]
+    with pytest.raises(SystemExit):
+        cli.wsctl_main(["sandbox", "settle", WS, SID])
+    assert len(asked) == 1
+
+
+def test_settlement_uses_workstream_lane_and_operation_lock(tmp_path: Path,
+                                                            monkeypatch: pytest.MonkeyPatch) -> None:
+    wsd, runtime, inside, release = held_wsd(tmp_path, monkeypatch)
+    calls: list[tuple[str, str, int]] = []
+    lock = wsd.parts.schedulers[WS].parker.entry
+    entries: list[str] = []
+
+    @contextlib.contextmanager
+    def entered() -> Iterator[None]:
+        with lock():
+            entries.append("held")
+            try:
+                yield
+            finally:
+                entries.pop()
+
+    def settle(ws: str, sid: str, generation: int) -> str:
+        assert entries == ["held"]
+        calls.append((ws, sid, generation))
+        return "never observed"
+
+    monkeypatch.setattr(wsd.parts.schedulers[WS].parker, "entry", entered)
+    monkeypatch.setattr(runtime, "settle_sandbox", settle)
+
+    async def scenario() -> ctl.CtlReply:
+        pickup = asyncio.create_task(wsd.handle(ctl.CtlRequest("tick", job="pickup", ws=WS)))
+        try:
+            await until(inside.is_set)
+            request = asyncio.create_task(wsd.handle(ctl.CtlRequest("sandbox-settle", ws=WS,
+                                                                   session=SID, generation=1)))
+            await asyncio.sleep(0.1)
+            assert not request.done() and not calls
+        finally:
+            release.set()
+        await pickup
+        return await request
+
+    result = asyncio.run(scenario())
+    assert result.result == "ok" and "never observed" in result.message
+    assert "late-create risk" in result.message
+    assert calls == [(WS, SID, 1)]

@@ -4,12 +4,9 @@ wsd starts it in its own tmux server, which runs in its own systemd scope, so it
 restart and acts whether or not the queue, the pickup or reconciliation works. wsd's own stop at a turn
 boundary comes first; this only guarantees that nothing runs past the deadline.
 
-A sandbox it finds absent may still appear: wsd starts it before the create, wsd may stall past the
-deadline, and a create that failed or timed out may complete later. So absence ends nothing early: wsd kills
-it once the session's end is confirmed and its create is known to have returned, and otherwise it watches
-until LINGER_SECONDS after the deadline (and, past that, until a deletion is confirmed). Even then it goes
-only once the session record says no create is outstanding (`settled`): a wsd that died inside a create leaves
-`create_started` without `created`, and the watcher stays until a later wsd ends the record.
+Create outcomes live in the host-only create ledger, outside replaceable session records.
+An unsettled create is watched indefinitely and escalates after 72 hours. A valid settlement
+must precede confirmed deletion and durable gone evidence before the watcher can exit.
 
 g08sd: wsd can't promise to stop a healthy session first (a long job or a stale clock can carry its pickup
 past the deadline), so at its first pass the reaper decides, once and before its first kill, whether it
@@ -27,35 +24,15 @@ from collections.abc import Callable
 from pathlib import Path
 
 from heterodyne.sandbox.backend import BackendError, BackendUnavailable
+from heterodyne.sandbox.creates import Ledger, settled, write_once
 from heterodyne.sandbox.openshell import OpenShellBackend
 from heterodyne.tmux import Tmux, TmuxError
 
 POLL_SECONDS = 30
 RETRY_SECONDS = 5
-# Assumed far beyond any create that could still land (OpenShell's own create timeout is minutes) and past
-# the day-long gateway outage the backstop is tested through: a watcher retained for an inconclusive
-# create can't outlive it, so leaked watchers don't pile up.
+# Settled creates retain the existing linger. Unknown creates escalate here and continue
+# indefinitely. This is not a bound on how late a create may land.
 LINGER_SECONDS = 72 * 3600
-
-
-def settled(record: Path, name: str) -> bool:
-    """Whether the session record shows no create of `name` outstanding: it returned (`created`), was never
-    submitted (no `create_started`), the session ended, or a later generation replaced the record (which
-    needs this one ended). A record removed by an operator after the end settles it too. Unreadable
-    evidence never does."""
-    try:
-        data = json.loads(record.read_bytes())
-    except FileNotFoundError:
-        return True
-    except (OSError, ValueError):
-        return False
-    if not isinstance(data, dict):
-        return False
-    fields: dict[str, object] = data  # pyright: ignore[reportUnknownVariableType]
-    if fields.get("sandbox") != name:
-        return True
-    return fields.get("created") is True or fields.get("create_started") is not True or \
-        fields.get("phase") == "ended"
 
 
 READ_ERRORS = (OSError, ValueError, BackendUnavailable, BackendError, TmuxError, subprocess.TimeoutExpired)
@@ -84,35 +61,10 @@ def mark_live(record: Path, marker: Path, name: str, generation: int, listed: Ca
     return write_once(marker, body)
 
 
-def write_once(path: Path, body: bytes) -> bool:
-    """Write `path` once, durably: a private temporary file, fsynced, linked to the final name (an existing
-    one is kept), then the directory fsynced. A crash leaves at most the temporary file, which is ignored."""
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    try:
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(fd, "wb") as f:
-            f.write(body)
-            f.flush()
-            os.fsync(f.fileno())
-        try:
-            os.link(tmp, path)
-        except FileExistsError:
-            pass
-        finally:
-            tmp.unlink(missing_ok=True)
-        folder = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(folder)
-        finally:
-            os.close(folder)
-    except OSError:
-        return False
-    return True
-
-
 def reap(name: str, deadline: int, delete: Callable[[str], bool], kill: Callable[[str], None], *,
          clock: Callable[[], float] = time.time, sleep: Callable[[float], None] = time.sleep,
-         settled: Callable[[], bool] = lambda: True, mark: Callable[[], object] = lambda: None) -> None:
+         settled: Callable[[], bool] = lambda: True, mark: Callable[[], object] = lambda: None,
+         ledger: Ledger | None = None, listed: Callable[[], set[str]] = set) -> None:
     """Wait for the deadline, then kill the sandbox's containers locally, which needs no OpenShell control
     service, and ask the backend to delete it: every RETRY_SECONDS until a deletion is confirmed, then every
     POLL_SECONDS. It returns only once a deletion is confirmed LINGER_SECONDS or more after the deadline and
@@ -123,14 +75,30 @@ def reap(name: str, deadline: int, delete: Callable[[str], bool], kill: Callable
         sleep(min(POLL_SECONDS, left))
     mark()
     while True:
+        # The settlement must predate the confirmed delete used to write gone.
+        was_settled = settled()
+        if ledger is not None:
+            try:
+                if name in listed():
+                    ledger.observe(name, "watcher", int(clock()))
+            except (BackendUnavailable, BackendError, OSError):
+                pass
         with contextlib.suppress(BackendUnavailable, BackendError):
             kill(name)
         try:
             gone = delete(name)
         except (BackendUnavailable, BackendError):
             gone = False
-        if gone and clock() >= deadline + LINGER_SECONDS and settled():
-            return
+        if clock() >= deadline + LINGER_SECONDS:
+            if not was_settled and ledger is not None:
+                with contextlib.suppress(OSError):
+                    ledger.alert(name, int(clock()))
+            if gone and was_settled:
+                if ledger is None:
+                    return
+                if ledger.put(name, "gone", by="watcher", at=int(clock())):
+                    if ledger.close_notice(name, int(clock())):
+                        return
         sleep(POLL_SECONDS if gone else RETRY_SECONDS)
 
 
@@ -147,6 +115,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tmux", required=True)
     parser.add_argument("--tmux-socket", required=True)
     parser.add_argument("--tmux-socket-path", type=Path)
+    parser.add_argument("--ledger", type=Path, required=True)
+    parser.add_argument("--alerts", type=Path, required=True)
+    parser.add_argument("--ready", type=Path, required=True)
     parser.add_argument("name")
     args = parser.parse_args(argv)
     backend = OpenShellBackend(args.openshell, args.podman, args.image, dict(os.environ))
@@ -154,12 +125,20 @@ def main(argv: list[str] | None = None) -> int:
     name: str = args.name
     tmux = Tmux(args.tmux_socket, args.tmux, socket_path=args.tmux_socket_path)
     pane: str = args.pane
+    ledger = Ledger(args.ledger, args.alerts)
+    # Opening/enumerating the ledger is part of startup, before readiness.
+    ledger.names()
+    if args.ready.parent != ledger.directory or not args.ready.name.startswith(f".ready-{name}-"):
+        parser.error("ready must be a unique file in the ledger")
+    if not write_once(args.ready, b"ready"):
+        return 1
 
     def pane_live() -> bool:
         return tmux.has_session(pane) and not tmux.pane_dead(pane)
 
-    reap(name, args.deadline, backend.delete, backend.kill, settled=lambda: settled(record, name),
-         mark=lambda: mark_live(record, args.marker, name, args.generation, backend.names, pane_live))
+    reap(name, args.deadline, backend.delete, backend.kill, settled=lambda: settled(ledger.directory, name),
+         mark=lambda: mark_live(record, args.marker, name, args.generation, backend.names, pane_live),
+         ledger=ledger, listed=backend.names)
     return 0
 
 

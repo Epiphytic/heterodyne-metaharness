@@ -15,6 +15,7 @@ about twice CLOSE_SECONDS whatever the clients do.
 import asyncio
 import contextlib
 import os
+import re
 import socket
 import stat
 from collections.abc import Awaitable, Callable
@@ -38,7 +39,7 @@ def _no_data() -> dict[str, dict[str, str]]:
 
 
 class CtlRequest(msgspec.Struct, frozen=True):
-    op: Literal["tick", "status", "pause", "resume", "reload", "unlanded", "resolve"]
+    op: Literal["tick", "status", "pause", "resume", "reload", "unlanded", "resolve", "sandbox-settle"]
     job: Literal["pickup", "reconcile"] | None = None      # tick only
     ws: str | None = None       # None: every workstream (tick and status); pause, resume, unlanded and
     #                             resolve need one, and reload takes none
@@ -67,10 +68,17 @@ def refusal(req: CtlRequest) -> str:
     call it without the socket."""
     if (req.op == "tick") != (req.job is not None):
         return "tick needs a job; nothing else takes one"
-    if req.op in ("pause", "resume", "unlanded", "resolve") and req.ws is None:
+    if req.op in ("pause", "resume", "unlanded", "resolve", "sandbox-settle") and req.ws is None:
         return f"{req.op} needs a workstream"
     resolving = (req.session, req.generation, req.tip, req.action)
-    if req.op != "resolve" and any(v is not None for v in resolving):
+    if req.op == "sandbox-settle":
+        if req.session is None or req.generation is None:
+            return "sandbox settle needs a session and a generation"
+        if not re.fullmatch(r"hz[0-9a-f]{12}", req.session) or req.generation <= 0:
+            return "invalid session or generation"
+        if req.tip is not None or req.action is not None:
+            return "sandbox settle takes no tip or action"
+    if req.op not in ("resolve", "sandbox-settle") and any(v is not None for v in resolving):
         return "only resolve takes a session, generation, tip or action"
     if req.op == "resolve" and (req.session is None or req.generation is None or req.action is None):
         return "resolve needs a session, a generation and an action"

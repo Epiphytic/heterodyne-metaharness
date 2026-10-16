@@ -6,7 +6,9 @@ from sandbox_env import config_env
 from wsd_env import accounts_at, selected_config
 
 from heterodyne import platform
-from heterodyne.config import ConfigError
+from heterodyne.admind.settings import resolve as admind_settings
+from heterodyne.config import ConfigError, load
+from heterodyne.marmot.nip19 import hex_to_npub
 from heterodyne.sandbox.build import CANARY, TMUX_SOCKET, build_runtime, build_usage_reader
 from heterodyne.sandbox.hostread import HostUsageReader
 from heterodyne.sandbox.openshell import OpenShellBackend
@@ -134,3 +136,24 @@ def test_the_reader_needs_the_sandbox_runtime_and_a_selected_codex_install(tmp_p
     assert isinstance(reader, HostUsageReader)
     assert reader.credlocks == settings(tmp_path, env).credlock_dir
     assert reader.scratch_root == settings(tmp_path, env).state_dir / "hostread"
+
+
+@pytest.mark.parametrize("state_override", [False, True])
+def test_runtime_create_paths_and_admind_share_the_host_state_directory(
+        tmp_path: Path, state_override: bool) -> None:
+    env = config_env(tmp_path, '[platform]\nsandbox = "openshell"\nservice_manager = "systemd"\n'
+                               '[admind]\nprofile = "p-one"\n'
+                               f'[admind.marmot]\nhome = "{tmp_path.parent / "m"}"\n'
+                               'relays = ["wss://relay.example.org"]\n')
+    (Path(env["HETERODYNE_CONFIG_DIR"]) / "policy.toml").write_text(
+        'approvers = ["op"]\noperators = ["op"]\n[identities.op]\n'
+        f'marmot_npub = "{hex_to_npub("c3" * 32)}"\n')
+    if state_override:
+        env["HETERODYNE_STATE_DIR"] = str(tmp_path / "different-state")
+    runtime = build_runtime(settings(tmp_path, env), env)
+    assert isinstance(runtime, SandboxRuntime)
+    admind = admind_settings(load(env=env), env)
+    ledger = runtime._ledger()  # pyright: ignore[reportPrivateUsage]
+    assert runtime.c.alerts == ledger.alerts == admind.alerts_dir
+    assert runtime.c.creates == ledger.directory == admind.state_dir.parent / "creates"
+    assert not ledger.alerts.is_relative_to(runtime.c.sessions.parent)

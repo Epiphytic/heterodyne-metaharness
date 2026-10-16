@@ -336,3 +336,15 @@ def test_canonical_writable_paths_beside_proc_are_kept(tmp_path: Path) -> None:
     agent = replace(facts(tmp_path), read_write=("/run/hz-bridge", "/procs", "/dev/fdx", "/dev/pts"))
     kept = build_spec(spec_input(tmp_path, agent=agent)).read_write
     assert {"/run/hz-bridge", "/procs", "/dev/fdx"} <= set(kept)
+
+
+@pytest.mark.parametrize("adapter", [ClaudeCode(), Codex()])
+@pytest.mark.parametrize("role", ["coder", "reviewer"])
+def test_host_create_ledger_is_outside_every_build_spec_bind(
+        tmp_path: Path, adapter: Codex | ClaudeCode, role: str) -> None:
+    i = replace(adapter_input(tmp_path, adapter), role=role,
+                layout=SessionLayout.at(tmp_path / "state" / "wsd" / "sessions", KEY))
+    ledger = tmp_path / "state" / "creates"
+    ledger.mkdir(parents=True)
+    for bind in build_spec(i).binds:
+        assert not ledger.is_relative_to(bind.source)

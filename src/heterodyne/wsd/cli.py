@@ -203,6 +203,12 @@ def wsctl_main(argv: Sequence[str] | None = None) -> int:
                          ("discard", "drop the session's commits")):
         actions.add_argument(f"--{action}", dest="action", action="store_const", const=action, help=text)
     resolve.add_argument("--tip", help="the session's tip, as wsctl unlanded shows it: the confirmation")
+    sandbox = sub.add_parser("sandbox", help="manage host sandbox create evidence")
+    sandbox_sub = sandbox.add_subparsers(dest="sandbox_cmd", required=True)
+    settle = sandbox_sub.add_parser("settle", help="accept late-create risk after checking the gateway")
+    settle.add_argument("ws")
+    settle.add_argument("session")
+    settle.add_argument("--generation", type=int, required=True)
     args = parser.parse_args(argv)
     if args.cmd == "resolve" and args.action != "discard" and args.tip is None:
         resolve.error(f"--{args.action} needs --tip")
@@ -220,6 +226,10 @@ def wsctl_main(argv: Sequence[str] | None = None) -> int:
         if args.cmd == "resolve":
             reply = _ask(s, ctl.CtlRequest("resolve", ws=args.ws, session=args.session,
                                            generation=args.generation, action=args.action, tip=args.tip))
+            return 1 if reply is None else _print(reply)
+        if args.cmd == "sandbox":
+            reply = _ask(s, ctl.CtlRequest("sandbox-settle", ws=args.ws, session=args.session,
+                                           generation=args.generation))
             return 1 if reply is None else _print(reply)
         reply = _ask(s, ctl.CtlRequest(args.cmd, ws=args.ws))
         return 1 if reply is None else _print(reply)
