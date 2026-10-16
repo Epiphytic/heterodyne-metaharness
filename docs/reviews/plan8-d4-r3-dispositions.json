@@ -1,0 +1,165 @@
+{
+  "status": "UNREVIEWED_AUTHOR_DISPOSITIONS",
+  "reviewed_head": "de94f65df7958d8b56f718d69da58669920606d1",
+  "actual_round": 3,
+  "max_rounds": 3,
+  "actual_outcome": "REVISE",
+  "findings": [
+    {
+      "number": 1,
+      "finding": {
+        "file": "docs/designs/2026-10-16-plan8-scheduling-reconciliation.md",
+        "line": 110,
+        "summary": "The new backup path copies in steps (pages=128, progress callback) over a separate read-only connection, while the daemon keeps writing through its own connection. SQLite restarts a stepped backup from page 0 whenever another connection changes the source between steps, so the copy may never finish.",
+        "failure_scenario": "Busy period with sessions running and hook/launch journal writes every few seconds. Python's backup() also sleeps 0.25 s between steps by default, so a multi-GB journal needs about 2000 steps (several minutes). Each commit by the daemon resets the copy to the start. The 30-minute deadline then fires every cycle: backup_bundle is always partial and no verified journal artifact is ever produced. Fix: hold one explicit read transaction on the source connection for the whole copy (a stable WAL snapshot, with no restart and writers not blocked), or use a single step or VACUUM INTO with the deadline enforced another way. State this in the design."
+      },
+      "finding_sha256": "ffdec5c6c4c5fe363bd879635764a2821d635d76d9f28944ea40f62db1d2446f",
+      "status": "author_repair_not_review_clearance",
+      "location": "\u00a78 stable snapshot",
+      "response": "Explicit BEGIN+SELECT read snapshot for all backup steps, separate WAL readers and bounded WAL/free-space/cancel deadline; disposable43-commit spike retained."
+    },
+    {
+      "number": 2,
+      "finding": {
+        "file": "docs/designs/2026-10-16-plan8-scheduling-reconciliation.md",
+        "line": 98,
+        "summary": "Cleanup can only remove files whose locally ended condition is settled, but nothing ever settles a recovery-phase file. Every recovery notice therefore holds one of the 255 shared slots forever, which brings back R2#2 for recovery files.",
+        "failure_scenario": "A failure file settles when its condition clears, but the recovery file then written has no ended condition and is never settled. After about 255 stale/recover flaps over the deployment's life (fewer when shared with 6C), the directory is full of permanent Plan8 recovery files. Every later Plan8 and 6C failure is only folded into shared_overflow.json, which admind relays once. New outages stop reaching Marmot. Define when a recovery notice settles (for example, once it is written or once the next episode opens) and include it in the shared fixture."
+      },
+      "finding_sha256": "9c475f7bbb14502447cd2b92953dd36936906be5bcc2bd8ef1eac37ffc7a84b8",
+      "status": "author_repair_not_review_clearance",
+      "location": "\u00a77 settlement",
+      "response": "Recovery/reset notices settle after exact durable local publication; failure settles on known false. Crash resumes same intent. >255 cycles fixture."
+    },
+    {
+      "number": 3,
+      "finding": {
+        "file": "docs/designs/2026-10-16-plan8-scheduling-reconciliation.md",
+        "line": 62,
+        "summary": "Scheduled wakes queue the job and return without waiting, and the design names no consumer for the job's result. The existing _guarded rule ('any other failure to record it propagates as itself: a timer that meets it dies, and so does wsd') is silently lost in systemd mode.",
+        "failure_scenario": "A scheduled pickup fails, and journal.emit('tick_failed') then raises something other than JournalBusy (a corrupt or poisoned journal, disk full). In internal mode the _every task dies and serve() exits, so the unit restarts. In systemd mode the error stays on a future nobody awaits. WSD keeps answering 'queued' to every wake while each job fails the same way. wake_overdue stays false because admission continues. The design needs a done-callback that sends such errors into the same fatal serve path as a partial submit."
+      },
+      "finding_sha256": "307a469e20b80fe415892001ec9f49b37c88ccf54a4441f8ce47962793eb8ee6",
+      "status": "author_repair_not_review_clearance",
+      "location": "\u00a74 fatal futures",
+      "response": "Every new scheduled future has one result consumer driving a serve fatal latch on unexpected exceptions, existing bounded drain/restart retained."
+    },
+    {
+      "number": 4,
+      "finding": {
+        "file": "docs/designs/2026-10-16-plan8-scheduling-reconciliation.md",
+        "line": 74,
+        "summary": "The effect high-water mark is kept per (installation_id, generation, job), and the effect identity includes generation. Any approved reinstall starts a new generation with an empty high-water mark, so a calendar slot already used in the old generation can be issued again.",
+        "failure_scenario": "The digest runs at 08:00 under generation G1 and succeeds. At 10:00 an approved reinstall (cadence change, release upgrade or timezone change) mints G2. The G1 job is settled, so \u00a710 lets G2 admit slots. 'Coalesce missed unissued slots to latest eligible' picks today's civil date, which has a new effect identity hash, so a second digest goes out the same day. The interval rule rejects slots before generation start; calendar has no equivalent. Carry the high-water mark over per job across generations, or reject calendar slots due before the generation was activated."
+      },
+      "finding_sha256": "5705ba82e74b04c30e68a862cedc4f3ff8bfbd7e5eba8815e5208573dca73e20",
+      "status": "author_repair_not_review_clearance",
+      "location": "\u00a75 activation boundary",
+      "response": "Reject calendar resolved due instant before approved generation activation, including same-day earlier slots; unknown prior effects still hold."
+    },
+    {
+      "number": 5,
+      "finding": {
+        "file": "docs/designs/2026-10-16-plan8-scheduling-reconciliation.md",
+        "line": 11,
+        "summary": "The \u00a71 list of proposed amendments (items 1\u20136) leaves out two human decisions that the manifest's human_decisions_required lists. One is the native-owner paired backup seam with its non-atomic three-store capture. The other is that local alert settlement/coalescing can remove a diagnostic before relay, with same-manager/overflow freshness limits.",
+        "failure_scenario": "The approver approves the six numbered \u00a71 items as the changed-design scope. Implementation then wraps the foreign Beads backup owner with a counter and lock, and deletes undelivered alert files, without any listed approval. This is the same class of gap as R2#13. inputs.json lists 9 decisions while the design lists 6, so the approval scope is ambiguous."
+      },
+      "finding_sha256": "5ad24b88855f3fb5e317ff572ee04870495281a6b3cea3183d0c67ab6db37782",
+      "status": "author_repair_not_review_clearance",
+      "location": "\u00a71 complete decisions",
+      "response": "Ten explicit human choices include paired backup non-atomic seam, local coalescing/remote limits and observer reset. Manifest mirrors full list."
+    },
+    {
+      "number": 6,
+      "finding": {
+        "file": "docs/designs/2026-10-16-plan8-scheduling-reconciliation.md",
+        "line": 110,
+        "summary": "The 30-minute backup copy runs on 'its maintenance lane', which \u00a75 also names as the single 'maintenance/effect lane' and the only writer that publishes the cached effect aggregate. A long copy blocks effect evaluation and cache updates.",
+        "failure_scenario": "A large journal copy holds the lane worker for up to 30 minutes. Effect-wake jobs queue behind it, the 30 s pass budget and the round-robin guarantees mean nothing, and the cached aggregate goes stale. The snapshot then reports effect health as unknown or stale, which contradicts 'cannot starve other jobs'. Either use separate lanes for copy and effect, or have the backup lane only record cycle state through the writer lane."
+      },
+      "finding_sha256": "fbdb787d9983c0e72505d2cbf659ece26b4aee214db2997bbac61dc1c0c3abd9",
+      "status": "author_repair_not_review_clearance",
+      "location": "\u00a7\u00a75/8 separate workers",
+      "response": "Backup copy has its own bounded worker, never effect writer lane; bounded progress/result messages update cache without blocking effect fairness."
+    },
+    {
+      "number": 7,
+      "finding": {
+        "file": "docs/designs/2026-10-16-plan8-scheduling-reconciliation.md",
+        "line": 92,
+        "summary": "If observer state is lost or corrupt, all publication stops until a Marmot recovery installs a fresh epoch. But IDs are already namespaced by a fresh store UUID, so a new store cannot collide with old IDs. The hold buys no safety and stops all remote health alerting.",
+        "failure_scenario": "The observer state file is corrupted, say after a crash on a filesystem without journaling. Only a service-journal diagnostic appears, which is terminal-only. The next WSD outage produces no Marmot alert until a human notices and runs recovery, and nothing remote prompts them to. A fresh UUID epoch could publish immediately with a fixed 'observer state reset' notice."
+      },
+      "finding_sha256": "94f491e436d7830ebb1e3bf97b07d61eb2839e2fd9d106e505fa8b7b48aeb1ed",
+      "status": "author_repair_not_review_clearance",
+      "location": "\u00a77 diagnostic reset",
+      "response": "Observation loss automatically creates durable fresh random epoch and fixed reset retirement notice under proposed human design choice. Does not reset effects/authority. Reset identity is exactly `[1,installation_id,observer_epoch,\"observer_state_reset\",1,\"retirement\"]`, hashed as UTF8 compact JSON, ensure_ascii=false, no newline/full SHA256; ordinary tuples unchanged. Persist epoch/reset intent before publication and resume the same tuple/hash after crashes."
+    },
+    {
+      "number": 8,
+      "finding": {
+        "file": "docs/designs/2026-10-16-plan8-scheduling-reconciliation.md",
+        "line": 92,
+        "summary": "Episodes are keyed per install/generation/code, but the design never says what happens to an open episode when the generation changes. The old generation never sees an explicit false, so it never closes or sends a recovery notice.",
+        "failure_scenario": "The owner switch (\u00a710 steps 2\u20136) drains WSD, so stale or wake_overdue becomes true and opens G1 failure episodes, which publish alerts. WSD comes back under G2 and later predicates evaluate under G2. The G1 episodes stay open forever with no 'recovered' notice, and their files never settle, which also uses up shared capacity."
+      },
+      "finding_sha256": "2ed501443865d61024532e08d1905b01188c711670a922902865f4c8814ab864",
+      "status": "author_repair_not_review_clearance",
+      "location": "\u00a77 continuity",
+      "response": "Episodes keyed installation/epoch/code retain opening generation; new config generation evaluates old episode actual predicate, unknown retains/false closes."
+    },
+    {
+      "number": 9,
+      "finding": {
+        "file": "docs/designs/2026-10-16-plan8-scheduling-reconciliation.md",
+        "line": 88,
+        "summary": "The 256 KiB snapshot cap is too small for the stated origin provenance: up to 64 request IDs per summary, queued/running/latest per kind, 2 kinds, 128 workstreams. The design does not say what happens when the cap is exceeded.",
+        "failure_scenario": "128 workstreams, each with a full 64-ID origin set for queued, running and latest-completed on both pickup and reconcile: about 128\u00d72\u00d73\u00d764\u00d739 bytes \u2248 1.9 MB. The snapshot either fails to write (heartbeat goes stale and a false episode opens) or is truncated in a way the design does not define. Limit snapshot summaries to count/first/last/truncated."
+      },
+      "finding_sha256": "a38cfeae27ada2143ce05b5c2c2a5ef1600925c7cc8e1baf68eb53c3b382869e",
+      "status": "author_repair_not_review_clearance",
+      "location": "\u00a77 bounded summaries",
+      "response": "Snapshot includes count/first/last/truncated only, never64-ID arrays; max capacity test and compact explicit snapshot_error fallback."
+    },
+    {
+      "number": 10,
+      "finding": {
+        "file": "docs/designs/2026-10-16-plan8-scheduling-reconciliation.md",
+        "line": 90,
+        "summary": "wake_overdue starts counting at 'completed recovery'. At baseline the listener opens only after _startup's recoveries and all startup pickups. If recovery_status=complete is set before the startup pickups finish, wakes cannot connect and wake_overdue fires falsely.",
+        "failure_scenario": "Recovery finishes quickly but startup pickups across many workstreams take longer than 130 s (2\u00d760+10). Every pickup wake gets connection refused, so no admission is recorded, and the observer opens a wake_overdue episode and publishes a false alert. Define complete as listener-open, or keep wake_overdue unknown until the listener starts."
+      },
+      "finding_sha256": "f8d017ec11adaf18408fa7fa7c7e3f48ad56c393b8ea66cb62b4ab8536f0b570",
+      "status": "author_repair_not_review_clearance",
+      "location": "\u00a77 listener clock",
+      "response": "wake_overdue unknown until listener opens after all startup pickups, deadline anchored actual listener-ready monotonic."
+    },
+    {
+      "number": 11,
+      "finding": {
+        "file": "docs/designs/2026-10-16-plan8-scheduling-reconciliation.md",
+        "line": 98,
+        "summary": "Plan8's shared settled-metadata schema (owner metadata with current/previous generation plus aggregate older counts) does not match the pinned 6C d3 \u00a77.1 contract, which records 'namespace/episode/hash/settled flag only'. Yet both describe one shared helper.",
+        "failure_scenario": "Two implementers build local_alerts.py metadata from different sibling designs. One writer's metadata dotfile fails the other's strict parse, so cleanup refuses or ignores foreign entries, and capacity accounting across owners diverges. Activation stays held under the 'byte-pinned fixture' rule, but the conflict should be resolved in the design text now."
+      },
+      "finding_sha256": "1852990852cd8b16b5cee3a505ed7596ce279a7de5dc940d90223f0d41d7d70d",
+      "status": "author_repair_not_review_clearance",
+      "location": "\u00a77 local-alert-v1",
+      "response": "One explicit bounded metadata/API schema coordinated with 6C d4, exact mappings and shared fixture required. Old sibling mismatch disclosed, no false compatible claim."
+    },
+    {
+      "number": 12,
+      "finding": {
+        "file": "docs/designs/2026-10-16-plan8-scheduling-reconciliation.md",
+        "line": 54,
+        "summary": "The new wake request's `generation` field is a UUID string, but the legacy CtlRequest already has `generation: int | None` for resolve and sandbox-settle. Extending CtlRequest instead of adding a separate variant would fail on type, or loosen the legacy check.",
+        "failure_scenario": "An implementer adds the scheduled fields to the existing msgspec CtlRequest. Decoding a UUID into generation:int returns 'malformed request' for every wake. Or the implementer widens the type to int|str, and resolve then accepts string generations. Require a separate decode struct, or rename the field."
+      },
+      "finding_sha256": "06baaa0ab247858b14cbec5ea2da489a5f23e507c27e3f1942b83e08373d308d",
+      "status": "author_repair_not_review_clearance",
+      "location": "\u00a74 typed variants",
+      "response": "Separate strict ScheduledWakeRequest/EffectWakeRequest/PairedBackupRequest; legacy integer generation decoding unchanged."
+    }
+  ]
+}

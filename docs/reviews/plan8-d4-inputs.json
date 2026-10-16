@@ -1,0 +1,309 @@
+{
+  "format": 1,
+  "status": "PROPOSED_UNREVIEWED_D4_CAP_EXHAUSTED",
+  "task": "btq-8d487",
+  "author": "Codex",
+  "source_base": "07637745fe75dc614109a0b8ba72d3489f262a97",
+  "actual_rounds_used": 3,
+  "remaining_rounds": 0,
+  "human_design_approval": null,
+  "implementation_authorized": false,
+  "files": [
+    {
+      "path": "docs/designs/2026-10-16-plan8-scheduling-reconciliation-d4.md",
+      "sha256": "20e1c94f5c2f37fd2a819977b6a8eb81dce1855dba946a22d92ebd7ca432da39"
+    },
+    {
+      "path": "docs/reviews/plan8-d4-r3-dispositions.json",
+      "sha256": "f99e06678c5a1795827c59948cdc5646f8aa1377f4a1d5da54bc534edab66f56"
+    },
+    {
+      "path": "docs/reviews/plan8-d4-r3-dispositions.md",
+      "sha256": "c9f8094254db10bbef696d5a03b359c56c6a8b4ce3062fd18771ee190175ba79"
+    }
+  ],
+  "historical_d3": {
+    "commit": "de94f65df7958d8b56f718d69da58669920606d1",
+    "spec_path": "docs/designs/2026-10-16-plan8-scheduling-reconciliation.md",
+    "spec_sha256": "2f4bcd7fc12f543b765eee4fc45ee9bc620640abc9ac29a7e8f671d26e13351f",
+    "manifest_path": "docs/designs/2026-10-16-plan8-scheduling-reconciliation-inputs.json",
+    "manifest_sha256": "e0454c4c0b3de2df788dea79db17340a64ddd1dcd1726168a8d6151c15d63c59"
+  },
+  "source_inputs": [
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/wsd/daemon.py",
+      "sha256": "3c285bdc61d2dc1cc245e0c90fac54a3fa821ce45298d858c8b016e2a38c60bd"
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/wsd/cli.py",
+      "sha256": "c47e8ac918f554d20cb053a9f286141b9a51ada38f947d81723493137e00bb21"
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/wsd/ctl.py",
+      "sha256": "e11e93403ca8ab898fb3dab9c9238da70a4ef623af9bc0f0529af450ae63964b"
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/wsd/settings.py",
+      "sha256": "42c7192ee9265f77d106b28d8ac3084e70e040ccdeb64800a1e83ebd09969ea4"
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/wsd/unit.py",
+      "sha256": "ec78fa7817d6ccdd1890c3eda503a6fc7d6ac1d74d38b65fa039f92ddbddfa4f"
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/wsd/journal.py",
+      "sha256": "b26aabb804941c8d98ed75ea0dc9b6af4e6f136f6541b3af399f9c5d561370c7"
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/wsd/runtime.py",
+      "sha256": "c6fc0de85dd22fa619e585af61fad303f833390122b71a50a9117c93db62bf8d"
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/daemon.py",
+      "sha256": "6dd566effd2fbd2a569e533cf8449da5ae15244290e6a9cfc30560e685acb0fb"
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/alerts.py",
+      "sha256": "61e9c252e06802e2e8f10dfbd835b5f8ef96991b7ae4c0d089f87926b149164d"
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/settings.py",
+      "sha256": "5f8838d254eed88257bd93ed14655011cff961fb5bb4255605ef6ae198031ae2"
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/store.py",
+      "sha256": "5ae75889f8b1c58f9f4367bd2d76c8070154cfd8caa384eb8178f6c0c68d3359"
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "deploy/install.sh",
+      "sha256": "48b87826530a282ab0ad5ccbbb4bbb0c3c3c2f5acd4bf89bf13dfe39945bdf1e"
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "docs/superpowers/plans/2026-09-29-heterodyne-v1-roadmap.md",
+      "sha256": "87ef1a4aa63e2f35aca075c9b0f63be7a1c93e9225099e8396f135a21a9df9a1"
+    },
+    {
+      "kind": "git_object",
+      "repository": "local-git:hermes-workstreams-v2-adr-r17 (no remote)",
+      "commit": "a27acecee8274e6ad8dc65def436614d42b5cb04",
+      "path": "docs/adr/0001-workstreams-v2.md",
+      "sha256": "3b6da7d95d2652619439192a5fbda0dc5e281e8e5bd87813e95ae8c5d860ea3c",
+      "authority": "Controller-supplied genuine btq-ovngv provenance; author did not query queue"
+    },
+    {
+      "kind": "private_research",
+      "path": "plan8-preparation/map.md",
+      "sha256": "e062b1eda2c9ad7e629e19ef4feee5e50d95248a2a2305f984c33d81bc986c57",
+      "authority": "Historical preparation only; old586 ADR pin explicitly superseded for this design"
+    },
+    {
+      "kind": "private_research",
+      "path": "plan8-preparation/inputs.json",
+      "sha256": "76ffe001b90578879cb5156bda596c0cf3babbdd473e61cb534015c8a5572d9f",
+      "authority": "Historical preparation only; old586 ADR pin explicitly superseded for this design"
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "ee9203f5b2d8567a557b0876ada4dd54e99e0463",
+      "path": "docs/designs/2026-10-16-plan6c-durable-delivery.md",
+      "sha256": "8cfefd6935b411ec8134237770a951963782dc258f4bd7538d6b1c145134e8fb",
+      "authority": "UNREVIEWED proposed Plan6C interface; not installed, not implementation approval"
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "ee9203f5b2d8567a557b0876ada4dd54e99e0463",
+      "path": "docs/reviews/plan6c-delivery-inputs.json",
+      "sha256": "70eece1b7b3349be08273650a472660c458c7f719142f75ab83b810b8cdf96e8",
+      "authority": "UNREVIEWED proposed Plan6C interface; not installed, not implementation approval"
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/wsd/scheduler.py",
+      "sha256": "cc265d66bca5899b4a3bbb9a19288c473c8c420403b204e67862d768de53983e"
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/fsutil.py",
+      "sha256": "34b8ff22a0450f1809de4db13b75ddf99d84e287b81dcb6313ef14e2e149dee1"
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "020c72a96ab527e57be28a0b2a619444308ac018",
+      "path": "docs/designs/2026-10-16-plan6c-durable-delivery.md",
+      "sha256": "96b4eff889d30639b9f8fe724676e37dc8efabe1d8013fc9790eaff631a09e8f",
+      "authority": "Current proposed d2, actual R2 REVISE27; NOT approved, installed or implementation authority. Owner-local600/660/4h wakes; no Plan8 polling deadline substitution."
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "020c72a96ab527e57be28a0b2a619444308ac018",
+      "path": "docs/reviews/plan6c-delivery-inputs.json",
+      "sha256": "14207b1a00ebba20338e7b9ca9c4eab58097bc4e42c9831767f3538d780cd113",
+      "authority": "Current proposed d2, actual R2 REVISE27; NOT approved, installed or implementation authority. Owner-local600/660/4h wakes; no Plan8 polling deadline substitution."
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/agents/base.py",
+      "sha256": "ca7c2ab3c8e96fc99f219ea959ee19a2638655071e4a8484e4c4d6e7d6ed880a"
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "4acc2d5a2d6ee3e2266ff465271a72c419493723",
+      "path": "docs/designs/2026-10-16-plan6c-durable-delivery.md",
+      "git_blob": "5dd70a02c0d114e4ce7c46db7131575d33e96734",
+      "sha256": "cf60b088c53123e127539a92d66f771385f2f2b4deb6cf399b76fcb77bae506f",
+      "source_link": "https://github.com/Epiphytic/heterodyne-metaharness/blob/4acc2d5a2d6ee3e2266ff465271a72c419493723/docs/designs/2026-10-16-plan6c-durable-delivery.md",
+      "authority": "Signed/pushed proposed d3; actual R3 completed REVISE15. NOT approved or installed. Byte-identical to earlier private author snapshot; shared helper compatibility remains proposed."
+    }
+  ],
+  "source_note": "All previous input bytes retained and independently verified. Descriptive status pending in historical entries records source-time text only; actual outcomes are REVISE28/20/12, not approvals. New uncommitted 6C d4 coordination is a proposed shared contract requiring exact final fixtures/reviews before activation.",
+  "actual_review_evidence": [
+    {
+      "private_handoff_relative_path": "review-8d487-builtin-design-r1.log",
+      "sha256": "978578bab018dc2cf248f98bae068525fb3f78183848681259e542816b2cc983"
+    },
+    {
+      "private_handoff_relative_path": "review-8d487-builtin-design-r1-findings-extracted.json",
+      "sha256": "e26d3c67f885b7d4201c9e325f67be9d63a4ada0aed9e5d32cdf8ad5edf33968"
+    },
+    {
+      "private_handoff_relative_path": "review-8d487-builtin-design-r1-result.json",
+      "sha256": "e20f54a575e3196d0616c01426f367bc5b26bef225b2e7e4fddd2a4d6373441b"
+    },
+    {
+      "private_handoff_relative_path": "review-8d487-builtin-design-r2.log",
+      "sha256": "7cd005a26f96dbce4c5d94f7e38fad94d53398eb138477696c674fb731e72af4"
+    },
+    {
+      "private_handoff_relative_path": "review-8d487-builtin-design-r2-findings-extracted.json",
+      "sha256": "891def21eda42951514c1e6fceee0d081ac883ed6dc771cd22fa0bdded03caf5"
+    },
+    {
+      "private_handoff_relative_path": "review-8d487-builtin-design-r2-result.json",
+      "sha256": "70d6eaf0b1d1a61155d65cdd3bda2133554ad6dfeed2e7908e9fd0e7cd209869"
+    },
+    {
+      "private_handoff_relative_path": "review-8d487-builtin-design-r3.log",
+      "sha256": "639a2a8feb1c7433f399aab1d20a18cfb851e5ccf659843e7051c6e923a4670c"
+    },
+    {
+      "private_handoff_relative_path": "review-8d487-builtin-design-r3-findings-extracted.json",
+      "sha256": "70e69dd2d9b5e2d4f008ffb06ba77de96cd3de1891f315184c39bc6d0aacad16"
+    },
+    {
+      "private_handoff_relative_path": "review-8d487-builtin-design-r3-result.json",
+      "sha256": "78ccbec307775523308085b5cf6b07bc8bba729e4878e05ed4748f8178346c63"
+    }
+  ],
+  "human_decisions_required": [
+    {
+      "number": 1,
+      "exact_spec_text": "Permit a separately admitted early Plan8 slice limited to owner selection, idempotent pickup/reconcile wakes, health observation and backup coordination before Plans5/6/7 finish. This departs from the roadmap's \u201cGate to start: Plan7\u201d and ADR17 \u00a714 build order. It does not start consumers, waive their predecessors or establish Plan9 readiness. Without explicit approval, implementation waits for the original predecessors."
+    },
+    {
+      "number": 2,
+      "exact_spec_text": "Defer ADR17 \u00a79 `schedules.toml` user jobs (fixed commands and filing Beads) beyond this bounded slice. This is a v1 scope departure, not a claim they are already out of scope. The human decision must either accept the deferral and revised release acceptance scope or retain the original v1 requirement. A deferred item cannot be silently counted as delivered in Plan9."
+    },
+    {
+      "number": 3,
+      "exact_spec_text": "Use typed scheduled ingress rather than send scheduled pickup through today's manual `wsd tick pickup` operator trigger. This preserves the BACKSTOP origin and makes systemd recurring ownership explicit. Manual ticks remain available."
+    },
+    {
+      "number": 4,
+      "exact_spec_text": "Add an observation-only five-minute babysitter. It is separate from ADR17's five-minute drift reconciler and from obsolete pane-watching babysitters. It shares the systemd user manager's failure domain: it is independent of WSD's process, **not an external dead-man service**. This external-timer failure residual must be accepted in design and deployment scope. WSD still fails and restarts on an admitted scheduled job whose unexpected exception cannot be recorded (\u00a74); that internal job-error invariant is preserved."
+    },
+    {
+      "number": 5,
+      "exact_spec_text": "Add the private schedule/effect SQLite store to ADR17 \u00a73.3: WSD is its sole authoritative writer, producers remain authoritative for actual effects, and loss/corruption holds dependent effects until supported reconciliation or genuine Marmot recovery establishes a nonreplaying boundary. It is not reconstructible from wall time or an empty replacement store. Back up and recover it with \u00a78; core wakes remain available. Effect scheduling uses per-schedule high-water deduplication and bounded recent receipts, not d1's indefinitely growing per-wake key store. Recent terminal detail compacts after 30 days; unsettled effects are never evicted. Effect-store capacity holds only the affected effect job, never core wakes. These retention/hold policies are disclosed changes, not automatic maintenance authority."
+    },
+    {
+      "number": 6,
+      "exact_spec_text": "In external mode, configured cadence means wake activation interval, not the internal `_every` delay after completed work. A slow lane can have one queued scheduled job and run back-to-back. This load/latency change requires explicit acceptance with owner selection; the numeric setting is preserved, not its completion-relative semantics. Internal mode retains its existing meaning."
+    },
+    {
+      "number": 7,
+      "exact_spec_text": "Accept the native-owner paired backup wrapper/counter and exact supported cadence, skipped companion cycles, retention and **non-atomic three-store capture** in \u00a78. The separate native owner remains authoritative; companion success does not prove native backup success."
+    },
+    {
+      "number": 8,
+      "exact_spec_text": "Accept local alert settlement/coalescing that may remove an undelivered diagnostic; stable overflow may relay only once and the observer shares the user-manager failure domain. This is bounded best-effort diagnostic publication, not guaranteed notification (\u00a77)."
+    },
+    {
+      "number": 9,
+      "exact_spec_text": "Add the authoritative WSD effect store to ADR17 \u00a73.3 with the loss/recovery and retention rules of item5; item5 and this explicit authority amendment are one coupled choice, not two independent grants."
+    },
+    {
+      "number": 10,
+      "exact_spec_text": "Permit automatic fresh random observer epochs after observation-state loss/corruption, with a fixed reset diagnostic. This applies only to diagnostic identities, never effects, approvals, task ownership or history (\u00a77)."
+    }
+  ],
+  "local_design_spike": {
+    "private_handoff_relative_path": "plan8-d4-snapshot-spike.json",
+    "sha256": "67bba2d76f933ff94650c0fcb2a10cf7a5183680bcd1b9ca09659283f7fb5999",
+    "scope": "disposable SQLite mechanism only; no application/live proof"
+  },
+  "external_primary_sources": [
+    {
+      "url": "https://www.sqlite.org/c3ref/backup_finish.html",
+      "claim": "External source modifications may restart an incremental copy without a pinned snapshot."
+    },
+    {
+      "url": "https://www.sqlite.org/isolation.html",
+      "claim": "WAL explicit read transactions see stable snapshot while other connections commit."
+    }
+  ],
+  "limits": [
+    "No runtime implementation, model, live database, services, sends, installation or deployment.",
+    "No fourth review without exact authenticated Marmot exception.",
+    "All prior verdicts/history preserved; author repair is not reviewer clearance."
+  ]
+}
