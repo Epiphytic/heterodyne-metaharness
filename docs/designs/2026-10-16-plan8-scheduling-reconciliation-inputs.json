@@ -1,14 +1,14 @@
 {
-  "status": "Proposed d1; unreviewed/unapproved",
+  "status": "Proposed d2 after actual R1 REVISE28; author repairs UNREVIEWED/UNAPPROVED",
   "author": "Codex",
   "task": "btq-8d487",
-  "at": "2026-10-16T08:40:56.508236+00:00",
+  "at": "2026-10-16T09:15:37.568944+00:00",
   "source_base": "07637745fe75dc614109a0b8ba72d3489f262a97",
   "governing_adr": "a27acecee8274e6ad8dc65def436614d42b5cb04",
-  "actual_review_rounds": 0,
+  "actual_review_rounds": 1,
   "design": {
     "path": "docs/designs/2026-10-16-plan8-scheduling-reconciliation.md",
-    "sha256": "ce4e1b9016f89e7e4266d707beaa82dec7c542d6e3e51a524fde48b2f0fd1a14"
+    "sha256": "6cbce46cbfccc8715715c3a6aae68bf7d7c820da5512276e410759d178e6ce77"
   },
   "inputs": [
     {
@@ -137,6 +137,36 @@
       "path": "docs/reviews/plan6c-delivery-inputs.json",
       "sha256": "70eece1b7b3349be08273650a472660c458c7f719142f75ab83b810b8cdf96e8",
       "authority": "UNREVIEWED proposed Plan6C interface; not installed, not implementation approval"
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/wsd/scheduler.py",
+      "sha256": "cc265d66bca5899b4a3bbb9a19288c473c8c420403b204e67862d768de53983e"
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/fsutil.py",
+      "sha256": "34b8ff22a0450f1809de4db13b75ddf99d84e287b81dcb6313ef14e2e149dee1"
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "020c72a96ab527e57be28a0b2a619444308ac018",
+      "path": "docs/designs/2026-10-16-plan6c-durable-delivery.md",
+      "sha256": "96b4eff889d30639b9f8fe724676e37dc8efabe1d8013fc9790eaff631a09e8f",
+      "authority": "Current proposed d2, actual R2 REVISE27; NOT approved, installed or implementation authority. Owner-local600/660/4h wakes; no Plan8 polling deadline substitution."
+    },
+    {
+      "kind": "git_object",
+      "repository": "https://github.com/Epiphytic/heterodyne-metaharness",
+      "commit": "020c72a96ab527e57be28a0b2a619444308ac018",
+      "path": "docs/reviews/plan6c-delivery-inputs.json",
+      "sha256": "14207b1a00ebba20338e7b9ca9c4eab58097bc4e42c9831767f3538d780cd113",
+      "authority": "Current proposed d2, actual R2 REVISE27; NOT approved, installed or implementation authority. Owner-local600/660/4h wakes; no Plan8 polling deadline substitution."
     }
   ],
   "discovery": "Semble code search and bounded source reads; ripwire reuse map saved privately; no runtime imports or executions",
@@ -156,5 +186,33 @@
   "repository_resolution": {
     "local-git:hermes-workstreams-v2-adr-r17 (no remote)": "Existing external ADR object archive; exact commit/path/hash, not a fabricated GitHub URL.",
     "private_research": "Controller evidence directory artifact-relative paths. Historical research, not public authority."
-  }
+  },
+  "remaining_review_rounds": 2,
+  "r1_dispositions": {
+    "path": "docs/designs/2026-10-16-plan8-scheduling-reconciliation-r1-dispositions.md",
+    "sha256": "7c9e644a805664a73be2eb1c4293db5ae65191cccf42b688b65b2cd40334529f",
+    "finding_count": 28,
+    "verbatim_order_preserved": true
+  },
+  "review_evidence": {
+    "base": "c9fa7942386556b5227d96cbe73b8ca4a9223efc",
+    "raw_report_sha256": "978578bab018dc2cf248f98bae068525fb3f78183848681259e542816b2cc983",
+    "extracted_sha256": "e26d3c67f885b7d4201c9e325f67be9d63a4ada0aed9e5d32cdf8ad5edf33968",
+    "verdict": "REVISE",
+    "issued_rounds": 1,
+    "new_revision_reviewed": false
+  },
+  "source_verification": {
+    "all_input_sha256_verified": true,
+    "verified_input_count": 22,
+    "method": "git show exact commit:path and SHA256; historical private research read/hash only; no runtime execution",
+    "scope": "Pins verify bytes, not human approval or current installation freshness"
+  },
+  "human_decisions_required": [
+    "Explicit ADR/roadmap early Plan8 core sequencing amendment or keep Plan7 predecessor",
+    "Explicit ADRv1 user schedules deferral + revised release acceptance or keep original requirement",
+    "Typed scheduled BACKSTOP ingress instead of manual tick origin",
+    "Observer same-manager failure-domain residual",
+    "Bounded effect high-water/recent-history compaction; core wakes never capacity-held"
+  ]
 }
