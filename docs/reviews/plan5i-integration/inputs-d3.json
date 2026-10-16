@@ -1,0 +1,40 @@
+{
+  "schema": "fu366-d3-document-inputs-1",
+  "status": "UNREVIEWED; actual R1/R2 REVISE preserved; R3 remaining; no approval or implementation claimed",
+  "source_head": "7db7066ddd58ce7697908cb5df2fe703a1bb1901",
+  "documentation_only": true,
+  "files": [
+    {
+      "path": "docs/adr/2026-10-16-plan5i-current-main-integration-d3.md",
+      "bytes": 29182,
+      "sha256": "6e7aadc0e0fc4c28cac3a3c804ec656cd832a16ace32c5309b6e2ae001f4887f"
+    },
+    {
+      "path": "docs/reviews/plan5i-integration/r1-disposition-d3.json",
+      "bytes": 12674,
+      "sha256": "d79972f485de0b55bf1f25f941c07ba94ce2ef0b8f3759c05ebf3db856cbd6e2"
+    },
+    {
+      "path": "docs/reviews/plan5i-integration/r1-disposition-d3.md",
+      "bytes": 9040,
+      "sha256": "1ffe416e6e466763d945b219474748eeaf01c43e1a5c9b3c6cba37ca9629eb75"
+    },
+    {
+      "path": "docs/reviews/plan5i-integration/r2-disposition-d3.json",
+      "bytes": 61512,
+      "sha256": "9cca8ea96d0f778ca747321b6bbd577bc53cfb5df0e0bea891a3cc30a401eb90"
+    },
+    {
+      "path": "docs/reviews/plan5i-integration/r2-disposition-d3.md",
+      "bytes": 46646,
+      "sha256": "ce7de91ec01908c1dfacfff958a93c28b28b5038f67fc581091477ff4cff9d6a"
+    },
+    {
+      "path": "docs/reviews/plan5i-integration/source-map-d3.json",
+      "bytes": 813806,
+      "sha256": "d234f39073148016afde3946e76f4a3dcfe98dd8729874ae1003fe3d8651b13f"
+    }
+  ],
+  "input_map": "source-map-d3.json",
+  "hash_convention": "raw file bytes SHA256; Git blobs independently pinned; individual findings canonical JSON as documented in disposition JSON"
+}
