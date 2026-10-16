@@ -1,0 +1,170 @@
+{
+  "version": 1,
+  "task": "btq-18sfj",
+  "status": "planning-only; no implementation approval recorded",
+  "archive_root": "Hermes handoff/2026-10-15/tmp-docs",
+  "artifacts": [
+    {
+      "name": "design-scanner-boundary.md",
+      "bytes": 12958,
+      "sha256": "2ced41d5c5f227bcb8442c8c564950f86026de0bcf7dcaf46e6aeb41f54c2d44"
+    },
+    {
+      "name": "design-scanner-boundary-d2.md",
+      "bytes": 17843,
+      "sha256": "a82d1aedbd75db97f30fa4e431e06fc366c9fdde79fbe854fb76421e826978b0"
+    },
+    {
+      "name": "design-scanner-boundary-d3.md",
+      "bytes": 26251,
+      "sha256": "c1bdb9da0f09874da429e3d9291e0421ea7323ad6d6e7c1566fe63b45fcdc6f1"
+    },
+    {
+      "name": "plan-scanner-d3.md",
+      "bytes": 51356,
+      "sha256": "68dcec0e95e8a79c6c01f1ddb1f8467ad1c413c4163d15c1fa4198aa444845c6"
+    },
+    {
+      "name": "plan-scanner-d3.r2.md",
+      "bytes": 55553,
+      "sha256": "96dfb073af79feea0ce8a849ace73c04b92b4999766146db54086464050840dc"
+    },
+    {
+      "name": "plan-scanner-d3.r3.md",
+      "bytes": 57619,
+      "sha256": "6adea4005f7e130521855a55db2a6e833b30ffa223ef9a36ac06e6198cb51df3"
+    },
+    {
+      "name": "plan-scanner-d3.r4.md",
+      "bytes": 60249,
+      "sha256": "d4fbe11609f3aa6e6c2ad2a6048d75ac4d7b21906d67a529ee3c7e7feafb0052"
+    },
+    {
+      "name": "plan-scanner-d3.r5.md",
+      "bytes": 75403,
+      "sha256": "8584020891a0a429de6a1e75be5e058f80e73f9e396012126192a22287d4170a"
+    },
+    {
+      "name": "ask-scanner-r5.md",
+      "bytes": 2764,
+      "sha256": "6c702446ca8b25c7c08d2d6938ea81eecd00bcf1eafaaaaff0c8eaee90f852e5"
+    },
+    {
+      "name": "review-scanner-d1.md",
+      "bytes": 3708,
+      "sha256": "fb3a6b4bf5ab0e33ee78de09a7120e42f8cd6eec965717b0d8e1bcd6ba47dd21"
+    },
+    {
+      "name": "review-scanner-d2.md",
+      "bytes": 1937,
+      "sha256": "27a8ee4c1018c136ce5b363a67f156eaeb78dc3e1232757f2840dcd9c48f747d"
+    },
+    {
+      "name": "review-scanner-d3.md",
+      "bytes": 1173,
+      "sha256": "20f9e5692fd0d345da9d9eb61c8df59c5d4fff784ada09ed6730007be5a1e688"
+    },
+    {
+      "name": "review-plan-scanner-d3.md",
+      "bytes": 2824,
+      "sha256": "1a59c4351e61d86c190a729a2b14516cdb44d31d6d163bc9f820844583a3753c"
+    },
+    {
+      "name": "review-plan-scanner-d3-c2.md",
+      "bytes": 1315,
+      "sha256": "27e498900b566899a2ce18d715dbe5413161522bb8e6a7405aff31c61931c9d0"
+    },
+    {
+      "name": "review-plan-scanner-d3-c3.md",
+      "bytes": 747,
+      "sha256": "a6fbfc7b1aee4d63945340a566d3f0d3c908b4c7bd0e36b881b7dcf44502f3fc"
+    },
+    {
+      "name": "brief-scanner-d1.md",
+      "bytes": 1387,
+      "sha256": "62adfddab59d0302bb03af53a97ce87a7f43ee135a31812e0e685411910dbff2"
+    },
+    {
+      "name": "brief-scanner-d2.md",
+      "bytes": 1311,
+      "sha256": "ce4598bd6a0b6e5c5cd6c29493a30a8403463cf8d52823c79b9684a4e53bec62"
+    },
+    {
+      "name": "brief-scanner-d3.md",
+      "bytes": 1637,
+      "sha256": "181520c95868b3399025181ab67d630768adbfc13fdac355920d6a585f14d1ea"
+    },
+    {
+      "name": "brief-plan-scanner-d3.md",
+      "bytes": 2351,
+      "sha256": "7aa441b797f018d7ef28c1422dad1fac47a544b49191df51951f39fab9ba3565"
+    },
+    {
+      "name": "brief-plan-scanner-d3-c2.md",
+      "bytes": 1283,
+      "sha256": "09f1e784fd9e449e7b9d434cefd32599cf82b53af446234cef1f49699bba233e"
+    },
+    {
+      "name": "brief-plan-scanner-d3-c3.md",
+      "bytes": 2176,
+      "sha256": "055b795e1bdea349d9eba2d3cae6042b8306860a28e8fb2c3d6faa7d9dfb003f"
+    }
+  ],
+  "planning_checkout_base": "2c0c5b5b775ee652d2ce32c192091aa2314e5b32",
+  "current_main": "3aa124cd4c6e11343d8222cc7ac17d10bec98c34",
+  "required_plan_base": "50fc42fb95dde0cdf38410c54e4e89bc3227f37b",
+  "historical_measurement_head": "c30546b1d69e81aaa1ab8d9e4e8b2c5098cc8639",
+  "required_plan_base_is_current_main_ancestor": false,
+  "source_pins": {
+    "src/heterodyne/config/secret_scan.py": {
+      "planning_base_sha256": "92422444c6e632c54a2fe8a4e5c80554fcce0421e6ada2f383ae58fdfff0bc59",
+      "current_main_sha256": "92422444c6e632c54a2fe8a4e5c80554fcce0421e6ada2f383ae58fdfff0bc59",
+      "required_plan_base_sha256": "92422444c6e632c54a2fe8a4e5c80554fcce0421e6ada2f383ae58fdfff0bc59"
+    },
+    "src/heterodyne/admind/redact.py": {
+      "planning_base_sha256": "533ecbb089b57e643c1edf8745eb13dd908b5dc1cbd14f74f48e3a59883a0d8c",
+      "current_main_sha256": "533ecbb089b57e643c1edf8745eb13dd908b5dc1cbd14f74f48e3a59883a0d8c",
+      "required_plan_base_sha256": "533ecbb089b57e643c1edf8745eb13dd908b5dc1cbd14f74f48e3a59883a0d8c"
+    },
+    "src/heterodyne/admind/hook.py": {
+      "planning_base_sha256": "2200fb756519b9c85f134368fe038ec15c043468fd4ac28e33ea3cc6441dc707",
+      "current_main_sha256": "2200fb756519b9c85f134368fe038ec15c043468fd4ac28e33ea3cc6441dc707",
+      "required_plan_base_sha256": "2200fb756519b9c85f134368fe038ec15c043468fd4ac28e33ea3cc6441dc707"
+    },
+    "tests/test_admind_approvals.py": {
+      "planning_base_sha256": "d15457e822f85d0854f03ec8c1a16ad91f828077b6e103fe831ea501bfaff68d",
+      "current_main_sha256": "4ab483415172735897cdb6fb5a2945237eb4e1368792c27bb0eda1f1d3a6e176",
+      "required_plan_base_sha256": "d15457e822f85d0854f03ec8c1a16ad91f828077b6e103fe831ea501bfaff68d"
+    },
+    "tests/test_admind_r13_redact.py": {
+      "planning_base_sha256": "073adee88fe2fb4461740b63abead8e591298fd09de54123a7aa0c94c9a46330",
+      "current_main_sha256": "fc30468b789502e924bfaa6213e9593d180b443653580f860f0a3565d52c8afc",
+      "required_plan_base_sha256": "073adee88fe2fb4461740b63abead8e591298fd09de54123a7aa0c94c9a46330"
+    }
+  },
+  "appendices": {
+    "python": {
+      "bytes": 13097,
+      "sha256": "91befae4c93170a52f07090ed3c71c5d1b9d9535e11ddf62321317083e49ebe2"
+    },
+    "diff src": {
+      "bytes": 9370,
+      "sha256": "a594f7bab06ae8c57830da7656449a72965387bd900ab5f0e6c52f291691a0e6"
+    },
+    "diff tests": {
+      "bytes": 3883,
+      "sha256": "9659b908b659029018c4dd7319b0a2b505ced84ec36479f3b8a663e2a13fd25d"
+    },
+    "redcheck": {
+      "bytes": 9390,
+      "sha256": "56506e99f0cd74f5a9000fef2b9572facd416d878f0d809d1d23bf4c0ddb5d3c"
+    }
+  },
+  "validation": {
+    "appendix_B1_current_main_dry_apply_exit": 0,
+    "appendix_B2_current_main_dry_apply_exit": 0,
+    "method": "git apply --check against temporary copies of exact current-main target files; no patches applied",
+    "tests_run": false,
+    "new_review_rounds": 0
+  }
+}
