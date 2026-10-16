@@ -1,0 +1,420 @@
+{
+  "schema": 1,
+  "purpose": "Administrative byte-exact filing, no new design/review/approval",
+  "policy_context": "Current operator policy is one HIGH cross-model design review, incorporate author fixes, then genuine human design approval; no second design review or validation. Historical actual REVISE outputs remain intact. No reviewer APPROVE or new review is claimed. Historical d4 cap-exception wording is superseded by this recorded policy.",
+  "implementation_or_native_authority": false,
+  "plans": [
+    {
+      "key": "z",
+      "brainstorm_task": "btq-zcd1l",
+      "original_revision": "4e027cb71e241f02f2d51effeba9adb8e1ef30e0",
+      "original_repository": "/home/openclaw/repos/heterodyne-metaharness-v2-btq-btq-zcd1l",
+      "original_url": "https://github.com/Epiphytic/heterodyne-metaharness/blob/4e027cb71e241f02f2d51effeba9adb8e1ef30e0/docs/designs/2026-10-16-management-design-task-recovery-d4.md",
+      "files": [
+        {
+          "original_path": "docs/designs/2026-10-16-management-design-task-recovery-d4.md",
+          "archive_path": "docs/adr/2026-10-16-management-design-task-recovery-d4.md",
+          "sha256": "171ffd925ff55d8aeb487a7234d6ce3442ab73f8707ae85f028803bd6ee0e097",
+          "bytes": 55627,
+          "original_blob": "65cf3ff53ff769f6b29a05bce642cb16fc371143"
+        },
+        {
+          "original_path": "docs/reviews/zcd1l-management-d4-inputs.json",
+          "archive_path": "docs/evidence/z/docs/reviews/zcd1l-management-d4-inputs.json",
+          "sha256": "7e3ea244bc6a6efff79fbd36573e524e3270bac781351cd26f09b9b36d35036e",
+          "bytes": 11358,
+          "original_blob": "7cb5e4f3bba7b7ffa749bbd211dd189546064a0f"
+        },
+        {
+          "original_path": "docs/reviews/zcd1l-r1-dispositions.md",
+          "archive_path": "docs/evidence/z/docs/reviews/zcd1l-r1-dispositions.md",
+          "sha256": "35df169733e04846b3d6ae6724464a028b5d9046dbcca9f8b2afda8513ac0847",
+          "bytes": 10403,
+          "original_blob": "11c688fcb98e13ca4e492fca2388246aaea1763f"
+        },
+        {
+          "original_path": "docs/reviews/zcd1l-r2-dispositions.md",
+          "archive_path": "docs/evidence/z/docs/reviews/zcd1l-r2-dispositions.md",
+          "sha256": "0abd2f6569554fcd17ec0324b1d148b0e3c501a32b28c611c5cebe8a2b4d3d1d",
+          "bytes": 9771,
+          "original_blob": "6590fb68d10c7d9c3e5e685cf7a83d7b84c32a49"
+        },
+        {
+          "original_path": "docs/reviews/zcd1l-r3-dispositions.md",
+          "archive_path": "docs/evidence/z/docs/reviews/zcd1l-r3-dispositions.md",
+          "sha256": "52cf9d5c0f91b2f22532b808b38b71d0035412513d49a3c0f9184cbf430aed22",
+          "bytes": 12243,
+          "original_blob": "55287c8cd749b95b6896a68694da0b3ee503fc56"
+        }
+      ],
+      "actual_review_ledger": [
+        {
+          "round": 1,
+          "reviewed_head": "e73eab04ac9eeb91ea7a5794cd04bbe2236fde4d",
+          "outcome": "REVISE",
+          "finding_count": 24,
+          "retained_report": "HANDOFF_CODEX/review-zcd1l-builtin-design-r1.log",
+          "report_sha256": "2e73f4fcd5140b5fdba15336c24b42a036c2d82c07022b253ed0e38341f0f672"
+        },
+        {
+          "round": 2,
+          "reviewed_head": "e1eb90a28c1fab011d73f2860abe0cfb1c96b430",
+          "outcome": "REVISE",
+          "finding_count": 25,
+          "retained_report": "HANDOFF_CODEX/review-zcd1l-builtin-design-r2.log",
+          "report_sha256": "d2257627e037fad7b70738bb104da7d7dfe2c024e805e6a7ca15f0e6517e9cd8",
+          "extracted_findings": "HANDOFF_CODEX/review-zcd1l-builtin-design-r2-findings-extracted.json",
+          "extracted_findings_sha256": "c34cee4f144ef739d05d415f8012be7adbb96baaabcfdd2aea6a57f77acd7c1f"
+        },
+        {
+          "round": 3,
+          "reviewed_head": "30a904b10c30a386c5867e6d7b8cd8f494b33ca0",
+          "outcome": "REVISE",
+          "finding_count": 16,
+          "retained_report": "HANDOFF_CODEX/review-zcd1l-builtin-design-r3.log",
+          "report_sha256": "1511c100d2a00eaefd5e9ab7b31a425e723783f8e9b846c8156508e790727341",
+          "extracted_findings": "HANDOFF_CODEX/review-zcd1l-builtin-design-r3-findings-extracted.json",
+          "extracted_findings_sha256": "9e73b67d68101eec17b4522cdefd5f8b51db28301a801b42c77bc8dbc919da80"
+        }
+      ],
+      "actual_author": "codex",
+      "reviewer_attribution": "Claude CLI requested opus; actual inner reviewer model not independently established where null in retained evidence",
+      "actual_verdicts": [
+        "REVISE",
+        "REVISE",
+        "REVISE"
+      ],
+      "finding_counts": [
+        24,
+        25,
+        16
+      ],
+      "implementation_target_id": null,
+      "approval_id": null
+    },
+    {
+      "key": "s",
+      "brainstorm_task": "btq-so7ma",
+      "original_revision": "7c439166a62deeabc63bd5dd6c47c03dc952373c",
+      "original_repository": "/home/openclaw/repos/heterodyne-metaharness-v2-btq-btq-so7ma",
+      "original_url": "https://github.com/Epiphytic/heterodyne-metaharness/blob/7c439166a62deeabc63bd5dd6c47c03dc952373c/docs/designs/2026-10-16-bounded-controller-management-delegation-d4.md",
+      "files": [
+        {
+          "original_path": "docs/designs/2026-10-16-bounded-controller-management-delegation-d4.md",
+          "archive_path": "docs/adr/2026-10-16-bounded-controller-management-delegation-d4.md",
+          "sha256": "05e49dd2270d2e7d200e39bf837230649e76bcfb5f5dbd1f061b03aa8b13cd07",
+          "bytes": 53348,
+          "original_blob": "a70e7acb1103872fb6bbe780537cdccac9483e26"
+        },
+        {
+          "original_path": "docs/reviews/bounded-controller-delegation-d4-inputs.json",
+          "archive_path": "docs/evidence/s/docs/reviews/bounded-controller-delegation-d4-inputs.json",
+          "sha256": "d27934e4e53503488e9964753ac8627e85213a05168d2a846191d805fa37e421",
+          "bytes": 9720,
+          "original_blob": "5299b408263e03193ab19497ad3137e268273efa"
+        },
+        {
+          "original_path": "docs/reviews/so7ma-r1-dispositions.md",
+          "archive_path": "docs/evidence/s/docs/reviews/so7ma-r1-dispositions.md",
+          "sha256": "db2ed9122f6f6d8919e2592aa3817146a8ada93269b664c3e100128f173fc948",
+          "bytes": 20819,
+          "original_blob": "ded36365205ee5049fec21d67105771b72687d98"
+        },
+        {
+          "original_path": "docs/reviews/so7ma-r2-dispositions.md",
+          "archive_path": "docs/evidence/s/docs/reviews/so7ma-r2-dispositions.md",
+          "sha256": "68880b66d39df3156dac62db1cf4064a398d7ef227b38af9668624763aabd2a8",
+          "bytes": 16604,
+          "original_blob": "f4b38a86bbeda5e0c34cce41e740f5c22c33ecde"
+        },
+        {
+          "original_path": "docs/reviews/so7ma-r3-dispositions.md",
+          "archive_path": "docs/evidence/s/docs/reviews/so7ma-r3-dispositions.md",
+          "sha256": "de740acd4202c7206a108482efbc3f7ac4368fabb8096627dc888186271dd00f",
+          "bytes": 10116,
+          "original_blob": "5828de906200fee7fd1de3325079818ec1289eb6"
+        }
+      ],
+      "actual_review_ledger": [
+        {
+          "round": 1,
+          "maximum": 3,
+          "verdict": "REVISE",
+          "findings": 42,
+          "report_sha256": "f167ea7ef46b0f0ff073901d79e6c710d2599bd2a24482c54596debd03d8294d",
+          "author_dispositions_path": "docs/reviews/so7ma-r1-dispositions.md",
+          "reviewed_head": "fb8ce8381df91eb15f1e50ca6ae7951e7057d67c"
+        },
+        {
+          "round": 2,
+          "maximum": 3,
+          "reviewed_head": "251d6b5fbb53ab2385195586c9a3dee22d76a6b4",
+          "verdict": "REVISE",
+          "findings": 24,
+          "retained_report": "HANDOFF_CODEX/review-so7ma-builtin-design-r2.log",
+          "report_sha256": "e5b8c6d04e94c8282f19dde6dde20e16fcb424abd1e685b658fc17dc319bf4b3",
+          "extracted_findings_sha256": "8ac4b808eab1bfa4ff0db41a42cef17604e828cdf634ca3f57d4548603614a41",
+          "author_dispositions_path": "docs/reviews/so7ma-r2-dispositions.md"
+        },
+        {
+          "round": 3,
+          "maximum": 3,
+          "reviewed_head": "8c3db8cb7ac2e42817eb1efb9002021b81f1f063",
+          "verdict": "REVISE",
+          "findings": 15,
+          "report_sha256": "64801b7682ca204f99c3ba03728587ad86b457063f2b9604de6c5f6e2d1a77c6",
+          "retained_report": "HANDOFF_CODEX/review-so7ma-builtin-design-r3.log",
+          "author_dispositions_path": "docs/reviews/so7ma-r3-dispositions.md",
+          "exact_private_ledger_sha256": "f71c1e277e62e17f39418025530a260d2f276c04b661f61e6c90bf27cc3ee154"
+        }
+      ],
+      "actual_author": "codex",
+      "reviewer_attribution": "Claude CLI requested opus; actual inner reviewer model not independently established where null in retained evidence",
+      "actual_verdicts": [
+        "REVISE",
+        "REVISE",
+        "REVISE"
+      ],
+      "finding_counts": [
+        42,
+        24,
+        15
+      ],
+      "implementation_target_id": null,
+      "approval_id": null
+    },
+    {
+      "key": "6a",
+      "brainstorm_task": "btq-0bkbo",
+      "original_revision": "356a1f3e36a1d363b0a183069e07fa846d1fe4bc",
+      "original_repository": "/home/openclaw/repos/heterodyne-metaharness-v2-btq-btq-0bkbo",
+      "original_url": "https://github.com/Epiphytic/heterodyne-metaharness/blob/356a1f3e36a1d363b0a183069e07fa846d1fe4bc/docs/designs/2026-10-16-plan6a-pure-marmot-presentation-d4.md",
+      "files": [
+        {
+          "original_path": "docs/designs/2026-10-16-plan6a-pure-marmot-presentation-d4.md",
+          "archive_path": "docs/adr/2026-10-16-plan6a-pure-marmot-presentation-d4.md",
+          "sha256": "f3c112854c3863dbe05c80e206204120389a7aad51175527095d78ec72e60d16",
+          "bytes": 57071,
+          "original_blob": "48e51f5b4ca52f9f2fa0c095dbd4257af33a06d4"
+        },
+        {
+          "original_path": "docs/designs/2026-10-16-plan6a-sources-d4.json",
+          "archive_path": "docs/evidence/6a/docs/designs/2026-10-16-plan6a-sources-d4.json",
+          "sha256": "8c23b1f948f98dd2a5fd666a4da10865d9f24c56e82ac3b1b130ac181df155d5",
+          "bytes": 15923,
+          "original_blob": "aafb4abfe733c5daa81f410eb21d45b50fd65d24"
+        },
+        {
+          "original_path": "docs/reviews/2026-10-16-plan6a-design-r1-dispositions-d2.json",
+          "archive_path": "docs/evidence/6a/docs/reviews/2026-10-16-plan6a-design-r1-dispositions-d2.json",
+          "sha256": "0ee934a2141550356fc835828752f2552e71518d0bc6c836de7158afc12abb6c",
+          "bytes": 30729,
+          "original_blob": "63ae1f9a19532923e0e40cfce3296b40f18f4b44"
+        },
+        {
+          "original_path": "docs/reviews/2026-10-16-plan6a-design-r1-dispositions-d2.md",
+          "archive_path": "docs/evidence/6a/docs/reviews/2026-10-16-plan6a-design-r1-dispositions-d2.md",
+          "sha256": "8c62cc37f80152490be274bacb19b6f350b4faa88b3fd2cfa9d31f1370621ee1",
+          "bytes": 14052,
+          "original_blob": "d66bcddf3171c0550b8823bb00f72e3d5fb26e49"
+        },
+        {
+          "original_path": "docs/reviews/2026-10-16-plan6a-design-r2-dispositions-d3.json",
+          "archive_path": "docs/evidence/6a/docs/reviews/2026-10-16-plan6a-design-r2-dispositions-d3.json",
+          "sha256": "beea9485a64dd1d9fd4f3ae1cc20754ce43331870f174ba389ee8195460eccff",
+          "bytes": 8031,
+          "original_blob": "a3427f05ef3ca1d25325dfd290365128b3c331a4"
+        },
+        {
+          "original_path": "docs/reviews/2026-10-16-plan6a-design-r2-dispositions-d3.md",
+          "archive_path": "docs/evidence/6a/docs/reviews/2026-10-16-plan6a-design-r2-dispositions-d3.md",
+          "sha256": "9c0272ffe7d4f60d1f408e43bc160fe7826764779b1a82511dba9dd95a021c98",
+          "bytes": 4051,
+          "original_blob": "9c031a3b69156eb7b40f4de2e2adc320ccb6eff9"
+        },
+        {
+          "original_path": "docs/reviews/2026-10-16-plan6a-design-r3-dispositions-d4.json",
+          "archive_path": "docs/evidence/6a/docs/reviews/2026-10-16-plan6a-design-r3-dispositions-d4.json",
+          "sha256": "8085fc410e86c55e23e9d6a7208c99812466acd490c0594527d8d6fad4874c2c",
+          "bytes": 8432,
+          "original_blob": "bc6f94a9c952eccce8a1e809f72b004d071a8725"
+        },
+        {
+          "original_path": "docs/reviews/2026-10-16-plan6a-design-r3-dispositions-d4.md",
+          "archive_path": "docs/evidence/6a/docs/reviews/2026-10-16-plan6a-design-r3-dispositions-d4.md",
+          "sha256": "63918f51e90830803861e3388461bddb7f257afc123a0985739d2267ce84196f",
+          "bytes": 4839,
+          "original_blob": "535a62aa64bd905bdc347206d2ef6768818ba3d2"
+        }
+      ],
+      "actual_review_ledger": {
+        "rounds_used": 3,
+        "maximum": 3,
+        "remaining": 0,
+        "r1": {
+          "rounds_used": 1,
+          "maximum": 3,
+          "reviewed_commit": "7903439e1a7ce5d738e502d0e7589d073ab4ac16",
+          "actual_result": "REVISE",
+          "findings": 68,
+          "complete_retained_report": {
+            "artifact": "0bkbo-r1-retained-plan6a-final.json",
+            "sha256": "06b3566447ed4b64cc496f72af80f7ba6335cab29f75065af34c4e1fb6f047ee"
+          },
+          "private_ordered_verbatim_dispositions": {
+            "artifact": "0bkbo-d2-author/r1-verbatim-dispositions.json",
+            "sha256": "70a4a100083ed4ffc082dc90a265fb5bd01714260eed83d6f4f970a364569ab1",
+            "reason_private": "Original findings contain private path examples; no encoded public copies."
+          }
+        },
+        "r2": {
+          "reviewed_commit": "b885fbb8dddcb83f268d06cd6f3e1fac46b8bd9d",
+          "verdict": "REVISE",
+          "findings": 25,
+          "raw_report_sha256": "e329199e62d901c3b5ee3e054d5b0e1fdd6e12285651128644b4c4e46fadd7f6",
+          "private_verbatim_ledger_sha256": "f3f3555b0bea796fe2e24136151dc1e1def7e8f909ceb7ad0c2c7197f683cdcd"
+        },
+        "r3": {
+          "reviewed_commit": "f283d1f52f119f15725e3589f81fcab3efbf6c30",
+          "actual_result": "REVISE",
+          "findings": 24,
+          "raw_report_sha256": "7ac3d77e7a1876951608633053a41752dc8ec59400ebffa29dd7479d4ef92b48",
+          "actual_result_artifact_sha256": "268c9c33a140158da9a625a033a1b1c16266e6aff356dff499777a50b49f0a64",
+          "private_verbatim_ledger": {
+            "artifact": "0bkbo-d4-author-evidence/r3-verbatim-findings.json",
+            "sha256": "177025303b8e60afc32ae3b6b72efa1301854bdefff02aadd4d53a6f14481b27"
+          }
+        }
+      },
+      "actual_author": "codex",
+      "reviewer_attribution": "Claude CLI requested opus; actual inner reviewer model not independently established where null in retained evidence",
+      "actual_verdicts": [
+        "REVISE",
+        "REVISE",
+        "REVISE"
+      ],
+      "finding_counts": [
+        68,
+        25,
+        24
+      ],
+      "implementation_target_id": null,
+      "approval_id": null
+    },
+    {
+      "key": "6b",
+      "brainstorm_task": "btq-63iz7",
+      "original_revision": "e7b0b960e1a7b526a23109684e735121a8955d90",
+      "original_repository": "/home/openclaw/repos/heterodyne-metaharness-v2-btq-btq-63iz7",
+      "original_url": "https://github.com/Epiphytic/heterodyne-metaharness/blob/e7b0b960e1a7b526a23109684e735121a8955d90/docs/designs/2026-10-16-plan6b-authenticated-marmot-read-surface-d4.md",
+      "files": [
+        {
+          "original_path": "docs/designs/2026-10-16-plan6b-authenticated-marmot-read-surface-d4.md",
+          "archive_path": "docs/adr/2026-10-16-plan6b-authenticated-marmot-read-surface-d4.md",
+          "sha256": "37f1ae13d13591fd196d988bb9cc97748e9cc5b65cd7cde6c735ed1a68060231",
+          "bytes": 62896,
+          "original_blob": "b98c4a515d948716fc50e8b7229adf2106fd34fc"
+        },
+        {
+          "original_path": "docs/reviews/plan6b-authenticated-read-d4-inputs.json",
+          "archive_path": "docs/evidence/6b/docs/reviews/plan6b-authenticated-read-d4-inputs.json",
+          "sha256": "75c255606552acd09d71d89e88273c02ed8299debcde410d54899e854e260e7d",
+          "bytes": 18345,
+          "original_blob": "684d728310e874c3f0e99949d6d757b147c89609"
+        },
+        {
+          "original_path": "docs/reviews/plan6b-authenticated-read-design-r1-disposition.md",
+          "archive_path": "docs/evidence/6b/docs/reviews/plan6b-authenticated-read-design-r1-disposition.md",
+          "sha256": "fac93739158b7caa5bc0bef69bbe23c747ea53ec3ea5e42e551e5efd6c997d09",
+          "bytes": 22731,
+          "original_blob": "2435d49f960f331445001d42d9ebe30bf67efe94"
+        },
+        {
+          "original_path": "docs/reviews/plan6b-authenticated-read-design-r2-disposition.md",
+          "archive_path": "docs/evidence/6b/docs/reviews/plan6b-authenticated-read-design-r2-disposition.md",
+          "sha256": "072306b3bfac2741f182cc6cf37cb70b438b490585c0dc32f74ee7767f876624",
+          "bytes": 28450,
+          "original_blob": "fb9ac3012852dccc95d43d6ee682ba390eb97cc9"
+        },
+        {
+          "original_path": "docs/reviews/plan6b-authenticated-read-design-r3-disposition-d4.json",
+          "archive_path": "docs/evidence/6b/docs/reviews/plan6b-authenticated-read-design-r3-disposition-d4.json",
+          "sha256": "7ab39501712d715ac64c0f162d8d553f8db9cc04082b68ea70e0cfe81a5e5007",
+          "bytes": 10134,
+          "original_blob": "ded6d6b8654dc95382dda6ebb1a5e7921903166e"
+        },
+        {
+          "original_path": "docs/reviews/plan6b-authenticated-read-design-r3-disposition-d4.md",
+          "archive_path": "docs/evidence/6b/docs/reviews/plan6b-authenticated-read-design-r3-disposition-d4.md",
+          "sha256": "d4f83934fe4b22d06e6900e1059156efe4a8655c60aa0f2494b489e9c77c2e57",
+          "bytes": 4804,
+          "original_blob": "3ca366e228fc291eb202937bf66ff5fae2b832d1"
+        }
+      ],
+      "actual_review_ledger": [
+        {
+          "round": 1,
+          "verdict": "REVISE",
+          "raw_sha256": "628b9583c7d2804b6dfb8cf032684c3eb252d686d9c13d1ec8901ad79ab23c87",
+          "prose_count": 26,
+          "actual_fenced_json_count": 27,
+          "reviewed_source": "60f8ad6768b6ee20638d9a0dbe51336c25a4dce3",
+          "disposition_path": "docs/reviews/plan6b-authenticated-read-design-r1-disposition.md",
+          "disposition_sha256": "fac93739158b7caa5bc0bef69bbe23c747ea53ec3ea5e42e551e5efd6c997d09",
+          "actual_returncode": 0,
+          "requested_model": "opus",
+          "requested_effort": "high",
+          "actual_inner_model": null,
+          "verification_pass_reported": false
+        },
+        {
+          "round": 2,
+          "verdict": "REVISE",
+          "raw_sha256": "b4d8c2beef17c0591e5f3bdb6b3f676879325cfa9c015dbb08472e6820374779",
+          "actual_fenced_json_count": 21,
+          "reviewed_source": "dd58209001061d5228ca9f50ce2ee618e7acf367",
+          "disposition_path": "docs/reviews/plan6b-authenticated-read-design-r2-disposition.md",
+          "disposition_sha256": "072306b3bfac2741f182cc6cf37cb70b438b490585c0dc32f74ee7767f876624",
+          "actual_returncode": 0,
+          "requested_model": "opus",
+          "requested_effort": "high",
+          "actual_inner_model": null,
+          "verification_pass_reported": false,
+          "ended_at": "2026-10-16T07:32:04.212740+00:00"
+        },
+        {
+          "round": 3,
+          "verdict": "REVISE",
+          "raw_sha256": "78cb6a757d305a3cf0269a014097b98db1cc0d37f8a483b1896b6c14f2e88ab5",
+          "actual_fenced_json_count": 19,
+          "reviewed_source": "0ed49add285a203a758dad8e97598ffa1b83f28d",
+          "disposition_path": "docs/reviews/plan6b-authenticated-read-design-r3-disposition-d4.md",
+          "disposition_sha256": "d4f83934fe4b22d06e6900e1059156efe4a8655c60aa0f2494b489e9c77c2e57",
+          "actual_returncode": 0,
+          "requested_model": "opus",
+          "requested_effort": "high",
+          "actual_inner_model": null,
+          "verification_pass_reported": false,
+          "ended_at": "2026-10-16T07:59:15.594692+00:00",
+          "result_private_path": "review-63iz7-builtin-design-r3-result.json",
+          "result_sha256": "d109b968f7099e004484f0484e7a2a79e49626add0162936ab8af75abec78f35",
+          "rounds_remaining": 0
+        }
+      ],
+      "actual_author": "codex",
+      "reviewer_attribution": "Claude CLI requested opus; actual inner reviewer model not independently established where null in retained evidence",
+      "actual_verdicts": [
+        "REVISE",
+        "REVISE",
+        "REVISE"
+      ],
+      "finding_counts": [
+        27,
+        21,
+        19
+      ],
+      "implementation_target_id": null,
+      "approval_id": null
+    }
+  ]
+}

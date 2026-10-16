@@ -1,0 +1,402 @@
+{
+  "schema": 2,
+  "task": "btq-63iz7",
+  "status": "UNREVIEWED d4 author dispositions; actual R3 REVISE19; all 3 allowed rounds consumed; no further review without exact authenticated Marmot exception",
+  "source_base": "07637745fe75dc614109a0b8ba72d3489f262a97",
+  "design_path": "docs/designs/2026-10-16-plan6b-authenticated-marmot-read-surface-d4.md",
+  "design_sha256": "37f1ae13d13591fd196d988bb9cc97748e9cc5b65cd7cde6c735ed1a68060231",
+  "inputs": [
+    {
+      "repository": "heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/marmot/control.py",
+      "bytes": 11949,
+      "sha256": "5015667928bb080578dbcc19406a215d79fbcf2696e94b84026c2cf6e14a4862",
+      "role": "existing native protocol and limitations"
+    },
+    {
+      "repository": "heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/wsd/journal.py",
+      "bytes": 60109,
+      "sha256": "b26aabb804941c8d98ed75ea0dc9b6af4e6f136f6541b3af399f9c5d561370c7",
+      "role": "existing inbox and derived snapshots, not new mapping API"
+    },
+    {
+      "repository": "heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/wsd/daemon.py",
+      "bytes": 40551,
+      "sha256": "3c285bdc61d2dc1cc245e0c90fac54a3fa821ce45298d858c8b016e2a38c60bd",
+      "role": "existing status projection and mixed control dispatch"
+    },
+    {
+      "repository": "heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/wsd/ctl.py",
+      "bytes": 10049,
+      "sha256": "e11e93403ca8ab898fb3dab9c9238da70a4ef623af9bc0f0529af450ae63964b",
+      "role": "existing privileged control socket; not read surface port"
+    },
+    {
+      "repository": "heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/wsd/beads.py",
+      "bytes": 28346,
+      "sha256": "1c2a7b13af2bbcc04581a071d22f614e5a01e246363ac01b868194e9bf3cbee0",
+      "role": "candidate read methods mixed with writes"
+    },
+    {
+      "repository": "heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/config/policy.py",
+      "bytes": 4677,
+      "sha256": "7fdbce1dcc17f5e5a9b2d6f2e750a3485d0777e77c75af698502a34de2677799",
+      "role": "actual supported Policy output"
+    },
+    {
+      "repository": "heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "docs/adr/0001-workstreams-v2.md",
+      "bytes": 193705,
+      "sha256": "39d3a806b89a9b478606b398fc88e15f84819332ef51ce9bcd3c88e5c514d53d",
+      "role": "stale product ADR15 header; not governing latest authority"
+    },
+    {
+      "repository": "heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "docs/security-model.md",
+      "bytes": 21122,
+      "sha256": "19995465c697f681a4a9c769884a7142c32c88fd40e0aea4603cebd08cb01940",
+      "role": "integrated guard d4 and fresh-policy/provenance amendment"
+    },
+    {
+      "repository": "heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "docs/spikes/S4-marmot.md",
+      "bytes": 21793,
+      "sha256": "97da66ec0675308bc06bc7f736a4872225f7d3bee435ce5f8d569153b6d07f41",
+      "role": "historical transport findings; raw spike logs no longer retained"
+    },
+    {
+      "repository": "heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "docs/superpowers/plans/2026-09-29-heterodyne-v1-roadmap.md",
+      "bytes": 5648,
+      "sha256": "87ef1a4aa63e2f35aca075c9b0f63be7a1c93e9225099e8396f135a21a9df9a1",
+      "role": "full Plan6 predecessor and release scope"
+    },
+    {
+      "repository": "heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "docs/superpowers/specs/2026-10-14-cxmkf-amendment-1.md",
+      "bytes": 4257,
+      "sha256": "f67e743f6fc91d5e4c1150155f90a96bdbc06b041fd2aecf4eaeae71e11ce84f",
+      "role": "actual recommended-no and multipart amendment"
+    },
+    {
+      "repository": "heterodyne-metaharness",
+      "commit": "663a9efb2f1f2dba4c4c8f864bb4da40eabedd77",
+      "path": "docs/superpowers/specs/2026-10-13-cxmkf-admind-card-kinds-design.md",
+      "bytes": 52225,
+      "sha256": "a10973b2ed760e55f77347ac5a22abd8daa93597ea73bfcfb004550a5b7cddb9",
+      "role": "approved historical admind-only card kinds; file absent from source 076"
+    },
+    {
+      "repository": "hermes-workstreams-v2",
+      "commit": "93d0e90b121a07db720d92924cda443a1cfc239c",
+      "path": "docs/adr/0001-workstreams-v2.md",
+      "bytes": 223328,
+      "sha256": "13086760390dc786c233fe358048878e1fa657f374f61534d619a8d22b8d8b35",
+      "role": "governing ADR16 authenticated ingress/read/Plan6 clauses"
+    },
+    {
+      "repository": "hermes-workstreams-v2",
+      "commit": "58615ac6cf8eed9419fc284482d40a82780cfe8d",
+      "path": "docs/adr/0001-workstreams-v2.md",
+      "bytes": 237003,
+      "sha256": "570339f06ba6ad682b996a3725fd624c831b7a0762c9d3c1fa770adf5d8cb3c9",
+      "role": "ADR17 narrow admind amendment approved by historical tz5o8; pending header not status evidence"
+    },
+    {
+      "repository": "heterodyne-metaharness",
+      "commit": "7903439e1a7ce5d738e502d0e7589d073ab4ac16",
+      "path": "docs/designs/2026-10-16-plan6a-pure-marmot-presentation.md",
+      "bytes": 25495,
+      "sha256": "5dc5a1dbb2fc8df933a8ec51da981992df71a520d532e180795a5232c8c57c8e",
+      "role": "PROVISIONAL 6A input, not approved dependency; reconcile actual final reviewed revision"
+    },
+    {
+      "repository": "heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/marmot/nip19.py",
+      "bytes": 2861,
+      "sha256": "b661174b8f27388b449f8c6ae851f3daf5d14dc0ec2c29536a3b3616fc427507",
+      "role": "actual 32-byte public-key decoding contract; not a group-ID bound"
+    },
+    {
+      "repository": "heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/settings.py",
+      "bytes": 13803,
+      "sha256": "5f8838d254eed88257bd93ed14655011cff961fb5bb4255605ef6ae198031ae2",
+      "role": "existing configured-key normalization/duplicate-key checks; not wsd allowlist substitution"
+    },
+    {
+      "repository": "heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/daemon.py",
+      "bytes": 190140,
+      "sha256": "6dd566effd2fbd2a569e533cf8449da5ae15244290e6a9cfc30560e685acb0fb",
+      "role": "actual strict native provenance, AskPost/Get handling and fresh policy intersected with confirmed keys; current sender proof not exported by AskGet"
+    },
+    {
+      "repository": "heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/wsd/scheduler.py",
+      "bytes": 33451,
+      "sha256": "cc265d66bca5899b4a3bbb9a19288c473c8c420403b204e67862d768de53983e",
+      "role": "actual resumable-first candidate gating; not native-ready pickup order"
+    },
+    {
+      "repository": "heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/wsd/btq.py",
+      "bytes": 2443,
+      "sha256": "1bda049fb8b42b0e9c1b34d71423ee5c75dbf1d535cf04566ca0b89a82cae1d7",
+      "role": "factory constructs general Queue; not read-only"
+    },
+    {
+      "repository": "heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/config/layers.py",
+      "bytes": 8393,
+      "sha256": "4f701161db899952bf7d51ec6da4f9388c9ac28898041ff73d87480921179b2c",
+      "role": "supported configuration layering source; new read schema remains proposed"
+    },
+    {
+      "repository": "beads-task-queue",
+      "commit": "6fe57598468ff53bf74dfd9e1cf181ad3177c3f1",
+      "path": "bin/btq",
+      "bytes": 146751,
+      "sha256": "ec2bc67b227326c80bf5d9a32eb661b220ea9af6942ef31bff04d8c06941bd2e",
+      "role": "Queue constructor/state/writer credentials/native 20-second timeout and unbounded paused-ready behavior"
+    },
+    {
+      "repository": "heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/asks.py",
+      "bytes": 31088,
+      "sha256": "6b6645f1fbba429b0f52277152f31745422332fe063792ce4748378091f37042",
+      "role": "actual AskPost/Get/AnswerView/AskSummary shapes; body and current sender-key proof absent from AskView"
+    },
+    {
+      "repository": "heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/notices.py",
+      "bytes": 4746,
+      "sha256": "e123b4adcf32369e72b1230525bfd31b4ea4f05286091bbef35dda0af9a790bd",
+      "role": "actual closed NoticePost route owner and notice limits; no invented response-only unsolicited send"
+    },
+    {
+      "repository": "heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/cli.py",
+      "bytes": 26442,
+      "sha256": "83858ebea0b71c777f865264d80c6537902206b0f2ca9024518f11ce160b843f",
+      "role": "actual private ask client; CLI store startup is not a read-consumer capability"
+    },
+    {
+      "repository": "heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/redact.py",
+      "bytes": 5660,
+      "sha256": "533ecbb089b57e643c1edf8745eb13dd908b5dc1cbd14f74f48e3a59883a0d8c",
+      "role": "Actual full-hex card redaction; display prefix differs from machine full-digest binding"
+    },
+    {
+      "repository": "heterodyne-metaharness",
+      "commit": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/store.py",
+      "bytes": 56321,
+      "sha256": "5ae75889f8b1c58f9f4367bd2d76c8070154cfd8caa384eb8178f6c0c68d3359",
+      "role": "Actual active ask/answer persistence; atomic seal/current-principal proof remains proposed, not installed"
+    },
+    {
+      "repository": "hermes-workstreams-v2",
+      "commit": "a27acecee8274e6ad8dc65def436614d42b5cb04",
+      "path": "docs/adr/0001-workstreams-v2.md",
+      "bytes": 239121,
+      "sha256": "3b6da7d95d2652619439192a5fbda0dc5e281e8e5bd87813e95ae8c5d860ea3c",
+      "role": "Governing ADR17 Amendment1 source; actual approval reference is historical native authority, not new admission"
+    }
+  ],
+  "private_controller_inputs": [
+    {
+      "path": "plan6-design-research/outline.md",
+      "bytes": 16580,
+      "sha256": "61c591d53d1d23a2871cecb24c999953198ca200389888b7fb0c2983fd613a6e",
+      "role": "controller preparation/historical snapshot only; not new approval"
+    },
+    {
+      "path": "plan6-design-research/inputs.json",
+      "bytes": 2563,
+      "sha256": "3161776d058659a2f80439245034ad18323d20d692467dd007924ccb6e499ccd",
+      "role": "controller preparation/historical snapshot only; not new approval"
+    },
+    {
+      "path": "plan6-design-research/decisions.json",
+      "bytes": 7240,
+      "sha256": "470cff0744895684b7b3fa43aed90f599e9cb23ef1b24cd83854244498adb17a",
+      "role": "controller preparation/historical snapshot only; not new approval"
+    },
+    {
+      "path": "release-resume-2026-10-16/native-workstream-issues.json",
+      "bytes": 696854,
+      "sha256": "984f34dcef44961472d1b6846842ac3f2752be39887f8f14bccafa4cb0da37d3",
+      "role": "controller preparation/historical snapshot only; not new approval"
+    }
+  ],
+  "historical_authorities": {
+    "adr16": "btq-xywu0",
+    "adr17_card_kinds": "btq-tz5o8",
+    "adr17_commit": "58615ac6cf8eed9419fc284482d40a82780cfe8d",
+    "card_kinds_impl": "btq-isubg",
+    "snapshot_is_current_native_validation": false,
+    "adr17_amendment1": "btq-ovngv",
+    "adr17_amendment1_commit": "a27acecee8274e6ad8dc65def436614d42b5cb04"
+  },
+  "unresolved_admission": [
+    "Exact authenticated Marmot review-budget resolution before any additional review; satisfactory actual review and genuine native Marmot design approval are still required",
+    "explicit early-read-only sequencing human decision or full Plan5 predecessor",
+    "actual final compatible approved and implemented Plan6A pin/profile",
+    "implementation admission under the approved design and real code review; separate deployment approval",
+    "prove the bounded owner/native producer contract with actual disposable read-role/effect fixtures; no writer fallback",
+    "reviewed owner-side exact request/answer/current-principal recovery compatibility adapter and initial trusted registered baseline before deployment"
+  ],
+  "implementation_or_live_actions": false,
+  "proposed_projection_contract": {
+    "version": 1,
+    "defined_in": "design sections 4.1\u20134.2",
+    "selectors": [
+      "Workstreams",
+      "Status",
+      "BeadStatus",
+      "Approvals",
+      "Queue",
+      "QueueFor"
+    ],
+    "origins": [
+      "native-beads",
+      "wsd-journal",
+      "account-usage-journal",
+      "host-config"
+    ],
+    "existing_api_claim": false,
+    "new_read_adapters_required": true,
+    "no_native_order_or_total_proof": "Unavailable; no guessed totals or ordering",
+    "result_tags": [
+      "Available",
+      "Unavailable",
+      "Rejected",
+      "Busy",
+      "NeedsDetails"
+    ],
+    "scope_digest_excludes": [
+      "ProducerBinding",
+      "release_commit",
+      "run_id",
+      "boot_id",
+      "generation"
+    ]
+  },
+  "revision": "d4",
+  "review_history": [
+    {
+      "round": 1,
+      "verdict": "REVISE",
+      "raw_sha256": "628b9583c7d2804b6dfb8cf032684c3eb252d686d9c13d1ec8901ad79ab23c87",
+      "prose_count": 26,
+      "actual_fenced_json_count": 27,
+      "reviewed_source": "60f8ad6768b6ee20638d9a0dbe51336c25a4dce3",
+      "disposition_path": "docs/reviews/plan6b-authenticated-read-design-r1-disposition.md",
+      "disposition_sha256": "fac93739158b7caa5bc0bef69bbe23c747ea53ec3ea5e42e551e5efd6c997d09",
+      "actual_returncode": 0,
+      "requested_model": "opus",
+      "requested_effort": "high",
+      "actual_inner_model": null,
+      "verification_pass_reported": false
+    },
+    {
+      "round": 2,
+      "verdict": "REVISE",
+      "raw_sha256": "b4d8c2beef17c0591e5f3bdb6b3f676879325cfa9c015dbb08472e6820374779",
+      "actual_fenced_json_count": 21,
+      "reviewed_source": "dd58209001061d5228ca9f50ce2ee618e7acf367",
+      "disposition_path": "docs/reviews/plan6b-authenticated-read-design-r2-disposition.md",
+      "disposition_sha256": "072306b3bfac2741f182cc6cf37cb70b438b490585c0dc32f74ee7767f876624",
+      "actual_returncode": 0,
+      "requested_model": "opus",
+      "requested_effort": "high",
+      "actual_inner_model": null,
+      "verification_pass_reported": false,
+      "ended_at": "2026-10-16T07:32:04.212740+00:00"
+    },
+    {
+      "round": 3,
+      "verdict": "REVISE",
+      "raw_sha256": "78cb6a757d305a3cf0269a014097b98db1cc0d37f8a483b1896b6c14f2e88ab5",
+      "actual_fenced_json_count": 19,
+      "reviewed_source": "0ed49add285a203a758dad8e97598ffa1b83f28d",
+      "disposition_path": "docs/reviews/plan6b-authenticated-read-design-r3-disposition-d4.md",
+      "disposition_sha256": "d4f83934fe4b22d06e6900e1059156efe4a8655c60aa0f2494b489e9c77c2e57",
+      "actual_returncode": 0,
+      "requested_model": "opus",
+      "requested_effort": "high",
+      "actual_inner_model": null,
+      "verification_pass_reported": false,
+      "ended_at": "2026-10-16T07:59:15.594692+00:00",
+      "result_private_path": "review-63iz7-builtin-design-r3-result.json",
+      "result_sha256": "d109b968f7099e004484f0484e7a2a79e49626add0162936ab8af75abec78f35",
+      "rounds_remaining": 0
+    }
+  ],
+  "unresolved_prerequisites": [
+    "Review-budget resolution, actual satisfactory review, genuine native Marmot design approval and explicit early-sequencing/safety-alert/recovery scope; none claimed",
+    "Exact genuinely approved/implemented 6A pin and explicit cached/outage/render-time/fixed-notice compatibility profile; provisional 7903439 is only inspected input",
+    "Provisioned read role, fixed operation shapes and owner mode=ro port proven with actual isolated native effects before deployment",
+    "Actual AskPost/Get are insufficient alone: reviewed owner-side proof must bind retained full request/body and real answer sender to current policy intersected with confirmed keys; absent proof HOLD",
+    "Supported private 6B journal/config/archive/doctor/recovery tooling and trusted initial baseline before deployment",
+    "Separate exact deployment approval; no consumer startup or live acceptance in design/library work"
+  ],
+  "prior_frozen_revision": "0ed49add285a203a758dad8e97598ffa1b83f28d",
+  "read_scope_bounds": {
+    "max_workstream_bindings": 100,
+    "max_distinct_queue_identities": 4,
+    "max_native_bulk_operations_total_per_projection": 4,
+    "fifth_identity": "reject registration, never silently omit bindings",
+    "public_ambiguous_target": "identical not-found; internal diagnostic only"
+  },
+  "accepted_availability_residuals": [
+    "S4 same-key send dedup observed; no uncertain retry in this stricter slice without proved retention/readback lifetime",
+    "Three-part/noninterleaved group turns and absolute lifetimes can expire accepted queries without a reply; deployment measures actual latency",
+    "Complete ledger restoration is conditional on retained latest high-water/tail proof, not guaranteed after irreversible loss; no empty replacement"
+  ],
+  "revision_artifacts": [
+    {
+      "path": "docs/designs/2026-10-16-plan6b-authenticated-marmot-read-surface-d4.md",
+      "bytes": 62896,
+      "sha256": "37f1ae13d13591fd196d988bb9cc97748e9cc5b65cd7cde6c735ed1a68060231"
+    },
+    {
+      "path": "docs/reviews/plan6b-authenticated-read-design-r3-disposition-d4.json",
+      "bytes": 10134,
+      "sha256": "7ab39501712d715ac64c0f162d8d553f8db9cc04082b68ea70e0cfe81a5e5007"
+    },
+    {
+      "path": "docs/reviews/plan6b-authenticated-read-design-r3-disposition-d4.md",
+      "bytes": 4804,
+      "sha256": "d4f83934fe4b22d06e6900e1059156efe4a8655c60aa0f2494b489e9c77c2e57"
+    }
+  ]
+}

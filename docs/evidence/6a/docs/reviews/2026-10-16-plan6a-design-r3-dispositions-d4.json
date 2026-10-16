@@ -1,0 +1,134 @@
+{
+  "task": "btq-0bkbo",
+  "actual_round": 3,
+  "actual_verdict": "REVISE",
+  "findings": 24,
+  "report_sha256": "7ac3d77e7a1876951608633053a41752dc8ec59400ebffa29dd7479d4ef92b48",
+  "status": "UNREVIEWED d4 author responses; all3 rounds used; no reviewer acceptance",
+  "private_verbatim_ledger": {
+    "artifact": "0bkbo-d4-author-evidence/r3-verbatim-findings.json",
+    "sha256": "177025303b8e60afc32ae3b6b72efa1301854bdefff02aadd4d53a6f14481b27"
+  },
+  "ordered_dispositions": [
+    {
+      "ordinal": 1,
+      "finding_object_sha256": "682960811c14386f74d1a1e0079283432db37759e4c10ee43ea1bf293bb58761",
+      "disposition": "Accept. OperatorDoc is recognized unsupported material; no command, lookup index or retrieval route is invented. Complete inline or a typed pinned public GitHub file is the supported replacement (§4.2)."
+    },
+    {
+      "ordinal": 2,
+      "finding_object_sha256": "0574c1dfdbbf74770f84f1c0ece9f08de5a039a77e1403c221c3c4970a6cef1d",
+      "disposition": "Accept by removing the unsupported capability. Rendering has no retrieval flag or owner callback and depends only on its immutable inputs (§4.2)."
+    },
+    {
+      "ordinal": 3,
+      "finding_object_sha256": "bdd2f5813a2032ef5c9f15b0581bfad6f7b12a6bf49d8e091d714e68c68af64a",
+      "disposition": "Accept. Closed kind/variant source profiles and required collection/order attestations replace caller-selected required flags (§4.1). These are proposed adapters, not existing APIs."
+    },
+    {
+      "ordinal": 4,
+      "finding_object_sha256": "b5fac7977b952070ed23767f2edad3ad5b932a89b09a2962140f038a90b48542",
+      "disposition": "Accept. Pending human decisions explicitly disclose path, UUID, email, long hex, TAB/Cf/bidi/filler, atomic-label and character-policy availability costs, including default2000 (§1)."
+    },
+    {
+      "ordinal": 5,
+      "finding_object_sha256": "cae8eacc387d9d3df00b8a32b364ba04342b9173c3303c017890f695753291ff",
+      "disposition": "Accept. Native128-character selectors remain valid classification inputs but indivisible copyable tokens. An overwidth token gives whole Withheld/NeedsDetails, never a split token (§5)."
+    },
+    {
+      "ordinal": 6,
+      "finding_object_sha256": "df99e7143f80cb701fda47a173462dab4eb6865e13ea678d2c7a9c1988d2b1b9",
+      "disposition": "Accept. Question Withheld has two fixed lines with bounded fixed reason labels; no dynamic title/body enters that diagnostic (§7)."
+    },
+    {
+      "ordinal": 7,
+      "finding_object_sha256": "deb27145d6af06145dcf28d75e85145d5c59b7bd8fc59d35244548e89ffa50a6",
+      "disposition": "Accept. Untyped visible URL/link syntax is screened, including protocol, www, Markdown/reference/autolink forms. Only typed generated evidence spans are links (§6)."
+    },
+    {
+      "ordinal": 8,
+      "finding_object_sha256": "10f329e136d854301f4e629490403da096ca2e17d48a5474609005b8f8e6c090",
+      "disposition": "Accept by simplification. D4 retracts the unapproved prefix exception. Every supplied collection row renders within20parts or zero parts/NeedsDetails; counts remain per source, never a fabricated cursor (§5)."
+    },
+    {
+      "ordinal": 9,
+      "finding_object_sha256": "ef6707ec15b01a577ab1de09262353050a765a46d4e2b5e946f0f32a19d2fbe1",
+      "disposition": "Accept. Reminder admits only File|Commit and two specified logical blocks, with bounded prose wrapping and an atomic URL. Wrong unions are Invalid; unsupported forge is visibly unavailable (§4.2/§5)."
+    },
+    {
+      "ordinal": 10,
+      "finding_object_sha256": "62e89f4e29cab2de948b21608648b8888bedfe67640baa96459a2946c3222115",
+      "disposition": "Accept by removal. OperatorDoc no longer emits a long retrieval instruction; fixed unsupported-reference outcomes follow ordinary/protected bounds (§4.2/§7)."
+    },
+    {
+      "ordinal": 11,
+      "finding_object_sha256": "f39462cdd66aea534d5aae7a483ae16d72aa904dd423e41210803753662e12cd",
+      "disposition": "Accept. Question now carries the same atomic lifecycle, revision/digest, eligibility envelope as approval; approval-only reaction policy is not invented for questions. Common stale-card reason covers both (§4.2)."
+    },
+    {
+      "ordinal": 12,
+      "finding_object_sha256": "7f7a88736c593be27df9528724570c3d0fbe3050344a42084d593dd6834f49ec",
+      "disposition": "Accept. source_eligible=false maps to Withheld(ineligible), with fixed source-not-eligible label and deterministic precedence (§7)."
+    },
+    {
+      "ordinal": 13,
+      "finding_object_sha256": "624cd8fec0d35b4e9130779fbb5de275a893f58b4d678263c89d8b6d70474249",
+      "disposition": "Accept. Unsupported well-formed material is visible Withheld(unsupported-reference) for protected views, fixed unavailable/incomplete reference for ordinary views; malformed schema alone is Invalid (§4.2/§7)."
+    },
+    {
+      "ordinal": 14,
+      "finding_object_sha256": "5c3dfb53bd95781e059e0d05ac19c8d2eb3f4cff0a2ec00f6bd52361e17414ae",
+      "disposition": "Accept with honest boundary. Sections carry explicit closed ordering attestations; queue candidates include contiguous ordinals and class-order validation. These attest source-owner claims, not cryptographic proof (§4/§4.1)."
+    },
+    {
+      "ordinal": 15,
+      "finding_object_sha256": "c2fbcef1a49844e3c9420b579fe6fd3348f584f48b32182f9c5f411aa7b6788c",
+      "disposition": "Accept. Scalar, list, nested-row, role-headroom, numeric, trust, percentage and duration formats/order are normative blocks, with wrapping only after formatting (§5)."
+    },
+    {
+      "ordinal": 16,
+      "finding_object_sha256": "b10a10b22ce4783d4dd135ecbe8dd54230a87fe311ddbd91727bdb4a25f2c15b",
+      "disposition": "Accept. Source warnings use one precedence-selected state plus refresh suffix, with fixed lowercase source names and bounded coalescing (§4.1)."
+    },
+    {
+      "ordinal": 17,
+      "finding_object_sha256": "46ee91ecae756e846dc0efe7d2757e2f5067d75a45e4e2b0552d40749cd8284f",
+      "disposition": "Accept. Closed origin selector determines exact headers, including queue workstream/all-workstreams scope; diagnostic notices use their own variant text (§4/§4.1)."
+    },
+    {
+      "ordinal": 18,
+      "finding_object_sha256": "0174332e4fca0c5b5bc1e37bc81d74c8371290279b09015ea0aeec14f1ebe3b5",
+      "disposition": "Accept. Recent events are bounded to five supplied rows; larger payload is Invalid(bounds), never silently truncated. Owner-known history total is distinct from shown (§4.1)."
+    },
+    {
+      "ordinal": 19,
+      "finding_object_sha256": "9120f3d2c55d77672565ae9fe4a91eb0d101cebef0397557ed14b571729bbb63",
+      "disposition": "Accept. Root requires target=none; thread permits none for absent binding. Illegal header combinations are Invalid before precedence (§3)."
+    },
+    {
+      "ordinal": 20,
+      "finding_object_sha256": "79bf20f171025541993a966ee665b75470441c310045ab92a287a8724ca71f08",
+      "disposition": "Accept. Screened SafeText is literal plain text without punctuation escaping; typed exact effect remains byte-exact inside its generated fence (§6)."
+    },
+    {
+      "ordinal": 21,
+      "finding_object_sha256": "70862e587acf681f1d3967ccee2473cae18fb0f93a798a56a4d1c35c4c840935",
+      "disposition": "Accept. Redundant presentation surface is removed. Closed origin/kind compatibility derives ordinary routing labels; protected pairs always contain both variants (§4)."
+    },
+    {
+      "ordinal": 22,
+      "finding_object_sha256": "69f59487019922ce3312e801b88471e12eb8553a809194973557076ce8fc6fea",
+      "disposition": "Accept. opaque_order_key requires even lowercase hex length2..256 before byte decoding; malformed keys are Invalid (§4.1)."
+    },
+    {
+      "ordinal": 23,
+      "finding_object_sha256": "2a359ff868b52b1910981ceb56587e4e2ab6cf007c3afc15470ab167ad47cbef",
+      "disposition": "Accept. D4 manifest corrects current authority limits, retains all historical pins and adds exact R2-reviewed d2 design/manifest plus R3-reviewed d3 artifacts and actual final report hashes."
+    },
+    {
+      "ordinal": 24,
+      "finding_object_sha256": "e278d975fbf44a6e815e04896947a82e42fca5399fe258ead3a2f881747501d0",
+      "disposition": "Accept. All material explanation must be on the protected card. Unsupported material visibly withholds; no host-terminal instructions, retrieval promises or bare permission fragments substitute for context (§1/§4.2)."
+    }
+  ]
+}

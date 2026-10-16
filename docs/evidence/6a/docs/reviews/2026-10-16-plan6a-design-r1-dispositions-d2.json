@@ -1,0 +1,557 @@
+{
+  "schema_version": 1,
+  "task": "btq-0bkbo",
+  "review_round": 1,
+  "actual_verdict": "REVISE",
+  "finding_count": 68,
+  "reviewed_commit": "7903439e1a7ce5d738e502d0e7589d073ab4ac16",
+  "retained_complete_report_sha256": "06b3566447ed4b64cc496f72af80f7ba6335cab29f75065af34c4e1fb6f047ee",
+  "priority_note": "Author triage only, not invented reviewer severity: blocking-contract repairs are admission/security/semantic conflicts; specification-clarification entries remove ambiguity without extra human gates; factual-correction preserves the actual parser/module distinction. All are addressed in this revision.",
+  "scope": "Author dispositions, not a review pass or approval. Public records retain exact per-finding canonical-object hashes; the original verbatim findings stay private because they contain private path examples. No encoding is used to conceal them in the public repository.",
+  "findings": [
+    {
+      "number": 1,
+      "author_priority": "blocking-contract",
+      "finding_object_sha256": "f02c25b2d11af5a2e76f6406d60d568b4bff5d1d854d166f5f7837fb5be2bae7",
+      "disposition": "accept",
+      "d2_location": "§§1,6",
+      "author_response": "Configured control mention is a narrow typed public-identifier exception requiring genuine ADR amendment approval. It is scanned for secrets, budgeted before pair success, and never permitted in user text."
+    },
+    {
+      "number": 2,
+      "author_priority": "blocking-contract",
+      "finding_object_sha256": "e185c6bd11488ebe7ab77bf9446575b6a0d0cee8c8c1bc4808b25f03cde5d59c",
+      "disposition": "accept",
+      "d2_location": "§§1,4.2,6",
+      "author_response": "Exact effect is preserved as concatenated typed spans; only verified-shape public SHA spans exempt identifier screening. Secret/path matches still withhold. The departure is disclosed, not smuggled through generic safe text."
+    },
+    {
+      "number": 3,
+      "author_priority": "blocking-contract",
+      "finding_object_sha256": "5140a2a00702748311a0042878d0ce3cbc2581e6a2bd53b5a6a53d2286153465",
+      "disposition": "accept",
+      "d2_location": "§4.3",
+      "author_response": "Evidence is a tagged structural union covering files, commits, PR with immutable head, ranges, bead context with accessible detail, and complete inline no-forge content. Floating/substr-matched links cannot pass."
+    },
+    {
+      "number": 4,
+      "author_priority": "specification-clarification",
+      "finding_object_sha256": "c397787364a18a6e854a26e8a550493348f101afec8674ec913e683ed009eca2",
+      "disposition": "accept",
+      "d2_location": "§§1,4.2",
+      "author_response": "Purpose remains optional; absent renders Approval. No legacy valid native approval is withheld solely for missing purpose."
+    },
+    {
+      "number": 5,
+      "author_priority": "blocking-contract",
+      "finding_object_sha256": "d0e02d5fe1f21591d5797ce5c81199fa23548891c9824696fe2a8a73e218954c",
+      "disposition": "accept",
+      "d2_location": "§1",
+      "author_response": "Three actual departures are enumerated for a genuine ADR amendment/admission: early pure sequencing, complete single-message twelve-line cards, typed identifier exceptions. No multipart or release-name departure remains."
+    },
+    {
+      "number": 6,
+      "author_priority": "blocking-contract",
+      "finding_object_sha256": "4ebed992c0d133371a038d47bf57b8906c657c738527fdf4935c53e05fe9ce2b",
+      "disposition": "accept",
+      "d2_location": "§4.2",
+      "author_response": "Explicit lifecycle, eligibility and atomic owner revision tokens hold stale/superseded/incoherent cards without a prompt. The later owner must prove real atomic content/digest capture; tokens are not invented native authority."
+    },
+    {
+      "number": 7,
+      "author_priority": "blocking-contract",
+      "finding_object_sha256": "59f4bbdb8c5ba72389782300ba6ee04aaa4b8757106e97565862d917258adeaf",
+      "disposition": "accept",
+      "d2_location": "§§4.2,5",
+      "author_response": "Excludes is mandatory, protected, explicit and rendered. Only genuinely supplied none is accepted; the renderer never invents scope exclusions."
+    },
+    {
+      "number": 8,
+      "author_priority": "blocking-contract",
+      "finding_object_sha256": "30c48ee365b41abade4a24813454ca3375a7db02f111060204f07cff77643078",
+      "disposition": "accept",
+      "d2_location": "§3",
+      "author_response": "A numbered precedence algorithm handles verified header, payload, native reaction, command then plain-thread routing. Commands do not depend on thread target."
+    },
+    {
+      "number": 9,
+      "author_priority": "blocking-contract",
+      "finding_object_sha256": "6b534c22a15aeedc7a4b917380d3de8b6973362d5d6c5f1560b65f833c53bd37",
+      "disposition": "accept",
+      "d2_location": "§3",
+      "author_response": "Plain approval/question thread replies are DeferredSteering, not decisions. Text emoji remain text; no reaction-like text category exists."
+    },
+    {
+      "number": 10,
+      "author_priority": "blocking-contract",
+      "finding_object_sha256": "323024b345a987ff3ccbebcb9436c91928755f194a9d72fddd528780720431fa",
+      "disposition": "accept",
+      "d2_location": "§3",
+      "author_response": "Text, ReactionAdded and ReactionRemoved are distinct union variants. Removed is ignored as unproven; native reactions return no decision value."
+    },
+    {
+      "number": 11,
+      "author_priority": "blocking-contract",
+      "finding_object_sha256": "a38c1b699d94fcdb2111598393ad1d1acf029c008a6ab3b4ab8f20fa096cd837",
+      "disposition": "accept",
+      "d2_location": "§§2,3",
+      "author_response": "Valid unverified/rejected/replayed headers are ignored before hostile body validation. Verified payload is bounded at 256 KiB; 5000-character legitimate plain intake is not rejected by the old 4096 classification limit."
+    },
+    {
+      "number": 12,
+      "author_priority": "blocking-contract",
+      "finding_object_sha256": "f725f6318cb97df10fca985e6fb2c063a6493fe33c83954ff86ca45089cb1e93",
+      "disposition": "accept",
+      "d2_location": "§3",
+      "author_response": "Root plain control text is ignored; only root plain workstream text is deferred intake."
+    },
+    {
+      "number": 13,
+      "author_priority": "blocking-contract",
+      "finding_object_sha256": "3460c2d27e7c68357bb30bca3a04e34a206db2f6436c6e2b66f89274c374bcfa",
+      "disposition": "accept",
+      "d2_location": "§§2,6",
+      "author_response": "Reuse immutable scanner patterns only, not show or mutable admind.redact. Config-derived login forms and safe display mappings are explicit immutable policy inputs."
+    },
+    {
+      "number": 14,
+      "author_priority": "blocking-contract",
+      "finding_object_sha256": "ef5125c0c35da9eb6dc637250c2ac6321a772e83f6a1774f9a00c7da8ad5d1b7",
+      "disposition": "accept",
+      "d2_location": "§2",
+      "author_response": "Effect boundary concerns actual initialization/calls, not inert os imports/default aliases. The permitted fallback is a pure-leaf extraction preserving scanner re-exports/tests, not a divergent policy or service import."
+    },
+    {
+      "number": 15,
+      "author_priority": "blocking-contract",
+      "finding_object_sha256": "d393077492a4f92b17cd8a420ec0e19e65573cd31d05ec4a8326647d07548332",
+      "disposition": "accept",
+      "d2_location": "§§2,4.2,7",
+      "author_response": "Invalid is an explicit API result. Unsupported answer policy is an explicit valid semantic variant yielding Withheld; unknown schema enums remain Invalid."
+    },
+    {
+      "number": 16,
+      "author_priority": "blocking-contract",
+      "finding_object_sha256": "aad94f251d7ff30fcdeef957fc9eaa97a8fa72c61f00feb37ee8f95280c4676f",
+      "disposition": "accept",
+      "d2_location": "§6",
+      "author_response": "Scan complete raw fields/protected concatenation before formatting; retain typed offsets and rescan final emitted parts. No truncate-then-redact or split-token blind spot."
+    },
+    {
+      "number": 17,
+      "author_priority": "blocking-contract",
+      "finding_object_sha256": "daddb43a3f6ef32e099f6fb186acc616fdd8aafcd0f2db59aaec9ef004b458cb",
+      "disposition": "accept",
+      "d2_location": "§§4.1,6",
+      "author_response": "Typed labels and configured session/transcript mappings replace arbitrary identifiers; explicit UUID/DID/email/hex/path/mention detectors supplement source scanner patterns, with honest heuristic limits."
+    },
+    {
+      "number": 18,
+      "author_priority": "blocking-contract",
+      "finding_object_sha256": "772248ca944382af4fa9d4b386c3db042ec94c0e09c3cfe21d08570ca115f73c",
+      "disposition": "accept",
+      "d2_location": "§§5,6",
+      "author_response": "CommonMark plain-text escaping is fixed; exact effect uses a fence longer than its longest backtick run and remains byte-exact. Protected content cannot be silently rewritten."
+    },
+    {
+      "number": 19,
+      "author_priority": "blocking-contract",
+      "finding_object_sha256": "e039710c18add686336ceac043555c2b757f9066b36b06bb161285ea055de61a",
+      "disposition": "accept",
+      "d2_location": "§6",
+      "author_response": "Untrusted Markdown is plain escaped text; typed encoders alone create links, mentions and fences. User mentions/protocols/reserved footer phrases fail screening."
+    },
+    {
+      "number": 20,
+      "author_priority": "blocking-contract",
+      "finding_object_sha256": "2777bda43353523dbdeac525396bc89b367a1dbc6acc2d8a018311f893f4e458",
+      "disposition": "accept",
+      "d2_location": "§6",
+      "author_response": "Unicode Zl/Zp are rejected along with control/format/surrogate categories, preventing alternate line separators from forging markers or footers."
+    },
+    {
+      "number": 21,
+      "author_priority": "blocking-contract",
+      "finding_object_sha256": "48c7c47f12b55251a7d831abf5397bfdbd58aec5d7a048127dd0118b79c43076",
+      "disposition": "accept",
+      "d2_location": "§6",
+      "author_response": "Finite forbidden categories, LF exception and filler codepoints are explicit. User ZWJ is deliberately excluded; generated fixed emoji constants remain allowed."
+    },
+    {
+      "number": 22,
+      "author_priority": "specification-clarification",
+      "finding_object_sha256": "379469f720a681b5a797c60a0969c63d8fdcab4ae5e0b2c5c161f1189ac468a7",
+      "disposition": "accept",
+      "d2_location": "§§4,5,7",
+      "author_response": "Per-collection completeness/counts are visible; infeasible >20-part ordinary output returns only a fixed narrow-query notice, with zero partial pages. No promise to send all 100 rows regardless of bounds."
+    },
+    {
+      "number": 23,
+      "author_priority": "specification-clarification",
+      "finding_object_sha256": "3a2c6b2829f9167649f912ba383b98405eb20d4540a2195ade84ee52d767f32f",
+      "disposition": "accept",
+      "d2_location": "§5",
+      "author_response": "Protected cards are single-message; ordinary greedy packing tries final marker-aware page counts deterministically. Single-part output has no continuation marker."
+    },
+    {
+      "number": 24,
+      "author_priority": "specification-clarification",
+      "finding_object_sha256": "793c65985dbf5292b55b83814b54385a2b6775fa3fff8a3b701b64777e384461",
+      "disposition": "accept",
+      "d2_location": "§§4.2,5",
+      "author_response": "Questions are complete single messages <=12 physical lines with the same cap/width checks and atomic mirror-pair success; no underspecified multipart question transport."
+    },
+    {
+      "number": 25,
+      "author_priority": "blocking-contract",
+      "finding_object_sha256": "5ef173baa23af32632b4fc0607072624d719c6ccd8e94ce29e0613293e82d078",
+      "disposition": "accept",
+      "d2_location": "§4.2",
+      "author_response": "Question union supports plain questions/material confirmations and optional-recommendation choices. No universal choice-only or recommended-answer requirement."
+    },
+    {
+      "number": 26,
+      "author_priority": "blocking-contract",
+      "finding_object_sha256": "a4022986343e9eb30e2bd1629e6dc0b0cf99db82ba5d3612b4eea5d53f77d77c",
+      "disposition": "accept",
+      "d2_location": "§4",
+      "author_response": "Missing is an explicit view union variant; unavailable required data never becomes empty facts. Fixed unavailable text is defined."
+    },
+    {
+      "number": 27,
+      "author_priority": "blocking-contract",
+      "finding_object_sha256": "bde34038f65fe7a264ff3a4edb807911710dc192306a330b7b3a1f98fd7c19d9",
+      "disposition": "accept",
+      "d2_location": "§5",
+      "author_response": "Each Notice has a concrete union payload; Digest has five independently counted sections and Reminder has a real safe typed reference without repeating the full card."
+    },
+    {
+      "number": 28,
+      "author_priority": "blocking-contract",
+      "finding_object_sha256": "9f684dad5df7d081c12fe4041c237c77971b1e892d4a56d612678aebd4445e93",
+      "disposition": "accept",
+      "d2_location": "§§4,4.2,5",
+      "author_response": "FYI is a distinct kind/payload with a fixed no-reply-needed sentence and no prompt."
+    },
+    {
+      "number": 29,
+      "author_priority": "specification-clarification",
+      "finding_object_sha256": "51f89ef8cfc117ab506be67c715c6b4caf268e911b7801f30b2ff238857d4d78",
+      "disposition": "accept",
+      "d2_location": "§4.1",
+      "author_response": "Workstream states include held, stuck and unknown, with reason/unknown wording; they never collapse into idle."
+    },
+    {
+      "number": 30,
+      "author_priority": "specification-clarification",
+      "finding_object_sha256": "6c8903d3d7315d0ee97a5ba661030a3c40a90264e14b57c77bae3c38db61e5d1",
+      "disposition": "accept",
+      "d2_location": "§4.1",
+      "author_response": "Reason unions have explicit state compatibility. Quota reset may be unknown; account-changed never carries a resume time and has a fixed recovery condition."
+    },
+    {
+      "number": 31,
+      "author_priority": "specification-clarification",
+      "finding_object_sha256": "c1e44f5173a3ed8600f10ee29ba7544fde2217d41c93aea33e71c55a404674c6",
+      "disposition": "accept",
+      "d2_location": "§4.1",
+      "author_response": "RoleHeadroom pairs role/account/remaining/trust/time; WorkstreamRow includes current bead and independent count/reason facts."
+    },
+    {
+      "number": 32,
+      "author_priority": "specification-clarification",
+      "finding_object_sha256": "3324090b863767781667855578dc886d9358923449713d70600fbfcdfd84c9e0",
+      "disposition": "accept",
+      "d2_location": "§3",
+      "author_response": "Read selectors reuse the exact source SLUG contract, not a new mixed-case sixty-four-character approximation. They are never filesystem paths or CLI flags."
+    },
+    {
+      "number": 33,
+      "author_priority": "blocking-contract",
+      "finding_object_sha256": "037ea40f24202ffd2791289abc5796b307f66f316711226a68efb6a56c42126c",
+      "disposition": "accept",
+      "d2_location": "§§5,7",
+      "author_response": "CannotApprove is a finite safe notice with required correction/no-decision wording and reason labels. Withheld never records a denial or shows a partial approval prompt."
+    },
+    {
+      "number": 34,
+      "author_priority": "blocking-contract",
+      "finding_object_sha256": "c66d1b4fe705e1849785b66f9d5c57137b0dad64e58c8502aa3079666f15d8ff",
+      "disposition": "accept",
+      "d2_location": "§§2,5",
+      "author_response": "Remove protected multipart delivery entirely. Each card is complete in one message; pair rendering is atomic text only, never a delivery/answer authority claim. Later transport must bind actual messages."
+    },
+    {
+      "number": 35,
+      "author_priority": "blocking-contract",
+      "finding_object_sha256": "3736a381be07b958405e1daf7360b066da549847be685ebca5eaa7f2a3641f90",
+      "disposition": "accept",
+      "d2_location": "§4.2",
+      "author_response": "Owner atomic content/digest provenance is an explicit adapter proof obligation; equality tokens alone are not claimed sufficient. Unequal tokens withhold."
+    },
+    {
+      "number": 36,
+      "author_priority": "blocking-contract",
+      "finding_object_sha256": "bc7740c0ac03a90a4892f7f5cd1af65d9e450bcf3448dfe64ef86cb7eb9f9e9a",
+      "disposition": "accept",
+      "d2_location": "§7",
+      "author_response": "Content-too-large/content-too-wide are explicit Withheld reasons with fixed labels; oversized exact effect cannot disappear into an unspecified result."
+    },
+    {
+      "number": 37,
+      "author_priority": "blocking-contract",
+      "finding_object_sha256": "9e4b7c3dde49c675dcd02c72eaa091495aa59cb828eb605701c2f06103ca3499",
+      "disposition": "accept",
+      "d2_location": "§1; d2 sources",
+      "author_response": "Record genuine ADR16 human decision identity/time/Marmot reference/digest separately from historical review metadata. This is not a grant for d2 and not a null-verdict approval claim."
+    },
+    {
+      "number": 38,
+      "author_priority": "specification-clarification",
+      "finding_object_sha256": "16f2a300f9bd5ac370058bfd704d772a65fc3a8a228d296d31baf94da31ffefe",
+      "disposition": "accept",
+      "d2_location": "d2 sources",
+      "author_response": "Use logical portable repository identities with exact immutable Git commit/path/hash and actual forge URL only where known. Moving ADR worktree HEAD is not a source pin or invented remote."
+    },
+    {
+      "number": 39,
+      "author_priority": "blocking-contract",
+      "finding_object_sha256": "d7d7afd780fd81692058bb02b3601289a66f7c2086d5cf4e1be8b20e6c3fadcf",
+      "disposition": "accept",
+      "d2_location": "d2 sources; §§2,6",
+      "author_response": "Pin the scanner, redactor, package initialization and identifiers source objects actually inspected; identify nonreused effectful/mutable helpers honestly."
+    },
+    {
+      "number": 40,
+      "author_priority": "blocking-contract",
+      "finding_object_sha256": "e62989e328d0205ec98f2eebdaffe1eed4976acda911b0d4b8917c5ab0133d35",
+      "disposition": "accept",
+      "d2_location": "§3",
+      "author_response": "Release naming remains open. No slash-release reservation is introduced; unknown spelling is classified unknown-command and held-only wording remains command-neutral."
+    },
+    {
+      "number": 41,
+      "author_priority": "specification-clarification",
+      "finding_object_sha256": "c0c617541f565a88820f3417a81b290c8160519460a2df0b9c30499a9bf0ad39",
+      "disposition": "accept",
+      "d2_location": "§§5,7 G16",
+      "author_response": "AllAccountsExhausted and AccountChanged notices plus complete digest/unavailable fixtures are required, without timing or recovery execution."
+    },
+    {
+      "number": 42,
+      "author_priority": "specification-clarification",
+      "finding_object_sha256": "c2c33d03df7347a66d45017dbc6e006b8b266ea8f8429b6bb256998fd8800771",
+      "disposition": "accept with producer distinction",
+      "d2_location": "§4; §7 G09",
+      "author_response": "The pure renderer represents future observation as time-unverified/unknown, not invented freshness. Frozen6B may independently reject malformed future source data before constructing a view; its stricter producer boundary remains explicit."
+    },
+    {
+      "number": 43,
+      "author_priority": "specification-clarification",
+      "finding_object_sha256": "bb03e0f678afa3a41e50e6ec2103dcb339e8fa217a81cb8b03c352c50277f17a",
+      "disposition": "accept",
+      "d2_location": "§4",
+      "author_response": "Freshness uses exact integer microseconds derived from supplied instants; no duplicate cache-state flag or second-level rounding ambiguity."
+    },
+    {
+      "number": 44,
+      "author_priority": "specification-clarification",
+      "finding_object_sha256": "c7e81b7561fd587890d73a7136aa6a91884b68f10148f43c150614257a1a93f1",
+      "disposition": "accept",
+      "d2_location": "§§4,5",
+      "author_response": "Observed/render/reset/resume timestamps include absolute UTC date and microseconds; relative age is explicitly at render time."
+    },
+    {
+      "number": 45,
+      "author_priority": "specification-clarification",
+      "finding_object_sha256": "1e2ba9508c9fc5184111a02a04d60b678432d98c9c14f3536ed6662ac4fc09fd",
+      "disposition": "accept",
+      "d2_location": "§4.1",
+      "author_response": "Unknown counts, headroom, state, time and account observations remain typed unknown rather than zero or silently absent."
+    },
+    {
+      "number": 46,
+      "author_priority": "specification-clarification",
+      "finding_object_sha256": "8bc11843a22e5683ab2c704cf0d3182dde3bcde897843413789fb36ecc9b744e",
+      "disposition": "accept",
+      "d2_location": "§4.1",
+      "author_response": "Usage observations preserve account, role, launch attribution, independent used/remaining values and original trust/time. No trusted capability is inferred."
+    },
+    {
+      "number": 47,
+      "author_priority": "specification-clarification",
+      "finding_object_sha256": "2df46519cfa5060c3a2397415612d3200decfdcffe4f10a272a29d34d689c48f",
+      "disposition": "accept",
+      "d2_location": "§4.1",
+      "author_response": "Events, decision summaries, actor display labels, via enum and timestamps are closed records. Raw identities never become safe labels; native approval display is distinguished from Plan5 evidence."
+    },
+    {
+      "number": 48,
+      "author_priority": "specification-clarification",
+      "finding_object_sha256": "03cf8797daaf7a05729eb4334d088421c498c3eceabfe64f29b6c9df707562e6",
+      "disposition": "accept",
+      "d2_location": "§§4.1,6",
+      "author_response": "Session/transcript displays must equal explicitly configured safe mapping values; no raw host path/session token or truncated raw title fallback."
+    },
+    {
+      "number": 49,
+      "author_priority": "blocking-contract",
+      "finding_object_sha256": "daa86180e1f124dc7f7435a73f96c1de6ddeddde51b6365bfa9e8cfd18c4fbee",
+      "disposition": "accept",
+      "d2_location": "§3",
+      "author_response": "Only native current-target ReactionAdded is deferred without an answer value; Removed is explicitly ignored as unproven. Task reaction glyph output remains display only."
+    },
+    {
+      "number": 50,
+      "author_priority": "blocking-contract",
+      "finding_object_sha256": "736ca7621b88ea62e5e6f79bb4530053256a9b7fc0461c64487e907f61a8377f",
+      "disposition": "accept",
+      "d2_location": "§§2,5,6",
+      "author_response": "Configured mention is in control card header only and fully budgeted before pair success. Missing mention withholds protected pair; safe failure notice does not claim operator delivery and future alert ownership remains explicit."
+    },
+    {
+      "number": 51,
+      "author_priority": "specification-clarification",
+      "finding_object_sha256": "3c512b9baed805ec74a1be9328acf37bb6cf5754bf205fc27b213c654fbd4675",
+      "disposition": "accept",
+      "d2_location": "§5",
+      "author_response": "Final maximum width120 scalars is measured; ordinary prose wraps deterministically, while an overwide exact effect/atomic link holds instead of truncating."
+    },
+    {
+      "number": 52,
+      "author_priority": "blocking-contract",
+      "finding_object_sha256": "67361622f4544958d9512161b4e7a2fdf6692bc048acd1bf1cc8d09366eebebd",
+      "disposition": "accept",
+      "d2_location": "§§2,6",
+      "author_response": "Reject lone surrogates before strict UTF-8 serialization; all invalid-object paths yield typed Invalid without encoding exceptions or echoed data."
+    },
+    {
+      "number": 53,
+      "author_priority": "blocking-contract",
+      "finding_object_sha256": "fcfb4c3b2687883ff2bac32116a4e09412b39b2dc070b6ca8ac92530f5fe6a97",
+      "disposition": "accept",
+      "d2_location": "§2",
+      "author_response": "Validate directly constructed records on every API entry, including bool counts/percentages, timezone/offset, unknown fields and all bounds."
+    },
+    {
+      "number": 54,
+      "author_priority": "specification-clarification",
+      "finding_object_sha256": "60e5ce0104d8b60527a89daf007d0498b6a0b452d510b66ca0fcecdd508a5ff2",
+      "disposition": "accept",
+      "d2_location": "§6; §7 G17",
+      "author_response": "Reduce field budgets before regex, prohibit input regex/replacement loops, and require recorded maximum-budget/adversarial latency evidence. A failing scanner budget holds pending a reviewed correction; it is not waived."
+    },
+    {
+      "number": 55,
+      "author_priority": "specification-clarification",
+      "finding_object_sha256": "afac69b5ea2ddb1f190185193558aaea4da53f983d8863877bf4bc59ffc5c8c0",
+      "disposition": "accept",
+      "d2_location": "§4",
+      "author_response": "Per-collection times/counts/completeness and explicitly separate transcripts/usage sections prevent a single aggregate count from misrepresenting several sources. Used/remaining are independent."
+    },
+    {
+      "number": 56,
+      "author_priority": "specification-clarification",
+      "finding_object_sha256": "9a6fa1b8f7eaa68c33ed52b0f938857cf3b79224aa88478720742a57d574e073",
+      "disposition": "accept",
+      "d2_location": "§5; §7",
+      "author_response": "Fixed headers/field order/separators/notice texts/protected template and packing semantics are normative. Literal implementation goldens cover every variant and cannot be regenerated to bless new behavior."
+    },
+    {
+      "number": 57,
+      "author_priority": "specification-clarification",
+      "finding_object_sha256": "80730c22f657842c9aa892d07fc4d2276e238fa2e54c72cd882cb2041370a406",
+      "disposition": "accept",
+      "d2_location": "§4.2",
+      "author_response": "Choice label grammar/case/uniqueness and recommendation membership are fixed. No slash prefix or casefold ambiguity; plain questions remain available."
+    },
+    {
+      "number": 58,
+      "author_priority": "specification-clarification",
+      "finding_object_sha256": "ed1053a25d34f737c92fe037814083b5b4e3385376d2fde59d63aac4f8b623ae",
+      "disposition": "accept",
+      "d2_location": "§4.1",
+      "author_response": "Approval ordering uses created_at plus unique opaque UTF-8 byte key, lexicographic; duplicate keys are Invalid and the key is never displayed."
+    },
+    {
+      "number": 59,
+      "author_priority": "specification-clarification",
+      "finding_object_sha256": "4eaa5c24a202d233cea86ab6747669a82889d25ae98feb4e44439594caed334d",
+      "disposition": "accept",
+      "d2_location": "§§2,5",
+      "author_response": "Canonical JSON UTF-8 byte accounting and Unicode-scalar final message/line accounting are distinct and precisely defined, including escapes/markers/LF/fences/mention."
+    },
+    {
+      "number": 60,
+      "author_priority": "blocking-contract",
+      "finding_object_sha256": "d57d30d24002c6349f224ec67dd596f05d9529c6cffb10ed54483e8f40394163",
+      "disposition": "accept",
+      "d2_location": "§3",
+      "author_response": "Suspension blocks actions/nonread handling, while authenticated read-query classifications remain available subject to fresh ingress authorization."
+    },
+    {
+      "number": 61,
+      "author_priority": "specification-clarification",
+      "finding_object_sha256": "a1f78795a5739fef977f85b9150afc957caaeaad7b882af8c8644540848a4fbc",
+      "disposition": "accept",
+      "d2_location": "§3",
+      "author_response": "Multiline/control command validation precedes mutation recognition; a multiline mutation spelling cannot ambiguously yield Unsupported."
+    },
+    {
+      "number": 62,
+      "author_priority": "specification-clarification",
+      "finding_object_sha256": "8ea0dad5879e7d4a87857bd1c717591fd77ea55393e0e564f48e971cb405b24e",
+      "disposition": "accept",
+      "d2_location": "§3",
+      "author_response": "Trim only U+0020 and split repeated U+0020; command case and tab/newline behavior are explicit. Other Unicode whitespace is not silently normalized."
+    },
+    {
+      "number": 63,
+      "author_priority": "blocking-contract",
+      "finding_object_sha256": "ce6e2e344a399797aab2eee32ff88d19f106711edbb21a3fb985dfaccc8ff76e",
+      "disposition": "accept",
+      "d2_location": "§3",
+      "author_response": "Verified ingress explicitly asserts registered account/group plus allowlist/replay facts, supplied by future authenticated owner, not text or renderer."
+    },
+    {
+      "number": 64,
+      "author_priority": "specification-clarification",
+      "finding_object_sha256": "c3fb6c944d61e2fa805d5b3d3bdfc64d59bcca760147e3b37785aed9c332adf3",
+      "disposition": "accept",
+      "d2_location": "§3",
+      "author_response": "Finite query and reason enums appear in the algorithm, with result fields limited to descriptive query/selector data."
+    },
+    {
+      "number": 65,
+      "author_priority": "specification-clarification",
+      "finding_object_sha256": "82c012580db54d9c9d34381df1875e908e8f233d9edf9c4eed15b19c76d06ffb",
+      "disposition": "accept",
+      "d2_location": "§7",
+      "author_response": "Preserve one-of-three history. Unresolved final REVISE holds; controller escalates concrete recovery through existing Marmot, no automatic fourth review/counter reset."
+    },
+    {
+      "number": 66,
+      "author_priority": "specification-clarification",
+      "finding_object_sha256": "6e255d630604f9543f7a2cc8945c0b8a3d880cb8eefe3ac27540b59b6cb5faa4",
+      "disposition": "accept",
+      "d2_location": "§7",
+      "author_response": "6C owns delivery/reminder due predicates and Plan8 orchestrates approved scheduling. Mutation cutover depends on actual Plan5/gatekeeper seams, not all Plan7; remove the roadmap dependency cycle without duplicating task authority."
+    },
+    {
+      "number": 67,
+      "author_priority": "specification-clarification",
+      "finding_object_sha256": "a837c995310de29de2d195e283a0e494489b89166379ab617b61c860364d7c2c",
+      "disposition": "accept",
+      "d2_location": "§7",
+      "author_response": "Use actual locked Ruff/Pyright, named affected tests, install-agnostic/diff checks and required hosted secrets gate; remove nonexistent formatter acceptance."
+    },
+    {
+      "number": 68,
+      "author_priority": "factual-correction",
+      "finding_object_sha256": "ad7ecea30fdebb35491e000ecb3b27a103e926dcae44b5d35b32f18b0ced0d02",
+      "disposition": "accept factual correction",
+      "d2_location": "§2",
+      "author_response": "admind.commands.parse itself is a pure parser; its module imports the effect-bearing pipeline. No claim parse executes effects. Do not import that module or reuse its incompatible grammar in 6A."
+    }
+  ]
+}
