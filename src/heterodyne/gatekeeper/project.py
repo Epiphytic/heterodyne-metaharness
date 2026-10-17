@@ -11,15 +11,14 @@ import msgspec
 from heterodyne.gatekeeper import contracts as c
 from heterodyne.gatekeeper.validate import (
     HOST_CODES,
-    REQUEST_TYPES,
-    RESULT_TYPES,
+    aliases,
     appended,
     canonical,
     check_result,
     data,
-    digest,
     native_lint_gap,
     prepare,
+    prepared_privacy,
     public_path,
     request_kind,
 )
@@ -79,7 +78,8 @@ def _sufficiency(request: c.SufficiencyRequest, outcome: c.Sufficient | c.Enrich
     if len(suffix.encode("utf-8")) > 8192 or len(description.encode("utf-8")) > 16384:
         return c.NeedsGrooming((c.Gap("oversize", "/candidate/description", None),))
     candidate = msgspec.structs.replace(request.candidate, description=description)
-    rebuilt = msgspec.structs.replace(request, candidate=candidate)
+    evidence = c.Used(request.candidate.description, tuple(sorted(aliases(request))), outcome.additions)
+    rebuilt = msgspec.structs.replace(request, candidate=candidate, enrichment=evidence)
     if len(canonical(rebuilt)) > 131072:
         return c.NeedsGrooming((c.Gap("oversize", "/candidate/description", None),))
     return c.EnrichmentProposal(candidate)
@@ -126,16 +126,13 @@ def disposition(
         return _hold(kind, "invalid_host")
     if request_kind(request) != kind:
         return _hold(kind, "invalid_host")
-    try:
-        request = msgspec.convert(data(request), type=REQUEST_TYPES[kind], strict=True)
-        raw = cast(dict[str, object], data(request))
-        del raw["snapshot_sha256"]
-        if digest(raw) != request.snapshot_sha256:
-            return _hold(kind, "invalid_host")
-    except (msgspec.ValidationError, TypeError, ValueError, UnicodeError, RecursionError):
+    privacy = privacy if privacy is not None else prepared_privacy(cast(object, prepared))
+    if privacy is None:
         return _hold(kind, "invalid_host")
-    if privacy is not None and not isinstance(prepare(request, privacy), c.Ready):
+    verified = prepare(request, privacy)
+    if not isinstance(verified, c.Ready):
         return _hold(kind, "invalid_host")
+    request = verified.value
     precheck = _precheck(request)
     if precheck is not None:
         return _hold(kind, "invalid_host") if attempt is not None else precheck
@@ -162,20 +159,7 @@ def disposition(
         return c.RawConfirmProposal() if kind == "intake" else _hold(kind, "bad_output")
     if type(result) is not c.Valid:
         return _hold(kind, "invalid_host")
-    if privacy is None:
-        try:
-            value = msgspec.convert(data(result.value), type=RESULT_TYPES[kind], strict=True)
-            if (
-                value.request_id != request.request_id
-                or value.revision != request.revision
-                or value.snapshot_sha256 != request.snapshot_sha256
-            ):
-                return _hold(kind, "invalid_host")
-            checked = c.Valid(value)
-        except (msgspec.ValidationError, TypeError, ValueError, UnicodeError, RecursionError):
-            return _hold(kind, "invalid_host")
-    else:
-        checked = check_result(result.value, request, privacy)
+    checked = check_result(result.value, request, privacy)
     if isinstance(checked, c.Invalid):
         return c.RawConfirmProposal() if kind == "intake" else _hold(kind, "bad_output")
     return _valid(request, checked.value)

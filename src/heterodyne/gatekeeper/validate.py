@@ -14,8 +14,9 @@ import msgspec
 
 from heterodyne.admind.redact import redact_with_dirs
 from heterodyne.gatekeeper import contracts as c
+from heterodyne.gatekeeper._rule_identity import matches as rules_match
 
-RULE_REVISION = "07637745fe75dc614109a0b8ba72d3489f262a97"
+RULE_REVISION = "c3e827949b35601dc3f39936b9f5821358dcb6c9"
 _ID = re.compile(r"[A-Za-z0-9_:.+\-]{1,128}")
 _BEAD = re.compile(r"[a-z0-9]{1,16}-[a-z0-9.]{1,32}")
 _TARGET = re.compile(r"[a-z][a-z0-9-]{0,31}-[0-9a-z]{5}")
@@ -132,7 +133,7 @@ def _locator(value: str, field: str) -> None:
 
 def privacy_context(value: object) -> c.PrivacyContext:
     context = msgspec.convert(value, type=c.PrivacyContext, strict=True)
-    if context.rule_revision != RULE_REVISION:
+    if context.rule_revision != RULE_REVISION or not rules_match():
         fail("binding")
     if len(context.login_dirs) > 16 or tuple(sorted(set(context.login_dirs))) != context.login_dirs:
         fail("invariant")
@@ -198,34 +199,43 @@ def _relative(value: str, privacy: c.PrivacyContext, field: str, *, dot: bool = 
         fail("profile", field)
 
 
-def _native(value: object, privacy: c.PrivacyContext, field: str, depth: int = 0) -> int:
-    if isinstance(value, (list, tuple, dict)):
-        if depth >= 8 or len(cast(list[object] | tuple[object, ...] | dict[object, object], value)) > 32:
-            fail("oversize", field)
-        children: list[object]
-        if isinstance(value, dict):
-            items = cast(dict[object, object], value)
-            for key in items:
-                if type(key) is not str or not _ID.fullmatch(key):
-                    fail("profile", field)
-                _text(key, privacy, field)
-            children = list(items.values())
-        else:
-            children = list(cast(list[object], value))
-        count = 1 + sum(_native(child, privacy, field, depth + 1) for child in children)
-    elif type(value) is str:
+def _native_children(value: object, privacy: c.PrivacyContext, field: str) -> tuple[object, ...]:
+    if isinstance(value, dict):
+        items = cast(dict[object, object], value)
+        for key in items:
+            if type(key) is not str or not _ID.fullmatch(key):
+                fail("profile", field)
+            _text(key, privacy, field)
+        return tuple(items.values())
+    return tuple(cast(list[object] | tuple[object, ...], value))
+
+
+def _native_leaf(value: object, privacy: c.PrivacyContext, field: str) -> None:
+    if type(value) is str:
         _text(value, privacy, field)
-        count = 1
     elif type(value) is int:
         if not -(2**63) <= value < 2**63:
             fail("profile", field)
-        count = 1
-    elif type(value) in (bool, type(None)):
-        count = 1
-    else:
+    elif type(value) not in (bool, type(None)):
         fail("profile", field)
-    if count > 512:
-        fail("oversize", field)
+
+
+def _native(value: object, privacy: c.PrivacyContext, field: str) -> int:
+    """Charge occurrences before descent, including aliased host containers; never expand a DAG."""
+    pending = [(value, 0)]
+    count = 0
+    while pending:
+        current, depth = pending.pop()
+        count += 1
+        if count > 512:
+            fail("oversize", field)
+        if isinstance(current, (list, tuple, dict)):
+            container = cast(list[object] | tuple[object, ...] | dict[object, object], current)
+            if depth >= 8 or len(container) > 32:
+                fail("oversize", field)
+            pending.extend((child, depth + 1) for child in _native_children(container, privacy, field))
+        else:
+            _native_leaf(current, privacy, field)
     return count
 
 
@@ -434,19 +444,26 @@ def _sufficiency(request: c.SufficiencyRequest, privacy: c.PrivacyContext) -> No
             fail("invariant", "/lint")
     elif isinstance(request.lint, c.Failed) and request.lint.gaps != native_lint_gap(True):
         fail("invariant", "/lint")
-    original = request.candidate
-    if isinstance(request.enrichment, c.Used):
-        used = request.enrichment
-        _text(used.base_description, privacy, "/enrichment/base_description", 16384)
-        if used.context_source_ids != tuple(sorted(aliases(request))):
-            fail("invariant", "/enrichment")
-        _additions(request, used.additions, privacy)
-        suffix = appended(request, used.additions)
-        if len(suffix.encode()) > 8192 or request.candidate.description != used.base_description + suffix:
-            fail("invariant", "/enrichment")
-        original = msgspec.structs.replace(request.candidate, description=used.base_description)
-    if digest(original) != request.base_candidate_sha256:
-        fail("binding", "/enrichment")
+
+
+def _enrichment(request: c.SufficiencyRequest, privacy: c.PrivacyContext) -> None:
+    """All retained reconstruction evidence is host-owned, never a model/origin fault."""
+    try:
+        original = request.candidate
+        if isinstance(request.enrichment, c.Used):
+            used = request.enrichment
+            _text(used.base_description, privacy, "/enrichment/base_description", 16384)
+            if used.context_source_ids != tuple(sorted(aliases(request))):
+                fail("invariant", "/enrichment")
+            _additions(request, used.additions, privacy)
+            suffix = appended(request, used.additions)
+            if len(suffix.encode()) > 8192 or request.candidate.description != used.base_description + suffix:
+                fail("invariant", "/enrichment")
+            original = msgspec.structs.replace(request.candidate, description=used.base_description)
+        if digest(original) != request.base_candidate_sha256:
+            fail("binding", "/enrichment")
+    except Fault:
+        fail("invariant", "/enrichment")
 
 
 def _host(request: c.AnyRequest, privacy: c.PrivacyContext) -> None:
@@ -457,10 +474,6 @@ def _host(request: c.AnyRequest, privacy: c.PrivacyContext) -> None:
     _match(request.policy_revision.sha256, _DIGEST, "/policy_revision/sha256")
     if request.privacy_sha256 != privacy.sha256:
         fail("binding", "/privacy_sha256")
-    raw = cast(dict[str, object], data(request))
-    del raw["snapshot_sha256"]
-    if request.snapshot_sha256 != digest(raw):
-        fail("binding", "/snapshot_sha256")
     _bindings(request, privacy)
     if isinstance(request, c.IntakeRequest):
         _origin(request.origin)
@@ -495,6 +508,12 @@ def _host(request: c.AnyRequest, privacy: c.PrivacyContext) -> None:
         if request.invocation.sha256 != digest(invocation):
             fail("binding", "/invocation/sha256")
     _contexts(request, privacy)
+    if isinstance(request, c.SufficiencyRequest):
+        _enrichment(request, privacy)
+    raw = cast(dict[str, object], data(request))
+    del raw["snapshot_sha256"]
+    if request.snapshot_sha256 != digest(raw):
+        fail("binding", "/snapshot_sha256")
     if len(canonical(request)) > 131072:
         fail("oversize")
 
@@ -526,6 +545,34 @@ def _wire(data_bytes: bytes, maximum: int) -> object:
     return value
 
 
+class _PreparedReady(c.Ready[c.AnyRequest], dict=True, frozen=True):
+    """Private ephemeral context; not a wire field or an authentication capability."""
+
+
+def prepared_privacy(value: object) -> c.PrivacyContext | None:
+    if type(value) is _PreparedReady:
+        context = value.__dict__.get("_privacy")
+        return context if isinstance(context, c.PrivacyContext) else None
+    return None
+
+
+def _ready(request: c.AnyRequest, privacy: c.PrivacyContext) -> c.Ready[c.AnyRequest]:
+    prepared = _PreparedReady(request)
+    cast(dict[str, object], object.__getattribute__(prepared, "__dict__"))["_privacy"] = privacy
+    return prepared
+
+
+def _typed_origin(raw: object, privacy: c.PrivacyContext) -> object:
+    # Bound object-valued origin data before to_builtins can expand shared containers.
+    if isinstance(raw, c.PermissionRequest):
+        _native(raw.invocation.input, privacy, "/invocation/input")
+    elif isinstance(raw, c.SufficiencyRequest):
+        _candidate(raw.candidate, privacy)
+    if isinstance(raw, (c.IntakeRequest, c.SufficiencyRequest, c.PermissionRequest)):
+        return data(raw)
+    return raw
+
+
 def prepare(
     raw: object, privacy: c.PrivacyContext, *, native_digest: str | None = None
 ) -> c.Prepared[c.AnyRequest]:
@@ -534,8 +581,10 @@ def prepare(
         privacy = privacy_context(data(privacy))
     except (Fault, msgspec.ValidationError, TypeError):
         return c.InvalidHost("/privacy_sha256")
-    if isinstance(raw, c.Request):
-        raw = data(raw)
+    try:
+        raw = _typed_origin(raw, privacy)
+    except Fault as error:
+        return c.OriginGap((c.Gap(error.code, error.field, None),))
     if not isinstance(raw, dict):
         return c.InvalidHost("")
     raw = cast(dict[str, object], raw)
@@ -559,7 +608,7 @@ def prepare(
                 return c.HostFailed("stale_digest")
     except msgspec.ValidationError as error:
         path = schema_path(error)
-        return c.InvalidHost("/context" if path.startswith("/context") else path)
+        return c.InvalidHost("/context" if (path == "/context" or path.startswith("/context/")) else path)
     except (UnicodeError, RecursionError, TypeError, ValueError) as error:
         if isinstance(error, Fault):
             if error.field == "/context" and error.code == "binding":
@@ -570,7 +619,7 @@ def prepare(
                 return c.HostFailed("egress_oversize")
             return c.InvalidHost(error.field if public_path(error.field) else "")
         return c.InvalidHost("")
-    return c.Ready(request)
+    return _ready(request, privacy)
 
 
 def decode_request(encoded: bytes, privacy: c.PrivacyContext) -> c.Check[c.AnyRequest]:
@@ -578,7 +627,17 @@ def decode_request(encoded: bytes, privacy: c.PrivacyContext) -> c.Check[c.AnyRe
         raw = _wire(encoded, 131072)
     except Fault as error:
         return c.Invalid("request", cast(c.CheckCode, error.code), error.field)
-    checked = prepare(raw, privacy)
+    try:
+        if not isinstance(raw, dict):
+            return c.Invalid("request", "schema", "")
+        body = cast(dict[str, object], raw)
+        kind = body.get("kind")
+        if not isinstance(kind, str) or kind not in REQUEST_TYPES:
+            return c.Invalid("request", "schema", "")
+        msgspec.convert(body, type=REQUEST_TYPES[kind], strict=True)
+    except msgspec.ValidationError as error:
+        return c.Invalid("request", "schema", schema_path(error))
+    checked = prepare(body, privacy)
     if isinstance(checked, c.Ready):
         return c.Valid(checked.value)
     if isinstance(checked, c.OriginGap):
@@ -586,7 +645,19 @@ def decode_request(encoded: bytes, privacy: c.PrivacyContext) -> c.Check[c.AnyRe
         return c.Invalid(
             "request", cast(c.CheckCode, "schema" if gap.code == "profile" else gap.code), gap.field
         )
-    return c.Invalid("request", "binding" if isinstance(checked, c.HostFailed) else "invariant", "")
+    return _request_invalid(checked)
+
+
+def _request_invalid(checked: c.Prepared[c.AnyRequest]) -> c.Invalid:
+    if isinstance(checked, c.HostFailed):
+        code = {"egress_unsafe": "unsafe", "egress_oversize": "oversize"}.get(checked.reason_code, "binding")
+        return c.Invalid("request", cast(c.CheckCode, code), "")
+    if isinstance(checked, c.OriginGap):
+        gap = checked.gaps[0]
+        return c.Invalid(
+            "request", cast(c.CheckCode, "schema" if gap.code == "profile" else gap.code), gap.field
+        )
+    return c.Invalid("request", "invariant", checked.field if isinstance(checked, c.InvalidHost) else "")
 
 
 def task_aliases(request: c.IntakeRequest) -> dict[str, str]:
@@ -651,6 +722,12 @@ def request_kind(request: c.AnyRequest) -> str:
 def check_result(raw: object, request: c.AnyRequest, privacy: c.PrivacyContext) -> c.Check[c.AnyJudgment]:
     """Validate a host-normalized result; never treats model output as host failure."""
     try:
+        privacy = privacy_context(data(privacy))
+        if privacy.sha256 != request.privacy_sha256:
+            fail("binding", "/privacy_sha256")
+    except (Fault, msgspec.ValidationError, TypeError, ValueError, UnicodeError):
+        return c.Invalid("result", "binding", "/privacy_sha256")
+    try:
         result = msgspec.convert(data(raw), type=RESULT_TYPES[request_kind(request)], strict=True)
         _outcome(request, result, privacy)
     except msgspec.ValidationError as error:
@@ -709,7 +786,7 @@ def egress(request: c.AnyRequest, privacy: c.PrivacyContext) -> c.Check[dict[str
     """Project only approved public fields. Repo locators/host provenance never leave."""
     prepared = prepare(request, privacy)
     if not isinstance(prepared, c.Ready):
-        return c.Invalid("request", "invariant", "")
+        return _request_invalid(prepared)
     common: dict[str, object] = dict(
         format=1,
         kind=request_kind(request),

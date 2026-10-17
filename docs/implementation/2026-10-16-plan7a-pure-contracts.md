@@ -51,3 +51,30 @@ Pure design approval does not amend the governing ADR or authorize deployment. L
 integration must establish authentic origin/policy/native readbacks, provider/timeout behavior,
 existing-session routing, hard floors and deployment authority. The 4 KiB evidence limit and
 ordinary advisory-model semantic risk remain explicit approved limitations.
+
+## First HIGH code-review repairs
+
+The actual first HIGH review returned REVISE with ten findings. All ten are addressed
+in this candidate; a second code review remains pending. The public/wire `Ready` grammar
+is unchanged. `prepare` retains its immutable privacy context in a private in-memory token
+without adding msgspec fields. Every disposition rechecks the complete request and normalized
+outcome under that bound context; plain, reconstructed or replaced tokens fail closed.
+This token is not authority or a persistence format. Explicit four-argument internal calls
+also rerun those checks. No registry, ambient login-directory lookup or global mutation exists.
+
+Enrichment budgets the complete mandatory Used reassessment, including retained base text
+and quotes. Host reconstruction evidence is checked after source-context validation and
+has host-owned diagnostics. NativeValue traversal charges every occurrence before descent,
+so shared Python containers cannot expand past the global budget before refusal.
+
+The inputs manifest now pins both actual redaction source blobs at the existing signed
+product revision containing the parity-tested extraction, retaining the original legacy
+pins separately. A pure fingerprint checks the loaded explicit-directory kernel, patterns
+and constants on admitted CPython 3.12; drift or another unadmitted interpreter fails closed.
+It reads no source files or environment and is compatibility evidence, not authentication
+against code replacement by a trusted host. A later redaction/interpreter update must admit
+its exact source and kernel identity together with parity fixtures before use.
+
+The review's optional regex-compilation and generated-field-set suggestions are deferred:
+there is no measured performance regression requiring a new caching lifecycle, and closed
+schema tests cover the explicit public diagnostic field allowlist. No review pass is claimed.

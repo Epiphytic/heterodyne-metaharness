@@ -354,10 +354,13 @@ def test_quote_byte_boundary(length, valid):
         assert checked == c.Invalid("result", "oversize", "/outcome/additions/0/quote")
 
 
-def test_transformed_whole_request_one_over_is_atomic_groom():
+@pytest.mark.parametrize("text_size,context_count,whole_size", [(4000, 27, 131052), (3300, 32, 124716)])
+def test_transformed_whole_request_one_over_is_atomic_groom(text_size, context_count, whole_size):
     raw = request("sufficiency")
-    text = "x" * 4000
-    blob = hashlib.sha1(b"blob 4000\0" + text.encode(), usedforsecurity=False).hexdigest()
+    text = "x" * text_size
+    blob = hashlib.sha1(
+        b"blob " + str(text_size).encode() + b"\0" + text.encode(), usedforsecurity=False
+    ).hexdigest()
     ref = dict(raw["candidate"]["ask"]["refs"][0], id=blob)
     raw["candidate"]["ask"]["refs"] = [ref]
     raw["resolved_refs"] = [dict(ref=ref, resolved_id=blob)]
@@ -370,18 +373,36 @@ def test_transformed_whole_request_one_over_is_atomic_groom():
             ref=ref,
             resolved_id=blob,
         )
-        for i in range(27)
+        for i in range(context_count)
     ]
     raw["candidate"]["description"] = "x"
     raw["base_candidate_sha256"] = digest(raw["candidate"])
     sealed = seal(raw)
-    remaining = 131052 - len(canonical(sealed)) + 1
+    remaining = whole_size - len(canonical(sealed)) + 1
     assert 1 <= remaining <= 16384
     raw["candidate"]["description"] = "x" * remaining
     raw["base_candidate_sha256"] = digest(raw["candidate"])
     prepared = prepare(seal(raw), privacy())
     assert isinstance(prepared, c.Ready), prepared
-    assert len(canonical(prepared.value)) == 131052
+    assert len(canonical(prepared.value)) == whole_size
+    assert isinstance(prepared.value, c.SufficiencyRequest)
+    if whole_size < 130000:
+        # New description alone fits; mandatory Used base/quote evidence does not.
+        from heterodyne.gatekeeper.validate import aliases, appended
+
+        additions = (c.Addition("source-00", 0, 1, "x"),)
+        candidate = msgspec.structs.replace(
+            prepared.value.candidate,
+            description=prepared.value.candidate.description + appended(prepared.value, additions),
+        )
+        unused = msgspec.structs.replace(prepared.value, candidate=candidate)
+        used = msgspec.structs.replace(
+            unused,
+            enrichment=c.Used(
+                prepared.value.candidate.description, tuple(sorted(aliases(prepared.value))), additions
+            ),
+        )
+        assert len(canonical(unused)) <= 131072 < len(canonical(used))
     selected = dict(
         status="enrich",
         reason="Evidence",
