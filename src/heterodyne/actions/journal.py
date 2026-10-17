@@ -19,7 +19,9 @@ import msgspec
 from heterodyne.actions.codec import encode_record
 from heterodyne.actions.decisions import Decision
 from heterodyne.actions.dispatch import Dispatch
-from heterodyne.actions.requests import TERMINAL_REQUESTS, Refused, Request, request_bytes, same_session
+from heterodyne.actions.policy import request_denial_key
+from heterodyne.actions.requests import TERMINAL_REQUESTS, Refused, Request, request_bytes
+from heterodyne.actions.transitions import decision_transition, dispatch_transition, request_transition
 
 APPLICATION_ID = 0x50315031
 SCHEMA_VERSION = 2
@@ -142,7 +144,7 @@ class FixtureJournal:
             raise
 
     def _event(self, kind: str, key: str, version: int, data: bytes) -> None:
-        if self.db.execute("SELECT count(*) FROM events").fetchone()[0] >= MAX_EVENTS:
+        if self.db.execute("SELECT coalesce(max(seq), 0) FROM events").fetchone()[0] >= MAX_EVENTS:
             raise Refused("fixture-event-capacity-needs-recovery")
         self.db.execute(
             "INSERT INTO events(kind,key,version,data) VALUES(?,?,?,?)", (kind, key, version, data)
@@ -178,7 +180,11 @@ class FixtureJournal:
                 if original is None or bytes(original[0]) != data:
                     raise Refused("creation-key-conflict")
                 return key
-            if value.denial_identity is None or self.denied(value.denial_identity, value.origin.session_key):
+            if value.denial_identity != request_denial_key(
+                value.intent, value.origin, value.resolved, value.config
+            ):
+                raise Refused("denial-identity-not-derived")
+            if self.denied(value.denial_identity or "", value.origin.session_key):
                 raise Refused("same-session-denied-intent")
             history = tuple(
                 row[0]
@@ -224,14 +230,29 @@ class FixtureJournal:
             if prior is not None:
                 if bytes(prior[0]) != data:
                     raise Refused("decision-event-id-conflict")
-                return "duplicate" if isinstance(old, Decision) and old.event == value.event else "superseded"
-            self._event("decision-inbox", inbox_key, 0, data)
+                if isinstance(old, Decision) and old.phase != "invalid":
+                    return "duplicate" if old.event == value.event else "superseded"
+            else:
+                self._event("decision-inbox", inbox_key, 0, data)
             if isinstance(old, Decision):
                 if old.phase != "invalid":
                     return "superseded"
                 if old.observed_native_event is not None and old.observed_native_event != value.event:
                     return "superseded"
-                value = msgspec.structs.replace(value, version=old.version + 1)
+                if old.observed_native_event is None and any(
+                    (record := msgspec.json.decode(bytes(history[0]), type=Decision)).phase == "invalid"
+                    and record.event == value.event
+                    for history in self.db.execute(
+                        "SELECT data FROM events WHERE kind='decision' AND key=?", (key,)
+                    )
+                ):
+                    return "superseded"
+                value = msgspec.structs.replace(
+                    value,
+                    version=old.version + 1,
+                    phase="native-written" if old.observed_native_event is not None else "pending",
+                    native_event_id=old.observed_native_event.event_id if old.observed_native_event else None,
+                )
                 data = encode_record(value)
                 self.db.execute(
                     "UPDATE decisions SET version=?,data=? WHERE key=?", (value.version, data, key)
@@ -287,11 +308,16 @@ class FixtureJournal:
             ).issubset(value.retired_nonces)
         ):
             raise Refused("reconcile-parent-binding")
+        reconciliations = 0
         for row in self.db.execute(
             "SELECT data FROM dispatches WHERE key=? OR key LIKE ?",
             (value.approval_id, value.approval_id + ":reconcile:%"),
         ):
             previous = msgspec.json.decode(bytes(row[0]), type=Dispatch)
+            if previous.dispatch_kind == "reconcile":
+                reconciliations += 1
+                if not previous.settled:
+                    raise Refused("reconcile-invocation-still-held")
             used = {
                 previous.startup_hash,
                 previous.claim_hash,
@@ -304,6 +330,8 @@ class FixtureJournal:
                 set(value.retired_startups) | set(value.retired_nonces)
             ):
                 raise Refused("reconcile-retired-history-required")
+        if reconciliations >= 3:
+            raise Refused("reconcile-needs-authenticated-recovery")
         self.db.execute("INSERT INTO dispatches VALUES(?,?,?)", (key, value.version, data))
         self._event("dispatch", key, value.version, data)
 
@@ -332,42 +360,19 @@ class FixtureJournal:
                 raise Refused("invalid-fixture-transition")
             data = request_bytes(value) if isinstance(value, Request) else encode_record(value)
             if isinstance(value, Request):
-                if (
-                    not isinstance(old, Request)
-                    or value.key != old.key
-                    or not same_session(old.origin, value.origin)
-                    or value.origin.generation < old.origin.generation
-                ):
+                if not isinstance(old, Request):
                     raise Refused("immutable-request-binding")
-                if value.phase == "denied":
-                    self._denial(value, self.get("decision", value.approval_id or ""))
-                elif value.phase == "completed":
-                    dispatch = self.get("dispatch", value.approval_id or "")
-                    if (
-                        not isinstance(dispatch, Dispatch)
-                        or not dispatch.settled
-                        or dispatch.state != "succeeded"
-                        or (dispatch.revision, dispatch.digest)
-                        != (value.request_revision, value.context_digest)
-                    ):
-                        raise Refused("completion-not-durable")
-                elif value.denial_identity is None or self.denied(
-                    value.denial_identity, value.origin.session_key
-                ):
-                    raise Refused("same-session-denied-intent")
-                history = {
-                    r[0]
-                    for r in self.db.execute(
-                        "SELECT identity FROM denials WHERE session_key=?", (value.origin.session_key,)
-                    )
-                }
-                if value.phase != "denied" and not history.issubset(value.prior_denials):
-                    raise Refused("denial-history-required")
+                value = self._request_proposal(old, value)
+                data = request_bytes(value)
                 self.db.execute(
                     "UPDATE requests SET data=?,version=?,outstanding=? WHERE key=? AND version=?",
                     (data, value.version, _outstanding(value), key, expected_version),
                 )
             else:
+                if isinstance(old, Decision) and isinstance(value, Decision):
+                    decision_transition(old, value)
+                elif isinstance(old, Dispatch) and isinstance(value, Dispatch):
+                    dispatch_transition(old, value)
                 if (dispatch_key(value) if isinstance(value, Dispatch) else value.approval_id) != key:
                     raise Refused("immutable-approval-binding")
                 query = {
@@ -380,6 +385,32 @@ class FixtureJournal:
             self._event(kind, key, value.version, data)
         return value
 
+    def _request_proposal(self, old: Request, value: Request) -> Request:
+        decision = self.get("decision", value.approval_id or "") if value.phase == "denied" else None
+        dispatch = self.get("dispatch", value.approval_id or "") if value.phase == "completed" else None
+        request_transition(old, value, decision=decision, dispatch=dispatch)
+        if value.phase == "denied":
+            self._denial(value, decision)
+        if value.phase in TERMINAL_REQUESTS:
+            return value
+        revised = value.request_revision != old.request_revision
+        if (revised or value.phase == "filed") and self.denied(
+            value.denial_identity or "", value.origin.session_key
+        ):
+            raise Refused("same-session-denied-intent")
+        # A later unrelated denial cannot freeze an already admitted request.
+        # Refresh history from the journal, never from a caller assertion.
+        history = set(value.prior_denials)
+        history.update(
+            row[0]
+            for row in self.db.execute(
+                "SELECT identity FROM denials WHERE session_key=?", (value.origin.session_key,)
+            )
+        )
+        if len(history) > 64:
+            raise Refused("denial-history-capacity-needs-recovery")
+        return msgspec.structs.replace(value, prior_denials=tuple(sorted(history)))
+
     def _denial(self, value: Request, decision: object) -> None:
         if (
             not isinstance(decision, Decision)
@@ -388,7 +419,8 @@ class FixtureJournal:
             or value.approval_id != decision.approval_id
             or value.context_digest != decision.digest
             or value.request_revision != decision.request_revision
-            or value.denial_identity is None
+            or value.denial_identity
+            != request_denial_key(value.intent, value.origin, value.resolved, value.config)
         ):
             raise Refused("denial-not-committed")
         result = self.db.execute(
@@ -396,7 +428,7 @@ class FixtureJournal:
             (value.denial_identity, value.origin.session_key, decision.approval_id),
         )
         if result.rowcount:
-            self._event("denial", value.denial_identity, 0, encode_record((value.key, decision)))
+            self._event("denial", value.denial_identity or "", 0, encode_record((value.key, decision)))
 
     def record_denial(self, value: Request, decision: Decision) -> None:
         with self.transaction():

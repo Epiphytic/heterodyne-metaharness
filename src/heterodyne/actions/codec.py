@@ -45,6 +45,16 @@ class InvalidAction(ValueError):
     """Fixed safe diagnostics never interpolate untrusted input."""
 
 
+def safe_label(value: object, maximum: int = 256) -> bool:
+    """Closed printable ASCII identity labels; no caller text in diagnostics."""
+    return (
+        type(value) is str
+        and 1 <= len(value) <= maximum
+        and value.isascii()
+        and all(32 <= ord(c) < 127 for c in value)
+    )
+
+
 def _fail(reason: str) -> Never:
     raise InvalidAction(reason)
 

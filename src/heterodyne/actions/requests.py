@@ -13,6 +13,7 @@ from heterodyne.actions.codec import (
     InvalidAction,
     assemble_envelope,
     encode_record,
+    safe_label,
     validate_request_inputs,
 )
 from heterodyne.actions.contracts import ActionConfig, Envelope, Intent, Origin, Record, Resolved
@@ -305,7 +306,7 @@ def settle_request(
 
     if phase == "denied":
         if (
-            value.phase != "filed"
+            value.phase not in {"filed", "ask-pinned", "sufficient"}
             or not isinstance(decision, Decision)
             or decision.phase != "committed"
             or decision.event.value != "deny"
@@ -345,12 +346,20 @@ def settle_request(
             or not recovery.exact_repair_scope
             or not recovery.native_readback
             or not digest_syntax(recovery.evidence)
-            or not 1 <= len(recovery.operator_event) <= 256
-            or not recovery.operator_event.isascii()
-            or not all(32 <= ord(c) < 127 for c in recovery.operator_event)
+            or not safe_label(recovery.operator_event)
         ):
             raise Refused("request-abandonment-not-authenticated")
-    return changed(value, phase=phase, cleanup_confirmed=True)
+    return changed(
+        value,
+        phase=phase,
+        cleanup_confirmed=True,
+        recovery_operator_event=recovery.operator_event
+        if isinstance(recovery, AbandonmentRecovery)
+        else value.recovery_operator_event,
+        recovery_evidence=recovery.evidence
+        if isinstance(recovery, AbandonmentRecovery)
+        else value.recovery_evidence,
+    )
 
 
 class AbandonmentRecovery(Record, frozen=True):
@@ -403,9 +412,7 @@ def recover_allocation(value: Request, observation: AllocationRecovery) -> Reque
         or not observation.exact_repair_scope
         or not observation.native_readback
         or not digest_syntax(observation.evidence_digest)
-        or not 1 <= len(observation.operator_event) <= 256
-        or not observation.operator_event.isascii()
-        or not all(32 <= ord(c) < 127 for c in observation.operator_event)
+        or not safe_label(observation.operator_event)
         or not 1 <= len(ids) <= 8
         or len(set(ids)) != len(ids)
         or any(not BEAD_ID.fullmatch(i) for i in ids)

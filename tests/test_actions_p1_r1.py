@@ -415,9 +415,30 @@ def test_new_generation_groom_journal_keeps_stable_session_and_requires_repark(t
     db = FixtureJournal.create(tmp_path / "fixture.sqlite")
     original = f.initial()
     key = db.add_request(original)
-    # A pure snapshot reducer used only to construct the synthetic pre-groom filing fixture.
+    value = db.transition("request", key, 0, issue_allocation)
     value = db.transition(
-        "request", key, 0, lambda v: msgspec.structs.replace(f.filed(), phase="ask-pinned", version=1)
+        "request",
+        key,
+        value.version,
+        lambda v: observe_allocation(v, ("btq-ab123",), lookup_ok=True, elapsed_seconds=1),
+    )
+    for operation in ("blocker", "park", "land"):
+        value = db.transition(
+            "request",
+            key,
+            value.version,
+            lambda v, operation=operation: f.observe_stage(
+                v,
+                operation,
+                key=v.key,
+                approval_id=v.approval_id,
+                origin=v.origin,
+                source=f.SHA,
+                readback_ok=True,
+            ),
+        )
+    value = db.transition(
+        "request", key, value.version, lambda v: f.pin_ask(v, b"whole fixture ask", f.DIGEST, revision=1)
     )
     new_origin = msgspec.structs.replace(value.origin, generation=2)
     value = db.transition(

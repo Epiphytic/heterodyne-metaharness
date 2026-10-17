@@ -8,7 +8,7 @@ from typing import Literal
 
 import msgspec
 
-from heterodyne.actions.codec import BEAD_ID
+from heterodyne.actions.codec import BEAD_ID, safe_label
 from heterodyne.actions.contracts import Record
 from heterodyne.actions.requests import Refused, changed, digest_syntax
 
@@ -127,7 +127,8 @@ def ready(
 ) -> Dispatch:
     _within(value, now)
     if (
-        value.state != "preparing"
+        value.dispatch_kind != "initial"
+        or value.state != "preparing"
         or value.claim_consumed
         or not fresh_gates
         or not startup_readback
@@ -179,7 +180,8 @@ def consume_claim(value: Dispatch, claim_hash: str, now: Clock, *, fresh_gates: 
     """CAS this state DURABLY before returning claim success. Lost acknowledgement is uncertain."""
     _within(value, now)
     if (
-        value.state != "ready"
+        value.dispatch_kind != "initial"
+        or value.state != "ready"
         or value.claim_consumed
         or not fresh_gates
         or claim_hash != value.claim_hash
@@ -307,10 +309,11 @@ class DispatchRecovery(Record, frozen=True):
     native_readback: bool = False
     effect_definitively_absent: bool = False
     cleanup_proven: bool = False
+    effect_attested_succeeded: bool = False
 
 
-def settle_failed_dispatch(value: Dispatch, observation: DispatchRecovery) -> Dispatch:
-    """Fixed failed-attempt settlement, never a retry, new claim or initial-effect capability."""
+def settle_dispatch(value: Dispatch, observation: DispatchRecovery) -> Dispatch:
+    """Exact operator-attested outcome and cleanup; never machine attribution or retry."""
     if (
         value.state not in {"held", "uncertain", "failed"}
         or value.settled
@@ -330,24 +333,45 @@ def settle_failed_dispatch(value: Dispatch, observation: DispatchRecovery) -> Di
                 observation.authenticated_current,
                 observation.exact_repair_scope,
                 observation.native_readback,
-                observation.effect_definitively_absent,
                 observation.cleanup_proven,
             )
         )
+        or observation.effect_definitively_absent == observation.effect_attested_succeeded
+        or (observation.effect_attested_succeeded and not value.claim_consumed)
         or not digest_syntax(observation.evidence)
-        or not 1 <= len(observation.operator_event) <= 256
-        or not observation.operator_event.isascii()
-        or not all(32 <= ord(c) < 127 for c in observation.operator_event)
+        or not safe_label(observation.operator_event)
     ):
         raise Refused("dispatch-recovery-not-bound")
     return changed(
         value,
-        state="failed",
+        state="succeeded" if observation.effect_attested_succeeded else "failed",
         settled=True,
         cleanup_proven=True,
         evidence=observation.evidence,
         recovery_operator_event=observation.operator_event,
     )
+
+
+def settle_failed_dispatch(value: Dispatch, observation: DispatchRecovery) -> Dispatch:
+    """Compatibility entrypoint: accepts only the originally supported absent outcome."""
+    if not observation.effect_definitively_absent or observation.effect_attested_succeeded:
+        raise Refused("dispatch-recovery-not-bound")
+    return settle_dispatch(value, observation)
+
+
+def finish_reconciliation(value: Dispatch, *, evidence: str, cleanup_proven: bool) -> Dispatch:
+    """Retire a read-only invocation; its evidence does not itself settle the parent effect."""
+    if (
+        value.dispatch_kind != "reconcile"
+        or value.state != "preparing"
+        or value.settled
+        or value.claim_consumed
+        or value.claim_hash is not None
+        or not cleanup_proven
+        or not digest_syntax(evidence)
+    ):
+        raise Refused("reconcile-cleanup-unproved")
+    return changed(value, state="failed", settled=True, cleanup_proven=True, evidence=evidence)
 
 
 def prepare_reconciliation(value: Dispatch, attempt_id: str, startup_hash: str, now: Clock) -> Dispatch:

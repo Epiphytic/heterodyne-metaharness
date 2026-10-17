@@ -104,6 +104,12 @@ follow-up proposal has separate bookkeeping and cannot rewrite the original even
 A revoked/stale prewrite event can be marked invalid; a write-issued event requires
 exact authenticated conflicting native readback before replacement. Every incoming
 event retains an inbox record, including duplicate/superseded decision handling.
+A previously superseded candidate can be reconsidered when the earlier candidate
+is invalidated, without duplicating its inbox row. An invalidated event cannot
+resurrect via replay. An exact authenticated native-conflict readback is adopted as
+native-written, never submitted as another native decision write. Authenticated
+groom/deny cards permit denial at ask-pinned/sufficient; they never grant approval
+before filing, including after two exhausted grooming revisions.
 Denial reasons are bounded to 1024 Unicode scalars, with the same text-safety rules.
 Permission widening defaults to true (hard deny); callers must positively establish
 non-widening. This is a safety default, not a permission-model implementation.
@@ -125,6 +131,18 @@ ambiguous claims first exhaust the bounded readbacks. Persisted `dispatch_kind`
 distinguishes the retained initial attempt from separate read-only reconciliation
 rows. Each reconciliation has a distinct attempt and startup/claim nonce lineage;
 settling its row cannot release the initial attempt's resources or permit an effect.
+Reconcile records cannot become ready, receive an effect nonce, or consume a claim.
+`finish_reconciliation` only records that read-only invocation's evidence/cleanup;
+parent effect observations remain separately bound. The journal permits one
+unsettled reconciliation and three total retained invocations per approval.
+
+`settle_dispatch` additionally accepts an exact authenticated, explicitly
+operator-attested success after exhausted unknown readbacks and cleanup proof.
+Its `recovery_operator_event` distinguishes that disposition from machine evidence;
+it must not be rendered as machine-verified or attributed execution. Conflicting
+absent/success attestations, stale pins and missing cleanup refuse. The compatibility
+`settle_failed_dispatch` accepts only absent outcomes. Neither can grant a claim.
+An already consumed attempt retains its consumed flag forever.
 
 `FixtureJournal` only creates/opens explicitly private temporary fixture databases,
 with a separate application ID and exact schema. Its v1-to-v2 migration is an
@@ -150,10 +168,27 @@ allocation across generations of its logical session; alias spelling is excluded
 from the identity while real effect fields remain. A changed intent must retain
 its session's prior denial identities (at most 64, otherwise hold) rather than
 pretend that the previous denial did not occur. These fingerprints and fixture
-row locators are separate from native approval digests.
+row locators are separate from native approval digests. Existing request progress
+refreshes denial history from the same journal transaction; a later unrelated
+denial cannot freeze cleanup or grooming. A revised or newly filed denied effect
+still refuses. The journal recomputes canonical identities and reconstructs legal
+Request, Decision and Dispatch transitions through the closed pure reducers.
+Arbitrary callback output cannot skip phases, erase immutable pins/history or
+release an unknown/filed request via cancellation. These checks corroborate
+synthetic observations; they do not authenticate future real adapter facts.
 
 Named synthetic offline tests are `test_actions_p0.py`, `test_actions_p1.py`,
-`test_actions_p1_dispatch.py`, `test_actions_p1_hardening.py`, and `test_actions_p1_r1.py`. SQLite operations
+`test_actions_p1_dispatch.py`, `test_actions_p1_hardening.py`, `test_actions_p1_r1.py`, and `test_actions_p1_r2.py`. SQLite operations
 only target temporary test files. Fake ports are in-memory and cannot reach a
 queue, session socket, effect target, model, service or network. Passing them does
 not establish live adapter readiness or authorize deployment.
+
+Remaining integration obligations: no production authentication, cleanup, timer or
+expiry/reboot observer is implemented. An uncertain dispatch retains its locks;
+clock expiry alone never proves launcher exit. `denied` is a reserved dispatch
+state; authenticated request/decision denial currently prevents dispatch insertion.
+The unchanged strict text codec rejects Unicode format characters (including
+ZWJ/ZWNJ); denial reasons now consistently convert that failure to `Refused`.
+The exact v2 fixture schema has no session-key denial index; its bounded scan is
+not presented as constant-time. Audit capacity uses the integer-primary-key maximum
+rather than a repeated full event count. No historical fixture rows are deleted.

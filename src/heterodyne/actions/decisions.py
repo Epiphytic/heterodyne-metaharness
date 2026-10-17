@@ -6,6 +6,7 @@ sole writer owes current principal, purpose, surface/event and native context ch
 
 from typing import Literal
 
+from heterodyne.actions.codec import safe_label
 from heterodyne.actions.contracts import Record
 from heterodyne.actions.requests import Refused, Request, changed, digest_syntax
 
@@ -45,15 +46,6 @@ class Decision(Record, frozen=True):
     observed_native_event: DecisionObservation | None = None
 
 
-def _label(value: str, maximum: int) -> bool:
-    return (
-        type(value) is str
-        and 1 <= len(value) <= maximum
-        and value.isascii()
-        and all(32 <= ord(c) < 127 for c in value)
-    )
-
-
 def begin_decision(
     request: Request,
     event: DecisionObservation,
@@ -63,7 +55,10 @@ def begin_decision(
     heart: bool = False,
 ) -> Decision:
     if (
-        request.phase != "filed"
+        (
+            request.phase != "filed"
+            and not (event.value == "deny" and request.phase in {"ask-pinned", "sufficient"})
+        )
         or request.context_digest != current_digest
         or event.digest != current_digest
         or event.approval_id != request.approval_id
@@ -75,15 +70,18 @@ def begin_decision(
         or not event.surface_bound
         or not event.authority_current
         or not all(
-            _label(v, 256) for v in (event.event_id, event.surface_id, event.operator_id, event.via_ref)
+            safe_label(v, 256) for v in (event.event_id, event.surface_id, event.operator_id, event.via_ref)
         )
-        or not _label(event.at, 64)
+        or not safe_label(event.at, 64)
         or len(event.denial_reason) > 1024
     ):
         raise Refused("decision-observation-binding")
-    from heterodyne.actions.codec import validate_text
+    from heterodyne.actions.codec import InvalidAction, validate_text
 
-    validate_text(event.denial_reason)
+    try:
+        validate_text(event.denial_reason)
+    except InvalidAction:
+        raise Refused("decision-reason-unsafe") from None
     return Decision(
         event.approval_id,
         expected_purpose,
