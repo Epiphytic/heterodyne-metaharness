@@ -90,8 +90,11 @@ class Observer:
                 )
             ):
                 raise ValueError("observer identity")
+            write_private(self.directory / ".observer-installed", self.installation)
             return state
         except (OSError, ValueError, msgspec.DecodeError):
+            installed = self.directory / ".observer-installed"
+            first = not installed.exists() and not self.path.exists() and not self.path.is_symlink()
             if self.path.exists() or self.path.is_symlink():
                 self.path.replace(self.directory / f"observer-state.corrupt-{uuid.uuid4().hex}")
             epoch = uuid.uuid4().hex
@@ -105,9 +108,12 @@ class Observer:
                 identity,
                 "retirement",
                 timestamp(utc),
-                "Observation state reset. Earlier diagnostic conditions are unknown; effect state unchanged.",
+                "Plan8 observer state reset; prior diagnostic continuity unknown. "
+                "Remote delivery unconfirmed.",
             )
-            state = ObserverState(1, self.installation, epoch, {code: Episode() for code in CODES}, reset)
+            state = ObserverState(1, self.installation, epoch, {code: Episode() for code in CODES},
+                                  None if first else reset)
+            write_private(installed, self.installation)
             self._save(state)  # exact reset intent survives a crash before first publication
             return state
 
@@ -166,6 +172,13 @@ class Observer:
                 if episode.notice is not None and self._flush(state, episode.notice):
                     episode.notice = None
                     self._save(state)
+                changing = ((value == "true" and episode.phase == "closed")
+                            or (value == "false" and episode.phase == "open"))
+                if changing and episode.notice is not None:
+                    # Superseded coalesced-only state has already contributed its count.
+                    # Release that exact pending identity without inventing publication.
+                    settle(self.alert_dir, episode.notice,
+                           hashlib.sha256(episode.notice.payload()).hexdigest(), "cleared")
                 if value == "true" and episode.phase == "closed":
                     if episode.sequence >= (1 << 64) - 1:
                         continue
@@ -179,7 +192,8 @@ class Observer:
                         episode_id(self.installation, self.generation, code, episode.sequence, "failure"),
                         "failure",
                         timestamp(utc),
-                        f"Workstream daemon diagnostic: {code}.",
+                        f"Plan8 health: {code}. Scheduled work status requires attention. "
+                        "Remote delivery unconfirmed.",
                     )
                     episode.notice = episode.failure
                     self._save(state)
@@ -203,7 +217,8 @@ class Observer:
                         ),
                         "recovery",
                         timestamp(utc),
-                        f"Workstream daemon diagnostic cleared: {code}.",
+                        f"Plan8 health: recovered from {code}. Other holds may remain. "
+                        "Remote delivery unconfirmed.",
                     )
                     self._save(state)
                     if self._flush(state, episode.notice):

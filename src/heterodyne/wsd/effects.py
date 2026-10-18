@@ -5,6 +5,7 @@ SQLite. Missing/corrupt stores hold effects alone; initialization is an explicit
 """
 
 import json
+import math
 import os
 import sqlite3
 import stat
@@ -41,6 +42,9 @@ class Health:
     revision: int
     jobs: tuple[tuple[str, str], ...] = ()
     backup_state: str = "unavailable"
+    held: int = 0
+    uncertain: int = 0
+    oldest_age: float | None = None
 
 
 @dataclass(frozen=True)
@@ -91,7 +95,7 @@ class EffectStore:
             with db:
                 db.execute("UPDATE jobs SET state='uncertain' WHERE state='dispatched'")
                 db.execute("UPDATE backup_cycle SET state='uncertain' WHERE cycle IS NOT NULL")
-            self._refresh(0)
+            self._refresh(time.time())
         except (OSError, ValueError, sqlite3.Error):
             if self.db is not None:
                 self.db.close()
@@ -124,12 +128,22 @@ class EffectStore:
             for r in db.execute("SELECT name,state FROM jobs ORDER BY name LIMIT 9")
         )
         self.cache = Health(
-            "ready" if self.clock.ready else "unready",
+            "ready",
             now,
             self.cache.revision + 1,
             jobs[:8],
             str(db.execute("SELECT state FROM backup_cycle").fetchone()[0] or "idle"),
+            sum(state == "held" for _, state in jobs),
+            sum(state == "uncertain" for _, state in jobs)
+            + int(db.execute("SELECT state FROM backup_cycle").fetchone()[0] == "uncertain"),
+            (max(0, now - float(row[0])) if (row := db.execute(
+                "SELECT min(updated) FROM jobs WHERE state IN ('held','uncertain')"
+            ).fetchone())[0] is not None else None),
         )
+
+    def refresh(self) -> None:
+        with self.lock:
+            self._refresh(time.time())
 
     def observe(self, sample: Sample) -> bool:
         with self.lock:
@@ -154,7 +168,8 @@ class EffectStore:
                         return False
                     db.execute("INSERT INTO jobs(name) VALUES(?)", (name,))
                     row = (-1, None, None)
-                if not self.clock.ready or slot <= row[0] or row[1] is not None:
+                if (not self.clock.ready or not math.isfinite(now) or now < self.clock.high_water
+                        or slot <= row[0] or row[1] is not None):
                     return False
                 skipped = max(0, slot - row[0] - 1)
                 db.execute(
@@ -162,6 +177,8 @@ class EffectStore:
                     "skipped=min(9223372036854775807,skipped+?) WHERE name=?",
                     (slot, now, skipped, name),
                 )
+                db.execute("UPDATE identity SET utc_water=max(utc_water,?)", (now,))
+            self.clock.high_water = max(self.clock.high_water, now)
             self._refresh(now)
             return True
 
@@ -264,7 +281,7 @@ class EffectStore:
             if pending is None or int(pending) != cycle:
                 raise ValueError("backup completion identity")
             with db:
-                if status in ("succeeded", "partial"):
+                if status in ("succeeded", "partial", "failed"):
                     db.execute(
                         "UPDATE backup_cycle SET high_water=cycle,cycle=NULL,state=?,"
                         "attempt=?,manifest_hash=?",

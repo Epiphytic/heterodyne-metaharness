@@ -42,12 +42,7 @@ def initialize(directory: Path, binding: Binding) -> None:
         write_private(path, json.dumps(binding.record(0), separators=(",", ":")))
 
 
-def paired_attempt(
-    directory: Path,
-    binding: Binding,
-    native: Callable[[], NativeStatus],
-    companion: Callable[[int, NativeStatus], object],
-) -> tuple[int, NativeStatus]:
+def _next_cycle(directory: Path, binding: Binding) -> int:
     with locked(directory):
         path = directory / "native-backup-cycle.state"
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -68,14 +63,35 @@ def paired_attempt(
             raise ValueError("native backup counter identity or sequence")
         cycle += 1
         write_private(path, json.dumps(binding.record(cycle), separators=(",", ":")))
-        try:
-            status = native()
-            if status not in ("succeeded", "failed", "unknown"):
-                status = "unknown"
-        except Exception:
+        return cycle
+
+
+def paired_attempt(
+    directory: Path,
+    binding: Binding,
+    native: Callable[[], NativeStatus],
+    companion: Callable[[int, NativeStatus], object],
+) -> tuple[int | None, NativeStatus]:
+    """Called inside the actual native owner's existing exclusive cycle ownership.
+
+    Counter/companion failures hold pairing only. None is an explicit unpaired native cycle,
+    never a replacement namespace or an invented sequence.
+    """
+    cycle: int | None = None
+    try:
+        cycle = _next_cycle(directory, binding)
+    except (OSError, ValueError, TypeError, AttributeError, TimeoutError):
+        logging.getLogger(__name__).warning(
+            "paired backup counter unavailable; native cycle remains independent")
+    try:
+        status = native()
+        if status not in ("succeeded", "failed", "unknown"):
             status = "unknown"
+    except Exception:
+        status = "unknown"
+    if cycle is not None:
         try:
             companion(cycle, status)
         except Exception:
             logging.getLogger(__name__).warning("paired backup companion unavailable; native result retained")
-        return cycle, status
+    return cycle, status

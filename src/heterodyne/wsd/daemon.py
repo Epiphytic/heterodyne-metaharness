@@ -660,6 +660,13 @@ class Wsd:
             return CtlReply("refused", "wsd is stopping; nothing more was started")
 
     async def _dispatch(self, req: CtlRequest) -> CtlReply:
+        if req.op == "scheduled-hold":
+            if self.s.timer_owner != "systemd" or self.stopping:
+                return CtlReply("refused", "external scheduling is not serving")
+            # Serialized on the serving loop, before any await: subsequent external
+            # requests see the hold. Admitted work still requires normal stop/drain.
+            self.maintenance = True
+            return CtlReply("ok", "scheduled admission held until daemon restart")
         if req.op == "status":
             ws, everything = req.ws, req.all
             return CtlReply("ok", "status", await self._run(STATUS_LANE, ("status", ws, everything),
@@ -824,6 +831,8 @@ class Wsd:
             self.health_sequence += 1
             lanes = {name: msgspec.convert(lane.origin_snapshot(), type=dict[str, dict[str, Origin]])
                      for name, lane in self.lanes.items() if name != STATUS_LANE}
+            if self.effects is not None:
+                self.effects.refresh()
             snapshot = HealthSnapshot(
                 1, manifest.installation_id, manifest.generation, self.process_id, boot.strip(),
                 time.time(), time.monotonic(), self.health_sequence, self.s.timer_owner,
@@ -833,7 +842,10 @@ class Wsd:
                 self.effects.cache.state if self.effects is not None else "unready", lanes,
                 effect_observed_at=self.effects.cache.observed_at if self.effects else 0,
                 effect_revision=self.effects.cache.revision if self.effects else 0,
-                effect_backup_state=self.effects.cache.backup_state if self.effects else "unavailable")
+                effect_backup_state=self.effects.cache.backup_state if self.effects else "unavailable",
+                effect_held=self.effects.cache.held if self.effects else 0,
+                effect_uncertain=self.effects.cache.uncertain if self.effects else 0,
+                effect_oldest_age=self.effects.cache.oldest_age if self.effects else None)
             try:
                 await asyncio.to_thread(publish_health, self.s.state_dir / "health.json", snapshot)
             except (OSError, ValueError):
@@ -845,8 +857,10 @@ class Wsd:
         raises Undrained if some still are after DRAIN_SECONDS. A stop during startup goes straight to
         the drain; the socket and the timers never start after it."""
         self.fatal = asyncio.get_running_loop().create_future()
-        if self.s.timer_owner == "systemd" or (self.s.state_dir / "schedule-manifest.json").exists():
+        if self.s.timer_owner == "systemd":
             self.manifest = load_manifest(self.s)
+        else:
+            self.manifest = None
         if self.manifest is not None:
             self.effects = EffectOwner(self.s.state_dir / "schedule-effects.db",
                                        self.manifest.installation_id,self.manifest.generation,self.manifest.backup_owner_hash)

@@ -55,6 +55,9 @@ class HealthSnapshot(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     effect_observed_at: float = 0
     effect_revision: int = 0
     effect_backup_state: str = "unavailable"
+    effect_held: int = 0
+    effect_uncertain: int = 0
+    effect_oldest_age: float | None = None
 
 
 def encode(snapshot: HealthSnapshot) -> bytes:
@@ -120,6 +123,10 @@ def read(path: Path, installation: str, generation: str) -> HealthSnapshot:
     if (
         any(value is not None and (not math.isfinite(value) or value < 0) for value in instants)
         or result.effect_revision < 0
+        or not 0 <= result.effect_held <= 8
+        or not 0 <= result.effect_uncertain <= 9
+        or (result.effect_oldest_age is not None
+            and (not math.isfinite(result.effect_oldest_age) or result.effect_oldest_age < 0))
         or any(
             not 0 <= origin.count <= (1 << 64) - 1
             or any(value is not None and len(value) > 36 for value in (origin.first, origin.last))
@@ -170,7 +177,9 @@ def predicates(
     values["recovery_stalled"] = (
         "true" if snapshot.recovery == "in_progress" and recovering_age > 600 else "false"
     )
-    values["effect_hold"] = "false" if snapshot.effect_state == "ready" else "true"
+    effect_age = utc - snapshot.effect_observed_at
+    if snapshot.effect_state == "ready" and 0 <= effect_age <= 90 and not snapshot.snapshot_error:
+        values["effect_hold"] = "true" if snapshot.effect_held or snapshot.effect_uncertain else "false"
     if snapshot.timer_owner == "internal":
         values["wake_overdue"] = "false"
     elif (

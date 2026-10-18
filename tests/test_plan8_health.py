@@ -47,7 +47,7 @@ def test_independent_unknown_stale_and_recovery_predicates():
     assert predicates(None, utc=1000, monotonic=100)["recovery_failed"] == "unknown"
     values = predicates(snapshot(), utc=1000, monotonic=100)
     assert values["stale"] == "false"
-    assert values["effect_hold"] == "true"
+    assert values["effect_hold"] == "unknown"
     assert values["wake_overdue"] == "false"
     assert predicates(snapshot(), utc=1100, monotonic=100)["stale"] == "true"
     assert predicates(snapshot(), utc=900, monotonic=100)["unknown"] == "true"
@@ -58,3 +58,10 @@ def test_independent_unknown_stale_and_recovery_predicates():
         )["stale"]
         == "true"
     )
+
+
+def test_fresh_effect_cache_reports_real_holds_without_clock_readiness():
+    for changes, expected in (({}, "false"), ({"effect_held": 1}, "true"),
+                              ({"effect_uncertain": 1}, "true")):
+        value = snapshot(effect_state="ready", effect_observed_at=1000, **changes)
+        assert predicates(value, utc=1000, monotonic=100)["effect_hold"] == expected

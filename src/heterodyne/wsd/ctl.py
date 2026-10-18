@@ -42,7 +42,8 @@ def _no_data() -> dict[str, dict[str, str]]:
 
 
 class CtlRequest(msgspec.Struct, frozen=True):
-    op: Literal["tick", "status", "pause", "resume", "reload", "unlanded", "resolve", "sandbox-settle"]
+    op: Literal["tick", "status", "pause", "resume", "reload", "unlanded", "resolve",
+                "sandbox-settle", "scheduled-hold"]
     job: Literal["pickup", "reconcile"] | None = None      # tick only
     ws: str | None = None       # None: every workstream (tick and status); pause, resume, unlanded and
     #                             resolve need one, and reload takes none
@@ -89,8 +90,8 @@ def refusal(req: CtlRequest) -> str:
         return "resolve needs a session, a generation and an action"
     if req.op == "resolve" and req.action != "discard" and req.tip is None:
         return f"resolve --{req.action} needs the tip it confirms"
-    if req.op == "reload" and req.ws is not None:
-        return "reload takes no workstream; it reloads them all"
+    if req.op in ("reload", "scheduled-hold") and req.ws is not None:
+        return f"{req.op} takes no workstream"
     if req.all and req.op != "status":
         return "only status takes all"
     return ""

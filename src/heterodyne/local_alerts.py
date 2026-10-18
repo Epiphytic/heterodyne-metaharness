@@ -115,6 +115,9 @@ class Metadata(msgspec.Struct, forbid_unknown_fields=True):
     version: Literal[1]
     entries: dict[str, Entry]
     aggregates: dict[str, Aggregate]
+    pending: dict[str, tuple[tuple[int, str, str, int, str], str]] = msgspec.field(
+        default_factory=dict[str, tuple[tuple[int, str, str, int, str], str]]
+    )
 
 
 def _load(directory: Path) -> Metadata:
@@ -135,7 +138,8 @@ def _load(directory: Path) -> Metadata:
     finally:
         os.close(fd)
     result = msgspec.json.decode(payload, type=Metadata)
-    if len(payload) > 262144 or len(result.entries) > MAX_EXACT or set(result.aggregates) != {"d6c", "p8"}:
+    if (len(payload) > 262144 or len(result.entries) > MAX_EXACT or len(result.pending) > MAX_EXACT
+            or set(result.aggregates) != {"d6c", "p8"}):
         raise ValueError("local alert metadata")
     if any(
         not 0 <= a.coalesced <= (1 << 64) - 1
@@ -144,6 +148,13 @@ def _load(directory: Path) -> Metadata:
         for a in result.aggregates.values()
     ):
         raise ValueError("local alert aggregate bounds")
+    for filename, (identity, sha) in result.pending.items():
+        if (identity[0] != 1 or identity[1] not in ("d6c", "p8")
+                or not HEX32.fullmatch(identity[2]) or not 1 <= identity[3] <= (1 << 64) - 1
+                or not EPISODE.fullmatch(identity[4]) or not re.fullmatch("[0-9a-f]{64}", sha)
+                or filename != (identity[1] + "_"
+                                + hashlib.sha256(canonical(identity)).hexdigest()[:32] + ".json")):
+            raise ValueError("local alert pending identity")
     for filename, entry in result.entries.items():
         if (
             filename != entry.filename
@@ -194,6 +205,9 @@ def publish(directory: Path, intent: Intent) -> Literal["written", "existing", "
         with locked(directory):
             metadata = _load(directory)
             entries = metadata.entries
+            prior = metadata.pending.get(name)
+            if prior is not None and prior != (intent.identity(), sha):
+                return "held"
             existing = entries.get(name)
             if existing is not None:
                 if existing.identity != intent.identity() or existing.hash != sha:
@@ -219,6 +233,11 @@ def publish(directory: Path, intent: Intent) -> Literal["written", "existing", "
                 if count >= MAX_EXACT or len(entries) >= MAX_EXACT:
                     if count >= 256 and not (directory / "shared_overflow.json").exists():
                         return "held"
+                    if prior is not None:
+                        return "coalesced"  # same exact pending intent: no recount or overflow rewrite
+                    if len(metadata.pending) >= MAX_EXACT:
+                        return "held"  # bounded pending dedup never evicts an unsettled identity
+                    metadata.pending[name] = (intent.identity(), sha)
                     aggregate = metadata.aggregates[intent.namespace]
                     aggregate.coalesced = min((1 << 64) - 1, aggregate.coalesced + 1)
                     aggregate.oldest = aggregate.oldest or intent.created_at
@@ -238,6 +257,7 @@ def publish(directory: Path, intent: Intent) -> Literal["written", "existing", "
                     )
                     write_private(directory / "shared_overflow.json", overflow.decode())
                     return "coalesced"
+                metadata.pending.pop(name, None)
                 entries[name] = Entry(intent.identity(), sha, intent.kind, name, None)
                 _save(directory, metadata)  # durable intended filename/hash before visible publication
             path = directory / name
@@ -265,9 +285,20 @@ def settle(
         with locked(directory):
             metadata = _load(directory)
             entry = metadata.entries.get(intent.filename())
+            if entry is None:
+                # Coalescing counted this exact intent, but no individual file exists.
+                # Owner clearance/retirement can release the dedup slot, never claim publication.
+                pending = metadata.pending.get(intent.filename())
+                if disposition == "published" or pending != (intent.identity(), expected_hash):
+                    return False
+                del metadata.pending[intent.filename()]
+                if disposition == "retired":
+                    aggregate = metadata.aggregates[intent.namespace]
+                    aggregate.retired = min((1 << 64) - 1, aggregate.retired + 1)
+                _save(directory, metadata)
+                return True
             if (
-                entry is None
-                or entry.identity != intent.identity()
+                entry.identity != intent.identity()
                 or entry.hash != expected_hash
                 or entry.kind != intent.kind
             ):
@@ -279,7 +310,8 @@ def settle(
                 return entry.settled == disposition
             entry.settled = disposition
             aggregate = metadata.aggregates[intent.namespace]
-            aggregate.retired = min((1 << 64) - 1, aggregate.retired + 1)
+            if disposition == "retired":
+                aggregate.retired = min((1 << 64) - 1, aggregate.retired + 1)
             _save(directory, metadata)
             return True
     except (OSError, ValueError, KeyError, TypeError, TimeoutError):

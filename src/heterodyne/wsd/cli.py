@@ -246,9 +246,17 @@ def wsd_main(argv: Sequence[str] | None = None) -> int:
         if args.cmd == "run":
             runtime = build_runtime(s, os.environ)
             return run(s, _factory(s), runtime, usage_reader=build_usage_reader(s, os.environ, runtime))
-    except (ConfigError, ManifestInvalid, InvalidWake, OSError) as exc:
+    except ConfigError as exc:
+        print(f"wsd: {exc}", file=sys.stderr)
+        return EX_CONFIG
+    except (ManifestInvalid, InvalidWake) as exc:
         print(f"wsd: {type(exc).__name__}", file=sys.stderr)
         return EX_CONFIG
+    except OSError:
+        if args.cmd == "run":
+            raise  # operational failure must retain the existing restart policy
+        print("wsd: scheduling input or local transport unavailable", file=sys.stderr)
+        return 1
     except btq.BtqUnavailable as exc:
         print(f"wsd: {exc}", file=sys.stderr)
         return EX_CONFIG
@@ -265,6 +273,7 @@ def wsctl_main(argv: Sequence[str] | None = None) -> int:
     status.add_argument("ws", nargs="?")
     status.add_argument("--all", action="store_true", help="list closed and dropped beads too")
     sub.add_parser("reload", help="reload accounts, usage and models, then re-gate account changes")
+    sub.add_parser("scheduled-hold", help="close external schedule admission until daemon restart")
     unlanded = sub.add_parser("unlanded", help="show a workstream's sessions whose commits were not landed")
     unlanded.add_argument("ws")
     resolve = sub.add_parser("resolve", help="land, keep or discard an unlanded session's commits")
@@ -293,8 +302,8 @@ def wsctl_main(argv: Sequence[str] | None = None) -> int:
         if args.cmd == "status":
             reply = _ask(s, ctl.CtlRequest("status", ws=args.ws, all=args.all))
             return 1 if reply is None else _print(reply)
-        if args.cmd == "reload":
-            reply = _ask(s, ctl.CtlRequest("reload"))
+        if args.cmd in ("reload", "scheduled-hold"):
+            reply = _ask(s, ctl.CtlRequest(args.cmd))
             return 1 if reply is None else _print(reply)
         if args.cmd == "unlanded":
             reply = _ask(s, ctl.CtlRequest("unlanded", ws=args.ws))

@@ -37,6 +37,7 @@ class EffectOwner:
         self.cancel = threading.Event()
         self.copy: cf.Future[dict[str, str]] | None = None
         self.closing = False
+        self.sample: cf.Future[None] | None = None
         self.opened = self.writer.submit(self._open)
         self.opened.add_done_callback(self._consume)
 
@@ -51,12 +52,18 @@ class EffectOwner:
                     verify_bundle, self.path.parent / "paired-backups", attempt, cycle, native, self.identity
                 )
                 self.copy.add_done_callback(lambda future: self._settle(cycle, future))
+            elif pending is not None:
+                # This process owns the recovered store; the former local worker is gone.
+                self.store.finish_backup(pending[0], "failed")
+                self.cache = self.store.cache
 
     def _settle(self, cycle: int, future: cf.Future[dict[str, str]]) -> None:
         try:
             result = future.result()
         except Exception:
-            result = {"status": "uncertain"}
+            # Future completion positively fences this local copy worker. This is not proof
+            # of native backup success/unsent; it only terminates the failed local companion.
+            result = {"status": "failed"}
 
         def write() -> None:
             if self.store is not None:
@@ -83,6 +90,12 @@ class EffectOwner:
             return result
 
         return self.writer.submit(run)
+
+    def refresh(self) -> None:
+        """One outstanding cache sample; a blocked writer leaves the old timestamp visibly stale."""
+        if not self.closing and (self.sample is None or self.sample.done()):
+            self.sample = self.call(lambda store: store.refresh())
+            self.sample.add_done_callback(self._consume)
 
     def backup(
         self, cycle: int, native: NativeStatus, directory: Path, sources: tuple[Path, Path]

@@ -57,7 +57,7 @@ def test_capacity_coalescing_retains_exact_pending_intent_until_space_returns(tm
     pending = json.loads((state / "observer-state.json").read_text())
     notice = pending["episodes"]["unavailable"]["notice"]
     assert notice is not None
-    assert pending["reset"] is not None
+    assert pending["reset"] is None  # first installation, not state loss
     for number in range(255):
         (alerts / f"foreign{number}.json").unlink()
     observer.inspect(1001, 101, "boot")

@@ -36,14 +36,15 @@ class Clock:
             self.previous = None
             self.ready = False
             return False
-        self.high_water = max(self.high_water, sample.utc)
         if old is None or old.boot != sample.boot:
             self.ready = False
         else:
             elapsed = sample.monotonic - old.monotonic
             jump = abs(sample.utc - old.utc - elapsed)
             if elapsed < 0 or jump > 2:
+                self.previous = None
                 self.ready = False
+                return False
             elif elapsed >= 30:
                 self.ready = True
             else:

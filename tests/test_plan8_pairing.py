@@ -1,5 +1,3 @@
-import pytest
-
 from heterodyne.wsd.backup_pairing import Binding, initialize, paired_attempt
 
 
@@ -21,14 +19,20 @@ def test_exact_native_attempt_then_companion_never_fakes_success(tmp_path):
     assert calls == ["native", (1, "failed"), "native", (2, "failed")]
 
 
-def test_missing_counter_never_restarts_native_namespace(tmp_path):
+def test_missing_or_mismatched_counter_holds_only_companion(tmp_path):
     binding = Binding("install", "generation", "a" * 64)
     calls = []
-    with pytest.raises(FileNotFoundError):
-        paired_attempt(tmp_path, binding, lambda: calls.append(1), lambda *_: None)
+    def native():
+        calls.append("native")
+        return "succeeded"
+
+    def companion(*_):
+        calls.append("companion")
+    assert paired_attempt(tmp_path, binding, native, companion) == (None, "succeeded")
+    assert not (tmp_path / "native-backup-cycle.state").exists()
     initialize(tmp_path, binding)
-    with pytest.raises(ValueError, match="identity"):
-        paired_attempt(
-            tmp_path, Binding("other", "generation", "a" * 64), lambda: calls.append(1), lambda *_: None
-        )
-    assert not calls
+    before = (tmp_path / "native-backup-cycle.state").read_bytes()
+    assert paired_attempt(tmp_path, Binding("other", "generation", "a" * 64),
+                          native, companion) == (None, "succeeded")
+    assert (tmp_path / "native-backup-cycle.state").read_bytes() == before
+    assert calls == ["native", "native"]
