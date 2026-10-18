@@ -1,0 +1,193 @@
+{
+  "schema": "fulfilled-question-activation-inputs.v1",
+  "task": "btq-ck0hk",
+  "status": "new proposed design; no implementation or deployment authorization",
+  "source_revision": "a73e91d367bd626556371f33a46e25f003243c6e",
+  "repository_locators": {
+    "product": "https://github.com/Epiphytic/heterodyne-metaharness"
+  },
+  "local_resolution": "Resolve product in the reviewed task checkout or any local Git clone retaining the pinned objects. Private runtime paths are not authority or public inputs.",
+  "predecessor": {
+    "repository": "product",
+    "revision": "e8b5db3fb3e506ff909540dfb298b2c873446448",
+    "path": "docs/adr/2026-10-16-fulfilled-question-lifecycle.md",
+    "git_blob": "8c25d998ef447ec2a4f4c9df74a1634e0b38422d",
+    "sha256": "30d4927b59d0c60dccf57d7d4352aa4796aaea7ba0dcc3e0f9ef14706827cfbc",
+    "bytes": 32266,
+    "authority": "genuine predecessor design approval identified by root; this artifact does not substitute for native decision evidence"
+  },
+  "sources": [
+    {
+      "repository": "product",
+      "revision": "a73e91d367bd626556371f33a46e25f003243c6e",
+      "path": "src/heterodyne/admind/fulfillment.py",
+      "git_blob": "ad8fca287213fc59d69daafe2f822ae8a5ddd67c",
+      "sha256": "4651cbb1d11cfafd6b41b7adf511b411ac2faa75d3edc8f4652a74ae54960681",
+      "bytes": 30367
+    },
+    {
+      "repository": "product",
+      "revision": "a73e91d367bd626556371f33a46e25f003243c6e",
+      "path": "src/heterodyne/admind/fulfillment_cli.py",
+      "git_blob": "01b836343fd3cbc9b8a66fe4f4cd59efc3fa1735",
+      "sha256": "af82543b1e9ed9b9cffcffe5c256e252476f2ee51ed0c04d99b3f17ee125ccdd",
+      "bytes": 7059
+    },
+    {
+      "repository": "product",
+      "revision": "a73e91d367bd626556371f33a46e25f003243c6e",
+      "path": "src/heterodyne/admind/store.py",
+      "git_blob": "6f41a6da8e519e7f11e48386cef8a422ce18eaf6",
+      "sha256": "5eaade11999686d31fb58e6dffa248a74f18cb776b8cddac51c22b5f7b447151",
+      "bytes": 67379
+    },
+    {
+      "repository": "product",
+      "revision": "a73e91d367bd626556371f33a46e25f003243c6e",
+      "path": "src/heterodyne/admind/daemon.py",
+      "git_blob": "3258b5d2714b37cb2921ac363eebebbafac6a35c",
+      "sha256": "731801abff09e173d4d09ba18dc3ac4e83c46ec9ff7c11f786f9a96707e7b7ee",
+      "bytes": 207658
+    },
+    {
+      "repository": "product",
+      "revision": "a73e91d367bd626556371f33a46e25f003243c6e",
+      "path": "src/heterodyne/admind/guard_state.py",
+      "git_blob": "c80926cffe6e9a9092c532fb35794b943f7c9fce",
+      "sha256": "e19e0e4a29c1f26144b40a2455b6ada8f99bf15a634aa743a0cc57179bb01625",
+      "bytes": 7467
+    },
+    {
+      "repository": "product",
+      "revision": "a73e91d367bd626556371f33a46e25f003243c6e",
+      "path": "src/heterodyne/admind/asks.py",
+      "git_blob": "a2c00cc88c2c38372b4ca7c9dd42611adeff615c",
+      "sha256": "6592eabb6b4659558f7263af78d030b8daf39c740fc088f90de9a44923394c5a",
+      "bytes": 32000
+    },
+    {
+      "repository": "product",
+      "revision": "a73e91d367bd626556371f33a46e25f003243c6e",
+      "path": "src/heterodyne/admind/chunk.py",
+      "git_blob": "58ecedec6b99ca3266dd46672720f10a464580a4",
+      "sha256": "da14b25dfe4e97157fe2e7f09e7eaa5eb95df7b11d61f01e3bc2a4569476e529",
+      "bytes": 4567
+    },
+    {
+      "repository": "product",
+      "revision": "a73e91d367bd626556371f33a46e25f003243c6e",
+      "path": "src/heterodyne/admind/settings.py",
+      "git_blob": "29ebac755d68fdf5d2ffe69a9dfb6b7e0abcb9bc",
+      "sha256": "5f8838d254eed88257bd93ed14655011cff961fb5bb4255605ef6ae198031ae2",
+      "bytes": 13803
+    },
+    {
+      "repository": "product",
+      "revision": "a73e91d367bd626556371f33a46e25f003243c6e",
+      "path": "src/heterodyne/admind/ctl.py",
+      "git_blob": "661488a7c1367a08ae6d0dc256ebe6452b4f5513",
+      "sha256": "e71120df19c39ec8b3ef7aa759869a2e60ffa791e22c1654b686ac90b6108cf5",
+      "bytes": 13738
+    },
+    {
+      "repository": "product",
+      "revision": "a73e91d367bd626556371f33a46e25f003243c6e",
+      "path": "src/heterodyne/admind/cli.py",
+      "git_blob": "0d98e3917da149bbe43e8ef5d214531d0b016974",
+      "sha256": "ad2988e91233a18c0c84a7a04a71a892422854b3d860ff4c79790f9f1beda8a9",
+      "bytes": 29164
+    },
+    {
+      "repository": "product",
+      "revision": "a73e91d367bd626556371f33a46e25f003243c6e",
+      "path": "docs/admind-fulfillment.md",
+      "git_blob": "6378b6b164d2edcd4eebe83ef8ea433500b3922e",
+      "sha256": "8c2fac392d11cfa785396c55e2440f304e386d32c5680b27f362dd9b88766dbc",
+      "bytes": 5641
+    },
+    {
+      "repository": "product",
+      "revision": "a73e91d367bd626556371f33a46e25f003243c6e",
+      "path": "tests/test_admind_fulfillment.py",
+      "git_blob": "52b333997c7e1e4c801f16e969ef3678401201e2",
+      "sha256": "a0969a343f8c80b70b4b2f96b686bd6f77edadb5479cfcc37e8a39dda8b90287",
+      "bytes": 22521
+    },
+    {
+      "repository": "product",
+      "revision": "a73e91d367bd626556371f33a46e25f003243c6e",
+      "path": "tests/test_admind_fulfillment_r1.py",
+      "git_blob": "c935a2c46c3a82052361e919c21fd2061bf6f616",
+      "sha256": "515781834ba09163cf43b2c025cacabfe068be519a464b52b234beec27065d8d",
+      "bytes": 9869
+    },
+    {
+      "repository": "product",
+      "revision": "a73e91d367bd626556371f33a46e25f003243c6e",
+      "path": "tests/test_admind_fulfillment_r2.py",
+      "git_blob": "b005217768d4f4a704664fb4ddfa5c04c869129f",
+      "sha256": "12534e8c51a06980169734384e482c3285d609b3674831e256a38f90586ae2c4",
+      "bytes": 8115
+    },
+    {
+      "repository": "product",
+      "revision": "a73e91d367bd626556371f33a46e25f003243c6e",
+      "path": "scripts/check_install_agnostic.py",
+      "git_blob": "f163b2765edc09a7c1067a302b8f1b0a3cb45d15",
+      "sha256": "b583e1b7e673268d5c6353dee737f000a341b72ef26faa09dd87a298f870cfc7",
+      "bytes": 7283
+    },
+    {
+      "repository": "product",
+      "revision": "a73e91d367bd626556371f33a46e25f003243c6e",
+      "path": ".pre-commit-config.yaml",
+      "git_blob": "1a200d9f46b37772b1a7fa3d0675a345f5853023",
+      "sha256": "3b2ce33aa8b2e218f86b2c797419a9801859dd9bdc9098fad159fb9158d9a27c",
+      "bytes": 702
+    },
+    {
+      "repository": "product",
+      "revision": "a73e91d367bd626556371f33a46e25f003243c6e",
+      "path": "pyproject.toml",
+      "git_blob": "1235d97bdc62eeeb1cd1a4210ef532bd6927c54c",
+      "sha256": "f772a967a4e3f944e4f0293a744a5f0157ead4cc77ee9d7fd8854c176bbeb911",
+      "bytes": 1289
+    }
+  ],
+  "historical_review": {
+    "path": "docs/reviews/fulfilled-question-activation-source-review.md",
+    "sha256": "c16aaa2c2d455fd128a7b2e773e75a85b81548f4bbe1cc7eaa8aa22cfb1eba55",
+    "kind": "actual third MEDIUM built-in code review of predecessor; not this design review",
+    "source_range": "2c0c5b5..7a74f02",
+    "static_only": true,
+    "findings": 8
+  },
+  "proposed_artifacts": [
+    {
+      "path": "docs/designs/2026-10-18-fulfilled-question-activation.md",
+      "sha256": "9a992421fd32788971a9ebcab222160467d44110b105a09c84b124001908ce3f",
+      "bytes": 24127
+    },
+    {
+      "path": "docs/adr/2026-10-18-fulfilled-question-activation.md",
+      "sha256": "9a992421fd32788971a9ebcab222160467d44110b105a09c84b124001908ce3f",
+      "bytes": 24127
+    },
+    {
+      "path": "docs/reviews/fulfilled-question-activation-source-review.md",
+      "sha256": "c16aaa2c2d455fd128a7b2e773e75a85b81548f4bbe1cc7eaa8aa22cfb1eba55",
+      "bytes": 7153
+    },
+    {
+      "path": "docs/reviews/fulfilled-question-activation-findings.json",
+      "sha256": "7d89dcd6a45c19cd64b2d0015b8d9525c3794078b8dab7ef597a711e2a2b6d07",
+      "bytes": 8019
+    }
+  ],
+  "hash_convention": "Full SHA256 of stored file bytes; Git blob IDs are separate; finding hashes as documented in finding ledger",
+  "limits": [
+    "No application tests, live probes, deployment, approval or native state changes were performed for this documentation task.",
+    "Source pinning is provenance, not evidence that proposed behavior is implemented.",
+    "Historical quality debt remains UNWAIVED."
+  ]
+}
