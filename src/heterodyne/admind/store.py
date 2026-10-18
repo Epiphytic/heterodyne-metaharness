@@ -125,6 +125,10 @@ CREATE TABLE IF NOT EXISTS ask_repeats (
     parts INTEGER NOT NULL,             -- this repeat's own chunk count (asks bump B11, B12)
     created_at TEXT NOT NULL,
     PRIMARY KEY (ask_id, request));
+-- An additive overlay keeps the existing ask status/attempt schema and current-attempt CAS intact.
+-- Presence proves the last invocation returned the exact pre-effect HOLD. Delete BEFORE retry launch.
+CREATE TABLE IF NOT EXISTS ask_maintenance (
+    ask_id TEXT PRIMARY KEY, message_id TEXT NOT NULL UNIQUE, retry_at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS notices (
     notice_id TEXT PRIMARY KEY,
     poster TEXT NOT NULL,
@@ -143,6 +147,11 @@ _NOTICE_KEY = re.compile(r"\Anotice:([2-9a-hjkmnp-z]{6}):\d+\Z")
 THREAD_FALLBACKS = ("no-message-id", "parent-failed", "parent-missing", "parent-pending")
 REACTION_PREFIX = "r:"      # a reaction's inbound key is `r:<event id>` (relay delta R27)
 # Statuses that count toward the open-ask limit (relay spec R15). `blocked` is terminal and does not.
+MAINTENANCE_RETRY_SECONDS = 30.0
+MAINTENANCE_CAPACITY = 128
+MAINTENANCE_SUSPENDED = frozenset({"authority", "native-conflict", "changed-card", "not-open",
+                                   "not-approval", "not-approver", "gate", "latched"})
+
 ASK_ACTIVE = ("open", "answered", "deciding", "uncertain")
 # The outbox keys that make a delivered message a card (R7): a card chunk, a chunk of an ask's !details, or
 # a chunk of an `!asks repeat` (asks bump B12). The ID part is checked exactly, so a `reply()` key with the
@@ -1018,6 +1027,8 @@ class Store:
             r = self.db.execute("SELECT status, attempt FROM asks WHERE ask_id = ?", (ask_id,)).fetchone()
             if r is None or r[0] != expect_status or r[1] != message_id:
                 return False
+            self.db.execute("DELETE FROM ask_maintenance WHERE ask_id = ? AND message_id = ?",
+                            (ask_id, message_id))
             self.db.execute("UPDATE ask_attempts SET settled = ?, exit_status = COALESCE(?, exit_status) "
                             "WHERE ask_id = ? AND message_id = ?", (settled, exit_status, ask_id, message_id))
             self.db.execute("UPDATE asks SET status = ?, outcome = ?, decided_by = ?, attempt = ?, "
@@ -1025,6 +1036,90 @@ class Store:
                             (new_status, None if outcome is None else redact(outcome), decided_by,
                              message_id if settled == "uncertain" else None,
                              now(), ask_id))
+            return True
+
+    @_locked
+    def defer_maintenance(self, a: Attempt, retry_at: float, *, reason: str | None = None) -> bool:
+        """Retain the exact authenticated current attempt; no inbound completion or new allocation."""
+        with self.transaction():
+            row = self.ask(a.ask_id)
+            if row is None or row.status != "deciding" or self.current_attempt(a.ask_id) != a:
+                return False
+            if row.outcome is not None and row.outcome.startswith("maintenance-held:"):
+                return False
+            # Cleanup is a writer operation, never an inspection side effect.
+            self.db.execute("DELETE FROM ask_maintenance WHERE NOT EXISTS "
+                            "(SELECT 1 FROM asks a WHERE a.ask_id = ask_maintenance.ask_id "
+                            "AND a.attempt = ask_maintenance.message_id AND a.status = 'deciding')")
+            count = self.db.execute("SELECT COUNT(*) FROM ask_maintenance").fetchone()[0]
+            exists = self.db.execute("SELECT 1 FROM ask_maintenance WHERE ask_id = ?", (a.ask_id,)).fetchone()
+            if count >= MAINTENANCE_CAPACITY and exists is None:
+                raise RuntimeError("maintenance pending capacity")
+            self.db.execute("INSERT INTO ask_maintenance VALUES (?, ?, ?) ON CONFLICT(ask_id) "
+                            "DO UPDATE SET message_id = excluded.message_id, retry_at = excluded.retry_at",
+                            (a.ask_id, a.message_id, retry_at))
+            outcome = ("maintenance-held:" + reason
+                       if reason is not None and reason in MAINTENANCE_SUSPENDED else "pending-maintenance")
+            self.db.execute("UPDATE asks SET outcome = ?, updated_at = ? WHERE ask_id = ?",
+                            (outcome, now(), a.ask_id))
+            return True
+
+    def _maintenance_rows(self, *, retryable: bool = False) -> list[tuple[str, str, float]]:
+        rows = self.db.execute(
+            "SELECT m.ask_id, m.message_id, m.retry_at FROM ask_maintenance m JOIN asks a "
+            "ON a.ask_id = m.ask_id AND a.attempt = m.message_id AND a.status = 'deciding' "
+            "WHERE (? OR a.outcome = 'pending-maintenance') ORDER BY m.retry_at, m.ask_id LIMIT ?",
+            (not retryable, MAINTENANCE_CAPACITY)).fetchall()
+        return [(str(a), str(m), float(t)) for a, m, t in rows]
+
+    @_locked
+    def maintenance_pending(self) -> list[tuple[str, str, float]]:
+        """Read-only current overlays, including suspended holds; no implicit cleanup."""
+        return self._maintenance_rows()
+
+    @_locked
+    def maintenance_retryable(self) -> list[tuple[str, str, float]]:
+        return self._maintenance_rows(retryable=True)
+
+    @_locked
+    def maintenance_retry_at(self, ask_id: str, message_id: str, *,
+                             include_suspended: bool = False) -> float | None:
+        """Indexed exact lookup; inspections and retries never scan/delete the retention table."""
+        row = self.db.execute(
+            "SELECT m.retry_at FROM ask_maintenance m JOIN asks a ON a.ask_id = m.ask_id "
+            "AND a.attempt = m.message_id AND a.status = 'deciding' "
+            "WHERE m.ask_id = ? AND m.message_id = ? AND (? OR a.outcome = 'pending-maintenance')",
+            (ask_id, message_id, include_suspended)).fetchone()
+        return None if row is None else float(row[0])
+
+    @_locked
+    def issue_decision(self, a: Attempt, *, maintenance_retry: bool = False) -> bool:
+        """Persist an issuing marker before launch; a crash never grants a replay entitlement."""
+        with self.transaction():
+            row = self.ask(a.ask_id)
+            if row is None or row.status != "deciding" or self.current_attempt(a.ask_id) != a:
+                return False
+            if maintenance_retry:
+                if row.outcome != "pending-maintenance":
+                    return False
+                cur = self.db.execute("DELETE FROM ask_maintenance WHERE ask_id = ? AND message_id = ?",
+                                      (a.ask_id, a.message_id))
+                if cur.rowcount != 1:
+                    return False
+            outcome = "maintenance-issuing" if maintenance_retry else "decision-issuing"
+            self.db.execute("UPDATE asks SET outcome = ?, updated_at = ? WHERE ask_id = ?",
+                            (outcome, now(), a.ask_id))
+            return True
+
+    @_locked
+    def mark_maintenance_issuing(self, a: Attempt) -> bool:
+        """After a proven HOLD, retain that distinction before publishing its overlay and notice."""
+        with self.transaction():
+            row = self.ask(a.ask_id)
+            if row is None or row.status != "deciding" or self.current_attempt(a.ask_id) != a:
+                return False
+            self.db.execute("UPDATE asks SET outcome = 'maintenance-issuing', updated_at = ? "
+                            "WHERE ask_id = ?", (now(), a.ask_id))
             return True
 
     @_locked

@@ -10,6 +10,7 @@ anything is settled. The outcome of a decision is never parsed from its output: 
 """
 
 import asyncio
+import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -107,6 +108,31 @@ class Attempt:
 Settled = Literal["recorded", "untouched", "blocked"]
 
 
+@dataclass(frozen=True)
+class MaintenanceHold:
+    """The enrolled child proved this invocation issued no native mutation."""
+
+
+def maintenance_hold(code: int, out: bytes) -> bool:
+    """Recognize only the closed, bounded pre-effect protocol, never a generic exit 75."""
+    if code != 75 or len(out) > 256:
+        return False
+
+    def unique(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        value: dict[str, object] = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("duplicate key")
+            value[key] = item
+        return value
+
+    try:
+        value = json.loads(out.decode("utf-8"), object_pairs_hook=unique)
+    except (UnicodeError, ValueError):
+        return False
+    return value == {"schema": "maintenance-hold.v1", "effect": "not-issued", "reason": "maintenance"}
+
+
 async def _read(stream: asyncio.StreamReader | None, cap: int) -> bytes:
     out = bytearray()
     if stream is not None:
@@ -187,10 +213,12 @@ class ApproveBead:
         return r
 
     async def decide(self, a: Attempt, bead: str,
-                     on_launch: Callable[[], None] | None = None) -> tuple[int, str]:
-        """Run the decision: (exit status, the first stderr line, redacted, at most MAX_LINE characters)."""
-        code, _, err = await self._run(decision_argv(self.binary, a, bead), DECIDE_SECONDS, MAX_OUTPUT,
+                     on_launch: Callable[[], None] | None = None) -> tuple[int, str] | MaintenanceHold:
+        """Return a closed pre-effect MaintenanceHold, or (exit status, redacted first stderr line)."""
+        code, out, err = await self._run(decision_argv(self.binary, a, bead), DECIDE_SECONDS, MAX_OUTPUT,
                                        on_launch)
+        if maintenance_hold(code, out):
+            return MaintenanceHold()
         lines = err.decode("utf-8", "replace").splitlines()
         return code, quoted(lines[0].strip()) if lines else ""
 
