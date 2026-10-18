@@ -81,3 +81,14 @@ core revalidates retained receipts against actual original data. An old writer's
 genuine changes become a visible conflict rather than silently releasing capacity.
 No historical cancelled ask is migrated into a fulfillment receipt. Deployment,
 consumer compatibility inventory and live recovery acceptance remain separate.
+
+Confirmation notices retain the complete original request and consumed answer context. If that context
+exceeds the notice bounds or would be redacted, the operator route refuses it; shortening only the
+completion declaration cannot repair immutable context. This is an availability limit, not authority
+to summarize, cancel the question, or claim completion. A genuine supported controller receipt may
+still apply. Quoted answers carry durable inbound requester ownership; absent provenance quarantines
+the notice and revoked ownership suppresses it.
+
+Routine Store opens validate the current overlay schema without rebuilding receipt history. Daemon
+startup/roll-forward rebuilds the validity index before serving requests; backup/restore callers must
+complete that startup step before treating capacity projections as current.

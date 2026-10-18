@@ -34,6 +34,12 @@ from heterodyne.admind.approvals import Attempt
 from heterodyne.admind.redact import redact, redact_continuation
 from heterodyne.fsutil import private_dir
 
+CAPACITY_ACTIVE_SQL = (
+    "(status IN ('open','answered','deciding','uncertain') AND NOT EXISTS "
+    "(SELECT 1 FROM ask_fulfillments f WHERE f.ask_id=asks.ask_id AND f.valid=1)) OR EXISTS "
+    "(SELECT 1 FROM ask_fulfillments f WHERE f.ask_id=asks.ask_id AND f.valid=0)"
+)
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS inbound (
@@ -836,11 +842,8 @@ class Store:
     @_locked
     def capacity_asks(self) -> list[AskRow]:
         """Separate capacity projection; raw status selectors retain their original meaning."""
-        rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE "  # noqa: S608
-            "(status IN ('open','answered','deciding','uncertain') AND NOT EXISTS "
-            "(SELECT 1 FROM ask_fulfillments f WHERE f.ask_id=asks.ask_id AND f.valid=1)) OR EXISTS "
-            "(SELECT 1 FROM ask_fulfillments f WHERE f.ask_id=asks.ask_id AND f.valid=0) "
-            "ORDER BY created_at,rowid").fetchall()
+        rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE {CAPACITY_ACTIVE_SQL} "  # noqa: S608
+                               "ORDER BY created_at,rowid").fetchall()
         return [_ask(r) for r in rows]
 
     @_locked
@@ -859,18 +862,13 @@ class Store:
 
     @_locked
     def capacity_count(self) -> int:
-        return int(self.db.execute("SELECT COUNT(*) FROM asks WHERE "
-            "(status IN ('open','answered','deciding','uncertain') AND NOT EXISTS "
-            "(SELECT 1 FROM ask_fulfillments f WHERE f.ask_id=asks.ask_id AND f.valid=1)) OR EXISTS "
-            "(SELECT 1 FROM ask_fulfillments f WHERE f.ask_id=asks.ask_id AND f.valid=0)").fetchone()[0])
+        return int(self.db.execute(f"SELECT COUNT(*) FROM asks WHERE {CAPACITY_ACTIVE_SQL}"  # noqa: S608
+                                   ).fetchone()[0])
 
     @_locked
     def inactive_asks(self, limit: int = 20) -> list[AskRow]:
-        rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE "  # noqa: S608
-            "(status NOT IN ('open','answered','deciding','uncertain') OR EXISTS "
-            "(SELECT 1 FROM ask_fulfillments f WHERE f.ask_id=asks.ask_id AND f.valid=1)) AND NOT EXISTS "
-            "(SELECT 1 FROM ask_fulfillments f WHERE f.ask_id=asks.ask_id AND f.valid=0) "
-            "ORDER BY created_at DESC,rowid DESC LIMIT ?", (limit,)).fetchall()
+        rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE NOT ({CAPACITY_ACTIVE_SQL}) "  # noqa: S608
+                               "ORDER BY created_at DESC,rowid DESC LIMIT ?", (limit,)).fetchall()
         return [_ask(r) for r in rows]
 
     @_locked
@@ -1228,10 +1226,12 @@ class Store:
         return cur.rowcount
 
     @contextlib.contextmanager
-    def transaction(self) -> Generator[None]:
+    def transaction(self, *, read_only: bool = False) -> Generator[None]:
         """Run the block's store calls as one SQLite transaction: all of them commit, or (on any
         exception, a simulated crash included) none do. Re-entrant: a nested block joins the outer one.
-        The store lock is held throughout, so keep the block short and free of awaits."""
+        The store lock is held throughout, so keep the block short and free of awaits.
+        read_only uses a deferred snapshot without reserving the SQLite writer lock; its caller
+        must perform reads only. A nested block joins the already established snapshot."""
         with self.lock:
             if self._depth:
                 self._depth += 1
@@ -1240,7 +1240,7 @@ class Store:
                 finally:
                     self._depth -= 1
                 return
-            self.db.execute("BEGIN IMMEDIATE")
+            self.db.execute("BEGIN" if read_only else "BEGIN IMMEDIATE")
             self._depth = 1
             try:
                 yield

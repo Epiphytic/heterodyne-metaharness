@@ -192,8 +192,10 @@ def check(req: Request) -> str | None:
 
 
 def check_id(ask_id: str) -> None:
-    # Exact persisted native ask alphabet, never normalizing an attested identity.
-    if len(ask_id) != 4 or any(c not in "23456789abcdefghjkmnpqrstuvwxyz" for c in ask_id):
+    from heterodyne.admind.asks import ID_ALPHABET, ID_LENGTH
+
+    # Never normalize an attested identity.
+    if len(ask_id) != ID_LENGTH or any(c not in ID_ALPHABET for c in ask_id):
         raise Invalid("identity")
 
 
@@ -242,45 +244,49 @@ DDL = (
 class Lifecycle:
     def __init__(self, store: Store):
         self.store = store
-        self.post: Callable[[str, str, str | None, str | None], None] = self._post
+        self.post: Callable[[str, str, str | None, str | None, tuple[str, ...] | None], None] = self._post
 
-    def _post(self, key: str, text: str, target: str | None, thread: str | None) -> None:
+    def _post(self, key: str, text: str, target: str | None, thread: str | None,
+              owners: tuple[str, ...] | None) -> None:
         """Offline Store adapter. The daemon installs its central redaction/wake pipeline."""
-        self.store.enqueue(key, redact(text), target, thread_key=thread, ownership_kind="system")
+        self.store.enqueue(key, redact(text), target, thread_key=thread,
+                           ownership_kind="system" if owners is None else "request" if owners else "unknown",
+                           owners=owners or ())
+
+    def validate_schema(self) -> None:
+        """Read-only compatibility check; never rehash history on a routine CLI open."""
+        version = self.store.get("ask_fulfillment_schema")
+        if version != "1":
+            raise Invalid("unsupported-schema")
+        identity = self.store.get("ask_store_id")
+        if identity is None or not HEX.fullmatch(identity):
+            raise Invalid("missing-store-identity")
+        for statement in DDL:
+            expected = statement.replace(" IF NOT EXISTS", "")
+            name = expected.split()[2] if not expected.startswith("CREATE UNIQUE") else expected.split()[3]
+            actual = self.store.db.execute("SELECT sql FROM sqlite_master WHERE name=?", (name,)).fetchone()
+            if actual is None or str(actual[0]) != expected:
+                raise Invalid("incompatible-schema")
 
     def migrate(self) -> None:
+        with self.store.lock:
+            if self.store.get("ask_fulfillment_schema") is not None:
+                self.validate_schema()
+                return
+            with self.store.transaction():
+                # Recheck after obtaining the writer lock: another process may have migrated first.
+                if self.store.get("ask_fulfillment_schema") is None:
+                    for statement in DDL:
+                        self.store.db.execute(statement)
+                    if self.store.get("ask_store_id") is None:
+                        self.store.set("ask_store_id", secrets.token_hex(32))
+                    self.store.set("ask_fulfillment_schema", "1")
+                self.validate_schema()
+
+    def rebuild(self) -> None:
+        """Startup/roll-forward only, before accepting requests; old-code changes remain conflicts."""
         with self.store.transaction():
-            version = self.store.get("ask_fulfillment_schema")
-            if version not in (None, "1"):
-                raise Invalid("unsupported-schema")
-            if version == "1":
-                present = {
-                    str(row[0])
-                    for row in self.store.db.execute("SELECT name FROM sqlite_master WHERE type='table'")
-                }
-                if not {"ask_fulfillments", "ask_fulfillment_intents", "ask_fulfillment_audit"} <= present:
-                    raise Invalid("incomplete-schema")
-                identity = self.store.get("ask_store_id")
-                if identity is None or not HEX.fullmatch(identity):
-                    raise Invalid("missing-store-identity")
-            for statement in DDL:
-                self.store.db.execute(statement)
-            if self.store.get("ask_store_id") is None:
-                self.store.set("ask_store_id", secrets.token_hex(32))
-            for statement in DDL:
-                expected = statement.replace(" IF NOT EXISTS", "")
-                name = (
-                    expected.split()[2] if not expected.startswith("CREATE UNIQUE") else expected.split()[3]
-                )
-                actual = self.store.db.execute(
-                    "SELECT sql FROM sqlite_master WHERE name=?", (name,)
-                ).fetchone()
-                if actual is None or str(actual[0]) != expected:
-                    raise Invalid("incompatible-schema")
-            identity = self.store.get("ask_store_id")
-            if identity is None or not HEX.fullmatch(identity):
-                raise Invalid("missing-store-identity")
-            self.store.set("ask_fulfillment_schema", "1")
+            self.validate_schema()
             for (ask_id,) in self.store.db.execute("SELECT ask_id FROM ask_fulfillments").fetchall():
                 self.refresh(str(ask_id))
 
@@ -368,7 +374,7 @@ class Lifecycle:
             )
 
     def view(self, ask_id: str) -> dict[str, object]:
-        with self.store.transaction():
+        with self.store.transaction(read_only=True):
             binding = self.binding(ask_id)
             original = self.store.ask(ask_id)
             row = self.store.db.execute(
@@ -506,6 +512,7 @@ class Lifecycle:
             f"Ask {binding.ask_id} fulfilled; original answer retained.",
             self.store.first_card_message(binding.ask_id),
             None,
+            None,
         )
         return Reply("applied", "fulfilled; original answer retained", record)
 
@@ -577,22 +584,32 @@ class Lifecycle:
                 "This releases capacity; it does not authorize execution or change the original answer."
             )
             if len(notice) > 3500 or notice.count("\n") > 40 or redact(notice) != notice:
-                raise Invalid("notice-redaction-or-bounds")
+                raise Invalid("notice-redaction-or-bounds: complete request/answer context "
+                              "cannot be delivered safely")
             parts = chunk.split(notice, chunk_chars)
             if any(redact(part) != part for part in parts):
-                raise Invalid("notice-redaction-or-bounds")
+                raise Invalid("notice-redaction-or-bounds: complete request/answer context "
+                              "cannot be delivered safely")
             if len(encoded.encode()) > MAX_FILE:
                 raise Invalid("oversized-intent")
             self.store.db.execute(
                 "INSERT INTO ask_fulfillment_intents VALUES (?,?,?,?,?,?,?,'pending',NULL)",
                 (intent, req.ask_id, intent_digest, encoded, notice, len(parts), at),
             )
+            # Durable inbound provenance, never the answer's display label. Any unknown source
+            # quarantines the entire quoted context; a mixed set cannot become system-owned.
+            senders = [
+                self.store.inbound_sender(answer.message_id) for answer in self.store.answers(req.ask_id)
+                if answer.message_id in req.declaration.binding.consumed_answers
+            ]
+            owners = tuple(sorted({sender for sender in senders if sender})) if all(senders) else ()
             for i, part in enumerate(parts):
                 self.post(
                     f"fulfill-intent:{intent}:{i}",
                     part,
                     None,
                     None if i == 0 else f"fulfill-intent:{intent}:0",
+                    owners,
                 )
             return Reply(
                 "pending", "confirmation notice queued", {"intent_id": intent, "digest": intent_digest}
@@ -673,6 +690,12 @@ class Lifecycle:
                 raise Invalid("incomplete-notice")
             declared = msgspec.json.decode(str(declaration), type=Declaration)
             self.validate(declared.binding, declared.evidence)
+            # Consume our own intent before commit retires *other* pending intents. Both changes
+            # share this transaction, so a failed receipt/notice rolls the consumption back too.
+            self.store.db.execute(
+                "UPDATE ask_fulfillment_intents SET status='consumed',reason=NULL WHERE intent_id=?",
+                (intent,),
+            )
             result = self.commit(
                 declared.binding,
                 str(intent_digest),
@@ -685,9 +708,6 @@ class Lifecycle:
                     "operation_id": intent,
                     "evidence": [builtins(item) for item in declared.evidence],
                 },
-            )
-            self.store.db.execute(
-                "UPDATE ask_fulfillment_intents SET status='consumed' WHERE intent_id=?", (intent,)
             )
             return result
 

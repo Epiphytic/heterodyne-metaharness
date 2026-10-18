@@ -193,6 +193,7 @@ def test_restart_rebuilds_conflict_after_old_writer_new_answer(tmp_path):
         old.execute("UPDATE asks SET status='cancelled' WHERE ask_id='abcd'")
     restored = Store(path)
     try:
+        restored.fulfillment.rebuild()  # daemon startup/roll-forward, not each routine CLI open
         assert restored.get("ask_store_id") == identity
         assert restored.fulfillment.view("abcd")["lifecycle"] == "conflict"
         assert len(restored.capacity_asks()) == 1

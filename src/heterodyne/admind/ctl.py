@@ -24,7 +24,7 @@ import stat
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from types import UnionType
-from typing import Any, Literal, NamedTuple, overload
+from typing import Any, Literal, NamedTuple, cast, overload
 
 import msgspec
 
@@ -179,10 +179,11 @@ class JsonSocketServer[Req, Rep: msgspec.Struct]:
                 line = await asyncio.wait_for(reader.readline(), READ_SECONDS)
                 if len(line.rstrip(b"\n")) > self.max_request:      # the delimiter does not count
                     raise ValueError("request too long")
-                if self.kind == "ask":
-                    from heterodyne.admind.fulfillment import strict_json
-                    strict_json(line, limit=self.max_request)
                 req = msgspec.json.decode(line, type=self.request_type)
+                if self.kind == "ask":
+                    from heterodyne.admind import fulfillment
+                    if isinstance(cast(object, req), fulfillment.Request):
+                        fulfillment.strict_json(line, limit=self.max_request)
             except (TimeoutError, ValueError, msgspec.DecodeError):
                 reply = self.refused("malformed request")
             else:

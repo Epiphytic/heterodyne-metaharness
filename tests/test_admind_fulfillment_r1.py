@@ -133,7 +133,7 @@ def test_lifecycle_reads_wait_for_other_thread_transaction(store, method):
         assert result is None
 
 
-def test_daemon_notices_use_central_redaction_wake_and_system_ownership(tmp_path, monkeypatch):
+def test_daemon_notices_use_central_redaction_wake_and_durable_ownership(tmp_path, monkeypatch):
     from test_admind_r1 import Unit, run
 
     from heterodyne.admind import ctl
@@ -162,7 +162,7 @@ def test_daemon_notices_use_central_redaction_wake_and_system_ownership(tmp_path
         assert u.daemon.wake.is_set() and observed[-1].startswith("fulfill:")
         assert u.store.db.execute(
             "SELECT DISTINCT ownership_kind FROM outbox WHERE key LIKE 'fulfill%'"
-        ).fetchall() == [("system",)]
+        ).fetchall() == [("unknown",), ("system",)]
     finally:
         u.store.close()
 

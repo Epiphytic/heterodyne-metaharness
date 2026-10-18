@@ -17,7 +17,18 @@ import msgspec
 
 from heterodyne import config as hconfig
 from heterodyne import units
-from heterodyne.admind import approvals, asks, binding, ctl, fulfillment_cli, initialised, links, refs, unit
+from heterodyne.admind import (
+    approvals,
+    asks,
+    binding,
+    ctl,
+    fulfillment,
+    fulfillment_cli,
+    initialised,
+    links,
+    refs,
+    unit,
+)
 from heterodyne.admind.agent import TMUX_SOCKET, AdminAgent, tmux_launcher
 from heterodyne.admind.audit import Audit
 from heterodyne.admind.commands import CommandRunner
@@ -62,7 +73,7 @@ def _load() -> tuple[AdmindSettings, Store, Audit]:
     s = _resolve()
     try:
         return s, Store(s.state_dir / "admind.db"), Audit(s.state_dir / "audit.jsonl")
-    except (OSError, sqlite3.Error) as exc:  # the path may hold an npub; name only the kind of failure
+    except (OSError, sqlite3.Error, fulfillment.Invalid) as exc:  # no private path in errors
         raise StateDirError(
             f"admind: cannot prepare the admind state directory ({type(exc).__name__})") from None
 

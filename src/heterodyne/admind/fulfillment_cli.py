@@ -120,7 +120,7 @@ def reconcile(settings: AdmindSettings, args: argparse.Namespace) -> dict[str, o
                 if args.apply and outcome == "eligible":
                     applied = send(settings, f.Apply(receipt))
                     outcome = (
-                        "already-applied"
+                        applied.result
                         if applied.result in ("applied", "already-applied")
                         else refusal_outcome(applied)
                     )

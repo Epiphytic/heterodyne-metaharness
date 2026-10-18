@@ -388,8 +388,8 @@ class Admind:
         self.acked = False          # the current subscription was acknowledged; check_group may then observe
         self.sub_gen = 0            # bumped at the start and end of every subscription attempt
         self.wake = asyncio.Event()
-        self.store.fulfillment.post = lambda key, text, target, thread: self.post(
-            key, text, target, thread_key=thread, owner=None)
+        self.store.fulfillment.post = lambda key, text, target, thread, owners: self.post(
+            key, text, target, thread_key=thread, owner=owners)
         self.send_lock = asyncio.Lock()     # held across each send; a membership transition drains it (B7)
         self.count_lock = asyncio.Lock()        # never acquire transition/send while held
         self.check_requested = False
@@ -619,6 +619,7 @@ class Admind:
     # --- lifecycle -----------------------------------------------------------------------------
     def recover(self) -> None:
         """Settle what a previous run left half done (D6). Idempotent."""
+        self.store.fulfillment.rebuild()  # roll-forward index before serving any socket or worker
         # A turn in flight when admind stopped can't be tied to its Stop any more (it may have been
         # lost, or arrive later). Close it out; a late Stop then has no anchor and posts top-level.
         self.abandon_in_flight("admind restarted during this turn; a late reply may appear unthreaded")
@@ -2409,24 +2410,30 @@ class Admind:
                 self.finish(mid, "dropped", CONTROL_REFUSED, "refused")
             return
         if text.strip() == "!fulfill":
-            if not fulfillment.ENABLED or not self.authorised(mid):
-                self.finish(mid, "done", "Fulfillment unavailable under current authorization.", "cmd")
-                return
             try:
-                with self.store.transaction():
-                    result = self.store.fulfillment.confirm(
-                        target, principal=self.senders.get(mid, ""), message_id=mid)
-                    self.finish(mid, "done", result.message, "cmd")
-            except fulfillment.Invalid as exc:
-                self.finish(mid, "done", "Fulfillment refused: " + str(exc), "cmd")
-            except Exception as exc:  # noqa: BLE001 - rollback and fixed wording; audit type only
-                self.audit_quietly("fulfillment", action="unavailable", error=type(exc).__name__)
-                # No receipt survives a failed transaction. A persistent outage leaves the original
-                # inbound recoverable; even the fixed unavailable reply needs a working Store.
+                if not fulfillment.ENABLED or not self.authorised(mid):
+                    self.finish(mid, "done", "Fulfillment unavailable under current authorization.", "cmd")
+                    return
                 try:
-                    self.finish(mid, "done", "Fulfillment unavailable: store unavailable.", "cmd")
-                except sqlite3.Error:
-                    self.audit_quietly("fulfillment", action="store-unavailable")
+                    with self.store.transaction():
+                        result = self.store.fulfillment.confirm(
+                            target, principal=self.senders.get(mid, ""), message_id=mid)
+                        self.finish(mid, "done", result.message, "cmd")
+                except fulfillment.Invalid as exc:
+                    self.finish(mid, "done", "Fulfillment refused: " + str(exc), "cmd")
+                return
+            except sqlite3.Error as exc:
+                reason = "store unavailable"
+                self.audit_quietly("fulfillment", action="store-unavailable", error=type(exc).__name__)
+            except Exception as exc:  # noqa: BLE001 - rollback; fixed public text, audit error type only
+                reason = "internal error"
+                self.audit_quietly("fulfillment", action="handler-failed", error=type(exc).__name__)
+            # A persistent outage leaves the original inbound recoverable. Refusal delivery and
+            # successful confirmation settlement both receive the same bounded database protection.
+            try:
+                self.finish(mid, "done", "Fulfillment unavailable: " + reason + ".", "cmd")
+            except sqlite3.Error:
+                self.audit_quietly("fulfillment", action="store-unavailable")
             return
         bump = self.store.bump_for_message(target)
         if bump is not None and (not text.startswith("!") or text[1:].split(maxsplit=1)[:1] in CARD_COMMANDS):
