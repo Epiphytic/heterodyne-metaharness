@@ -1,0 +1,56 @@
+{
+  "task": "btq-57l70",
+  "review_ordinal": 5,
+  "effort": "MEDIUM",
+  "reviewed_head": "0ca2d17e1dff612fc986357529e175de96860df5",
+  "raw_sha256": "12eb9f8359319ccc4a8cba029698aed9f92b5b411ba0ba996b064c1c3b4e6847",
+  "actual_verdict": "No critical flaws; bounded undeployed helper good enough as PoC",
+  "findings": [
+    {
+      "ordinal": 1,
+      "status": "OPEN_UNWAIVED",
+      "disposition": "Candidate suffix allowlist does not prove complete reachable constructor inventory; no scanner stage admission."
+    },
+    {
+      "ordinal": 2,
+      "status": "OPEN_UNWAIVED",
+      "disposition": "Tmux guard source semantics remain manually unproven; arbitrary candidate references are insufficient stage evidence."
+    },
+    {
+      "ordinal": 3,
+      "status": "OPEN_UNWAIVED",
+      "disposition": "Source-to-derived socket length relationship remains manually unproven, especially transient sockets."
+    },
+    {
+      "ordinal": 4,
+      "status": "OPEN_UNWAIVED",
+      "disposition": "Racing proc stat parsing can HOLD with an unclassified exception."
+    },
+    {
+      "ordinal": 5,
+      "status": "OPEN_UNWAIVED",
+      "disposition": "Scratch-root inventory.json collision can leave a partial archive and HOLD."
+    },
+    {
+      "ordinal": 6,
+      "status": "OPEN_UNWAIVED",
+      "disposition": "Current H92 branch runs active worktree rather than approved disposable detached copy; MUST repair before H92 stage."
+    },
+    {
+      "ordinal": 7,
+      "status": "OPEN_UNWAIVED",
+      "disposition": "Full directory listing materialization is not bounded by the entry limit."
+    },
+    {
+      "ordinal": 8,
+      "status": "OPEN_UNWAIVED",
+      "disposition": "Duplicate archive/walk counters remain maintenance debt."
+    }
+  ],
+  "stage_authority": "HOLD; complete source-frozen inventory and approved stage behavior not demonstrated",
+  "limits": [
+    "No scanner stage, service, native input or deployment",
+    "Quality5 regressions/1 gate remains unwaived",
+    "Prior R4 lower-priority findings also remain unwaived"
+  ]
+}
