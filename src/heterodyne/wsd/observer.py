@@ -90,9 +90,7 @@ class Observer:
                 )
             ):
                 raise ValueError("observer identity")
-            write_private(self.directory / ".observer-installed", self.installation)
-            return state
-        except (OSError, ValueError, msgspec.DecodeError):
+        except (FileNotFoundError, ValueError, msgspec.DecodeError):
             installed = self.directory / ".observer-installed"
             first = not installed.exists() and not self.path.exists() and not self.path.is_symlink()
             if self.path.exists() or self.path.is_symlink():
@@ -116,6 +114,10 @@ class Observer:
             write_private(installed, self.installation)
             self._save(state)  # exact reset intent survives a crash before first publication
             return state
+        installed = self.directory / ".observer-installed"
+        if not installed.exists():
+            write_private(installed, self.installation)
+        return state
 
     def _flush(self, state: ObserverState, intent: Intent) -> bool:
         result = publish(self.alert_dir, intent)
@@ -142,9 +144,11 @@ class Observer:
                 state.reset = None
                 self._save(state)
             snapshot: HealthSnapshot | None = None
+            invalid_boot = False
             try:
                 snapshot = read(self.directory / "health.json", self.installation, self.generation)
                 if snapshot.boot_id != boot:
+                    invalid_boot = True
                     snapshot = None
             except (OSError, ValueError, msgspec.DecodeError):
                 pass
@@ -153,7 +157,7 @@ class Observer:
                 state.prior_sequence = None
                 state.sequence_seen_at = None
                 state.observer_boot = boot
-            values = predicates(
+            values: dict[str, Truth] = predicates(
                 snapshot,
                 utc=utc,
                 monotonic=monotonic,
@@ -161,6 +165,9 @@ class Observer:
                 prior_sequence=state.prior_sequence,
                 sequence_seen_at=state.sequence_seen_at,
             )
+            if invalid_boot:
+                values = {code: "unknown" for code in CODES}
+                values["unknown"] = "true"
             if snapshot is not None and (
                 snapshot.process_id != state.prior_process or snapshot.sequence != state.prior_sequence
             ):

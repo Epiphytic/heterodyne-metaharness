@@ -57,7 +57,7 @@ def test_owner_restart_settles_only_exact_verified_manifest(tmp_path):
     try:
         owner.opened.result(timeout=3)
         owner.copy.result(timeout=3)
-        assert owner.call(lambda s: s.begin_backup(6, "unknown")).result(timeout=3) == "completed"
+        assert owner.call(lambda s: s.begin_backup(6, "unknown")).result(timeout=3) == "partial"
         assert owner.call(lambda s: s.begin_backup(7, "unknown")).result(timeout=3) == "queued"
     finally:
         owner.close()

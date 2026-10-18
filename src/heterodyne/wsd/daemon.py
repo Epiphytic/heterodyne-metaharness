@@ -598,7 +598,9 @@ class Wsd:
                 (self.s.journal,self.s.state_dir / "schedule-effects.db")))
             if status in ("queued", "joined", "completed"):
                 return reply(status, "none")
-            return reply("refused", "unresolved")
+            reason = {"failed": "local_failed", "partial": "local_partial",
+                      "result_unavailable": "result_unavailable"}.get(status, "unresolved")
+            return reply("refused", reason)
         self.backup_pending = asyncio.create_task(admit())
         return await asyncio.shield(self.backup_pending)
 
@@ -821,35 +823,48 @@ class Wsd:
             for name in self.parts.schedulers]
         await asyncio.gather(*pickups)
 
-    async def _heartbeat(self) -> None:
-        """Capture on the loop, publish one immutable snapshot off-loop; no overlapping copies."""
+    async def _publish_health(self, boot: str) -> None:
         manifest = self.manifest
         if manifest is None:
             return
+        self.health_sequence += 1
+        lanes = {name: msgspec.convert(lane.origin_snapshot(), type=dict[str, dict[str, Origin]])
+                 for name, lane in self.lanes.items() if name != STATUS_LANE}
+        if self.effects is not None:
+            self.effects.refresh()
+        snapshot = HealthSnapshot(
+            1, manifest.installation_id, manifest.generation, self.process_id, boot.strip(),
+            time.time(), time.monotonic(), self.health_sequence, self.s.timer_owner,
+            self.s.backstop_seconds, self.s.reconcile_seconds,
+            self.recovery_status, self.recovery_started, self.admission_ready, self.listener_ready_at,
+            self.last_scheduled.get("pickup"), self.last_scheduled.get("reconcile"),
+            self.effects.cache.state if self.effects is not None else "unready", lanes,
+            effect_observed_at=self.effects.cache.observed_at if self.effects else 0,
+            effect_revision=self.effects.cache.revision if self.effects else 0,
+            effect_backup_state=self.effects.cache.backup_state if self.effects else "unavailable",
+            effect_held=self.effects.cache.held if self.effects else 0,
+            effect_uncertain=self.effects.cache.uncertain if self.effects else 0,
+            effect_oldest_age=self.effects.cache.oldest_age if self.effects else None)
+        writing = asyncio.create_task(asyncio.to_thread(
+            publish_health, self.s.state_dir / "health.json", snapshot))
+        try:
+            try:
+                await asyncio.shield(writing)
+            except asyncio.CancelledError:
+                # Cancellation cannot stop an OS write. Fence it before a final failed snapshot.
+                with contextlib.suppress(OSError, ValueError):
+                    await writing
+                raise
+        except (OSError, ValueError):
+            pass  # observer sees the last snapshot become stale; core never waits on alert delivery
+
+    async def _heartbeat(self) -> None:
+        """Capture on-loop, publish off-loop; never overlap periodic copies."""
+        if self.manifest is None:
+            return
         boot = await asyncio.to_thread(Path("/proc/sys/kernel/random/boot_id").read_text)
         while True:
-            self.health_sequence += 1
-            lanes = {name: msgspec.convert(lane.origin_snapshot(), type=dict[str, dict[str, Origin]])
-                     for name, lane in self.lanes.items() if name != STATUS_LANE}
-            if self.effects is not None:
-                self.effects.refresh()
-            snapshot = HealthSnapshot(
-                1, manifest.installation_id, manifest.generation, self.process_id, boot.strip(),
-                time.time(), time.monotonic(), self.health_sequence, self.s.timer_owner,
-                self.s.backstop_seconds, self.s.reconcile_seconds,
-                self.recovery_status, self.recovery_started, self.admission_ready, self.listener_ready_at,
-                self.last_scheduled.get("pickup"), self.last_scheduled.get("reconcile"),
-                self.effects.cache.state if self.effects is not None else "unready", lanes,
-                effect_observed_at=self.effects.cache.observed_at if self.effects else 0,
-                effect_revision=self.effects.cache.revision if self.effects else 0,
-                effect_backup_state=self.effects.cache.backup_state if self.effects else "unavailable",
-                effect_held=self.effects.cache.held if self.effects else 0,
-                effect_uncertain=self.effects.cache.uncertain if self.effects else 0,
-                effect_oldest_age=self.effects.cache.oldest_age if self.effects else None)
-            try:
-                await asyncio.to_thread(publish_health, self.s.state_dir / "health.json", snapshot)
-            except (OSError, ValueError):
-                pass  # observer sees the last snapshot become stale; core never waits on alert delivery
+            await self._publish_health(boot)
             await asyncio.sleep(30)
 
     async def serve(self, stop: asyncio.Event) -> None:
@@ -883,6 +898,11 @@ class Wsd:
             finally:
                 self.health_task.cancel()
                 await asyncio.gather(self.health_task, return_exceptions=True)
+                if failed is not None and self.manifest is not None:
+                    # No periodic writer remains; publish the actual terminal recovery state.
+                    with contextlib.suppress(OSError, ValueError):
+                        boot = await asyncio.to_thread(Path("/proc/sys/kernel/random/boot_id").read_text)
+                        await self._publish_health(boot)
                 if self.effects is not None:
                     await asyncio.to_thread(self.effects.close)
             if failed is not None:

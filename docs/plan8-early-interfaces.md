@@ -59,3 +59,20 @@ consistency, exact backup-attempt recovery, bounded health, observer reset/unkno
 capacity/idempotency, native one-attempt pairing and pure immutable unit rendering. Live ownership,
 transport delivery, native backup health, restoration and long-running service acceptance remain
 unclaimed. Quality-delta findings remain unwaived in the accompanying author evidence.
+
+Second-review repairs preserve settled alert files until capacity requires exact local eviction;
+this improves the relay opportunity without claiming receipt or guaranteed delivery. Transient
+observer I/O errors retain the previous epoch/state. Different-boot snapshots remain unknown.
+Fresh effect-owner errors produce a hold diagnostic, and startup recovery failure publishes its
+terminal health state after fencing an in-flight older publication.
+
+Failed local copy workers clean only their exact unsealed private scratch after completion or
+exclusive owner recovery. Unknown/foreign/sealed artifacts are preserved; a full bounded inventory
+refuses further local accumulation. Verified local bundles use the calendar retention policy even
+when native status is unknown, while their manifests remain partial. Pruning failures do not discard
+sealed result identity. Repeated latest failed/partial cycles return typed refusal results, and
+older compacted results return `result_unavailable`; none claims success or replays a native backup.
+The adapter preserves original native exceptions even when its companion also fails.
+
+The second review's lower-ranked observer timeout/budget concern remains unresolved and must be
+addressed before live observer/timer activation. No live acceptance is inferred from offline checks.

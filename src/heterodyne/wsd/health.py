@@ -178,8 +178,11 @@ def predicates(
         "true" if snapshot.recovery == "in_progress" and recovering_age > 600 else "false"
     )
     effect_age = utc - snapshot.effect_observed_at
-    if snapshot.effect_state == "ready" and 0 <= effect_age <= 90 and not snapshot.snapshot_error:
-        values["effect_hold"] = "true" if snapshot.effect_held or snapshot.effect_uncertain else "false"
+    if 0 <= effect_age <= 90 and not snapshot.snapshot_error:
+        if snapshot.effect_state == "error":
+            values["effect_hold"] = "true"  # fresh owner refusal, not an invented zero count
+        elif snapshot.effect_state == "ready":
+            values["effect_hold"] = "true" if snapshot.effect_held or snapshot.effect_uncertain else "false"
     if snapshot.timer_owner == "internal":
         values["wake_overdue"] = "false"
     elif (

@@ -1,0 +1,135 @@
+{
+  "schema": "plan8-code-review-dispositions-v1",
+  "review_ordinal": 2,
+  "effort": "high",
+  "actual_verdict": "REVISE",
+  "raw_sha256": "8829f0aa9692c153c72200eef9912f25b5f6e5dc23b20f833e749b60a48fd9fe",
+  "reviewer_disclosure": "High-effort recall candidates; no separate verification pass. Author tests are not a replacement review.",
+  "source": "b25abd76296fc5ca460ec6d89b594c9c712390e7",
+  "findings": [
+    {
+      "number": 1,
+      "verbatim_finding": "1. `src/heterodyne/local_alerts.py:217`: Every publish() first unlinks every settled file, and recovery/reset notices are settled 'published' as soon as they are written, so they are deleted on the next publish (often in the same observer pass) before admind's alert poll can relay them.\n\n   Failure scenario: WSD restarts and one babysitter pass sees unavailable->false and stale->false. Code A's recovery notice is written and settled 'published'. Code B's recovery publish then runs the cleanup loop and unlinks A's file milliseconds later. The same happens to the observer-reset notice whenever any failure is published in the same pass. admind polls every alert_poll_seconds, so it never sees these files. Cleanup should only evict settled files when capacity is actually needed.\n\n",
+      "status": "fixed",
+      "resolution": "Publish evicts exact settled bytes only when the individual file/metadata capacity actually needs space, stopping as soon as one slot is available. Foreign/unsettled bytes remain protected. Locally settled is not remote delivery; bounded capacity still permits early eviction.",
+      "tests": [
+        "test_settled_notice_retained_until_capacity_needed"
+      ]
+    },
+    {
+      "number": 2,
+      "verbatim_finding": "2. `src/heterodyne/wsd/observer.py:93`: _load treats any OSError as corruption, including writing the .observer-installed marker after a valid state was parsed and transient open/read errors; it then moves the good state aside and mints a new epoch with a reset notice.\n\n   Failure scenario: A transient ENOSPC/EIO on write_private('.observer-installed'), or EMFILE on os.open, happens while observer-state.json is valid. Control enters the except branch, renames the valid state to observer-state.corrupt-*, creates a new random epoch and queues a 'state reset' notice. All open episodes and sequence continuity are lost, against the design's 'loss/corruption only' reset rule. The marker is also rewritten and fsynced on every 300s pass for no benefit.\n\n",
+      "status": "fixed",
+      "resolution": "Only missing/corrupt state resets continuity. Other open/read OSError propagates without rename/reset. The installation marker is written only if missing, outside the corruption handler; marker failure preserves existing state. Genuine lost/corrupt state retains the existing reset lifecycle.",
+      "tests": [
+        "test_transient_io_preserves_observer_epoch",
+        "test_valid_observer_does_not_rewrite_install_marker"
+      ]
+    },
+    {
+      "number": 3,
+      "verbatim_finding": "3. `src/heterodyne/wsd/backup_cycles.py:244`: Failed or incomplete attempt directories (the partial local-N.db left by copy_bundle/snapshot) are never removed and count toward the 257-entry iterdir cap, after which retain() returns early forever.\n\n   Failure scenario: R1 fix 2 now creates a new attempt on every native cycle after a failure. Under a persistent free-space-floor, busy or deadline failure, each cycle leaves an unverifiable directory holding a partial DB copy, which uses up more of the free space whose floor caused the failure. With a six-hour owner, about 64 days reaches 256 entries. From then on retain() returns immediately, so successful bundles are never pruned and disk use grows without bound.\n\n",
+      "status": "fixed",
+      "resolution": "A completed copy worker removes only its exact unsealed private scratch with a closed filename inventory. Exclusive restart does the same for the sole recorded pending attempt. Sealed/foreign/unsafe artifacts stay untouched. A bounded 256-artifact inventory refuses new local copies instead of accumulating indefinitely; this does not stop the native owner.",
+      "tests": [
+        "test_failed_copy_cleans_own_partial_attempt",
+        "test_restart_cleans_only_exact_unsealed_private_scratch",
+        "test_unknown_inventory_refuses_new_copy_without_growth"
+      ]
+    },
+    {
+      "number": 4,
+      "verbatim_finding": "4. `src/heterodyne/wsd/backup_cycles.py:274`: Bundles whose native status is not 'succeeded' are all 'partial', and retention keeps only the single latest partial and deletes every other verified partial, so the 7-daily/4-weekly recovery history never builds when native status is unknown or failed.\n\n   Failure scenario: The native owner has no supported receipt, so every paired-backup reports native_status=unknown, which is the case the design names as normal. Each cycle verifies a correct local journal and schedule-store snapshot, but retain() deletes all earlier ones. Only one local recovery point ever exists, and one bad latest snapshot leaves no older WSD journal copy.\n\n",
+      "status": "fixed",
+      "resolution": "Every integrity-verified local bundle participates in daily/weekly retention even when native outcome is unknown/failed. The manifest stays partial; no full/native success is inferred. The latest verified local recovery point remains protected.",
+      "tests": [
+        "test_verified_local_history_independent_of_native"
+      ]
+    },
+    {
+      "number": 5,
+      "verbatim_finding": "5. `src/heterodyne/wsd/effect_owner.py:112`: retain() runs inside the copy future after copy_bundle has sealed and verified the manifest, so any retention exception (rmtree OSError, iterdir error) turns a durable successful bundle into a recorded 'failed' cycle with no attempt or manifest hash.\n\n   Failure scenario: copy_bundle writes a verified manifest, then retain() hits PermissionError/EBUSY in shutil.rmtree on an old bundle. The copy future raises, _settle maps it to {'status':'failed'}, and finish_backup records the cycle as failed with attempt=''. The store then denies that a good recovery set exists, and the health/latest result reports failure for a successful companion cycle.\n\n",
+      "status": "fixed",
+      "resolution": "Retention OSError/ValueError is logged without replacing the already sealed local result. Attempt ID and manifest hash survive into the single owner ledger. Native and local results remain separate.",
+      "tests": [
+        "test_prune_failure_preserves_sealed_result"
+      ]
+    },
+    {
+      "number": 6,
+      "verbatim_finding": "6. `src/heterodyne/wsd/effects.py:254`: begin_backup returns 'completed' for any cycle at or below the high-water mark, including cycles finished as 'failed' or 'partial', so a repeated companion request for a failed cycle gets `completed:none` and exits 0.\n\n   Failure scenario: Cycle 7's copy fails (disk floor) and finish_backup sets high_water=7 with state failed. The native wrapper or an operator retries `wsd paired-backup 7 succeeded`. maintenance_request replies status=completed and reason=none, and the CLI exits 0. The caller is told the local companion completed when it actually failed. The design says a repeat cycle 'joins/returns its local result'.\n\n",
+      "status": "fixed",
+      "resolution": "An exact latest repeated cycle returns its retained local terminal status. Failed/partial are typed local_failed/local_partial refusals; compacted older results refuse result_unavailable. No repeated request replays a native/local attempt. New admission clears the old attempt/hash before naming a fresh one.",
+      "tests": [
+        "test_repeat_returns_actual_local_result",
+        "test_repeated_bad_result_survives_real_control_wire",
+        "test_cli_does_not_report_repeated_bad_result_as_success"
+      ]
+    },
+    {
+      "number": 7,
+      "verbatim_finding": "7. `src/heterodyne/wsd/observer.py:147`: A snapshot from a different boot is discarded (snapshot=None), which makes 'unavailable' true and opens a failure episode, although the design says invalid clock/boot evidence is unknown.\n\n   Failure scenario: On every host reboot the babysitter timer (OnBootSec=5) fires before WSD has published a heartbeat for the new boot. health.json still has the old boot_id, so unavailable=true and a 'Plan8 health: unavailable' failure alert is published. A recovery alert follows once WSD comes up, so every reboot produces a spurious failure/recovery pair.\n\n",
+      "status": "fixed",
+      "resolution": "A different-boot snapshot produces unknown predicates (and the explicit unknown diagnostic), rather than an unavailable failure. It cannot clear existing open conditions or update previous process/sequence proof.",
+      "tests": [
+        "test_old_boot_is_unknown_not_unavailable"
+      ]
+    },
+    {
+      "number": 8,
+      "verbatim_finding": "8. `src/heterodyne/wsd/health.py:181`: effect_hold is only evaluated when effect_state=='ready'. A missing, corrupt or wrong-schema effect store (cache 'error') leaves effect_hold 'unknown' forever, so no diagnostic is ever raised for a store the design says must 'report a hold'.\n\n   Failure scenario: schedule-effects.db is corrupted or was never initialized on a systemd install. EffectStore sets cache=error, paired-backup is refused as owner_unavailable and effects are held, but effect_hold stays unknown and the 'unknown' predicate only covers snapshot_error or clock problems. No failure episode opens, so the hold on effects and backups is invisible to the babysitter indefinitely.\n\n",
+      "status": "fixed",
+      "resolution": "A fresh error effect-owner cache is a positive effect hold. Actual store-open errors receive a real observation timestamp, and callback failures refresh it. Unready or stale observations remain unknown, never an invented zero.",
+      "tests": [
+        "test_fresh_effect_error_reports_hold",
+        "test_actual_missing_store_error_has_fresh_timestamp"
+      ]
+    },
+    {
+      "number": 9,
+      "verbatim_finding": "9. `src/heterodyne/wsd/backup_pairing.py:90`: paired_attempt catches every exception from the native backup callable and turns it into status 'unknown' without re-raising, which changes the native owner's own failure behavior.\n\n   Failure scenario: The real Beads backup raises (disk full, dolt error). Before wrapping, the native owner's unit or cron exits non-zero and its existing alerting or Restart policy fires. With the wrapper, paired_attempt returns (cycle, 'unknown') normally, so the owner reports success and a genuine native backup failure is hidden. This breaks the noninterference requirement that the native owner keep its authoritative semantics.\n\n",
+      "status": "fixed",
+      "resolution": "The companion notification occurs in finally with unknown native status if the native callable raises. Companion exceptions are contained, while the original native exception propagates unchanged. Counter failures still cannot suppress the actual native attempt.",
+      "tests": [
+        "test_native_exception_is_not_suppressed"
+      ]
+    },
+    {
+      "number": 10,
+      "verbatim_finding": "10. `src/heterodyne/wsd/daemon.py:877`: recovery_status is set to 'failed' and the heartbeat task is cancelled straight away (line 884) with no final snapshot written, so 'failed' is never published and the recovery_failed predicate can never become true.\n\n    Failure scenario: Startup recovery raises in systemd mode. serve() sets recovery_status='failed', cancels the sleeping heartbeat, drains and re-raises. The last health.json still says recovery=in_progress, so the observer reports stale or recovery_stalled (after 600s) and never recovery_failed. The design's independent recovery_failed predicate is unreachable.\n",
+      "status": "fixed",
+      "resolution": "The failed startup path cancels and fences the periodic publication worker, then publishes the actual failed recovery snapshot before closing the effect owner. Cancellation waits for any in-flight publication to finish so an older snapshot cannot overwrite the final failure. Publication failure still cannot hide the original recovery exception.",
+      "tests": [
+        "test_startup_failure_has_final_failed_heartbeat",
+        "test_final_failed_snapshot_fences_inflight_periodic_writer"
+      ]
+    }
+  ],
+  "lower_ranked": [
+    {
+      "verbatim_finding": "- **Missing manifest in systemd mode:** the manifest file not existing, or `location()` failing to resolve, raises OSError rather than ManifestInvalid. `wsd run` then crash-restarts in a loop instead of exiting EX_CONFIG.\n",
+      "status": "fixed",
+      "resolution": "Manifest open/root-resolution OSError is converted inside manifest loading to ManifestInvalid. Runtime daemon OSError remains restartable (the R1 regression is preserved)."
+    },
+    {
+      "verbatim_finding": "- **Babysitter timeout:** the babysitter unit inherits `TimeoutStartSec=10`, but a pass has no 30s deadline and makes several 5s lock waits, so systemd can kill it mid-pass.\n",
+      "status": "deferred_unverified",
+      "resolution": "The ten ranked correctness failures are repaired in this bounded iteration. The separate 10-second unit timeout versus multi-lock observer budget remains an explicit preactivation limitation, not a claimed pass or waiver. No live observer/timer activation is authorized by this implementation."
+    },
+    {
+      "verbatim_finding": "- **Duplicated code:** the private-file open/fstat/read checks are repeated about 7 times. `maintenance_protocol.request` duplicates the transport in `scheduled_request`, and `Lane.scheduled` duplicates the body of `Lane.submit`.\n",
+      "status": "deferred_noncritical",
+      "resolution": "No broad private-file/transport/Lane refactor in this correctness repair. Duplication and quality debt remain unwaived."
+    },
+    {
+      "verbatim_finding": "- **Wasted writes and queries:** `EffectStore.observe` commits an unchanged `utc_water` on every sample, and `_refresh` runs the same backup_cycle query twice.\n",
+      "status": "fixed",
+      "resolution": "Clock observation no longer writes an unchanged admission high-water. Only actual admitted effects persist it. Cached backup state is read once per refresh."
+    }
+  ],
+  "limits": [
+    "Offline synthetic tests only; no activation, live timers/services/native DB/transport effects or 72-hour acceptance.",
+    "Quality findings remain unwaived.",
+    "Next actual review is ordinal3 MEDIUM, only after root inspection and authorization."
+  ]
+}

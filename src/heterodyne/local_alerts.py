@@ -214,13 +214,6 @@ def publish(directory: Path, intent: Intent) -> Literal["written", "existing", "
                     return "held"
                 if existing.settled is not None:
                     return "existing"  # producer ledger remains responsible for dedup after cleanup
-            for old_name, entry in list(entries.items()):
-                if entry.settled is not None:
-                    path = directory / old_name
-                    if path.exists() and hashlib.sha256(_read(path)).hexdigest() != entry.hash:
-                        return "held"
-                    path.unlink(missing_ok=True)
-                    del entries[old_name]
             if existing is None:
                 # Foreign diagnostic files consume capacity and are never deleted or adopted.
                 count = sum(
@@ -230,6 +223,19 @@ def publish(directory: Path, intent: Intent) -> Literal["written", "existing", "
                     and not path.name.startswith(".")
                     and path.name != "shared_overflow.json"
                 )
+                # Retain settled notices for the relay until capacity actually requires eviction.
+                # Only exact locally settled bytes are eligible; this is never a receipt claim.
+                for old_name, entry in list(entries.items()):
+                    if count < MAX_EXACT and len(entries) < MAX_EXACT:
+                        break
+                    if entry.settled is not None:
+                        path = directory / old_name
+                        if path.exists():
+                            if hashlib.sha256(_read(path)).hexdigest() != entry.hash:
+                                return "held"
+                            path.unlink()
+                            count -= 1
+                        del entries[old_name]
                 if count >= MAX_EXACT or len(entries) >= MAX_EXACT:
                     if count >= 256 and not (directory / "shared_overflow.json").exists():
                         return "held"

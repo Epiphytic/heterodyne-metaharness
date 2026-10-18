@@ -99,7 +99,7 @@ def test_backup_cycle_highwater_and_unresolved_recovery(tmp_path):
     assert store.begin_backup(4, "unknown") == "joined"
     assert store.begin_backup(5, "succeeded") == "unresolved"
     store.finish_backup(4, "partial", "attempt", "a" * 64)
-    assert store.begin_backup(3, "succeeded") == "completed"
+    assert store.begin_backup(3, "succeeded") == "result_unavailable"
     assert store.begin_backup(5, "succeeded") == "queued"
     store.close()
     store = EffectStore(path, "install", "generation")

@@ -63,7 +63,8 @@ def decode(payload: bytes) -> Request:
 class Receipt(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     request_id: str
     status: Literal["queued", "joined", "completed", "refused"]
-    reason: Literal["none", "not_ready", "producer_disabled", "owner_unavailable", "busy", "unresolved"]
+    reason: Literal["none", "not_ready", "producer_disabled", "owner_unavailable", "busy", "unresolved",
+                    "local_failed", "local_partial", "result_unavailable"]
 
 
 class Envelope(msgspec.Struct, frozen=True, forbid_unknown_fields=True):

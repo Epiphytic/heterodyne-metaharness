@@ -5,6 +5,7 @@ approved implementation/activation; generic effect-wake never constructs an effe
 """
 
 import concurrent.futures as cf
+import logging
 import threading
 import time
 from collections.abc import Callable
@@ -15,6 +16,7 @@ from heterodyne.wsd.backup_cycles import (
     Identity,
     NativeStatus,
     copy_bundle,
+    discard_incomplete,
     new_attempt,
     retain,
     verify_bundle,
@@ -48,9 +50,15 @@ class EffectOwner:
             pending = self.store.pending_backup()
             if pending is not None and pending[2]:
                 cycle, native, attempt = pending
-                self.copy = self.copier.submit(
-                    verify_bundle, self.path.parent / "paired-backups", attempt, cycle, native, self.identity
-                )
+                def recover() -> dict[str, str]:
+                    directory = self.path.parent / "paired-backups"
+                    try:
+                        return verify_bundle(directory, attempt, cycle, native, self.identity)
+                    except (OSError, ValueError):
+                        # Exclusive owner restart fences the old local worker, not the native effect.
+                        discard_incomplete(directory, attempt)
+                        raise
+                self.copy = self.copier.submit(recover)
                 self.copy.add_done_callback(lambda future: self._settle(cycle, future))
             elif pending is not None:
                 # This process owns the recovered store; the former local worker is gone.
@@ -109,7 +117,11 @@ class EffectOwner:
 
             def copy() -> dict[str, str]:
                 result = copy_bundle(directory, sources, cycle, native, self.cancel, self.identity, attempt)
-                retain(directory, self.identity, time.time(), attempt)
+                try:
+                    retain(directory, self.identity, time.time(), attempt)
+                except (OSError, ValueError):
+                    logging.getLogger(__name__).warning(
+                    "paired backup retention held; sealed result retained")
                 return result
 
             self.copy = self.copier.submit(copy)

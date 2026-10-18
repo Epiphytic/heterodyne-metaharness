@@ -100,7 +100,7 @@ class EffectStore:
             if self.db is not None:
                 self.db.close()
             self.db = None
-            self.cache = Health("error", 0, 1)
+            self.cache = Health("error", time.time(), 1)
 
     @staticmethod
     def initialize(path: Path, installation: str, generation: str) -> None:
@@ -127,15 +127,16 @@ class EffectStore:
             (str(r[0]), str(r[1] or "idle"))
             for r in db.execute("SELECT name,state FROM jobs ORDER BY name LIMIT 9")
         )
+        backup_state = str(db.execute("SELECT state FROM backup_cycle").fetchone()[0] or "idle")
         self.cache = Health(
             "ready",
             now,
             self.cache.revision + 1,
             jobs[:8],
-            str(db.execute("SELECT state FROM backup_cycle").fetchone()[0] or "idle"),
+            backup_state,
             sum(state == "held" for _, state in jobs),
             sum(state == "uncertain" for _, state in jobs)
-            + int(db.execute("SELECT state FROM backup_cycle").fetchone()[0] == "uncertain"),
+            + int(backup_state == "uncertain"),
             (max(0, now - float(row[0])) if (row := db.execute(
                 "SELECT min(updated) FROM jobs WHERE state IN ('held','uncertain')"
             ).fetchone())[0] is not None else None),
@@ -147,10 +148,9 @@ class EffectStore:
 
     def observe(self, sample: Sample) -> bool:
         with self.lock:
-            db = self._owned()
+            self._owned()
             ready = self.clock.observe(sample)
-            with db:
-                db.execute("UPDATE identity SET utc_water=?", (self.clock.high_water,))
+            # Observation cannot admit work or change the durable admission high-water.
             self._refresh(sample.utc)
             return ready
 
@@ -246,15 +246,18 @@ class EffectStore:
             raise ValueError("backup cycle")
         with self.lock:
             db = self._owned()
-            high, pending = db.execute("SELECT high_water,cycle FROM backup_cycle").fetchone()
+            high, pending, latest = db.execute("SELECT high_water,cycle,state FROM backup_cycle").fetchone()
             if pending is not None and int(pending) == cycle:
                 return "joined"
             if pending is not None:
                 return "unresolved"
-            if cycle <= int(high):
-                return "completed"
+            if cycle < int(high):
+                return "result_unavailable"  # older result compacted, never replay or claim success
+            if cycle == int(high):
+                return "completed" if latest == "succeeded" else str(latest)
             with db:
-                db.execute("UPDATE backup_cycle SET cycle=?,native=?,state='copying'", (str(cycle), native))
+                db.execute("UPDATE backup_cycle SET cycle=?,native=?,state='copying',"
+                           "attempt='',manifest_hash=''", (str(cycle), native))
             self._refresh(time.time())
             return "queued"
 

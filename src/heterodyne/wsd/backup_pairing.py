@@ -83,15 +83,17 @@ def paired_attempt(
     except (OSError, ValueError, TypeError, AttributeError, TimeoutError):
         logging.getLogger(__name__).warning(
             "paired backup counter unavailable; native cycle remains independent")
+    status: NativeStatus = "unknown"
     try:
         status = native()
         if status not in ("succeeded", "failed", "unknown"):
             status = "unknown"
-    except Exception:
-        status = "unknown"
-    if cycle is not None:
-        try:
-            companion(cycle, status)
-        except Exception:
-            logging.getLogger(__name__).warning("paired backup companion unavailable; native result retained")
+    finally:
+        # Notify without replacing the native owner's original exception/exit semantics.
+        if cycle is not None:
+            try:
+                companion(cycle, status)
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "paired backup companion unavailable; native result retained")
     return cycle, status

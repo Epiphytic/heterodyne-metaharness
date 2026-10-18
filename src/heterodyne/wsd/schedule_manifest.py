@@ -83,7 +83,10 @@ def validate(manifest: ScheduleManifest, settings: WsdSettings) -> None:
 
 def load(settings: WsdSettings) -> ScheduleManifest:
     path = settings.state_dir / MANIFEST_NAME
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    except OSError as exc:
+        raise ManifestInvalid("scheduling manifest unavailable") from exc
     try:
         info = os.fstat(fd)
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
@@ -93,7 +96,7 @@ def load(settings: WsdSettings) -> ScheduleManifest:
             manifest = msgspec.json.decode(source.read(65537), type=ScheduleManifest)
         validate(manifest, settings)
         return manifest
-    except (ValueError, msgspec.DecodeError) as exc:
+    except (OSError, ValueError, msgspec.DecodeError) as exc:
         raise ManifestInvalid("invalid scheduling manifest") from exc
     finally:
         os.close(fd)

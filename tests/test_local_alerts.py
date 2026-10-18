@@ -21,7 +21,7 @@ def test_exact_identity_encoding_and_restart_idempotence(tmp_path):
     assert not settle(tmp_path, i, hashlib.sha256(payload).hexdigest(), "published")
     assert settle(tmp_path, i, hashlib.sha256(payload).hexdigest(), "cleared")
     assert publish(tmp_path, intent("next")) == "written"
-    assert not (tmp_path / i.filename()).exists()
+    assert (tmp_path / i.filename()).exists()  # retain settled bytes until capacity is needed
 
 
 def test_capacity_reserves_overflow_and_never_deletes_foreign(tmp_path):

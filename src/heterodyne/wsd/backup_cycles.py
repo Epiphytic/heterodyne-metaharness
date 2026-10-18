@@ -48,28 +48,60 @@ def copy_bundle(
     if not re.fullmatch("[0-9a-f]{32}", attempt_id):
         raise ValueError("backup attempt identity")
     private_dir(directory)
+    if len(list(islice(directory.iterdir(), 257))) >= 256:
+        raise ValueError("backup inventory held: unknown or unpruned artifacts")
     attempt = directory / attempt_id
     attempt.mkdir(mode=0o700)  # never overwrite even an incomplete predecessor
-    copies: list[dict[str, str | int | float]] = []
-    for number, source in enumerate(sources):
-        target = attempt / f"local-{number}.db"
-        captured = time.time()
-        result = snapshot(source, target, cancel)
-        copies.append({"file": target.name, "capture_utc": captured, **result})
-    manifest: dict[str, object] = {
-        "version": 1,
-        **identity.record(),
-        "cycle": cycle,
-        "attempt": attempt.name,
-        "completed_utc": time.time(),
-        "native_status": native,
-        "status": "succeeded" if native == "succeeded" else "partial",
-        "capture": "individually-consistent-not-atomic",
-        "copies": copies,
-    }
-    path = attempt / "manifest.json"
-    seal_manifest(path, json.dumps(manifest, sort_keys=True, separators=(",", ":")))
-    return {"status": str(manifest["status"]), "attempt": attempt.name, "manifest_sha256": digest(path)}
+    try:
+        copies: list[dict[str, str | int | float]] = []
+        for number, source in enumerate(sources):
+            target = attempt / f"local-{number}.db"
+            captured = time.time()
+            result = snapshot(source, target, cancel)
+            copies.append({"file": target.name, "capture_utc": captured, **result})
+        manifest: dict[str, object] = {
+            "version": 1,
+            **identity.record(),
+            "cycle": cycle,
+            "attempt": attempt.name,
+            "completed_utc": time.time(),
+            "native_status": native,
+            "status": "succeeded" if native == "succeeded" else "partial",
+            "capture": "individually-consistent-not-atomic",
+            "copies": copies,
+        }
+        path = attempt / "manifest.json"
+        seal_manifest(path, json.dumps(manifest, sort_keys=True, separators=(",", ":")))
+        return {"status": str(manifest["status"]), "attempt": attempt.name, "manifest_sha256": digest(path)}
+    except Exception:
+        # The copy worker is now finished. Only its exact, unsealed local scratch is eligible.
+        discard_incomplete(directory, attempt_id)
+        raise
+
+
+def discard_incomplete(directory: Path, attempt_id: str) -> None:
+    """Local worker completion/exclusive restart required; never delete a sealed or foreign set."""
+    if not re.fullmatch("[0-9a-f]{32}", attempt_id):
+        return
+    attempt = directory / attempt_id
+    try:
+        info = attempt.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077):
+            return
+        paths = list(islice(attempt.iterdir(), 7))
+        if len(paths) > 6:
+            return
+        for path in paths:
+            if not re.fullmatch(r"local-[01]\.db(?:-(?:journal|wal|shm))?", path.name):
+                return
+            item = path.lstat()
+            if not stat.S_ISREG(item.st_mode) or item.st_uid != os.geteuid() or item.st_mode & 0o077:
+                return
+        for path in paths:
+            path.unlink()
+        attempt.rmdir()
+    except OSError:
+        return  # failed cleanup is retained; the bounded inventory refuses further accumulation
 
 
 def verify_bundle(
@@ -134,11 +166,10 @@ def verify_bundle(
 def retain(directory: Path, identity: Identity, now: float, unresolved: str | None) -> None:
     """Called on the copy lane. Never deletes foreign, unverifiable, or latest verified recovery data.
 
-    Successful sets use UTC civil daily/weekly buckets, not cycle identity. Only known exact local
-    artifacts participate. Incomplete/unverifiable artifacts hold for operator recovery, not deletion.
+    Verified local sets use UTC daily/weekly buckets independently of native status. No local
+    integrity proof upgrades unknown native results. Unknown artifacts hold for operator recovery.
     """
     successes: list[tuple[float, Path]] = []
-    partials: list[tuple[float, Path]] = []
     attempts = list(islice(directory.iterdir(), 257))
     if len(attempts) > 256:
         return  # unknown artifact saturation is a visible retention hold, never unbounded work
@@ -151,7 +182,7 @@ def retain(directory: Path, identity: Identity, now: float, unresolved: str | No
             completed = float(raw["completed_utc"])
             if completed > now:
                 continue
-            (successes if raw["status"] == "succeeded" else partials).append((completed, attempt))
+            successes.append((completed, attempt))
         except (OSError, ValueError, KeyError, TypeError, sqlite3.Error):
             continue
     successes.sort(reverse=True)
@@ -169,10 +200,7 @@ def retain(directory: Path, identity: Identity, now: float, unresolved: str | No
         if 0 <= (monday - week).days < 28 and week.isoformat() not in weeks:
             keep.add(attempt)
             weeks.add(week.isoformat())
-    partials.sort(reverse=True)
-    if partials:
-        keep.add(partials[0][1])
-    for _, attempt in successes + partials:
+    for _, attempt in successes:
         if attempt not in keep:
             shutil.rmtree(attempt)  # exact owned verified artifacts only; last success is always protected
 
