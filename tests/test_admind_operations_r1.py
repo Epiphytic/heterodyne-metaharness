@@ -15,12 +15,15 @@ from heterodyne.admind import asks, ctl, operations
 pytest_plugins = ("test_admind_operations",)
 
 
-def test_source_owned_bead_rejects_legacy_question_without_poisoning(unit: Unit) -> None:
+def test_source_owned_bead_allows_legacy_question_without_poisoning(unit: Unit) -> None:
     assert call(unit, request()).result == "posted"
     reply = asyncio.run(
         unit.daemon.serialised_post(asks.AskPost("question", title="Safe", body="What?", bead=BEAD), peer())
     )
-    assert reply.result == "refused"
+    # R2#3: only source-owned approval posts use approval.operation.v1.
+    assert reply.result == "posted"
+    assert reply.ask is not None and reply.ask.summary.kind == "question"
+    assert len(call(unit, request("status")).lineage) == 1
     assert call(unit, request("withdraw")).result == "withdrawn"
 
 

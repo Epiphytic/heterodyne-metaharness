@@ -45,6 +45,7 @@ from heterodyne.admind import (
     membership,
     notices,
     operations,
+    recovery,
     summarize,
     verbs,
 )
@@ -333,7 +334,6 @@ def reconcile(count: int, confirmed: set[str] | None, pending_raw: str | None,
     return None, "unknown"
 
 
-
 class Admind:
     def __init__(self, settings: AdmindSettings, client: ControlClient, store: Store, audit: Audit,
                  agent: AdminAgent, runner: commands.CommandRunner, account: str, group: str,
@@ -350,6 +350,12 @@ class Admind:
         self.agent = agent
         self.runner = runner
         self.account = account
+        try:
+            self.maintenance_recovery: recovery.Service | None = recovery.Service(
+                store, settings.state_dir / "maintenance-recovery")
+        except (recovery.Invalid, OSError, sqlite3.Error):
+            self.maintenance_recovery = None
+            self.audit.write("maintenance-recovery", action="feature-unavailable")
         self.group = group
         self.hooks: asyncio.Queue[HookEvent | Delivery] = asyncio.Queue()
         # operator messages and reactions for worker_loop
@@ -674,10 +680,26 @@ class Admind:
         await self.check_group()
         server = self.make_server(self.s.state_dir / "hook.sock")
         control: ctl.JsonSocketServer[ctl.CtlRequest, ctl.CtlReply] | None = None
+        recovery_server: ctl.JsonSocketServer[recovery.Request, recovery.Reply] | None = None
         try:
             await server.start()
             control = ctl.CtlServer(self.s.state_dir / ctl.CTL_SOCKET, self.on_ctl, self.audit)
             await control.start()
+            recovery_server = ctl.JsonSocketServer(
+                self.s.state_dir / recovery.SOCKET,
+                self.on_recovery,
+                self.audit,
+                kind="maintenance-recovery",
+                max_request=recovery.MAX_BYTES,
+                max_reply=recovery.MAX_BYTES,
+                request_type=recovery.Request,
+                check=recovery.check,
+                refused=lambda why: recovery.Reply("refused", why),
+                failed=lambda: recovery.Reply("unavailable", "recovery unavailable"),
+                describe=lambda req: {"op": type(req).__name__},
+            )
+            if self.maintenance_recovery is not None:
+                await recovery_server.start()
             self.ask_server = ctl.JsonSocketServer(
                 self.s.state_dir / asks.ASK_SOCKET, self.on_ask_wire, self.audit, kind="ask",
                 max_request=asks.MAX_REQUEST, max_reply=asks.MAX_REPLY,
@@ -707,6 +729,8 @@ class Admind:
             self._backoff.clear()
             if self.ask_server is not None:
                 await self.ask_server.close()
+            if recovery_server is not None:
+                await recovery_server.close()
             if control is not None:
                 await control.close()
             await server.close()
@@ -723,6 +747,119 @@ class Admind:
             except Exception as exc:  # noqa: BLE001 - the change is settled; the worker flushes later
                 self.audit_quietly("ctl", action="flush-failed", error=type(exc).__name__)
         return ctl.CtlReply(result, redact(message))
+
+    def recovery_authority(self, sender: str | None = None) -> str | None:
+        """Actual current host policy/confirmed-set observation, never local request claims."""
+        if not self.authorised() or (sender is not None and sender not in self.operators):
+            return None
+        return recovery.sha(
+            {
+                "policy": sorted((o.hex, o.name) for o in self.policy_operators),
+                "confirmed": sorted(self.confirmed_operators() or ()),
+            }
+        )
+
+    async def on_recovery(self, req: recovery.Request, peer: ctl.Peer) -> recovery.Reply:
+        try:
+            service = self.maintenance_recovery
+            if service is None:
+                return recovery.Reply("unavailable", "recovery unavailable")
+            if peer.uid != os.getuid():
+                raise recovery.Invalid("peer")
+            if why := recovery.check(req):
+                raise recovery.Invalid(why)
+            if isinstance(req, recovery.Status):
+                return recovery.Reply(
+                    "ok", "recovery status", service.get(req.proposal_sha256)
+                )
+            async with self.work_lock:
+                if not await self.check_group() or self.recovery_authority() is None:
+                    raise recovery.Invalid("authority")
+                # Hash the bounded source closure off the subscription event loop. Keep
+                # work_lock until the worker has actually stopped, including cancellation.
+                loop = asyncio.get_running_loop()
+
+                async def observe_authority(sender: str) -> str | None:
+                    # Policy refresh and membership state belong to the daemon loop,
+                    # never to the source-hashing worker. work_lock is still held.
+                    return self.recovery_authority(sender)
+
+                def authority(sender: str) -> str | None:
+                    pending = asyncio.run_coroutine_threadsafe(observe_authority(sender), loop)
+                    try:
+                        return pending.result(timeout=5)
+                    except TimeoutError:
+                        pending.cancel()
+                        raise recovery.Invalid("authority-unavailable") from None
+
+                def perform() -> recovery.Reply:
+                    if isinstance(req, recovery.Register):
+                        def post(key: str, text: str) -> None:
+                            self.store.enqueue(key, text, None, lane=2, ownership_kind="system")
+                            loop.call_soon_threadsafe(self.wake.set)
+                        return service.register(
+                            req, uid=peer.uid, pid=peer.pid,
+                            chunk_chars=self.s.chunk_chars, post=post,
+                        )
+                    return service.permit(
+                        req, uid=peer.uid, authority=authority,
+                    )
+
+                task = asyncio.create_task(asyncio.to_thread(perform))
+                try:
+                    return await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    while not task.done():
+                        try:
+                            await asyncio.shield(task)
+                        except asyncio.CancelledError:
+                            continue
+                        except Exception:  # worker failure must not replace cancellation
+                            break
+                    if not task.cancelled():
+                        task.exception()
+                    raise
+        except recovery.Invalid as exc:
+            return recovery.Reply("refused", str(exc))
+        except (OSError, sqlite3.Error):
+            return recovery.Reply("unavailable", "recovery store or enrollment unavailable")
+
+    async def recovery_message(self, ev: InboundMessage) -> None:
+        if (ev.account_id_hex.lower() != self.account.lower()
+                or ev.group_id_hex.lower() != self.group.lower()):
+            self.audit.write("drop", reason="maintenance account/group mismatch",
+                             sender_prefix=ev.message.sender.account_id_hex[:8],
+                             text_chars=len(ev.message.text))
+            return
+        service = self.maintenance_recovery
+        if service is None or not await self.check_group():
+            self.audit.write("maintenance-recovery", action="authority-unavailable")
+            return
+        sender = ev.message.sender.account_id_hex.lower()
+        mid = ev.message.message_id_hex.lower()
+        fields = recovery.MessageFields(
+                      account=ev.account_id_hex.lower(), group=ev.group_id_hex.lower(),
+                      mid=mid, sender=sender,
+                      target=None if ev.reply_to is None else ev.reply_to.message_id_hex.lower(),
+                      text=ev.message.text, authority=lambda: self.recovery_authority(sender))
+        response_key = "maintenance-response:" + recovery.sha(
+            [fields["account"], fields["group"], mid]
+        )
+
+        def post(text: str) -> None:
+            self.post(response_key, text, mid, owner=(sender,))
+
+        try:
+            reply = service.message(**fields, post=post)
+            self.audit.write("maintenance-recovery", action=reply.message)
+        except recovery.Invalid as exc:
+            self.audit.write("maintenance-recovery", action="refused", reason=str(exc))
+            try:
+                service.refusal(**fields, reason=str(exc), post=post)
+            except (recovery.Invalid, OSError, sqlite3.Error):
+                self.audit.write("maintenance-recovery", action="refusal-unavailable")
+        except (OSError, sqlite3.Error):
+            self.audit.write("maintenance-recovery", action="unavailable")
 
     # --- asks (relay spec) ----------------------------------------------------------------------
     @staticmethod
@@ -806,9 +943,6 @@ class Admind:
         self.posts_in_flight += 1
         try:
             async with self.ask_post_lock:
-                with self.store.transaction(read_only=True):
-                    if operations.bead_binding(self.store, req.bead) is not None:
-                        return asks.refused("source-owned bead; use approval.operation.v1")
                 if req.kind == "approval":
                     return await self.post_approval(req, peer)
                 return self.post_ask(req, peer)
@@ -2395,6 +2529,10 @@ class Admind:
         if not MESSAGE_ID.fullmatch(mid):
             self.audit.write("drop", operator=verdict.operator, reason="malformed message id",
                              text=own_text(ev.message.text))
+            return
+        if (recovery.COMMAND.fullmatch(ev.message.text) is not None
+                and MESSAGE_ID.fullmatch(mid)):
+            await self.recovery_message(ev)
             return
         if not self.store.claim_inbound(mid, sender_key=ev.message.sender.account_id_hex.lower()):
             self.audit.write("drop", operator=verdict.operator, message_id=mid, reason="replayed message id",

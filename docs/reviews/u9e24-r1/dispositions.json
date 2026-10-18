@@ -1,0 +1,80 @@
+{
+  "schema": "author-review-dispositions.v1",
+  "status": "AUTHOR_REPAIRS_NOT_REVIEW_CLEARANCE",
+  "source": "dca0d7e7059a9bdd73e9bcbb945271789a0b4fd4",
+  "raw_sha256": "8f6a16735daabfd31a201aa298084d382cbeb644adff02d36cf11b27605ad9be",
+  "findings": [
+    {
+      "ordinal": 1,
+      "finding": "`src/heterodyne/admind/recovery.py:237`: publish() links the temp file to the final path and only then unlinks the temp, and nothing on restart removes leftover `.recovery-*` files. A crash between those two steps leaves the permanent generation file with two hard links, and every later repair refuses it.\n\n   Failure scenario: The permit DB row commits, publish_permit runs os.link(temp, generations/KEY/1.json), and the process crashes before temporary.unlink(). After restart, `permit KEY` takes the repair path: os.link raises FileExistsError, and private_read(path) finds st_nlink == 2 and raises Invalid('unsafe-file'). The single-link rule now permanently rejects the stored generation, so the proposal can never be published (and the queue consumer would also reject it). This goes against the 'restart repairs that same candidate' claim.",
+      "disposition": "Fixed exact known crash alias only: verify owned0600 regular two-link same inode and candidate bytes, unlink exactly one private .recovery-UUID alias and fsync. Unknown multi-link remains HOLD."
+    },
+    {
+      "ordinal": 2,
+      "finding": "`src/heterodyne/admind/recovery.py:512`: The 128-message cap per proposal is checked before the revoke branch, so once a proposal's history is full, an authenticated revoke is refused and never recorded.\n\n   Failure scenario: After consent, operators send repeated settle replies, or their clients redeliver under new message IDs, until 128 rows exist for the proposal. An operator then sends `!maintenance revoke <token>` before the permit is issued. message() raises Invalid('message-capacity'), the state stays 'consented', and permit() still issues. \u00a76 requires a revoke after consent to revoke before permit issuance.",
+      "disposition": "Fixed revocation starvation using one reserved immutable revocation control slot per proposal, separate from128 ordinary message records. No existing history is deleted."
+    },
+    {
+      "ordinal": 3,
+      "finding": "`src/heterodyne/admind/recovery.py:422`: The proposal limit counts every row ever stored. Expired, revoked and finished proposals are never deleted, so 128 is a lifetime cap for the daemon, not a limit on live proposals.\n\n   Failure scenario: After 128 registrations over the daemon's life, even if all are long expired or revoked, every new register raises Invalid('capacity') forever. Maintenance recovery stops working until someone hand-edits the database. \u00a76 sets a 24-hour lifetime, which implies expired proposals free their slot.",
+      "disposition": "Retained128 lifetime proposal bound and all history. Expiry does not authorize deletion/archive. Finite-storage exhaustion remains explicit HOLD; indefinite availability needs separately approved archival design. No claim that24h expiry frees capacity."
+    },
+    {
+      "ordinal": 4,
+      "finding": "`src/heterodyne/admind/recovery.py:554`: permit() never compares current authority against the policy digest stored at consent (the `policy` column, row[4], is never read). It only checks that current authority stays stable across the transaction and that the consenting operator is still current.\n\n   Failure scenario: An operator consents under policy digest P1. The operator set or confirmed membership then changes (for example, another operator is removed or added), giving P2, while the consenting operator stays. permit() issues a permit stamped with P2 and raises no drift error, even though \u00a76 says to recheck against the retained policy digest and refuse on drift.",
+      "disposition": "Fixed permit issuance to compare fresh policy digest against exact retained consent policy before repairing or issuing a candidate."
+    },
+    {
+      "ordinal": 5,
+      "finding": "`src/heterodyne/admind/recovery.py:682`: The rendered notice never tells the operator that an already-issued permit can still start the recovery for up to 30 seconds after a revoke. \u00a76 requires this to be disclosed to the human.\n\n   Failure scenario: The operator reads 'Revoke: !maintenance revoke TOKEN' and reasonably assumes a revoke takes effect immediately. If the permit was already issued, the queue can still consume it within 30 seconds, and the operator was never warned. This breaks the design's 'no zero-after-revoke claim' requirement.",
+      "disposition": "Fixed human notice to disclose30-second post-revoke start residual. Existing permit lifetime and no-zero-after-revoke semantics unchanged."
+    },
+    {
+      "ordinal": 6,
+      "finding": "`src/heterodyne/admind/daemon.py:798`: recovery_message only writes an audit line. No receipt or refusal is ever posted back to the operator's thread, so consent is never acknowledged and a duplicate never gets its retained receipt back.\n\n   Failure scenario: An operator replies `!maintenance settle TOKEN` to the wrong message, after expiry, or while authority is drifting. The command is refused silently (thread-unmapped, history-only, authority), and on success they see nothing either. They cannot tell whether consent was recorded and are likely to resend. \u00a76 requires persisting provenance before acknowledging, and returning the retained receipt for a duplicate.",
+      "disposition": "Fixed attributed durable thread acknowledgments/refusals with exact sender/message/reply/payload and policy provenance persisted in same transaction as response publication. Fixed codes only, bounded retained refusals."
+    },
+    {
+      "ordinal": 7,
+      "finding": "`src/heterodyne/admind/recovery.py:460`: The duplicate lookup runs only after authority() succeeds, so redelivery of an already-recorded consent message is refused instead of returning its retained receipt.\n\n   Failure scenario: Message M is recorded as 'consented'. The policy then changes, or the operator is removed, and the transport redelivers M. authority() returns None and Invalid('authority') is raised before the dedup lookup, so the retained receipt is never returned. \u00a76 says repeated delivery of that message returns the same receipt.",
+      "disposition": "Fixed exact retained payload readback before new authorization, including daemon ignore/drop routing. New or altered commands still require current authority; readback grants no new effect."
+    },
+    {
+      "ordinal": 8,
+      "finding": "`src/heterodyne/admind/daemon.py:2375`: Routing on startswith('!maintenance') with no word boundary takes over any operator message that begins with that prefix. Such messages skip claim_inbound and normal handling and are dropped with only an audit entry.\n\n   Failure scenario: An operator sends '!maintenance-window tonight, pause deploys' or '!maintenance status'. Before this change it went to the agent. Now recovery.message fails COMMAND.fullmatch, raises Invalid('command-auth'), and the message is dropped silently with no reply and no inbound record.",
+      "disposition": "Fixed interception to exact closed command grammar only. Similar-prefix and unsupported status messages retain original normal-intake route."
+    },
+    {
+      "ordinal": 9,
+      "finding": "`src/heterodyne/admind/recovery.py:329`: enrollment() re-hashes up to 256 source files of up to 16 MiB each with blocking reads on the asyncio event loop, while holding work_lock, on every register and permit request.\n\n   Failure scenario: With a large source closure, each permit or register call blocks the daemon loop for seconds. Inbound message handling, membership checks, outbox sending and the ask/ctl sockets all stall. This can also push the permit past its tight 30-second initiation window as the queue sees it.",
+      "disposition": "Fixed source verification off event loop in retained worker under existing work_lock. Cancellation waits for actual worker completion; no abandoned effects or released lock while worker runs."
+    },
+    {
+      "ordinal": 10,
+      "finding": "`src/heterodyne/admind/recovery.py:221`: path.parent.mkdir(mode=0o700, parents=True) creates any missing parent directories (maintenance-recovery/, generations/, permits/ parents) with the default umask mode, and only the immediate parent is checked for 0700.\n\n    Failure scenario: On a fresh state directory with umask 022, the first publish creates maintenance-recovery/ and generations/ as 0755. Other users can then list proposal hashes and permit filenames, which contradicts the documented 0700 maintenance-recovery directory. No check catches it, because only generations/KEY is checked.",
+      "disposition": "Fixed every newly created ancestor mode0700 and validation without chmod of existing directories."
+    }
+  ],
+  "other_candidates": [
+    {
+      "ordinal": 1,
+      "finding": "**No status or terminal tracking:** the `terminal` column and `terminal` state are never written, so status can never report begun, completed or unknown.",
+      "disposition": "Deferred mandatory activation integration: no authenticated queue terminal-ingest API currently exists. Adminds consent state is not execution proof. Do not invent begun/completed/unknown from arbitrary local receipts. Queue peer working bytes are not a frozen API. Real executor/status integration remains HOLD."
+    },
+    {
+      "ordinal": 2,
+      "finding": "**Repeated validation:** each request is validated three times (`ctl.py` decodes it again, the server runs `check`, and `on_recovery` and `register` re-check). `check()` re-encodes the decoded request, so its duplicate-key check there can never trigger.",
+      "disposition": "Removed redundant initial normal JSON decode for recovery wire requests; exact strict decode once at socket. Bounded defensive validation remains for direct typed API calls; no blanket removal of security checks."
+    },
+    {
+      "ordinal": 3,
+      "finding": "**Possible broken thread link:** the outbox re-redaction rekey (`:r0`) would break the `notice_key:0` link to the sent thread.",
+      "disposition": "Actual legacy _CHUNKED grammar matches64-hex IDs, while recovery notices use short IDs and preserve their original:0 key. Regression proves actual redaction roundtrip. Exact single sent :0/:r0 lookup also refuses ambiguous or changed-body mapping."
+    },
+    {
+      "ordinal": 4,
+      "finding": "**No server identity check in the CLI:** the CLI doesn't verify the user ID of the process behind the daemon socket it connects to.",
+      "disposition": "Fixed CLI server UID verification before sending any request bytes, using existing peer credential primitive; private socket wrong-peer regression."
+    }
+  ]
+}

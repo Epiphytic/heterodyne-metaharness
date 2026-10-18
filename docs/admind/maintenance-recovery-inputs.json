@@ -1,0 +1,22 @@
+{
+  "schema": "admind-maintenance-recovery-inputs.v1",
+  "task": "btq-u9e24",
+  "base": "878b50e55cafdfcd4bd22f2a258c3cce2863e4a8",
+  "approved_design": {
+    "repository": "harness-improvements",
+    "commit": "6f1c11043bb26395c18e03ed0b5a2c2d85f5eb85",
+    "path": "docs/adr/2026-10-18-maintenance-operational-recovery.md",
+    "sha256": "6c33d7d8884a9362abcf1d6ce7b59cb024317dc639bee9037ee55aecc0d710ec",
+    "approval_task": "btq-1yedv",
+    "marmot_reference": "xgta"
+  },
+  "scope": "Standalone admind section 6 only; queue execution and deployment unavailable.",
+  "composition": "y2luw queue implementation must validate and consume published permit under EX; not included or claimed reviewed here.",
+  "source_inputs": {
+    "src/heterodyne/admind/daemon.py": "731801abff09e173d4d09ba18dc3ac4e83c46ec9ff7c11f786f9a96707e7b7ee",
+    "src/heterodyne/admind/ctl.py": "e71120df19c39ec8b3ef7aa759869a2e60ffa791e22c1654b686ac90b6108cf5",
+    "src/heterodyne/admind/cli.py": "ad2988e91233a18c0c84a7a04a71a892422854b3d860ff4c79790f9f1beda8a9",
+    "src/heterodyne/admind/store.py": "5eaade11999686d31fb58e6dffa248a74f18cb776b8cddac51c22b5f7b447151",
+    "src/heterodyne/admind/notices.py": "e123b4adcf32369e72b1230525bfd31b4ea4f05286091bbef35dda0af9a790bd"
+  }
+}

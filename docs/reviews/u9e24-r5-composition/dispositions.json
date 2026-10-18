@@ -1,0 +1,53 @@
+{
+  "review": "FIFTH actual MEDIUM exact PoC question; standalone PoC accepted",
+  "findings": [
+    {
+      "ordinal": 1,
+      "finding_verbatim": "1. `src/heterodyne/admind/recovery.py:878`: Service.permit() runs in an asyncio.to_thread worker and calls self.current() (a db.execute on the shared check_same_thread=False connection) outside self.store.lock, though the comment above says store access is serialized by that lock.\n\n   Failure scenario: A local `admind maintenance-recovery permit` runs while the event-loop thread holds an open Store.transaction (e.g. the outbox sender or a hook write). The worker's SELECT on maintenance_recovery_current joins the other thread's open transaction on the same connection. It can see uncommitted rows (a supersession that later rolls back) or hit a sqlite3 recursive-cursor ProgrammingError. That error is not caught by the (OSError, sqlite3.Error) handler and fails the request through the generic path. The 'superseded' gate checked before authority is not a real snapshot.",
+      "status": "MANDATORY_BEFORE_EXECUTOR_ACTIVATION",
+      "disposition": "Retained unwaived. Executor composition must enforce exact source/retirement identity, current authority and coherent locked snapshots with merged real-adapter negative tests."
+    },
+    {
+      "ordinal": 2,
+      "finding_verbatim": "2. `src/heterodyne/admind/approvals.py:278`: Main removed the cold/drifted-cache NotSpawned refusal, so a maintenance retry now launches the native child with identity \"\". record_hold then rejects the HOLD (DIGEST check fails on an empty identity), and since 'missing any invocation is irreversible', retirement is permanently disqualified. hold_maintenance ignores record_hold's False return and gives no audit or distinct notice.\n\n   Failure scenario: The adapter's ctime/mtime changes between the read() that warms the cache and decide(): a reinstall, chmod or touch during the read child. The retry spawns, returns HOLD, and record_hold returns False silently. Every later HOLD fails the invocations==count-1 check, so the attempt can never be retired. The operator only sees 'retirement unavailable: complete since-begin not-issued proof is missing', which hides the real cause (adapter identity drift). Before this change the same state produced NotSpawned plus record_not_spawned, which kept the proof chain intact.",
+      "status": "MANDATORY_BEFORE_EXECUTOR_ACTIVATION",
+      "disposition": "Retained unwaived. Executor composition must enforce exact source/retirement identity, current authority and coherent locked snapshots with merged real-adapter negative tests."
+    },
+    {
+      "ordinal": 3,
+      "finding_verbatim": "3. `src/heterodyne/admind/recovery.py:44`: Projection.adapter_sha256 and the 'ask' selector in a recovery descriptor are only format-checked. Nothing binds them to the retirement ledger's adapter_identity or maintenance_proofs, so recovery is an independent route to clear an ask whose retirement was just disqualified for identity drift.\n\n   Failure scenario: An attempt loses retirement eligibility through identity drift (finding 2). A same-UID registrant writes a descriptor with selector {type: ask, id: <ask>}, action clear-proven-cancel and an arbitrary 64-hex adapter_sha256. Admind delivers the notice, accepts `!maintenance settle` and issues a permit without ever comparing adapter_sha256 to ApproveBead.identity() or the retained proof. The 'drift disqualifies retirement proof' rule from main is then enforced only if the gated queue executor re-checks it. That executor requirement is not listed among the mandatory R4 prerequisites.",
+      "status": "MANDATORY_BEFORE_EXECUTOR_ACTIVATION",
+      "disposition": "Retained unwaived. Executor composition must enforce exact source/retirement identity, current authority and coherent locked snapshots with merged real-adapter negative tests."
+    },
+    {
+      "ordinal": 4,
+      "finding_verbatim": "4. `tests/test_admind_recovery_composition.py:19`: The composition tests use the fake approval port from test_admind_retirement.eligible, so the merged ApproveBead identity-cache behavior (cold or drifted cache now launches) is never tested together with operation withdrawal, retirement and recovery consent.\n\n   Failure scenario: The 152-test PASS claim covers the identity change only in isolation (test_admind_retirement_identity.py). A regression, such as a maintenance retry on a withdrawn or recovery-consented operation launching a native decision on a cold cache, or retirement reading through a drifted adapter after recovery consent, would pass every composition test.",
+      "status": "MANDATORY_BEFORE_EXECUTOR_ACTIVATION",
+      "disposition": "Retained unwaived. Executor composition must enforce exact source/retirement identity, current authority and coherent locked snapshots with merged real-adapter negative tests."
+    },
+    {
+      "ordinal": 5,
+      "finding_verbatim": "5. `src/heterodyne/admind/daemon.py:2533`: A '!maintenance settle|revoke' message is routed to recovery_message before claim_inbound, remember_sender and record_prompt, and when maintenance_recovery is None (feature unavailable) it is dropped with only an audit line and no reply to the operator.\n\n   Failure scenario: Recovery.Service init failed at startup (Invalid/OSError/sqlite error, so it was set to None). An operator replies '!maintenance settle <token>' to a consent notice and gets no response. The message also never enters the inbound replay or prompt ledger, so it is not visible in the normal message history either. The operator can't tell 'feature down' from 'message lost'.",
+      "status": "OPEN_UNWAIVED",
+      "disposition": "Retained unwaived PoC limitation; no claim of complete operator feedback or optimized validation."
+    },
+    {
+      "ordinal": 6,
+      "finding_verbatim": "6. `src/heterodyne/admind/daemon.py:1574`: The hold notice from main tells operators to 'See the separate recovery notice for eligibility' (meaning the `!asks retire` retirement notice), while the merged recovery feature adds a different 'Maintenance recovery consent' notice with `!maintenance settle`. After composition there are two kinds of 'recovery' notice with different commands.\n\n   Failure scenario: A held attempt is suspended and the operator also has a pending maintenance-recovery consent notice in the same group. Following 'the separate recovery notice', they may reply `!maintenance settle` (wrong authority, history-only or refused) instead of `!asks retire <token>`, or the reverse. The original reply stays held.",
+      "status": "OPEN_UNWAIVED",
+      "disposition": "Retained unwaived PoC limitation; no claim of complete operator feedback or optimized validation."
+    },
+    {
+      "ordinal": 7,
+      "finding_verbatim": "7. `src/heterodyne/admind/daemon.py:2532`: Redundant `MESSAGE_ID.fullmatch(mid)` in the recovery routing condition; on_message has already returned on a malformed mid three lines earlier.\n\n   Failure scenario: Dead conjunct. Readers may think recovery needs a stricter or different mid check than the rest of on_message, which makes later changes to the shared check riskier. Simpler form: `if recovery.COMMAND.fullmatch(ev.message.text):`.",
+      "status": "OPEN_UNWAIVED",
+      "disposition": "Retained unwaived PoC limitation; no claim of complete operator feedback or optimized validation."
+    },
+    {
+      "ordinal": 8,
+      "finding_verbatim": "8. `src/heterodyne/admind/daemon.py:769`: recovery.check(req) runs three times per request: JsonSocketServer(check=recovery.check), again in on_recovery, and again inside Service.register. Each run re-decodes and canonicalizes the whole descriptor (up to 256 KiB).\n\n   Failure scenario: Each Register re-encodes and parses the descriptor three times on the event loop or worker, with no added safety, because the socket server already refuses a failing check. Keep the check at one boundary (the Service, which other callers also use) and drop the on_recovery copy.",
+      "status": "OPEN_UNWAIVED",
+      "disposition": "Retained unwaived PoC limitation; no claim of complete operator feedback or optimized validation."
+    }
+  ]
+}
