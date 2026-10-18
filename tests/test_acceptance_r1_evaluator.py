@@ -36,7 +36,9 @@ def test_isolated_projection_requires_exact_component(field, value):
     ],
 )
 def test_native_timestamp_cannot_lose_precision_or_accept_lenient_forms(stamp):
-    with pytest.raises(codec.InvalidEvidence, match="invalid_native_time"):
+    expected = Hold if ".123456" in stamp else codec.InvalidEvidence
+    code = "unsupported_native_precision" if expected is Hold else "invalid_native_time"
+    with pytest.raises(expected, match=code):
         codec.native_utc(stamp)
 
 

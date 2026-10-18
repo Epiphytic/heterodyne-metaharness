@@ -127,3 +127,24 @@ execution requirements. The observation clock remains null.
 Full-chain validation and repeated inventory reads remain bounded but expensive.
 Quadratic append work and long terminal lock holds are unwaived performance debt;
 these offline tests do not establish production collector latency or capacity.
+
+
+R2 precision and archive diagnostics: valid native timestamps exceeding six fractional
+places raise the distinct typed `Hold("unsupported_native_precision")`; malformed
+calendar or offset input remains `InvalidEvidence("invalid_native_time")`. The shared
+Hold type is re-exported from the evaluator. No fractional truncation is returned.
+An archived sealed interval must include exactly one qualification event immediately
+after its Stop; a chain ending at the Stop does not prove complete publication.
+
+The second full high-reasoning review and exact provenance are retained under
+`docs/reviews/plan9-r2`. Whole-history replay, repeated inventory/object scans and
+proof-adapter work within terminal locks remain explicit performance debt; no
+72-hour throughput or independent-source latency acceptance is claimed. Source
+adapters, corpus collection, live drills and deployment remain incomplete gates.
+
+Second-review ledger repairs add per-attempt fence identity, validate aborts and
+complete event proofs before publication, and replay exact durable release programs
+through receipt-before-cleanup crashes. Only receipt-proven spool IDs retire from
+active capacity; original bytes and unrelated late arrivals remain retained.
+Original retention has a separate finite bound. Repeated proof and history scans
+remain open performance debt; offline checks establish no 72-hour throughput.

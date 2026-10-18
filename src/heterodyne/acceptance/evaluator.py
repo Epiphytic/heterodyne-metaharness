@@ -12,6 +12,7 @@ import msgspec
 
 from . import codec
 from . import models as m
+from .codec import Hold as Hold
 
 DURATION_NS = 259200000000000
 GAP_NS = 600000000000
@@ -59,10 +60,6 @@ ProofRole = Literal[
     "final_migration",
     "current_release",
 ]
-
-
-class Hold(ValueError):
-    """A fixed evidence/proof failure; never authorization to repair live state."""
 
 
 @dataclass(frozen=True)
@@ -432,6 +429,10 @@ class Evaluator:
         except (Hold, codec.InvalidEvidence) as exc:
             return Evaluation("not_qualified", str(exc), None, digest, segment_id)
 
+    def validate_events(self, entry: m.Entry, digest: str, raws: Sequence[bytes]) -> list[m.Event]:
+        """Replay full event proofs and chronology before a ledger publication."""
+        return self._events(entry, digest, raws)
+
     def _events(self, entry: m.Entry, digest: str, raws: Sequence[bytes]) -> list[m.Event]:
         events: list[m.Event] = []
         previous: str | None = None
@@ -514,7 +515,7 @@ class Evaluator:
                 event.event == "qualification" and event.segment_id == segment.segment_id
                 for event in events[index + 1 :]
             )
-            and len(events[index + 1 :]) <= 1,
+            and len(events[index + 1 :]) == 1,
             "archive_terminal_tail",
         )
         result = self.interval(

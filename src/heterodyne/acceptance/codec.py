@@ -14,6 +14,10 @@ MAX_BYTES = 8 * 1024 * 1024
 MAX_VALUES = 200_000
 
 
+class Hold(ValueError):
+    """A fixed evidence/proof failure; never authorization to repair live state."""
+
+
 class InvalidEvidence(ValueError):
     """Malformed or noncanonical evidence, with a fixed diagnostic code."""
 
@@ -98,21 +102,23 @@ def utc_ns(value: str) -> int:
 
 def native_utc(value: str) -> str:
     try:
-        if (
-            re.fullmatch(
-                r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
-                r"(?:\.[0-9]{1,6})?(?:Z|[+-][0-9]{2}:[0-9]{2})",
-                value,
-            )
-            is None
-        ):
+        match = re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
+            r"(?:\.(?P<fraction>[0-9]+))?(?:Z|[+-][0-9]{2}:[0-9]{2})",
+            value,
+        )
+        if match is None:
             raise ValueError
         parsed = datetime.fromisoformat(value)
         if parsed.tzinfo is None or parsed.utcoffset() is None:
             raise ValueError
-        return parsed.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        normalized = parsed.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     except (ValueError, OverflowError, UnicodeError):
         raise InvalidEvidence("invalid_native_time") from None
+    # Calendar and offset are valid; never return datetime's truncated fraction.
+    if len(match.group("fraction") or "") > 6:
+        raise Hold("unsupported_native_precision")
+    return normalized
 
 
 def _semantic(value: object, annotation: object = None) -> None:

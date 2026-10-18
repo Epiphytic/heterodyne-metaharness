@@ -24,6 +24,7 @@ def graph(*, period=600):
         ),
     )
     chain.append(codec.canonical(stop))
+    chain.append(codec.canonical(event(len(chain), codec.digest(chain[-1]), 259200, "qualification")))
     inventory["archive-event-chain"] = codec.canonical([codec.load(raw) for raw in chain])
     segment = m.Segment(
         format=1,
@@ -31,7 +32,7 @@ def graph(*, period=600):
         segment_id="segment",
         entry_sha256=codec.digest(entry_raw),
         start_event_sha256=codec.digest(chain[0]),
-        end_event_sha256=codec.digest(chain[-1]),
+        end_event_sha256=codec.digest(codec.canonical(stop)),
         start=at(),
         end=at(259200),
         duration_ns="259200000000000",
