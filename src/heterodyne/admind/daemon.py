@@ -661,7 +661,8 @@ class Admind:
                                    ("hooks", self.hook_loop), ("outbox", self.outbox_loop),
                                    ("alerts", self.alerts_loop), ("group", self.group_loop),
                                    ("agent", self.agent_loop), ("summaries", self.summary_loop),
-                                   ("batches", self.batch_loop), ("autobump", self.autobump_loop)):
+                                   ("batches", self.batch_loop), ("autobump", self.autobump_loop),
+                                   ("maintenance-retry", self.maintenance_retry_loop)):
                     tg.create_task(self.guarded(supervised(name, loop, self.audit)))
                 tg.create_task(self.guarded(self.reconcile_asks(snapshot)))
         except BaseException:
@@ -1281,7 +1282,7 @@ class Admind:
         self.audit_quietly("ask", action="conflict", ask_id=a.ask_id, message_id=a.message_id,
                            expected=expected)
 
-    async def run_attempt(self, a: Attempt, row: AskRow) -> None:
+    async def run_attempt(self, a: Attempt, row: AskRow, *, maintenance_retry: bool = False) -> None:
         """Steps 4-8 of a persisted attempt. Until the decision child exists, every failure closes the
         attempt as `refused` (r5-1); once it exists, every exit goes through the reap and the read-back."""
         assert self.approve_bead is not None and row.bead is not None      # noqa: S101 - checked by decide
@@ -1304,9 +1305,19 @@ class Admind:
             r = await ab.read(bead)                                     # step 5
             stop = self.preflight(r, a, bead)
             if stop is None:
-                unauthorised = not self.authorised(mid)                 # step 6: the commit point (R11)
+                unauthorised = (not self.authorised(mid)
+                                or (maintenance_retry and self.operator_name(mid) != a.operator))
                 if not unauthorised:
-                    code, line = await ab.decide(a, bead, on_launch)    # step 7
+                    if maintenance_retry and not self.store.issue_maintenance_retry(a):
+                        self.conflict(a, "deciding")
+                        return
+                    result = await ab.decide(a, bead, on_launch)        # step 7
+                    if isinstance(result, approvals.MaintenanceHold):
+                        self.store.defer_maintenance(a, self.wallclock() + 30.0)
+                        self.audit.write("ask", action="pending-maintenance", ask_id=a.ask_id,
+                                         message_id=mid, outcome="not-issued")
+                        return
+                    code, line = result
         except asyncio.CancelledError:
             raise       # left `deciding`; the startup reconcile settles it (R26)
         except Exception as exc:  # noqa: BLE001 - fixed words; nothing launched means nothing was written
@@ -1317,6 +1328,10 @@ class Admind:
                         else "unavailable" if isinstance(exc, OSError) and audited else "error")
                 stop = ("open", PREFLIGHT_FAILED.format(bead=bead, word=word), word)
         if unauthorised:
+            if maintenance_retry:
+                self.store.defer_maintenance(a, self.wallclock() + 30.0)
+                self.audit_quietly("ask", action="maintenance-held", ask_id=a.ask_id, reason="authority")
+                return
             with self.store.transaction():
                 closed = self.store.close_attempt(a.ask_id, mid, expect_status="deciding", settled="refused",
                                                   exit_status=None, new_status="open", outcome=None,
@@ -1329,6 +1344,10 @@ class Admind:
             self.audit.write("drop", message_id=mid, reason="no longer authorised", what="decision")
             return
         if stop is not None:
+            if maintenance_retry:
+                self.store.defer_maintenance(a, self.wallclock() + 30.0)
+                self.audit_quietly("ask", action="maintenance-held", ask_id=a.ask_id, reason=stop[2])
+                return
             if stop[0] == "stale" and isinstance(r, Readout):
                 await self.refresh(a, row, r, "refused", None, "")
             else:
@@ -1469,6 +1488,10 @@ class Admind:
         if a is None or a.message_id != attempt or row is None or row.bead is None:
             self.audit_quietly("ask", action="reconcile-skipped", ask_id=ask_id)
             return
+        if any(x == ask_id and y == attempt for x, y, _ in self.store.maintenance_pending()):
+            # Proven pre-effect attempts keep their original inbound/provenance across restart.
+            # The bounded retry loop performs fresh policy and native checks before any new child.
+            return
         if self.approve_bead is None:
             self.unverified(ask_id, attempt, row.bead)
             return
@@ -1490,6 +1513,53 @@ class Admind:
             return
         self.audit.write("ask", action="reconciled", ask_id=ask_id, message_id=attempt, outcome=settled,
                          status=new_status, was=status, restarted=restarted)
+
+    async def maintenance_retry_loop(self) -> None:
+        """Retry only persisted proven-pre-effect attempts, serially under the normal worker lock."""
+        while True:
+            await asyncio.sleep(30.0)
+            for ask_id, mid, due in self.store.maintenance_pending():
+                if self.wallclock() < due:
+                    continue
+                async with self.work_lock:
+                    try:
+                        await self.retry_maintenance(ask_id, mid)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:  # noqa: BLE001 - preserve attempt, never infer an effect
+                        self.audit_quietly("ask", action="maintenance-retry-failed", ask_id=ask_id,
+                                           error=type(exc).__name__)
+
+    async def retry_maintenance(self, ask_id: str, mid: str) -> None:
+        """Read native first: another valid decision wins; only an untouched exact card can retry."""
+        pending = next((due for aid, message, due in self.store.maintenance_pending()
+                        if aid == ask_id and message == mid), None)
+        if pending is None or self.wallclock() < pending:
+            return
+        a, row = self.store.current_attempt(ask_id), self.store.ask(ask_id)
+        if a is None or a.message_id != mid or row is None or row.bead is None or row.status != "deciding":
+            return
+        # Backoff persists even on failed policy/readback, including across daemon restarts.
+        self.store.defer_maintenance(a, self.wallclock() + 30.0)
+        if (self.approve_bead is None or not self.authorised(mid)
+                or self.operator_name(mid) != a.operator):
+            self.audit_quietly("ask", action="maintenance-held", ask_id=ask_id, reason="authority")
+            return
+        settled, back = await self.read_and_settle(a, row.bead)
+        if settled in ("recorded", "blocked") and back is not None:
+            new_status, text = self.settlement(settled, back, a, row.bead, "")
+            with self.store.transaction():
+                if self.store.close_attempt(ask_id, mid, expect_status="deciding", settled=settled,
+                                            exit_status=None, new_status=new_status, outcome=text,
+                                            decided_by=a.operator if settled == "recorded" else None):
+                    self.finish(mid, "done", text, "ask")
+            return
+        if settled != "untouched" or back is None:
+            return
+        if self.preflight(back, a, row.bead) is not None or row.digest != a.digest:
+            self.audit_quietly("ask", action="maintenance-held", ask_id=ask_id, reason="changed-card")
+            return
+        await self.run_attempt(a, row, maintenance_retry=True)
 
     def unverified(self, ask_id: str, attempt: str, bead: str) -> None:
         """A stranded attempt that cannot be read back: approve_bead was removed (say, for a rollback).

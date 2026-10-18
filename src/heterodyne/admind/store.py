@@ -125,6 +125,10 @@ CREATE TABLE IF NOT EXISTS ask_repeats (
     parts INTEGER NOT NULL,             -- this repeat's own chunk count (asks bump B11, B12)
     created_at TEXT NOT NULL,
     PRIMARY KEY (ask_id, request));
+-- An additive overlay keeps the existing ask status/attempt schema and current-attempt CAS intact.
+-- Presence proves the last invocation returned the exact pre-effect HOLD. Delete BEFORE retry launch.
+CREATE TABLE IF NOT EXISTS ask_maintenance (
+    ask_id TEXT PRIMARY KEY, message_id TEXT NOT NULL UNIQUE, retry_at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS notices (
     notice_id TEXT PRIMARY KEY,
     poster TEXT NOT NULL,
@@ -977,6 +981,8 @@ class Store:
             r = self.db.execute("SELECT status, attempt FROM asks WHERE ask_id = ?", (ask_id,)).fetchone()
             if r is None or r[0] != expect_status or r[1] != message_id:
                 return False
+            self.db.execute("DELETE FROM ask_maintenance WHERE ask_id = ? AND message_id = ?",
+                            (ask_id, message_id))
             self.db.execute("UPDATE ask_attempts SET settled = ?, exit_status = COALESCE(?, exit_status) "
                             "WHERE ask_id = ? AND message_id = ?", (settled, exit_status, ask_id, message_id))
             self.db.execute("UPDATE asks SET status = ?, outcome = ?, decided_by = ?, attempt = ?, "
@@ -984,6 +990,46 @@ class Store:
                             (new_status, outcome, decided_by, message_id if settled == "uncertain" else None,
                              now(), ask_id))
             return True
+
+    @_locked
+    def defer_maintenance(self, a: Attempt, retry_at: float) -> bool:
+        """Retain the exact authenticated current attempt; no inbound completion or new allocation."""
+        with self.transaction():
+            row = self.ask(a.ask_id)
+            if row is None or row.status != "deciding" or self.current_attempt(a.ask_id) != a:
+                return False
+            count = self.db.execute("SELECT COUNT(*) FROM ask_maintenance").fetchone()[0]
+            exists = self.db.execute("SELECT 1 FROM ask_maintenance WHERE ask_id = ?", (a.ask_id,)).fetchone()
+            if count >= 128 and exists is None:
+                raise RuntimeError("maintenance pending capacity")
+            self.db.execute("INSERT INTO ask_maintenance VALUES (?, ?, ?) ON CONFLICT(ask_id) "
+                            "DO UPDATE SET retry_at = excluded.retry_at "
+                            "WHERE message_id = excluded.message_id",
+                            (a.ask_id, a.message_id, retry_at))
+            self.db.execute("UPDATE asks SET outcome = 'pending-maintenance', updated_at = ? "
+                            "WHERE ask_id = ?",
+                            (now(), a.ask_id))
+            return True
+
+    @_locked
+    def maintenance_pending(self) -> list[tuple[str, str, float]]:
+        rows = self.db.execute("SELECT ask_id, message_id, retry_at FROM ask_maintenance "
+                               "ORDER BY retry_at, ask_id LIMIT 128").fetchall()
+        return [(str(a), str(m), float(t)) for a, m, t in rows]
+
+    @_locked
+    def issue_maintenance_retry(self, a: Attempt) -> bool:
+        """Consume only the pre-effect retry entitlement, atomically BEFORE a possible child launch.
+
+        Crash after this commit follows ordinary ambiguous readback, never automatic retry.
+        """
+        with self.transaction():
+            row = self.ask(a.ask_id)
+            if row is None or row.status != "deciding" or self.current_attempt(a.ask_id) != a:
+                return False
+            cur = self.db.execute("DELETE FROM ask_maintenance WHERE ask_id = ? AND message_id = ?",
+                                  (a.ask_id, a.message_id))
+            return cur.rowcount == 1
 
     @_locked
     def recovery_snapshot(self) -> list[tuple[str, str, str]]:
