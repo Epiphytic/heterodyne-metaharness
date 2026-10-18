@@ -20,6 +20,8 @@ import msgspec
 from heterodyne.actions.codec import encode_record
 from heterodyne.actions.decisions import Decision, begin_decision
 from heterodyne.actions.dispatch import (
+    DISPATCH_WINDOW_NS,
+    PREPARATION_WINDOW_NS,
     Clock,
     Dispatch,
     DispatchRecovery,
@@ -113,6 +115,22 @@ def dispatch_key(value: Dispatch) -> str:
         if value.dispatch_kind == "initial"
         else value.approval_id + ":reconcile:" + value.attempt_id
     )
+
+
+def _observation(payload: bytes) -> TransitionObservation:
+    """Decode exact old-null compatibility without trusting old elapsed counters."""
+    try:
+        raw = msgspec.json.decode(payload)
+        if type(raw) is dict:
+            fields = cast(dict[str, object], raw)
+            if (
+                "allocation_elapsed_seconds" in fields
+                and fields.pop("allocation_elapsed_seconds") is not None
+            ):
+                raise Refused("legacy-observation-needs-provenance")
+        return msgspec.convert(raw, type=TransitionObservation, strict=True)
+    except msgspec.DecodeError:
+        raise Refused("fixture-observation-corrupt") from None
 
 
 def _outstanding(value: Request) -> int:
@@ -308,15 +326,27 @@ class FixtureJournal:
             self._event("request", key, value.version, data)
         return key
 
-    def _request_for_approval(self, approval_id: str) -> Request:
-        matches = [
-            value
-            for row in self.db.execute("SELECT data FROM requests")
-            if (value := msgspec.json.decode(bytes(row[0]), type=Request)).approval_id == approval_id
-        ]
-        if len(matches) != 1:
+    def _requests_for_approvals(self, approvals: set[str]) -> dict[str, Request]:
+        """One bounded scan per lookup set; legacy domains never enter effect paths."""
+        matches: dict[str, Request] = {}
+        try:
+            for row in self.db.execute("SELECT data FROM requests"):
+                value = msgspec.json.decode(bytes(row[0]), type=Request)
+                if value.approval_id not in approvals:
+                    continue
+                if value.denial_domain != DENIAL_DOMAIN:
+                    raise Refused("legacy-denial-domain-needs-provenance")
+                if value.approval_id in matches:
+                    raise Refused("unique-durable-request-required")
+                matches[value.approval_id] = value
+        except msgspec.DecodeError:
+            raise Refused("fixture-record-corrupt") from None
+        if set(matches) != approvals:
             raise Refused("unique-durable-request-required")
-        return matches[0]
+        return matches
+
+    def _request_for_approval(self, approval_id: str) -> Request:
+        return self._requests_for_approvals({approval_id})[approval_id]
 
     def add_decision(self, value: Decision) -> str:
         """Retain every inbox event. First valid native decision wins, never first invalid candidate."""
@@ -388,10 +418,8 @@ class FixtureJournal:
             value = msgspec.structs.replace(
                 value,
                 started=sampled,
-                deadline_ns=sampled.mono_ns + value.deadline_ns - value.started.mono_ns,
-                preparation_deadline_ns=sampled.mono_ns
-                + value.preparation_deadline_ns
-                - value.started.mono_ns,
+                deadline_ns=sampled.mono_ns + DISPATCH_WINDOW_NS,
+                preparation_deadline_ns=sampled.mono_ns + PREPARATION_WINDOW_NS,
             )
             data = encode_record(value)
             decision = self.get("decision", value.approval_id)
@@ -531,30 +559,14 @@ class FixtureJournal:
         _, cls = TABLES[kind]
         with self.transaction():
             old = self.get(kind, key)
-            needs_clock = (
-                observation.now is not None
-                or (isinstance(old, Request) and old.phase == "allocation-intent")
-                or isinstance(reducer, ObservedReducer)
-                or observation.dispatch_operation
-                in {"ready", "consume-claim", "restart-preparation", "lookup"}
-                or any(
-                    recovery is not None and recovery.clock_discontinuity
-                    for recovery in (
-                        observation.dispatch_recovery,
-                        observation.allocation_recovery,
-                        observation.abandonment_recovery,
+            sampled = self._sample_clock()
+            observation = msgspec.structs.replace(observation, now=sampled)
+            for field in ("dispatch_recovery", "allocation_recovery", "abandonment_recovery"):
+                recovery = getattr(observation, field)
+                if recovery is not None and recovery.clock_discontinuity:
+                    observation = msgspec.structs.replace(
+                        observation, **{field: msgspec.structs.replace(recovery, observed_now=sampled)}
                     )
-                )
-            )
-            sampled = self._sample_clock() if needs_clock else None
-            if sampled is not None:
-                observation = msgspec.structs.replace(observation, now=sampled)
-                for field in ("dispatch_recovery", "allocation_recovery", "abandonment_recovery"):
-                    recovery = getattr(observation, field)
-                    if recovery is not None and recovery.clock_discontinuity:
-                        observation = msgspec.structs.replace(
-                            observation, **{field: msgspec.structs.replace(recovery, observed_now=sampled)}
-                        )
             observation = self._recovery_clock(old, observation, sampled)
             try:
                 value = (
@@ -729,7 +741,7 @@ class FixtureJournal:
                 "SELECT data FROM events WHERE kind='request-observation' AND key=? AND version=?",
                 (request_key(old), old.version),
             ).fetchone()
-            started = msgspec.json.decode(row[0], type=TransitionObservation).now if row else None
+            started = _observation(row[0]).now if row else None
             self._proven_clock("request", request_key(old), old.version, started)
         if started is None:
             raise Refused("clock-recovery-history-required")
@@ -757,9 +769,7 @@ class FixtureJournal:
                     "SELECT data FROM events WHERE kind='dispatch-observation' AND key=? AND version=?",
                     (dispatch_key(old), version),
                 ).fetchone()
-                observed = (
-                    msgspec.json.decode(row[0], type=TransitionObservation) if row else EMPTY_OBSERVATION
-                )
+                observed = _observation(row[0]) if row else EMPTY_OBSERVATION
                 if observed.now is not None:
                     if proven:
                         self._proven_clock("dispatch", dispatch_key(old), version, observed.now)
@@ -780,7 +790,7 @@ class FixtureJournal:
                 "SELECT data FROM events WHERE kind='request-observation' AND key=? AND version=?",
                 (request_key(old), old.version),
             ).fetchone()
-            issued = msgspec.json.decode(row[0], type=TransitionObservation) if row else EMPTY_OBSERVATION
+            issued = _observation(row[0]) if row else EMPTY_OBSERVATION
             self._proven_clock("request", request_key(old), old.version, issued.now)
             observation = msgspec.structs.replace(observation, allocation_started=issued.now)
         request_transition(old, value, decision=decision, dispatch=dispatch, observation=observation)
@@ -835,10 +845,12 @@ class FixtureJournal:
 
     def _denial_provenance(self, session_key: str) -> None:
         """Legacy opaque hashes cannot be silently reinterpreted in a new domain."""
-        for identity, approval in self.db.execute(
+        rows = self.db.execute(
             "SELECT identity,approval FROM denials WHERE session_key=?", (session_key,)
-        ):
-            value = self._request_for_approval(approval)
+        ).fetchall()
+        requests = self._requests_for_approvals({row[1] for row in rows}) if rows else {}
+        for identity, approval in rows:
+            value = requests[approval]
             if (
                 value.denial_domain != DENIAL_DOMAIN
                 or value.origin.session_key != session_key

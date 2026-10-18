@@ -47,35 +47,62 @@ class Decision(Record, frozen=True):
     observed_native_event: DecisionObservation | None = None
 
 
+def _emoji_base(ch: str) -> bool:
+    return unicodedata.category(ch) == "So" and (0x2300 <= ord(ch) <= 0x27BF or 0x1F000 <= ord(ch) <= 0x1FAFF)
+
+
+def _metadata_controls_safe(reason: str) -> bool:
+    """Finite visible metadata grammar, including emoji adornments and flag tags."""
+    index = 0
+    while index < len(reason):
+        ch = reason[index]
+        code = ord(ch)
+        if ch == "\r":
+            if reason[index : index + 2] != "\r\n":
+                return False
+            index += 2
+            continue
+        if ch == "🏴" and index + 1 < len(reason) and 0xE0000 <= ord(reason[index + 1]) <= 0xE007F:
+            end = index + 1
+            while end < len(reason) and (
+                0xE0061 <= ord(reason[end]) <= 0xE007A or 0xE0030 <= ord(reason[end]) <= 0xE0039
+            ):
+                end += 1
+            if end == index + 1 or end == len(reason) or ord(reason[end]) != 0xE007F:
+                return False
+            index = end + 1
+            continue
+        if ch == "\u200d":
+            left = index - 1
+            while left >= 0 and (reason[left] == "\ufe0f" or 0x1F3FB <= ord(reason[left]) <= 0x1F3FF):
+                left -= 1
+            if (
+                left < 0
+                or index + 1 == len(reason)
+                or not (_emoji_base(reason[left]) and _emoji_base(reason[index + 1]))
+            ):
+                return False
+        elif (
+            unicodedata.category(ch) in {"Cc", "Cs", "Cf"}
+            or ch in "\u2028\u2029\u115f\u1160\u3164\uffa0\u2800\u034f"
+            or 0x180B <= code <= 0x180E
+        ):
+            return False
+        index += 1
+    return True
+
+
 def _validate_denial_reason(reason: str) -> None:
-    """Metadata permits visible emoji and line breaks without relaxing identifier rules."""
+    """Metadata permits visible emoji and CRLF without relaxing identifier rules."""
     from heterodyne.config.secret_scan import secret_value
 
     if (
-        any(
-            (
-                unicodedata.category(ch) in {"Cc", "Cs", "Cf"}
-                and ch not in "\r\n\t\u200d"
-                and not 0xE0020 <= ord(ch) <= 0xE007F
-            )
-            or ch in "\u2028\u2029"
-            for ch in reason
-        )
+        not _metadata_controls_safe(reason)
         or (
             reason
             and not any(
                 not ch.isspace() and unicodedata.category(ch) not in {"Cf", "Cc", "Mn", "Me"} for ch in reason
             )
-        )
-        or any(
-            ch == "\u200d"
-            and (
-                i == 0
-                or i == len(reason) - 1
-                or unicodedata.category(reason[i - 1]) != "So"
-                or unicodedata.category(reason[i + 1]) != "So"
-            )
-            for i, ch in enumerate(reason)
         )
         or secret_value(reason)
     ):

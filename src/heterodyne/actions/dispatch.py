@@ -12,6 +12,9 @@ from heterodyne.actions.codec import BEAD_ID, safe_label
 from heterodyne.actions.contracts import Clock, Record
 from heterodyne.actions.requests import Refused, changed, digest_syntax
 
+DISPATCH_WINDOW_NS = 60_000_000_000
+PREPARATION_WINDOW_NS = 30_000_000_000
+
 DispatchState = Literal[
     "preparing", "ready", "held", "executing", "uncertain", "succeeded", "failed", "denied"
 ]
@@ -126,8 +129,8 @@ def prepare(
         resource,
         startup_hash,
         now,
-        now.mono_ns + 60_000_000_000,
-        now.mono_ns + 30_000_000_000,
+        now.mono_ns + DISPATCH_WINDOW_NS,
+        now.mono_ns + PREPARATION_WINDOW_NS,
     )
 
 
@@ -175,7 +178,7 @@ def restart_preparation(value: Dispatch, startup_hash: str, now: Clock) -> Dispa
         state="preparing",
         startup_hash=startup_hash,
         retired_startups=(*value.retired_startups, value.startup_hash),
-        preparation_deadline_ns=min(now.mono_ns + 30_000_000_000, value.deadline_ns),
+        preparation_deadline_ns=min(now.mono_ns + PREPARATION_WINDOW_NS, value.deadline_ns),
         launch_attempts=value.launch_attempts + 1,
     )
 

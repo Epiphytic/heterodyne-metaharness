@@ -1,6 +1,7 @@
 """C1 regression contracts: synthetic inputs, disposable journals, no adapters."""
 
 from contextlib import closing
+from itertools import chain, repeat
 from typing import Any, cast
 
 import msgspec
@@ -216,12 +217,24 @@ def test_unassociated_legacy_denial_cannot_be_forgotten_on_new_admission(tmp_pat
 
 def test_unconsumed_success_keeps_durable_child_and_parent_audit(tmp_path):
     import test_actions_p1_r3 as r3
-    from actions_journal_fixture import FixtureJournal as SampledJournal
 
     from heterodyne.actions.journal import dispatch_key
 
-    with closing(SampledJournal.create(tmp_path / "fixture")) as db:
+    setup = iter(
+        [
+            dis.Clock("allocation", 1, 1),
+            dis.Clock("allocation", 10**9 + 1, 10**9 + 1),
+            *(
+                [dis.Clock("allocation", 10**9 + 1, 10**9 + 1)]
+                * (len(f.STAGES) + 3 + 2 + len(f.FINALIZATIONS))
+            ),
+            *([dis.Clock("boot", 1, 1)] * 4),
+        ]
+    )
+    with closing(FixtureJournal.create(tmp_path / "fixture", clock=lambda: next(setup))) as db:
         parent, clock = r3.ready_parent(db, consumed=False)
+        now = clock
+        db.clock = lambda: now
         parent = db.transition(
             "dispatch",
             parent.approval_id,
@@ -264,11 +277,11 @@ def test_unconsumed_success_keeps_durable_child_and_parent_audit(tmp_path):
 
 
 def test_denial_history_requires_exact_retained_decision_binding(tmp_path):
-    from actions_journal_fixture import FixtureJournal as SampledJournal
 
     from heterodyne.actions.codec import encode_record
 
-    with closing(SampledJournal.create(tmp_path / "fixture")) as db:
+    setup = chain([dis.Clock("allocation", 1, 1)], repeat(dis.Clock("allocation", 10**9 + 1, 10**9 + 1)))
+    with closing(FixtureJournal.create(tmp_path / "fixture", clock=lambda: next(setup))) as db:
         value = f.persist_filed_request(db)
         decision = f.persist_decision(db, "deny")
         db.record_denial(value, decision)

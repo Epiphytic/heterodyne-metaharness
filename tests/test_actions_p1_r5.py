@@ -521,7 +521,12 @@ def test_dispatch_clock_recovery_uses_last_retained_lookup_anchor(tmp_path):
         [
             dis.Clock("allocation", 1, 1),
             dis.Clock("allocation", 10**9 + 1, 10**9 + 1),
-            *([dis.Clock("boot", 1, 1)] * 4),
+            # Unconditional sampling also covers non-timed request/decision steps.
+            *(
+                [dis.Clock("allocation", 10**9 + 1, 10**9 + 1)]
+                * (len(f.STAGES) + 3 + 2 + len(f.FINALIZATIONS))
+            ),
+            *([dis.Clock("boot", 1, 1)] * 5),
         ]
     )
     with closing(FixtureJournal.create(tmp_path / "fixture", clock=lambda: next(samples))) as db:
