@@ -1,0 +1,65 @@
+{
+  "reviewer": "claude-opus",
+  "author": "codex",
+  "mode": "cross-model",
+  "round": 5,
+  "effort": "medium",
+  "range": "597a1d4aec3d4fc081e5774ff3ffc7aa33aa16be..1220d34b54840b1b33252aee72613d731c13a81b",
+  "actual_result": "No critical flaw; good enough for PoC",
+  "raw_sha256": "f8063708c5f7c3a39ddcd577b1cbbe5254121c804a82160d4da2073f81fc2cc9",
+  "stream_sha256": "4507227ca42d0407dfa392522f2ad259f3ac9034229b46d6adf94bba2bd2a648",
+  "capture_kind": "manual-foreign-observed-stream-not-reserved-profile-proof",
+  "findings": [
+    {
+      "ordinal": 1,
+      "finding": "`src/heterodyne/admind/approvals.py:278`: With the NotSpawned refusal removed, a maintenance retry whose cached identity is cold or changed now runs the adapter. A resulting maintenance hold carries identity \"\", so record_hold rejects it while the invocation count still advances. An attempt that already had a valid retirement proof becomes permanently ineligible.\n\n   Failure scenario: An attempt has an eligible proof at invocations=N. Before the next maintenance retry, the adapter is reinstalled with identical bytes, or chmod'd, or hardlinked; any of these changes ctime and so the stamp. cached_identity() returns \"\" and the child returns a maintenance hold. MaintenanceHold(adapter_identity=\"\") makes record_hold return False (DIGEST check) while the generation is now N+1. From then on eligible() needs proof.invocations == generation, and record_hold needs previous.invocations == count-1, so neither can succeed. Retirement is closed for good and needs manual recovery. Under R4 the same case went down the NotSpawned path and record_not_spawned could keep the chain.",
+      "status": "OPEN_UNWAIVED",
+      "disposition": "Conservative eligibility loss after unproven invocation is retained as approved exact-coverage HOLD; prior proof/history is not authority for the new invocation. No automatic replay or manual database workaround is authorized."
+    },
+    {
+      "ordinal": 2,
+      "finding": "`src/heterodyne/admind/approvals.py:277`: On a cache miss, the pre-launch identity is thrown away even though the cache still holds the earlier byte hash. A maintenance hold from an adapter whose bytes did not change is still treated as having drifted. Root cause: the before/after check compares stat stamps when it should compare content.\n\n   Failure scenario: Metadata-only change (touch, chmod, link count, or a reinstall with the same content) followed by a maintenance hold: before is \"\" and after is the real hash, so they differ and the proof is lost. A deeper fix: decide() keeps the stale cached hash as `before` (no file read at the fence), and the hash identity() computes after the hold verifies that the bytes match. Then only real content drift disqualifies.",
+      "status": "OPEN_UNWAIVED",
+      "disposition": "Metadata drift also disqualifies the cached proof. Retained content-hash reuse proposal is future source work, not implemented or waived."
+    },
+    {
+      "ordinal": 3,
+      "finding": "`src/heterodyne/admind/approvals.py:214`: The old guarantee 'drift needs a fresh read phase' is gone, so a decision can run on a different adapter binary from the one that passed the gate-preview read and preflight. Nothing replaces that check.\n\n   Failure scenario: ab.read() (gate-preview and preflight) runs adapter v1. The adapter is replaced with v2 before decide(). cached_identity() sees the drift and returns \"\", but decide() now launches v2 with --yes --expect-digest anyway. The native decision is made by a binary that was never preflighted. The --expect-digest check limits the damage, but the 'fresh read on drift' rule from the R4 docstring is silently dropped rather than recorded as a decision.",
+      "status": "OPEN_UNWAIVED",
+      "disposition": "Ordinary decisions retain the pre-retirement installed-adapter trust boundary and native expected-digest gate. This repair removes the newly introduced identity-cache execution gate; hash drift remains ineligible for retirement proof. Fresh preflight-on-drift is not claimed."
+    },
+    {
+      "ordinal": 4,
+      "finding": "`src/heterodyne/admind/daemon.py:1391`: hold_maintenance ignores record_hold's False return, so when a maintenance hold is rejected for having no adapter identity, nothing is audited and the cause cannot be seen.\n\n   Failure scenario: A cold or changed identity causes a hold to be rejected. The operator then gets only the generic 'retirement unavailable: complete since-begin not-issued proof is missing' notice (retirement.py:396). No audit event says the adapter identity was unavailable or changed. Operators cannot tell this new, expected route to ineligibility apart from a lost proof or a bug.",
+      "status": "OPEN_UNWAIVED",
+      "disposition": "Missing precise rejection audit remains operator-diagnostic debt."
+    },
+    {
+      "ordinal": 5,
+      "finding": "`tests/test_admind_retirement_identity.py:60`: The new tests cover only the port (ApproveBead.decide). Nothing runs the daemon's run_attempt maintenance-retry path with a cold or changed identity after an earlier proof exists, so the irreversible loss of eligibility (finding 1) is never asserted.\n\n   Failure scenario: A test that has a proof at generation N, then a retry with a cold cache returning a hold, should assert that eligible() is None and that the proof bytes survive unchanged (the ADR's 'Negative tests must assert original Attempt/inbound/proof bytes survive'). Without it, a regression that silently overwrites or deletes the proof, or wrongly keeps it eligible, would go unnoticed.",
+      "status": "OPEN_UNWAIVED",
+      "disposition": "Daemon-level cold-cache-after-proof history regression remains missing; existing port and retirement suites pass but do not establish that exact new scenario."
+    },
+    {
+      "ordinal": 6,
+      "finding": "`tests/test_admind_retirement_identity.py:37`: The 'unreadable' case patches approvals.os.open, which is the process-wide os.open, and only simulates an execute-only adapter. A real mode-0111 file is never tested.\n\n   Failure scenario: Any other os.open call during the scenario (asyncio internals, logging, the to_thread hash after a hold) would also raise PermissionError, which could hide behaviour differences. Also, a real execute-only adapter fails differently (EACCES on open after stat succeeds) from what this mock produces at the call site, so 'execute-only' in the commit message overstates what is covered.",
+      "status": "OPEN_UNWAIVED",
+      "disposition": "Unreadable regression is synthetic PermissionError on os.open; no genuine mode0111 execution test or live executable was run."
+    },
+    {
+      "ordinal": 7,
+      "finding": "`tests/test_admind_retirement_r2.py:239`: test_real_adapter_structural_not_spawned_sites lost its parametrisation and now checks only one site, but its plural name ('sites') was kept, which misleads about how much is covered.\n\n   Failure scenario: A future reader assumes the identity-cache NotSpawned site is still covered, or restores it under this name. The name should be singular (for example ..._popen_not_spawned) to match the single Popen OSError case.",
+      "status": "OPEN_UNWAIVED",
+      "disposition": "Plural historical test name remains maintenance debt; exact real Popen rejection assertion is retained."
+    }
+  ],
+  "checks": {
+    "affected": "547 passed151.70sec in10namedmodules",
+    "full_configured_types": "0errors0warnings0infos",
+    "real_commit_hooks": "install-agnostic/Ruff/gitleaks PASS",
+    "quality": "quality-final.log exit2 OPEN UNWAIVED",
+    "hosted_ci": "new head not yet submitted"
+  },
+  "prior_history": "All R3/R4 findings retain original ordinals/raw and unwaived status. This source repairs R3 ordinary approve/deny identity gating; conservative retirement-proof loss and other findings remain.",
+  "limits": "No deployment, live tests, native approval or retirement effects. New hash regressions use inert disposable files and synthetic runner."
+}

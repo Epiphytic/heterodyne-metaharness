@@ -211,7 +211,7 @@ class ApproveBead:
             return ""
 
     def cached_identity(self) -> str:
-        """No file reads or await at the final authority fence; drift needs a fresh read phase."""
+        """No file reads or await at the authority fence; drift disqualifies retirement proof."""
         try:
             current = self.binary.stat()
         except OSError:
@@ -276,8 +276,6 @@ class ApproveBead:
             identity = await asyncio.to_thread(self.identity)
         else:
             identity = self.cached_identity()
-            if not identity:
-                raise NotSpawned()
         code, out, err = await self._run(decision_argv(self.binary, a, bead), DECIDE_SECONDS, MAX_OUTPUT,
                                        on_launch)
         if maintenance_hold(code, out):

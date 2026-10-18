@@ -237,7 +237,7 @@ def test_changed_installed_adapter_remains_hold_without_native_read(tmp_path: Pa
 
 
 @pytest.mark.parametrize("drift", [False, True])
-def test_final_launch_refuses_cold_or_changed_cache_without_hashing(
+def test_final_launch_allows_cold_or_changed_cache_without_hashing(
     tmp_path: Path, monkeypatch, drift: bool
 ) -> None:
     from heterodyne.admind.approvals import ApproveBead
@@ -250,12 +250,22 @@ def test_final_launch_refuses_cold_or_changed_cache_without_hashing(
             assert await asyncio.to_thread(port.identity)
             binary.write_bytes(b"changed adapter")
 
+        launches = []
+
         def forbidden(*args, **kwargs):
-            pytest.fail("final authority fence must neither hash nor launch on cache miss")
+            pytest.fail("final authority fence must not hash on cache miss")
+
+        async def run(argv, seconds, limit, on_launch=None):
+            assert port.cached_identity() == ""
+            assert on_launch is not None
+            on_launch()
+            return 0, b"", b""
 
         monkeypatch.setattr(port, "identity", forbidden)
-        monkeypatch.setattr(port, "_run", forbidden)
-        with pytest.raises(BtqError, match="unavailable"):
-            await port.decide(APPROVE, "btq-ab12c", on_launch=lambda: None)
+        monkeypatch.setattr(port, "_run", run)
+        assert await port.decide(
+            APPROVE, "btq-ab12c", on_launch=lambda: launches.append(True)
+        ) == (0, "")
+        assert launches == [True]
 
     asyncio.run(scenario())
