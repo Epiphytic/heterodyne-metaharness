@@ -377,6 +377,8 @@ class Store:
         self.fulfillment = Lifecycle(self)
         try:
             self.fulfillment.migrate()
+            from heterodyne.admind.operations import SCHEMA as OPERATION_SCHEMA
+            self.db.executescript(OPERATION_SCHEMA)
         except BaseException:
             self.db.close()
             raise
@@ -1050,7 +1052,8 @@ class Store:
         """In one transaction: the ask `open -> deciding` with `attempt` set, the attempt row, and the
         inbound message `executing`. False, changing nothing, if the ask is not `open`."""
         with self.transaction():
-            if self.fulfillment.protected(a.ask_id):
+            from heterodyne.admind.operations import decision_allowed
+            if not decision_allowed(self, a.ask_id) or self.fulfillment.protected(a.ask_id):
                 return False
             cur = self.db.execute("UPDATE asks SET status = 'deciding', attempt = ?, updated_at = ? "
                                   "WHERE ask_id = ? AND status = 'open'", (a.message_id, now(), a.ask_id))
@@ -1157,6 +1160,9 @@ class Store:
     def issue_decision(self, a: Attempt, *, maintenance_retry: bool = False) -> bool:
         """Persist an issuing marker before launch; a crash never grants a replay entitlement."""
         with self.transaction():
+            from heterodyne.admind.operations import decision_allowed
+            if not decision_allowed(self, a.ask_id):
+                return False
             row = self.ask(a.ask_id)
             if row is None or row.status != "deciding" or self.current_attempt(a.ask_id) != a:
                 return False

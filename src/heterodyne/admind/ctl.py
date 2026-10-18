@@ -181,7 +181,9 @@ class JsonSocketServer[Req, Rep: msgspec.Struct]:
                     raise ValueError("request too long")
                 req = msgspec.json.decode(line, type=self.request_type)
                 if self.kind == "ask":
-                    from heterodyne.admind import fulfillment
+                    from heterodyne.admind import fulfillment, operations
+                    if isinstance(cast(object, req), operations.Request):
+                        operations.decode(line)
                     if isinstance(cast(object, req), fulfillment.Request):
                         fulfillment.strict_json(line, limit=self.max_request)
             except (TimeoutError, ValueError, msgspec.DecodeError):

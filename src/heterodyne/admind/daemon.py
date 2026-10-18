@@ -44,6 +44,7 @@ from heterodyne.admind import (
     guard_state,
     membership,
     notices,
+    operations,
     summarize,
     verbs,
 )
@@ -415,7 +416,8 @@ class Admind:
         self.posts_in_flight = 0                # ask posts on ask.sock being handled (R15)
         self.ask_post_lock = asyncio.Lock()     # posts run one at a time (R22)
         self.ask_server: ctl.JsonSocketServer[
-            asks.AskRequest | fulfillment.Request, asks.AskReply | fulfillment.Reply] | None = None
+            asks.AskRequest | fulfillment.Request | operations.Request,
+            asks.AskReply | fulfillment.Reply | operations.Reply] | None = None
         self.approve_bead = None if settings.approve_bead is None else ApproveBead(settings.approve_bead)
 
     # --- state helpers -------------------------------------------------------------------------
@@ -679,12 +681,11 @@ class Admind:
             self.ask_server = ctl.JsonSocketServer(
                 self.s.state_dir / asks.ASK_SOCKET, self.on_ask_wire, self.audit, kind="ask",
                 max_request=asks.MAX_REQUEST, max_reply=asks.MAX_REPLY,
-                request_type=asks.AskRequest | fulfillment.Request,
-                check=lambda req: (fulfillment.check(req) if isinstance(req,
-                    fulfillment.Request) else asks.check(req)),
+                request_type=asks.AskRequest | fulfillment.Request | operations.Request,
+                check=self.check_ask_wire,
                 refused=asks.refused, failed=asks.failed,
-                describe=lambda req: ({"op": type(req).__name__} if isinstance(req,
-                    fulfillment.Request) else asks.describe(req)))
+                describe=lambda req: (asks.describe(req) if isinstance(req, asks.AskRequest) else
+                    {"op": type(req).__name__}))
             await self.ask_server.start()
             await self.start_agent(startup=True)
             async with asyncio.TaskGroup() as tg:
@@ -724,14 +725,28 @@ class Admind:
         return ctl.CtlReply(result, redact(message))
 
     # --- asks (relay spec) ----------------------------------------------------------------------
-    async def on_ask_wire(self, req: asks.AskRequest | fulfillment.Request,
-                          peer: ctl.Peer) -> asks.AskReply | fulfillment.Reply:
+    @staticmethod
+    def check_ask_wire(req: asks.AskRequest | fulfillment.Request | operations.Request) -> str | None:
+        """Validate the selected closed protocol without weakening legacy DTO checks."""
+        if isinstance(req, operations.Request):
+            return operations.check(req)
+        if isinstance(req, fulfillment.Request):
+            return fulfillment.check(req)
+        return asks.check(req)
+
+    async def on_ask_wire(self, req: asks.AskRequest | fulfillment.Request | operations.Request,
+                          peer: ctl.Peer) -> asks.AskReply | fulfillment.Reply | operations.Reply:
+        if isinstance(req, operations.Request):
+            return await self.on_operation(req, peer)
         if isinstance(req, fulfillment.Request):
             reply = await self.on_fulfillment(req, peer)
             if len(msgspec.json.encode(reply)) > fulfillment.MAX_REPLY:
                 return fulfillment.Reply("unavailable", "lifecycle reply exceeds bound")
             return reply
         return await self.on_ask(req, peer)
+
+    async def on_operation(self, req: operations.Request, peer: ctl.Peer) -> operations.Reply:
+        return await operations.handle(self, req, peer)
 
     async def on_fulfillment(self, req: fulfillment.Request, peer: ctl.Peer) -> fulfillment.Reply:
         """Separate opt-in protocol. No long-lived daemon lock or external operation is involved."""
@@ -792,6 +807,9 @@ class Admind:
         try:
             async with self.ask_post_lock:
                 if req.kind == "approval":
+                    with self.store.transaction(read_only=True):
+                        if operations.bead_binding(self.store, req.bead) is not None:
+                            return asks.refused("source-owned bead; use approval.operation.v1")
                     return await self.post_approval(req, peer)
                 return self.post_ask(req, peer)
         finally:
@@ -901,6 +919,9 @@ class Admind:
         """Spec §8 "Post an approval ask", under `ask_post_lock` (R22): read the bead with approve-bead,
         prepare the card from its readout, then commit it in one transaction."""
         bead = req.bead or ""
+        with self.store.transaction(read_only=True):
+            if operations.bead_binding(self.store, bead) is not None:
+                return asks.refused("source-owned bead; use approval.operation.v1")
         refusal = self.approval_post_refusal(bead)
         if refusal is not None or self.approve_bead is None:
             return self.approval_refused(bead, refusal or ASK_NO_APPROVALS, "limits")
@@ -943,12 +964,14 @@ class Admind:
         row = dataclasses.replace(row, body=asks.approval_body(r, card), card_parts=len(card.card_chunks))
         return FreshCard(row, card)
 
-    def commit_approval(self, fresh: FreshCard, peer_pid: int | None) -> list[str]:
+    def commit_approval(self, fresh: FreshCard, peer_pid: int | None, *,
+                        operation_key: str | None = None) -> list[str]:
         """Inside the caller's transaction: supersede the bead's open and answered asks, store the fresh
         one and queue its card. Returns the superseded ask IDs."""
         row, bead = fresh.row, fresh.row.bead
         superseded: list[str] = []
         with self.store.transaction():
+            bound_key = operations.before_commit(self.store, bead, operation_key)
             for old in self.store.asks_with_status("open", "answered"):
                 if old.bead == bead and not self.store.fulfillment.protected(old.ask_id):
                     superseded.append(old.ask_id)
@@ -956,6 +979,8 @@ class Admind:
                     self.ask_notice(old.ask_id, "superseded", row.ask_id, ASK_SUPERSEDED_NOTICE.format(
                         old=old.ask_id, new=row.ask_id, bead=bead))
             self.store.insert_ask(row, peer_pid)
+            if bound_key is not None:
+                operations.attach(self.store, bound_key, row.ask_id)
             self.post_parts(f"ask:{row.ask_id}", fresh.card.card_chunks, owner=None)  # checked chunks
         return superseded
 
@@ -1533,12 +1558,17 @@ class Admind:
             thread = self.attempt_thread(a.ask_id, mid)        # the updated content goes where the reply goes
             superseded: list[str] = []
             with self.store.transaction():
+                binding = operations.bead_binding(self.store, bead)
+                if binding is not None and binding[1]:
+                    # Withdrawal fenced replacement cards, not the already issued native attempt.
+                    return
                 closed = self.store.close_attempt(a.ask_id, mid, expect_status="deciding", settled=settled,
                                                   exit_status=code, new_status="stale", outcome=text,
                                                   decided_by=None)
                 if closed:
                     if isinstance(fresh, FreshCard):
-                        superseded = self.commit_approval(fresh, None)
+                        superseded = self.commit_approval(
+                            fresh, None, operation_key=None if binding is None else binding[0])
                     for i, part in enumerate(updated):      # the request part is the bare event ID
                         self.post(f"askd:{a.ask_id}:{mid.removeprefix(REACTION_PREFIX)}:{i}", part, thread,
                                   lane=2, owner=self.request_owners(mid))
