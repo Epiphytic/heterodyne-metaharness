@@ -11,14 +11,21 @@ import os
 import sqlite3
 import stat
 from collections.abc import Callable, Generator
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, overload
+from typing import Any, Literal, cast, overload
 
 import msgspec
 
 from heterodyne.actions.codec import encode_record
 from heterodyne.actions.decisions import Decision, begin_decision
-from heterodyne.actions.dispatch import Clock, Dispatch, DispatchRecovery, clock_elapsed
+from heterodyne.actions.dispatch import (
+    Clock,
+    Dispatch,
+    DispatchRecovery,
+    clock_elapsed,
+    reconciliation_disposition,
+)
 from heterodyne.actions.policy import request_denial_key
 from heterodyne.actions.requests import (
     TERMINAL_REQUESTS,
@@ -122,6 +129,13 @@ def _open_fixture(path: Path) -> sqlite3.Connection:
     ):
         raise Refused("fixture-journal-file")
     return sqlite3.connect(path.absolute().as_uri() + "?mode=rw", uri=True, isolation_level=None, timeout=1)
+
+
+@dataclass(frozen=True)
+class ObservedReducer[RecordT: (Request, Decision, Dispatch)]:
+    """Use the transaction's sampled observation without predicting its clock."""
+
+    reduce: Callable[[RecordT, TransitionObservation], RecordT]
 
 
 class FixtureJournal:
@@ -365,7 +379,17 @@ class FixtureJournal:
         if value.version != 0 or value.state != "preparing":
             raise Refused("dispatch-not-initial")
         with self.transaction():
-            sampled = self._sample_clock(value.started)
+            sampled = self._sample_clock()
+            if sampled is not None:
+                value = msgspec.structs.replace(
+                    value,
+                    started=sampled,
+                    deadline_ns=sampled.mono_ns + value.deadline_ns - value.started.mono_ns,
+                    preparation_deadline_ns=sampled.mono_ns
+                    + value.preparation_deadline_ns
+                    - value.started.mono_ns,
+                )
+                data = encode_record(value)
             decision = self.get("decision", value.approval_id)
             request = self._request_for_approval(value.approval_id)
             if (
@@ -404,7 +428,7 @@ class FixtureJournal:
         return tuple(
             msgspec.json.decode(bytes(row[0]), type=Dispatch)
             for row in self.db.execute(
-                "SELECT data FROM dispatches WHERE key LIKE ?", (approval_id + ":reconcile:%",)
+                "SELECT data FROM dispatches WHERE key LIKE ? ORDER BY rowid", (approval_id + ":reconcile:%",)
             )
         )
 
@@ -424,9 +448,11 @@ class FixtureJournal:
             raise Refused("reconcile-parent-binding")
         reconciliations = 0
         unread = 0
+        previous_start = parent.started
         for previous in (parent, *self._reconciliation_children(value.approval_id)):
             if previous.dispatch_kind == "reconcile":
                 reconciliations += 1
+                previous_start = previous.started
                 if previous.launch_attempts != 1:
                     raise Refused("reconcile-attempt-history-needs-recovery")
                 if not previous.settled:
@@ -449,6 +475,8 @@ class FixtureJournal:
             raise Refused("reconcile-parent-observation-required")
         if reconciliations >= 3:
             raise Refused("reconcile-needs-authenticated-recovery")
+        if clock_elapsed(previous_start, value.started) < (1, 5, 30)[reconciliations]:
+            raise Refused("reconcile-attempt-not-due")
         self._terminal_budget(self._request_for_approval(value.approval_id))
         self.db.execute("INSERT INTO dispatches VALUES(?,?,?)", (key, value.version, data))
         self._event("dispatch", key, value.version, data)
@@ -459,7 +487,7 @@ class FixtureJournal:
         kind: Literal["request"],
         key: str,
         expected_version: int,
-        reducer: Callable[[Request], Request],
+        reducer: Callable[[Request], Request] | ObservedReducer[Request],
         *,
         observation: TransitionObservation = EMPTY_OBSERVATION,
     ) -> Request: ...
@@ -470,7 +498,7 @@ class FixtureJournal:
         kind: Literal["decision"],
         key: str,
         expected_version: int,
-        reducer: Callable[[Decision], Decision],
+        reducer: Callable[[Decision], Decision] | ObservedReducer[Decision],
         *,
         observation: TransitionObservation = EMPTY_OBSERVATION,
     ) -> Decision: ...
@@ -481,7 +509,7 @@ class FixtureJournal:
         kind: Literal["dispatch"],
         key: str,
         expected_version: int,
-        reducer: Callable[[Dispatch], Dispatch],
+        reducer: Callable[[Dispatch], Dispatch] | ObservedReducer[Dispatch],
         *,
         observation: TransitionObservation = EMPTY_OBSERVATION,
     ) -> Dispatch: ...
@@ -491,7 +519,7 @@ class FixtureJournal:
         kind: Literal["request", "decision", "dispatch"],
         key: str,
         expected_version: int,
-        reducer: Callable[[Any], Request | Decision | Dispatch],
+        reducer: Callable[[Any], Request | Decision | Dispatch] | ObservedReducer[Any],
         *,
         observation: TransitionObservation = EMPTY_OBSERVATION,
     ) -> Request | Decision | Dispatch:
@@ -499,12 +527,36 @@ class FixtureJournal:
         _, cls = TABLES[kind]
         with self.transaction():
             old = self.get(kind, key)
-            sampled = self._sample_clock(observation.now) if observation.now is not None else None
-            observation = self._recovery_clock(old, observation)
-            if observation.now is not None and sampled is None and self.clock is not None:
-                sampled = observation.now
+            needs_clock = (
+                observation.now is not None
+                or isinstance(reducer, ObservedReducer)
+                or observation.dispatch_operation
+                in {"ready", "consume-claim", "restart-preparation", "lookup"}
+                or any(
+                    recovery is not None and recovery.clock_discontinuity
+                    for recovery in (
+                        observation.dispatch_recovery,
+                        observation.allocation_recovery,
+                        observation.abandonment_recovery,
+                    )
+                )
+            )
+            sampled = self._sample_clock() if needs_clock else None
+            if sampled is not None:
+                observation = msgspec.structs.replace(observation, now=sampled)
+                for field in ("dispatch_recovery", "allocation_recovery", "abandonment_recovery"):
+                    recovery = getattr(observation, field)
+                    if recovery is not None and recovery.clock_discontinuity:
+                        observation = msgspec.structs.replace(
+                            observation, **{field: msgspec.structs.replace(recovery, observed_now=sampled)}
+                        )
+            observation = self._recovery_clock(old, observation, sampled)
             try:
-                value = reducer(old)
+                value = (
+                    cast(ObservedReducer[Any], reducer).reduce(old, observation)
+                    if isinstance(reducer, ObservedReducer)
+                    else reducer(old)
+                )
             except Refused:
                 if old.version != expected_version:
                     raise Refused("stale-fixture-version") from None
@@ -586,13 +638,11 @@ class FixtureJournal:
             )
         return False
 
-    def _sample_clock(self, expected: Clock | None) -> Clock | None:
+    def _sample_clock(self) -> Clock | None:
         if self.clock is None:
             return None
         sampled = self.clock()
         clock_elapsed(sampled, sampled)
-        if expected is not None and expected != sampled:
-            raise Refused("journal-clock-sample-mismatch")
         return sampled
 
     def _clock_event(self, kind: str, key: str, version: int, sampled: Clock | None) -> None:
@@ -608,7 +658,10 @@ class FixtureJournal:
             raise Refused("journal-clock-provenance-required")
 
     def _recovery_clock(
-        self, old: Request | Decision | Dispatch, observation: TransitionObservation
+        self,
+        old: Request | Decision | Dispatch,
+        observation: TransitionObservation,
+        sampled: Clock | None,
     ) -> TransitionObservation:
         recoveries = tuple(
             item
@@ -627,31 +680,35 @@ class FixtureJournal:
             isinstance(old, Dispatch) != isinstance(recovery, DispatchRecovery) or isinstance(old, Decision)
         ):
             raise Refused("clock-recovery-record-mismatch")
-        if (
-            isinstance(old, Dispatch)
-            and isinstance(recovery, DispatchRecovery)
-            and recovery.completed_reconciliation_attempts
-        ):
+        if isinstance(old, Dispatch) and isinstance(recovery, DispatchRecovery):
             children = self._reconciliation_children(old.approval_id)
+            facts = tuple(reconciliation_disposition(old, child) for child in children)
+            unread = any(item.effect is not None and not item.applied for item in facts)
             if (
+                unread or recovery.completed_reconciliation_attempts or recovery.observed_reconciliations
+            ) and (
                 old.dispatch_kind != "initial"
-                or len(children) != 3
                 or any(
                     not child.settled or not child.cleanup_proven or child.launch_attempts != 1
                     for child in children
                 )
-                or tuple(sorted(child.attempt_id for child in children))
-                != tuple(sorted(recovery.completed_reconciliation_attempts))
+                or tuple(sorted(facts, key=lambda item: item.attempt_id))
+                != tuple(sorted(recovery.observed_reconciliations, key=lambda item: item.attempt_id))
+                or (
+                    recovery.completed_reconciliation_attempts
+                    and (
+                        len(children) != 3
+                        or tuple(sorted(child.attempt_id for child in children))
+                        != tuple(sorted(recovery.completed_reconciliation_attempts))
+                    )
+                )
             ):
                 raise Refused("reconciliation-exhaustion-provenance-required")
         if recovery is None or isinstance(recovery, CancellationRecovery) or not recovery.clock_discontinuity:
             return observation
-        if self.clock is None:
+        if sampled is None:
             raise Refused("journal-clock-sampler-required")
-        now = self.clock()
-        clock_elapsed(now, now)
-        if recovery.observed_now != now or (observation.now is not None and observation.now != now):
-            raise Refused("recovery-clock-sample-mismatch")
+        now = sampled
         started = None
         if isinstance(old, Dispatch) and isinstance(recovery, DispatchRecovery):
             started = self._dispatch_lookup_clock(old, proven=True)

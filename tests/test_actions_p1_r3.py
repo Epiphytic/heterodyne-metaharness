@@ -285,7 +285,7 @@ def test_parent_backoff_uses_observed_clock_not_proposal_elapsed(tmp_path):
             dis.uncertain,
             observation=TransitionObservation(dispatch_operation="uncertain"),
         )
-        child = dis.prepare_reconciliation(parent, "read", "f" * 64, clock)
+        child = dis.prepare_reconciliation(parent, "read", "f" * 64, f.reader_clock(db, parent))
         db.add_dispatch(child)
         db.transition(
             "dispatch",

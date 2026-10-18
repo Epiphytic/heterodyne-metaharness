@@ -267,12 +267,16 @@ Allocation and dispatch lookup backoffs are measured from the previous retained
 lookup clock (or issuance/start for the first read), so their intervals are truly
 1, 5 and 30 seconds. Clock-discontinuity recovery on either path requires an
 explicit fixture clock callback. At dispatch insertion, allocation issuance and
-each clock-bearing transition, the journal samples it inside the transaction,
-checks exact agreement and retains a separate clock-provenance event. Recovery
+each clock-bearing transition, the journal samples it once inside the transaction,
+injects that sample into the canonical observation, and retains a separate
+clock-provenance event. `ObservedReducer` passes that canonical observation to the
+proposal callback so it need not predict an advancing clock. Recovery
 requires that provenance for the exact retained anchor and a matching explicit
 dispatch anchor; missing legacy provenance holds. A caller-selected boot ID alone
-cannot bypass reads. The fixture callback must supply deterministic sampled facts;
-this is not a production clock-port implementation.
+cannot bypass reads while the trusted clock provider remains unchanged. The mutable
+fixture `db.clock` callback is an explicit trusted test-injection boundary; retained
+provenance does not defend against a caller replacing that provider. It is not a
+production clock-port implementation.
 The exact authenticated recovery may adopt a canonical allocation with closed
 orphans, abandon the cleaned allocation, or settle the dispatch; it never recreates
 a shell or grants another effect claim. Historical missing anchors remain HOLD.
@@ -283,7 +287,10 @@ Only finite denial/terminal/recovery progress can consume its owner's reserve;
 usage is durably retained in the same transaction, including its own usage marker.
 One owner's repeated operations cannot consume another owner's reserve. Three
 serial reconciliation invocations, their observations and final authenticated
-settlement/cleanup are covered by actual-capacity regressions. No history is pruned,
+settlement/cleanup are covered by actual-capacity regressions, including a sampled
+clock on every transition, three independently cleaned failed preparations, and
+an unapplied final read. Those paths consume at most 44 of the 96 reserved events.
+No history is pruned,
 no event limit is raised, and no archival mechanism is introduced. A fully retained
 terminal journal can still HOLD new work; archival/retention requires a separately
 admitted design. An already-full historical journal without headroom also holds.
@@ -304,3 +311,18 @@ operator recovery can attest the parent outcome and cleanup using the exact chil
 IDs. This retains operator attribution; it does not turn failed reads into absence.
 Live children, invented IDs, legacy multiplied launch histories and missing cleanup
 remain HOLD. No extra effect claim or general clearing authority is introduced.
+
+
+R8 gates each child invocation before insertion at the successive 1/5/30-second
+intervals, even when preparation fails. Preparation failure requires a separate
+`LauncherReadback` bound to the exact approval, attempt, startup and version, with
+launcher-exited and no-children observations. These remain explicit synthetic
+attestations, not process inspections.
+
+Authenticated parent settlement must acknowledge the exact retained child
+dispositions, including every unapplied result. A contradictory success on a
+failed or unconsumed parent has a bounded operator-attested outcome/cleanup exit;
+it does not erase that child evidence, consume the initial claim, authorize a
+replay, or invent further reads. Three arbitrary attempt IDs alone do not prove
+exhaustion. The journal binds supplied dispositions to actual durable children;
+standalone reducers cannot independently authenticate their synthetic inputs.

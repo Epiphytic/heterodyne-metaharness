@@ -309,7 +309,7 @@ def test_unconsumed_held_recovery_releases_resources_without_effect_replay(tmp_p
         value.approval_id,
         0,
         lambda v: dis.preparation_failed(v, launcher_exited=True, no_children=True),
-        observation=TransitionObservation(dispatch_operation="preparation-failed"),
+        observation=f.launcher_observation(value),
     )
     recovery = dis.DispatchRecovery(
         value.approval_id,
@@ -358,14 +358,16 @@ def test_reconciliation_has_separate_persisted_kind_identity_and_no_initial_effe
         dis.uncertain,
         observation=TransitionObservation(dispatch_operation="uncertain"),
     )
-    reconciler = dis.prepare_reconciliation(parent, "read-only-1", "f" * 64, clock)
+    reconciler = dis.prepare_reconciliation(parent, "read-only-1", "f" * 64, f.reader_clock(db, parent))
     db.add_dispatch(reconciler)
     key = dispatch_key(reconciler)
     assert key != parent.approval_id
     with pytest.raises(Refused):
         dis.ready(reconciler, parent.startup_hash, clock, fresh_gates=True, startup_readback=True)
     with pytest.raises(Refused):
-        db.add_dispatch(dis.prepare_reconciliation(parent, "read-only-2", "f" * 64, clock))
+        db.add_dispatch(
+            dis.prepare_reconciliation(parent, "read-only-2", "f" * 64, f.reader_clock(db, parent))
+        )
     db.close()
     db = FixtureJournal(path)
     assert db.get("dispatch", key).dispatch_kind == "reconcile"

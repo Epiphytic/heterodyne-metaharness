@@ -82,7 +82,7 @@ def held_parent(db):
         value.approval_id,
         0,
         lambda v: dis.preparation_failed(v, launcher_exited=True, no_children=True),
-        observation=TransitionObservation(dispatch_operation="preparation-failed"),
+        observation=f.launcher_observation(value),
     )
     return value, clock
 
@@ -233,7 +233,7 @@ def test_reconcile_cannot_issue_effect_claim_even_with_fresh_nonce(tmp_path):
         dis.uncertain,
         observation=TransitionObservation(dispatch_operation="uncertain"),
     )
-    value = dis.prepare_reconciliation(parent, "read-1", "f" * 64, clock)
+    value = dis.prepare_reconciliation(parent, "read-1", "f" * 64, f.reader_clock(db, parent))
     with pytest.raises(Refused):
         dis.ready(value, "e" * 64, clock, fresh_gates=True, startup_readback=True)
     forged = msgspec.structs.replace(
@@ -286,10 +286,10 @@ def test_only_one_reconcile_invocation_may_be_unsettled(tmp_path):
         dis.uncertain,
         observation=TransitionObservation(dispatch_operation="uncertain"),
     )
-    first = dis.prepare_reconciliation(parent, "read-1", "f" * 64, clock)
+    first = dis.prepare_reconciliation(parent, "read-1", "f" * 64, f.reader_clock(db, parent))
     db.add_dispatch(first)
     second = msgspec.structs.replace(
-        dis.prepare_reconciliation(parent, "read-2", "a" * 64, clock),
+        dis.prepare_reconciliation(parent, "read-2", "a" * 64, f.reader_clock(db, parent)),
         retired_startups=(*first.retired_startups, first.startup_hash),
     )
     with pytest.raises(Refused):
@@ -409,7 +409,7 @@ def test_reconciliations_are_serial_and_total_three_across_reopen(tmp_path):
         parent = f.persist_reconcile_observation(db, parent, elapsed)
         db.close()
         db = FixtureJournal(path)
-    fourth = dis.prepare_reconciliation(parent, "read-4", "a" * 64, clock)
+    fourth = dis.prepare_reconciliation(parent, "read-4", "a" * 64, f.reader_clock(db, parent))
     history = set(fourth.retired_startups) | set(fourth.retired_nonces)
     for row in db.db.execute("SELECT data FROM dispatches"):
         previous = msgspec.json.decode(row[0], type=dis.Dispatch)

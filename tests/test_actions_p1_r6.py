@@ -105,7 +105,7 @@ def test_live_reconciliation_child_blocks_parent_resource_release(tmp_path):
             dis.uncertain,
             observation=TransitionObservation(dispatch_operation="uncertain"),
         )
-        child = dis.prepare_reconciliation(parent, "active-reader", "f" * 64, clock)
+        child = dis.prepare_reconciliation(parent, "active-reader", "f" * 64, f.reader_clock(db, parent))
         db.add_dispatch(child)
         with pytest.raises(req.Refused, match="reconciliation.*held"):
             db.transition(

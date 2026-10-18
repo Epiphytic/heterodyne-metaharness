@@ -309,15 +309,29 @@ def test_allocation_recovery_cannot_fabricate_discontinuity(tmp_path, mode):
             True,
             supplied,
         )
-        with pytest.raises(req.Refused, match="clock"):
-            db.transition(
+        if mode == "mismatch":
+            done = db.transition(
                 "request",
                 key,
                 value.version,
                 lambda old: req.recover_allocation(old, recovery),
                 observation=TransitionObservation(allocation_recovery=recovery),
             )
-        assert db.get("request", key) == value
+            row = db.db.execute(
+                "SELECT data FROM events WHERE kind='request-observation' AND key=? AND version=?",
+                (key, done.version),
+            ).fetchone()
+            assert msgspec.json.decode(row[0], type=TransitionObservation).now == actual
+        else:
+            with pytest.raises(req.Refused, match="clock"):
+                db.transition(
+                    "request",
+                    key,
+                    value.version,
+                    lambda old: req.recover_allocation(old, recovery),
+                    observation=TransitionObservation(allocation_recovery=recovery),
+                )
+            assert db.get("request", key) == value
 
 
 def test_dispatch_lookup_waits_after_previous_observation(tmp_path):
@@ -351,32 +365,17 @@ def test_dispatch_lookup_waits_after_previous_observation(tmp_path):
                 )
             ),
         )
-        db.add_dispatch(child)
-        db.transition(
-            "dispatch",
-            dispatch_key(child),
-            child.version,
-            lambda old: dis.finish_reconciliation(
-                old, evidence=f.DIGEST, cleanup_proven=True, effect="unknown"
-            ),
-            observation=f.reconciliation_observation(child, effect="unknown"),
-        )
         with pytest.raises(req.Refused, match="not-due"):
-            db.transition(
-                "dispatch",
-                parent.approval_id,
-                parent.version,
-                lambda old: dis.reconcile_lookup(
-                    old, elapsed_seconds=30, effect="unknown", evidence=f.DIGEST, cleanup_proven=False
-                ),
-                observation=TransitionObservation(
-                    dispatch_operation="lookup",
-                    now=now,
-                    reconciliation_started=dis.Clock("forged", 0, 0),
-                    reconciliation_key=dispatch_key(child),
-                ),
-            )
-        assert db.get("dispatch", parent.approval_id) == parent
+            db.add_dispatch(child)
+        due = f.reader_clock(db, parent)
+        child = msgspec.structs.replace(
+            child,
+            started=due,
+            deadline_ns=due.mono_ns + 60 * 10**9,
+            preparation_deadline_ns=due.mono_ns + 60 * 10**9,
+        )
+        db.add_dispatch(child)
+        assert db.get("dispatch", dispatch_key(child)).started == due
 
 
 def fill_normal_capacity(db):

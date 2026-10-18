@@ -71,6 +71,17 @@ class CleanupReadback(Record, frozen=True):
     native_terminal: bool = False
 
 
+class LauncherReadback(Record, frozen=True):
+    """Independent synthetic exit observation, never inferred from a proposal."""
+
+    approval_id: str
+    attempt_id: str
+    startup_hash: str
+    expected_version: int
+    launcher_exited: bool = False
+    no_children: bool = False
+
+
 class TransitionObservation(Record, frozen=True):
     """Independent synthetic port input, never recovered from a proposed state.
 
@@ -107,6 +118,7 @@ class TransitionObservation(Record, frozen=True):
     dispatch_readback: DispatchReadback | None = None
     cleanup_readback: CleanupReadback | None = None
     reconciliation_started: Clock | None = None
+    launcher_readback: LauncherReadback | None = None
 
 
 EMPTY_OBSERVATION = TransitionObservation()
@@ -367,10 +379,23 @@ def dispatch_transition(
         )
     elif operation == "restart-preparation":
         candidate = dis.restart_preparation(old, value.startup_hash, _observed_clock(observation))
-    elif operation == "preparation-failed":
-        candidate = dis.preparation_failed(old, launcher_exited=True, no_children=True)
-    elif operation == "retire-unconsumed":
-        candidate = dis.retire_unconsumed(old, old.claim_hash or "", launcher_exited=True, no_children=True)
+    elif operation in {"preparation-failed", "retire-unconsumed"}:
+        read = observation.launcher_readback
+        if read is None or (read.approval_id, read.attempt_id, read.startup_hash, read.expected_version) != (
+            old.approval_id,
+            old.attempt_id,
+            old.startup_hash,
+            old.version,
+        ):
+            raise req.Refused("launcher-cleanup-observation-required")
+        if operation == "preparation-failed":
+            candidate = dis.preparation_failed(
+                old, launcher_exited=read.launcher_exited, no_children=read.no_children
+            )
+        else:
+            candidate = dis.retire_unconsumed(
+                old, old.claim_hash or "", launcher_exited=read.launcher_exited, no_children=read.no_children
+            )
     elif operation == "uncertain":
         candidate = dis.uncertain(old)
     elif operation == "report":

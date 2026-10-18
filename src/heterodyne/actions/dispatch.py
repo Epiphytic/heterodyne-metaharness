@@ -319,6 +319,30 @@ def reconcile_lookup(
     )
 
 
+class ReconciliationDisposition(Record, frozen=True):
+    """Exact retained child facts acknowledged by a synthetic operator disposition."""
+
+    attempt_id: str
+    version: int
+    effect: Literal["succeeded", "absent", "unknown"] | None
+    evidence: str | None
+    cleanup_proven: bool
+    settled: bool
+    applied: bool
+
+
+def reconciliation_disposition(parent: Dispatch, child: Dispatch) -> ReconciliationDisposition:
+    return ReconciliationDisposition(
+        child.attempt_id,
+        child.version,
+        child.reconciliation_effect,
+        child.evidence,
+        child.cleanup_proven,
+        child.settled,
+        child.attempt_id in parent.reconciliation_attempts,
+    )
+
+
 class DispatchRecovery(Record, frozen=True):
     """Fake exact-scope operator observation; real admission adapter is unavailable."""
 
@@ -342,14 +366,29 @@ class DispatchRecovery(Record, frozen=True):
     clock_anchor: Clock | None = None
     # Exact journal-retained settled invocation IDs; never a count of successful reads.
     completed_reconciliation_attempts: tuple[str, ...] = ()
+    observed_reconciliations: tuple[ReconciliationDisposition, ...] = ()
 
 
 def settle_dispatch(value: Dispatch, observation: DispatchRecovery) -> Dispatch:
     """Exact operator-attested outcome and cleanup; never machine attribution or retry."""
-    exhausted = (
+    facts = observation.observed_reconciliations
+    bound = (
         value.dispatch_kind == "initial"
-        and len(observation.completed_reconciliation_attempts) == 3
-        and len(set(observation.completed_reconciliation_attempts)) == 3
+        and 1 <= len(facts) <= 3
+        and len({item.attempt_id for item in facts}) == len(facts)
+        and all(item.settled and item.cleanup_proven for item in facts)
+    )
+    exhausted = (
+        bound
+        and len(facts) == 3
+        and tuple(sorted(item.attempt_id for item in facts))
+        == tuple(sorted(observation.completed_reconciliation_attempts))
+    )
+    conflict = bound and any(
+        not item.applied
+        and item.effect == "succeeded"
+        and (value.state == "failed" or not value.claim_consumed)
+        for item in facts
     )
     discontinuous = False
     if observation.clock_discontinuity and observation.observed_now is not None:
@@ -362,7 +401,11 @@ def settle_dispatch(value: Dispatch, observation: DispatchRecovery) -> Dispatch:
         value.state not in {"held", "uncertain", "failed"}
         or value.settled
         or (
-            value.claim_consumed and value.reconciliation_lookups != 3 and not discontinuous and not exhausted
+            value.claim_consumed
+            and value.reconciliation_lookups != 3
+            and not discontinuous
+            and not exhausted
+            and not conflict
         )
         or (
             not value.claim_consumed
@@ -370,6 +413,7 @@ def settle_dispatch(value: Dispatch, observation: DispatchRecovery) -> Dispatch:
             and value.reconciliation_lookups != 3
             and not discontinuous
             and not exhausted
+            and not conflict
         )
         or (
             observation.approval_id,

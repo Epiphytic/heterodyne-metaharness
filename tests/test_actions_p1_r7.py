@@ -24,15 +24,22 @@ def test_forged_issuance_clock_cannot_create_discontinuity(tmp_path):
     actual = dis.Clock("real", 1, 1)
     with closing(FixtureJournal.create(tmp_path / "fixture", clock=lambda: actual)) as db:
         key = db.add_request(f.initial())
-        with pytest.raises(req.Refused, match="clock.*sample"):
-            db.transition(
-                "request",
-                key,
-                0,
-                req.issue_allocation,
-                observation=TransitionObservation(now=dis.Clock("fake", 1, 1)),
-            )
-        assert db.get("request", key).phase == "allocation-intent"
+        value = db.transition(
+            "request",
+            key,
+            0,
+            req.issue_allocation,
+            observation=TransitionObservation(now=dis.Clock("fake", 1, 1)),
+        )
+        row = db.db.execute(
+            "SELECT data FROM events WHERE kind='request-clock' AND key=? AND version=?", (key, value.version)
+        ).fetchone()
+        assert msgspec.json.decode(row[0], type=dis.Clock) == actual
+        row = db.db.execute(
+            "SELECT data FROM events WHERE kind='request-observation' AND key=? AND version=?",
+            (key, value.version),
+        ).fetchone()
+        assert msgspec.json.decode(row[0], type=TransitionObservation).now == actual
 
 
 @pytest.mark.parametrize("legacy", [False, True])
@@ -117,7 +124,9 @@ def test_three_failed_preparations_allow_only_scoped_operator_settlement(tmp_pat
         children = []
         retired = parent
         for n in range(3):
-            child = dis.prepare_reconciliation(retired, f"reader-{n}", str(n + 1) * 64, clock)
+            child = dis.prepare_reconciliation(
+                retired, f"reader-{n}", str(n + 1) * 64, f.reader_clock(db, retired)
+            )
             db.add_dispatch(child)
             if mode == "mixed" and n == 2:
                 child = db.transition(
@@ -145,7 +154,7 @@ def test_three_failed_preparations_allow_only_scoped_operator_settlement(tmp_pat
                     dispatch_key(child),
                     child.version,
                     lambda old: dis.preparation_failed(old, launcher_exited=True, no_children=True),
-                    observation=TransitionObservation(dispatch_operation="preparation-failed"),
+                    observation=f.launcher_observation(child),
                 )
             if mode != "mixed" or n != 2:
                 with pytest.raises(req.Refused):
@@ -196,6 +205,9 @@ def test_three_failed_preparations_allow_only_scoped_operator_settlement(tmp_pat
             effect_definitively_absent=True,
             cleanup_proven=True,
             completed_reconciliation_attempts=attempts,
+            observed_reconciliations=tuple(
+                dis.reconciliation_disposition(parent, child) for child in children
+            ),
         )
 
         def settle(old):
@@ -240,9 +252,10 @@ def test_dispatch_prepare_and_lookup_cannot_admit_forged_anchor(tmp_path):
         actual = dis.Clock("real", 1, 1)
         db.clock = lambda: actual
         child = msgspec.structs.replace(parent, version=0, state="preparing", started=dis.Clock("fake", 1, 1))
-        with pytest.raises(req.Refused, match="clock.*sample"):
+        with pytest.raises(req.Refused, match="already-exists"):
             db.add_dispatch(child)
-        with pytest.raises(req.Refused, match="clock.*sample"):
+        before = db.db.execute("SELECT count(*) FROM events").fetchone()[0]
+        assert (
             db.transition(
                 "dispatch",
                 parent.approval_id,
@@ -250,6 +263,10 @@ def test_dispatch_prepare_and_lookup_cannot_admit_forged_anchor(tmp_path):
                 lambda old: old,
                 observation=TransitionObservation(dispatch_operation="lookup", now=dis.Clock("fake", 1, 1)),
             )
+            == parent
+        )
+        assert db.db.execute("SELECT count(*) FROM events").fetchone()[0] == before
+        assert db.get("dispatch", parent.approval_id).started.boot_id == "boot"
 
 
 def test_settled_preparation_failure_does_not_block_next_bounded_reader(tmp_path):
@@ -264,14 +281,14 @@ def test_settled_preparation_failure_does_not_block_next_bounded_reader(tmp_path
             dis.uncertain,
             observation=TransitionObservation(dispatch_operation="uncertain"),
         )
-        child = dis.prepare_reconciliation(parent, "failed-reader", "1" * 64, clock)
+        child = dis.prepare_reconciliation(parent, "failed-reader", "1" * 64, f.reader_clock(db, parent))
         db.add_dispatch(child)
         child = db.transition(
             "dispatch",
             dispatch_key(child),
             child.version,
             lambda old: dis.preparation_failed(old, launcher_exited=True, no_children=True),
-            observation=TransitionObservation(dispatch_operation="preparation-failed"),
+            observation=f.launcher_observation(child),
         )
         recovery = dis.DispatchRecovery(
             child.approval_id,
@@ -299,7 +316,7 @@ def test_settled_preparation_failure_does_not_block_next_bounded_reader(tmp_path
             parent,
             retired_startups=(*parent.retired_startups, child.startup_hash),
         )
-        second = dis.prepare_reconciliation(retained, "second-reader", "2" * 64, clock)
+        second = dis.prepare_reconciliation(retained, "second-reader", "2" * 64, f.reader_clock(db, retained))
         db.add_dispatch(second)
         assert db.get("dispatch", dispatch_key(second)) == second
         assert db.get("dispatch", parent.approval_id).reconciliation_lookups == 0

@@ -55,7 +55,7 @@ def test_readonly_child_cannot_self_attest_result(tmp_path):
             dis.uncertain,
             observation=TransitionObservation(dispatch_operation="uncertain"),
         )
-        child = dis.prepare_reconciliation(parent, "read-child", "f" * 64, clock)
+        child = dis.prepare_reconciliation(parent, "read-child", "f" * 64, f.reader_clock(db, parent))
         db.add_dispatch(child)
         with pytest.raises(Refused, match="observation"):
             db.transition(
@@ -73,7 +73,7 @@ def test_held_parent_cannot_allocate_readonly_child(tmp_path):
     with closing(FixtureJournal.create(tmp_path / "fixture")) as db:
         parent, clock = r2.held_parent(db)
         with pytest.raises(Refused):
-            child = dis.prepare_reconciliation(parent, "read-child", "f" * 64, clock)
+            child = dis.prepare_reconciliation(parent, "read-child", "f" * 64, f.reader_clock(db, parent))
             db.add_dispatch(child)
 
 
@@ -359,7 +359,7 @@ def test_readonly_child_requires_exact_separate_finished_read(tmp_path, change):
             dis.uncertain,
             observation=TransitionObservation(dispatch_operation="uncertain"),
         )
-        child = dis.prepare_reconciliation(parent, "read-child", "f" * 64, clock)
+        child = dis.prepare_reconciliation(parent, "read-child", "f" * 64, f.reader_clock(db, parent))
         db.add_dispatch(child)
         independent = f.reconciliation_observation(child, effect="succeeded", effect_cleanup=True)
         bad = msgspec.structs.replace(

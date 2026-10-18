@@ -661,7 +661,7 @@ def test_two_connections_claim_retirement_race_has_only_one_transition(tmp_path)
             value.approval_id,
             value.version,
             lambda v: retire_unconsumed(v, "d" * 64, launcher_exited=True, no_children=True),
-            observation=TransitionObservation(dispatch_operation="retire-unconsumed"),
+            observation=launcher_observation(value, "retire-unconsumed"),
         )
     assert right.get("dispatch", value.approval_id).claim_consumed
     left.close()
@@ -827,3 +827,29 @@ def report_observation(value, *, effect, evidence, cleanup):
             cleanup,
         ),
     )
+
+
+def launcher_observation(value, operation="preparation-failed", **kwargs):
+    from heterodyne.actions.transitions import LauncherReadback
+
+    return TransitionObservation(
+        dispatch_operation=operation,
+        launcher_readback=LauncherReadback(
+            value.approval_id,
+            value.attempt_id,
+            value.startup_hash,
+            value.version,
+            launcher_exited=True,
+            no_children=True,
+            **kwargs,
+        ),
+    )
+
+
+def reader_clock(db, parent):
+    from heterodyne.actions.dispatch import Clock
+
+    children = db._reconciliation_children(parent.approval_id)
+    anchor = children[-1].started if children else parent.started
+    seconds = (1, 5, 30)[min(len(children), 2)]
+    return Clock(anchor.boot_id, anchor.mono_ns + seconds * 10**9, anchor.utc_ns + seconds * 10**9)
