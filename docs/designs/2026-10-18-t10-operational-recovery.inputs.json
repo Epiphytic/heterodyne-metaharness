@@ -1,0 +1,95 @@
+{
+  "schema": "t10-recovery-design-inputs.v1",
+  "task": "btq-7wvub",
+  "author": "Codex",
+  "status": "unreviewed-not-approved",
+  "base": "2c0c5b5b775ee652d2ce32c192091aa2314e5b32",
+  "source_commit": "167b1b9783b760b25f8180485bcb7482b7deef59",
+  "original_plan_commit": "4ac749bd5722be8c1baa96e38cadbf9bbb2687e1",
+  "inputs": [
+    {
+      "commit": "167b1b9783b760b25f8180485bcb7482b7deef59",
+      "path": "src/heterodyne/wsd/harness.py",
+      "blob": "6355274aa619fccb74bd14f8a143d0ba1c1d62e5",
+      "sha256": "83e7d46cd8e8de3a14321bafda966144560289b2506e7e6342b67875d341f182"
+    },
+    {
+      "commit": "167b1b9783b760b25f8180485bcb7482b7deef59",
+      "path": "src/heterodyne/wsd/journal.py",
+      "blob": "326aa053bf281fdb24fb50136124b8f1860df659",
+      "sha256": "06ba493d59ef84c95c9a7602ca91105b16a8b15266036485365f66b06c5406ac"
+    },
+    {
+      "commit": "167b1b9783b760b25f8180485bcb7482b7deef59",
+      "path": "src/heterodyne/wsd/approvals.py",
+      "blob": "d22ef8f64c7089588cf2c9cd29f6890eff85601f",
+      "sha256": "cb37819634f4c723450a34b53d0d258d38ac505a7930f6f9ef7735144b632d51"
+    },
+    {
+      "commit": "167b1b9783b760b25f8180485bcb7482b7deef59",
+      "path": "src/heterodyne/harness/store.py",
+      "blob": "1ac505dc65915ea5d3103f60dfbb4bb0a28ca3f7",
+      "sha256": "34b0695e8adb675c1b6a7815bbad8ffd1302f616e933e47126297d6d6df4bbf5"
+    },
+    {
+      "commit": "167b1b9783b760b25f8180485bcb7482b7deef59",
+      "path": "src/heterodyne/harness/resources/store_core.py",
+      "blob": "0f92e565bfb240f514e39503db86af17f2712c50",
+      "sha256": "7231cebaf1843a176eb9307410a108711aa2564809a3a2b86837379867e22a70"
+    },
+    {
+      "commit": "167b1b9783b760b25f8180485bcb7482b7deef59",
+      "path": "src/heterodyne/admind/asks.py",
+      "blob": "a2c00cc88c2c38372b4ca7c9dd42611adeff615c",
+      "sha256": "6592eabb6b4659558f7263af78d030b8daf39c740fc088f90de9a44923394c5a"
+    },
+    {
+      "commit": "167b1b9783b760b25f8180485bcb7482b7deef59",
+      "path": "src/heterodyne/admind/daemon.py",
+      "blob": "2bd0b1a3d300acb9fbb774125ce11c2d246882cd",
+      "sha256": "fc571fe1f09fb5f40bdfe4e96d7575ab0583998a21f5ab03d183e4301a4fb760"
+    },
+    {
+      "commit": "167b1b9783b760b25f8180485bcb7482b7deef59",
+      "path": "src/heterodyne/admind/store.py",
+      "blob": "7fe6420296b2d630435a2db980cd721184d5623f",
+      "sha256": "cbb4c287e31ac933d069d23a88873f547c497c3bd2b00ea8bf39ac248a899952"
+    },
+    {
+      "commit": "167b1b9783b760b25f8180485bcb7482b7deef59",
+      "path": "docs/reviews/plan4c-t10-code-r7-medium.md",
+      "blob": "4b26e2bdcae42d89ae9bbe2f448e06e0ad7eddb4",
+      "sha256": "f53848891dc94859a224151e6463170ab5e079251fd1d1290433a8900b52118d"
+    },
+    {
+      "commit": "167b1b9783b760b25f8180485bcb7482b7deef59",
+      "path": "docs/reviews/plan4c-t10-r7-controller-disposition.md",
+      "blob": "5095e78a586afa6412ff7ab977106a20f82b739b",
+      "sha256": "5b8dcd17c78d54d1db1bb7fa74207a83e88afaf109e247142105ebeb7f085ddf"
+    },
+    {
+      "commit": "4ac749bd5722be8c1baa96e38cadbf9bbb2687e1",
+      "path": "docs/superpowers/plans/2026-10-13-plan4c-managed-installs.md",
+      "blob": "17b0997db120f951d7720dc3be6f6ce2f9f81963",
+      "sha256": "a470dc7e644d0eaf17b2bd1e04acab331664a08071147e01f64cfe0166a709be"
+    }
+  ],
+  "design": {
+    "path": "docs/designs/2026-10-18-t10-operational-recovery.md",
+    "sha256": "1bb42f7be385ec550220162a3fb6d62faa45791e8176e97980747ce4c08b738b"
+  },
+  "adr": {
+    "path": "docs/adr/2026-10-18-t10-operational-recovery.md",
+    "byte_identical_to": "docs/designs/2026-10-18-t10-operational-recovery.md"
+  },
+  "research_provenance": {
+    "path": "autonomous-resume/t10-recovery-research/research.md",
+    "scope": "secondary research; its older working-tree snapshot is not the immutable implementation pin"
+  },
+  "review": {
+    "new_design_reviews": 0,
+    "t10_actual_r7_result": "REVISE",
+    "source_review_history_preserved": true
+  },
+  "effects": "documentation only; no runtime, queue, approval or deployment action"
+}
