@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import msgspec
 import pytest
+from fakes.settings import make_settings
 
 from heterodyne.admind import asks
 from heterodyne.admind import fulfillment as f
@@ -195,7 +196,8 @@ def test_restart_rebuilds_conflict_after_old_writer_new_answer(tmp_path):
         assert restored.get("ask_store_id") == identity
         assert restored.fulfillment.view("abcd")["lifecycle"] == "conflict"
         assert len(restored.capacity_asks()) == 1
-        assert restored.ask("abcd").status == "cancelled"
+        row = restored.ask("abcd")
+        assert row is not None and row.status == "cancelled"
         with pytest.raises(f.Invalid, match="conflict"):
             apply(restored, receipt)
     finally:
@@ -430,9 +432,11 @@ def test_real_inbound_confirmation_uses_normal_auth_gates(tmp_path, monkeypatch,
     u = Unit(tmp_path)
     try:
         seed(u.store)
-        intent = u.store.fulfillment.propose(
+        proposed = u.store.fulfillment.propose(
             f.Propose("abcd", declaration(u.store)), uid=os.getuid(), chunk_chars=350
-        ).view["intent_id"]
+        )
+        assert proposed.view is not None
+        intent = proposed.view["intent_id"]
         target = deliver(u.store, intent)
         monkeypatch.setattr(f, "ENABLED", mode != "disabled")
         if mode == "latched":
@@ -443,8 +447,11 @@ def test_real_inbound_confirmation_uses_normal_auth_gates(tmp_path, monkeypatch,
         assert u.store.fulfillment.protected("abcd") is (mode == "allowed")
         if mode == "allowed":
             receipt = u.store.fulfillment.stored("abcd")
-            assert receipt["authority"]["message_id"] == "f" * 64
-            assert receipt["authority"]["principal"] == OPERATOR_HEX
+            assert receipt is not None
+            authority = receipt["authority"]
+            assert isinstance(authority, dict)
+            assert authority["message_id"] == "f" * 64
+            assert authority["principal"] == OPERATOR_HEX
             run(u.daemon.on_message(event))
             assert u.store.db.execute("SELECT COUNT(*) FROM ask_fulfillments").fetchone()[0] == 1
     finally:
@@ -477,16 +484,16 @@ def test_reconcile_lost_reply_queries_before_retry_and_continuation_is_exact(sto
         return result
 
     monkeypatch.setattr(cli, "send", send)
-    first = cli.reconcile(None, args)
+    first = cli.reconcile(make_settings(tmp_path), args)
     assert first["results"] == [{"ask_id": "abcd", "outcome": "unavailable"}]
     assert calls == ["Get", "Apply"]
     args.continuation = first["continuation"]
-    second = cli.reconcile(None, args)
+    second = cli.reconcile(make_settings(tmp_path), args)
     assert second["results"] == [{"ask_id": "abcd", "outcome": "already-applied"}]
     assert calls == ["Get", "Apply", "Get"]
     args.continuation = "0" * 64 + ":0"
     with pytest.raises(f.Invalid, match="continuation"):
-        cli.reconcile(None, args)
+        cli.reconcile(make_settings(tmp_path), args)
 
 
 def test_existing_socket_serves_both_strict_dtos_with_kernel_uid(tmp_path, monkeypatch):
@@ -520,8 +527,11 @@ def test_existing_socket_serves_both_strict_dtos_with_kernel_uid(tmp_path, monke
         try:
             result = await ctl.request(server.path, f.Apply(completion(u.store)), 5, reply_type=f.Reply)
             assert result.result == "applied"
-            assert result.view["authority"]["uid"] == os.getuid()
+            assert result.view is not None
+            authority = result.view["authority"]
+            assert isinstance(authority, dict) and authority["uid"] == os.getuid()
             result = await ctl.request(server.path, asks.AskGet("abcd"), 5, reply_type=asks.AskReply)
+            assert result.ask is not None
             assert result.ask.summary.status == "answered"
             assert len(result.ask.answers) == 1
             reader, writer = await asyncio.open_unix_connection(server.path)
@@ -548,10 +558,10 @@ def test_real_cli_parser_and_fixed_errors(store, tmp_path, monkeypatch, capsys):
     receipt.write_bytes(f.canonical(f.builtins(completion(store))))
     args = cli.build_parser().parse_args(["ask", "fulfillment", "apply", "--receipt", str(receipt), "--json"])
     monkeypatch.setattr(fulfillment_cli, "send", lambda _settings, req: apply(store, req.receipt))
-    assert fulfillment_cli.command(None, args) == 0
+    assert fulfillment_cli.command(make_settings(tmp_path), args) == 0
     assert '"result":"applied"' in capsys.readouterr().out
     receipt.write_text('{"schema":"untrusted-secret-sentinel"}')
-    assert fulfillment_cli.command(None, args) == 1
+    assert fulfillment_cli.command(make_settings(tmp_path), args) == 1
     output = capsys.readouterr()
     assert "untrusted-secret-sentinel" not in output.err
     assert "invalid fulfillment input" in output.err

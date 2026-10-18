@@ -367,6 +367,14 @@ class Store:
             self.db.close()
             raise
 
+        from heterodyne.admind.fulfillment import Lifecycle
+        self.fulfillment = Lifecycle(self)
+        try:
+            self.fulfillment.migrate()
+        except BaseException:
+            self.db.close()
+            raise
+
     def migrate_guard(self) -> None:
         from heterodyne.admind.guard_state import migrate
         with self.transaction():
@@ -411,13 +419,6 @@ class Store:
                          (ask_id,)).fetchone()
         return _ask(raw[:-1]), raw[-1]
 
-        from heterodyne.admind.fulfillment import Lifecycle
-        self.fulfillment = Lifecycle(self)
-        try:
-            self.fulfillment.migrate()
-        except BaseException:
-            self.db.close()
-            raise
 
     @_locked
     def close(self) -> None:
@@ -843,6 +844,27 @@ class Store:
         return [_ask(r) for r in rows]
 
     @_locked
+    def fulfilled_asks(self, limit: int = 20) -> list[AskRow]:
+        rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE EXISTS "  # noqa: S608
+            "(SELECT 1 FROM ask_fulfillments f WHERE f.ask_id=asks.ask_id AND f.valid=1) "
+            "ORDER BY created_at DESC,rowid DESC LIMIT ?", (limit,)).fetchall()
+        return [_ask(r) for r in rows]
+
+    @_locked
+    def remindable_asks(self) -> list[AskRow]:
+        rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE status='open' AND NOT EXISTS "  # noqa: S608
+            "(SELECT 1 FROM ask_fulfillments f WHERE f.ask_id=asks.ask_id) "
+            "ORDER BY created_at,rowid").fetchall()
+        return [_ask(r) for r in rows]
+
+    @_locked
+    def capacity_count(self) -> int:
+        return int(self.db.execute("SELECT COUNT(*) FROM asks WHERE "
+            "(status IN ('open','answered','deciding','uncertain') AND NOT EXISTS "
+            "(SELECT 1 FROM ask_fulfillments f WHERE f.ask_id=asks.ask_id AND f.valid=1)) OR EXISTS "
+            "(SELECT 1 FROM ask_fulfillments f WHERE f.ask_id=asks.ask_id AND f.valid=0)").fetchone()[0])
+
+    @_locked
     def inactive_asks(self, limit: int = 20) -> list[AskRow]:
         rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE "  # noqa: S608
             "(status NOT IN ('open','answered','deciding','uncertain') OR EXISTS "
@@ -867,20 +889,26 @@ class Store:
     @_locked
     def set_ask(self, ask_id: str, status: str, *, outcome: str | None = None,
                 decided_by: str | None = None) -> None:
-        if self.fulfillment.protected(ask_id):
-            raise ValueError("already fulfilled; original answer retained")
-        self.db.execute("UPDATE asks SET status = ?, outcome = ?, decided_by = ?, updated_at = ? "
-                        "WHERE ask_id = ?", (status, outcome, decided_by, now(), ask_id))
+        with self.transaction():
+            if self.fulfillment.protected(ask_id):
+                raise ValueError("already fulfilled; original answer retained")
+            self.db.execute("UPDATE asks SET status = ?, outcome = ?, decided_by = ?, updated_at = ? "
+                            "WHERE ask_id = ?", (status, outcome, decided_by, now(), ask_id))
+            self.fulfillment.retire_pending(ask_id, "status-changed")
 
     @_locked
     def add_answer(self, ask_id: str, kind: str, operator: str, message_id: str, text: str,
                    choice: str | None = None) -> None:
-        if self.fulfillment.protected(ask_id):
-            raise ValueError("already fulfilled; original answer retained")
-        self.db.execute("INSERT INTO ask_answers(ask_id, seq, kind, operator, message_id, text, at, choice) "
-                        "VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM ask_answers WHERE ask_id = ?), "
-                        "?, ?, ?, ?, ?, ?)",
-                        (ask_id, ask_id, kind, operator, message_id, text, now(), choice))
+        with self.transaction():
+            if self.fulfillment.protected(ask_id):
+                raise ValueError("already fulfilled; original answer retained")
+            self.db.execute("INSERT INTO ask_answers(ask_id, seq, kind, operator, message_id, "
+                            "text, at, choice) "
+                            "VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM ask_answers "
+                            "WHERE ask_id = ?), "
+                            "?, ?, ?, ?, ?, ?)",
+                            (ask_id, ask_id, kind, operator, message_id, text, now(), choice))
+            self.fulfillment.retire_pending(ask_id, "stale-answers")
 
     @_locked
     def answers(self, ask_id: str) -> list[AnswerRow]:

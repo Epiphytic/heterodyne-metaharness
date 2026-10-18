@@ -12,6 +12,7 @@ import os
 import re
 import secrets
 import stat
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -28,6 +29,7 @@ ENABLED = False
 MAX_REQUEST, MAX_REPLY, MAX_FILE = 65_536, 131_072, 24_576
 TOKEN = re.compile(r"[A-Za-z0-9._:-]{1,128}\Z")
 HEX = re.compile(r"[0-9a-f]{64}\Z")
+ANSWER_ID = re.compile(r"(?:r:)?[0-9a-f]{64}\Z")
 
 
 class Invalid(ValueError):
@@ -213,7 +215,7 @@ def validate_binding(binding: Binding, evidence: list[Evidence]) -> None:
     if not binding.created_at or len(binding.created_at) > 64:
         raise Invalid("identity")
     for value in binding.consumed_answers:
-        if not HEX.fullmatch(value):
+        if not ANSWER_ID.fullmatch(value):
             raise Invalid("answer-reference")
     for item in evidence:
         if not TOKEN.fullmatch(item.artifact_id) or not HEX.fullmatch(item.sha256):
@@ -240,6 +242,11 @@ DDL = (
 class Lifecycle:
     def __init__(self, store: Store):
         self.store = store
+        self.post: Callable[[str, str, str | None, str | None], None] = self._post
+
+    def _post(self, key: str, text: str, target: str | None, thread: str | None) -> None:
+        """Offline Store adapter. The daemon installs its central redaction/wake pipeline."""
+        self.store.enqueue(key, redact(text), target, thread_key=thread, ownership_kind="system")
 
     def migrate(self) -> None:
         with self.store.transaction():
@@ -278,42 +285,51 @@ class Lifecycle:
                 self.refresh(str(ask_id))
 
     def binding(self, ask_id: str) -> dict[str, object]:
-        row = self.store.ask(ask_id)
-        if row is None:
-            raise Invalid("missing")
-        fields = (
-            "kind",
-            "poster",
-            "title",
-            "body",
-            "pr_url",
-            "head_sha",
-            "bead",
-            "digest",
-            "question_form",
-            "choices",
-            "links",
-            "created_at",
-        )
-        ask = {key: getattr(row, key) for key in fields}
-        answers: list[dict[str, object]] = [
-            dict(seq=int(seq), kind=kind, operator=operator, message_id=mid, text=text, at=at, choice=choice)
-            for seq, kind, operator, mid, text, at, choice in self.store.db.execute(
-                "SELECT seq,kind,operator,message_id,text,at,choice FROM "
-                "ask_answers WHERE ask_id=? ORDER BY seq",
-                (ask_id,),
+        with self.store.lock:
+            row = self.store.ask(ask_id)
+            if row is None:
+                raise Invalid("missing")
+            fields = (
+                "kind",
+                "poster",
+                "title",
+                "body",
+                "pr_url",
+                "head_sha",
+                "bead",
+                "digest",
+                "question_form",
+                "choices",
+                "links",
+                "created_at",
             )
-        ]
-        return {
-            "ask_store_id": self.store.get("ask_store_id"),
-            "ask_id": ask_id,
-            "created_at": row.created_at,
-            "ask_sha256": digest("ask", ask),
-            "answers_sha256": digest("answers", answers),
-            "answer_ids": [answer["message_id"] for answer in answers if answer["kind"] == "answer"],
-        }
+            ask = {key: getattr(row, key) for key in fields}
+            answers: list[dict[str, object]] = [
+                dict(
+                    seq=int(seq),
+                    kind=kind,
+                    operator=operator,
+                    message_id=mid,
+                    text=text,
+                    at=at,
+                    choice=choice,
+                )
+                for seq, kind, operator, mid, text, at, choice in self.store.db.execute(
+                    "SELECT seq,kind,operator,message_id,text,at,choice FROM "
+                    "ask_answers WHERE ask_id=? ORDER BY seq",
+                    (ask_id,),
+                )
+            ]
+            return {
+                "ask_store_id": self.store.get("ask_store_id"),
+                "ask_id": ask_id,
+                "created_at": row.created_at,
+                "ask_sha256": digest("ask", ask),
+                "answers_sha256": digest("answers", answers),
+                "answer_ids": [answer["message_id"] for answer in answers if answer["kind"] == "answer"],
+            }
 
-    def validate(self, binding: Binding) -> None:
+    def validate(self, binding: Binding, evidence: list[Evidence] | None = None) -> None:
         actual = self.binding(binding.ask_id)
         for key in ("ask_store_id", "created_at", "ask_sha256", "answers_sha256"):
             if actual[key] != getattr(binding, key):
@@ -323,6 +339,8 @@ class Lifecycle:
         row = self.store.ask(binding.ask_id)
         if row is None or row.kind not in ("question", "merge") or row.status != "answered":
             raise Invalid("unsupported")
+        if row.kind == "merge" and evidence is not None and not evidence:
+            raise Invalid("merge-evidence")
 
     def refresh(self, ask_id: str) -> None:
         record = self.stored(ask_id)
@@ -336,16 +354,18 @@ class Lifecycle:
         self.store.db.execute("UPDATE ask_fulfillments SET valid=? WHERE ask_id=?", (valid, ask_id))
 
     def stored(self, ask_id: str) -> dict[str, object] | None:
-        row = self.store.db.execute(
-            "SELECT receipt FROM ask_fulfillments WHERE ask_id=?", (ask_id,)
-        ).fetchone()
-        return None if row is None else json.loads(str(row[0]))
+        with self.store.lock:
+            row = self.store.db.execute(
+                "SELECT receipt FROM ask_fulfillments WHERE ask_id=?", (ask_id,)
+            ).fetchone()
+            return None if row is None else json.loads(str(row[0]))
 
     def protected(self, ask_id: str) -> bool:
-        return (
-            self.store.db.execute("SELECT 1 FROM ask_fulfillments WHERE ask_id=?", (ask_id,)).fetchone()
-            is not None
-        )
+        with self.store.lock:
+            return (
+                self.store.db.execute("SELECT 1 FROM ask_fulfillments WHERE ask_id=?", (ask_id,)).fetchone()
+                is not None
+            )
 
     def view(self, ask_id: str) -> dict[str, object]:
         with self.store.transaction():
@@ -364,7 +384,8 @@ class Lifecycle:
                 "binding": binding,
                 "receipt": self.stored(ask_id),
                 "lifecycle": "unfulfilled" if row is None else "fulfilled" if row[0] else "conflict",
-                "eligible": original is not None
+                "eligible": row is None
+                and original is not None
                 and original.kind in ("question", "merge")
                 and original.status == "answered"
                 and bool(binding["answer_ids"]),
@@ -383,7 +404,7 @@ class Lifecycle:
             existing = self.duplicate(receipt.binding.ask_id, request_digest)
             if existing:
                 return existing
-            self.validate(receipt.binding)
+            self.validate(receipt.binding, receipt.evidence)
             core = digest(
                 "operation",
                 {
@@ -442,7 +463,7 @@ class Lifecycle:
         operation_id: str | None = None,
         core: str | None = None,
     ) -> Reply:
-        before = len(self.store.capacity_asks())
+        before = self.store.capacity_count()
         receipt_id = secrets.token_hex(16)
         record = {
             "schema": "fulfillment-receipt-v1",
@@ -479,10 +500,12 @@ class Lifecycle:
             "VALUES (?,?,'applied',?)",
             (binding.ask_id, request_digest, stamp()),
         )
-        self.store.enqueue(
+        self.retire_pending(binding.ask_id, "fulfilled")
+        self.post(
             f"fulfill:{receipt_id}",
             f"Ask {binding.ask_id} fulfilled; original answer retained.",
             self.store.first_card_message(binding.ask_id),
+            None,
         )
         return Reply("applied", "fulfilled; original answer retained", record)
 
@@ -494,16 +517,18 @@ class Lifecycle:
             raise Invalid(why)
         self.require_uid(uid)
         with self.store.transaction():
-            self.validate(req.declaration.binding)
+            self.validate(req.declaration.binding, req.declaration.evidence)
             if self.protected(req.ask_id):
                 raise Invalid("conflict")
             old = self.store.db.execute(
-                "SELECT intent_id,digest,declaration FROM ask_fulfillment_intents "
+                "SELECT intent_id,digest,declaration,created_at FROM ask_fulfillment_intents "
                 "WHERE ask_id=? AND status='pending'",
                 (req.ask_id,),
             ).fetchone()
             encoded = canonical(builtins(req.declaration)).decode()
             if old is not None and str(old[2]) == encoded and req.replace_intent is None:
+                if datetime.now(UTC) - datetime.fromisoformat(str(old[3])) >= timedelta(hours=24):
+                    raise Invalid("stale-intent")
                 return Reply("pending", "existing notice retained", {"intent_id": old[0], "digest": old[1]})
             if old is not None:
                 if req.replace_intent != old[1]:
@@ -563,15 +588,33 @@ class Lifecycle:
                 (intent, req.ask_id, intent_digest, encoded, notice, len(parts), at),
             )
             for i, part in enumerate(parts):
-                self.store.enqueue(
+                self.post(
                     f"fulfill-intent:{intent}:{i}",
                     part,
                     None,
-                    thread_key=None if i == 0 else f"fulfill-intent:{intent}:0",
+                    None if i == 0 else f"fulfill-intent:{intent}:0",
                 )
             return Reply(
                 "pending", "confirmation notice queued", {"intent_id": intent, "digest": intent_digest}
             )
+
+    def retire_pending(self, ask_id: str, reason: str) -> None:
+        """Caller holds the mutation transaction; retain notice rows and an audit tombstone."""
+        row = self.store.db.execute(
+            "SELECT digest FROM ask_fulfillment_intents WHERE ask_id=? AND status='pending'", (ask_id,)
+        ).fetchone()
+        if row is None:
+            return
+        self.store.db.execute(
+            "INSERT OR IGNORE INTO ask_fulfillment_audit(ask_id,request_digest,disposition,at) "
+            "VALUES (?,?,?,?)",
+            (ask_id, row[0], reason, stamp()),
+        )
+        self.store.db.execute(
+            "UPDATE ask_fulfillment_intents SET status='retired',reason=? "
+            "WHERE ask_id=? AND status='pending'",
+            (reason, ask_id),
+        )
 
     def retire(self, ask_id: str, expected: str, reason: str) -> Reply:
         if reason not in ("operator-withdrawal", "stale-answers", "expired"):
@@ -629,7 +672,7 @@ class Lifecycle:
             ):
                 raise Invalid("incomplete-notice")
             declared = msgspec.json.decode(str(declaration), type=Declaration)
-            self.validate(declared.binding)
+            self.validate(declared.binding, declared.evidence)
             result = self.commit(
                 declared.binding,
                 str(intent_digest),

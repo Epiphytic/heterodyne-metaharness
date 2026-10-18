@@ -50,7 +50,7 @@ def peer_pid(sock: socket.socket | None, platform: str = sys.platform) -> int | 
         return None
     try:
         if platform.startswith("linux"):
-            return int(struct.unpack("3i", sock.getsockopt(socket.SOL_SOCKET, _SO_PEERCRED,
+            return int(struct.unpack("iII", sock.getsockopt(socket.SOL_SOCKET, _SO_PEERCRED,
                                                            struct.calcsize("3i")))[0])
         if platform == "darwin":
             return int(struct.unpack("i", sock.getsockopt(_SOL_LOCAL, _LOCAL_PEERPID,
@@ -60,13 +60,13 @@ def peer_pid(sock: socket.socket | None, platform: str = sys.platform) -> int | 
     return None
 
 
-def peer_credentials_checked(sock: socket.socket) -> tuple[int, int, int]:
+def peer_credentials_checked(sock: socket.socket | None) -> tuple[int, int, int]:
     """Kernel-observed PID/UID/GID; no audit-only fallback may authenticate a new operation."""
-    if not sys.platform.startswith("linux"):
-        raise OSError("peer credentials need Linux")
+    if sock is None or not sys.platform.startswith("linux"):
+        raise OSError("peer credentials need a Linux socket")
     try:
-        pid, uid, gid = struct.unpack("3i", sock.getsockopt(
-            socket.SOL_SOCKET, _SO_PEERCRED, struct.calcsize("3i")))
+        pid, uid, gid = struct.unpack("iII", sock.getsockopt(
+            socket.SOL_SOCKET, _SO_PEERCRED, struct.calcsize("iII")))
     except struct.error:
         raise OSError("peer credentials unreadable") from None
     if pid <= 0 or uid < 0 or gid < 0:

@@ -388,6 +388,8 @@ class Admind:
         self.acked = False          # the current subscription was acknowledged; check_group may then observe
         self.sub_gen = 0            # bumped at the start and end of every subscription attempt
         self.wake = asyncio.Event()
+        self.store.fulfillment.post = lambda key, text, target, thread: self.post(
+            key, text, target, thread_key=thread, owner=None)
         self.send_lock = asyncio.Lock()     # held across each send; a membership transition drains it (B7)
         self.count_lock = asyncio.Lock()        # never acquire transition/send while held
         self.check_requested = False
@@ -678,11 +680,10 @@ class Admind:
                 max_request=asks.MAX_REQUEST, max_reply=asks.MAX_REPLY,
                 request_type=asks.AskRequest | fulfillment.Request,
                 check=lambda req: (fulfillment.check(req) if isinstance(req,
-                    fulfillment.Apply | fulfillment.Propose |
-                    fulfillment.Dispose | fulfillment.Get) else asks.check(req)),
+                    fulfillment.Request) else asks.check(req)),
                 refused=asks.refused, failed=asks.failed,
-                describe=lambda req: ({"op": type(req).__name__} if isinstance(req, fulfillment.Apply |
-                    fulfillment.Propose | fulfillment.Dispose | fulfillment.Get) else asks.describe(req)))
+                describe=lambda req: ({"op": type(req).__name__} if isinstance(req,
+                    fulfillment.Request) else asks.describe(req)))
             await self.ask_server.start()
             await self.start_agent(startup=True)
             async with asyncio.TaskGroup() as tg:
@@ -724,7 +725,7 @@ class Admind:
     # --- asks (relay spec) ----------------------------------------------------------------------
     async def on_ask_wire(self, req: asks.AskRequest | fulfillment.Request,
                           peer: ctl.Peer) -> asks.AskReply | fulfillment.Reply:
-        if isinstance(req, fulfillment.Apply | fulfillment.Propose | fulfillment.Dispose | fulfillment.Get):
+        if isinstance(req, fulfillment.Request):
             reply = await self.on_fulfillment(req, peer)
             if len(msgspec.json.encode(reply)) > fulfillment.MAX_REPLY:
                 return fulfillment.Reply("unavailable", "lifecycle reply exceeds bound")
@@ -1092,7 +1093,7 @@ class Admind:
         at = asks.now()
         lines = [asks.list_line(r, at) for r in self.store.capacity_asks()]
         lines += [f"{r.ask_id} fulfilled (lifecycle); original answer retained"
-                  for r in self.store.inactive_asks(20) if self.store.fulfillment.protected(r.ask_id)]
+                  for r in self.store.fulfilled_asks(20)]
         self.finish(mid, "done", "\n".join(lines) or NO_ACTIVE_ASKS, "cmd")
         self.audit.write("command", message_id=mid, command="asks", asks=len(lines))
 
@@ -1146,9 +1147,7 @@ class Admind:
         due = at - timedelta(hours=hours)
         bumped: list[str] = []
         skipped: list[tuple[str, str]] = []
-        for row in self.store.asks_with_status("open"):
-            if self.store.fulfillment.protected(row.ask_id):
-                continue
+        for row in self.store.remindable_asks():
             if row.last_activity_at is None or datetime.fromisoformat(row.last_activity_at) > due:
                 continue
             if self.store.reminder_pending(row.ask_id):
@@ -2414,12 +2413,20 @@ class Admind:
                 self.finish(mid, "done", "Fulfillment unavailable under current authorization.", "cmd")
                 return
             try:
-                result = self.store.fulfillment.confirm(
-                    target, principal=self.senders.get(mid, ""), message_id=mid)
-                message = result.message
+                with self.store.transaction():
+                    result = self.store.fulfillment.confirm(
+                        target, principal=self.senders.get(mid, ""), message_id=mid)
+                    self.finish(mid, "done", result.message, "cmd")
             except fulfillment.Invalid as exc:
-                message = "Fulfillment refused: " + str(exc)
-            self.finish(mid, "done", message, "cmd")
+                self.finish(mid, "done", "Fulfillment refused: " + str(exc), "cmd")
+            except Exception as exc:  # noqa: BLE001 - rollback and fixed wording; audit type only
+                self.audit_quietly("fulfillment", action="unavailable", error=type(exc).__name__)
+                # No receipt survives a failed transaction. A persistent outage leaves the original
+                # inbound recoverable; even the fixed unavailable reply needs a working Store.
+                try:
+                    self.finish(mid, "done", "Fulfillment unavailable: store unavailable.", "cmd")
+                except sqlite3.Error:
+                    self.audit_quietly("fulfillment", action="store-unavailable")
             return
         bump = self.store.bump_for_message(target)
         if bump is not None and (not text.startswith("!") or text[1:].split(maxsplit=1)[:1] in CARD_COMMANDS):
