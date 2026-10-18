@@ -1,6 +1,7 @@
 """Pure immutable unit rendering. Rendering never enables or starts any unit."""
 
 from collections.abc import Mapping
+from pathlib import Path
 
 from heterodyne import units
 from heterodyne.wsd.schedule_manifest import ScheduleManifest
@@ -43,7 +44,7 @@ def render(manifest: ScheduleManifest, python: str, env: Mapping[str, str]) -> d
             python,
             path=env.get("PATH", ""),
             config_dir=manifest.config.path,
-            state_dir=manifest.state.path,
+            state_dir=str(Path(manifest.state.path).parent),
             release=manifest.release_hash,
         )
         result[f"heterodyne-{job}.timer"] = TIMER.format(job=job, seconds=seconds)
@@ -53,7 +54,7 @@ def render(manifest: ScheduleManifest, python: str, env: Mapping[str, str]) -> d
             python,
             path=env.get("PATH", ""),
             config_dir=manifest.config.path,
-            state_dir=manifest.state.path,
+            state_dir=str(Path(manifest.state.path).parent),
             release=manifest.release_hash,
         )
         result["heterodyne-babysitter.timer"] = TIMER.format(job="babysitter", seconds=300)

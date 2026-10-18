@@ -1,0 +1,15 @@
+{
+  "actual_review": 5,
+  "verdict": "APPROVE as a PoC, with one new pre-activation must-fix",
+  "raw_sha256": "2b0fb5cec6e25b5da0ba4ca71d6246ee2c770f5e7003d395e35020fb273e10a3",
+  "ordered_dispositions": [
+    "FIXED: scheduled pickup/reconcile/babysitter services now pass the shared state root, matching existing WSD resolution which appends /wsd. Actual existing renderer regression fails old source and passes repair for all three services plus shared alerts root.",
+    "RETAINED activation debt: malformed unrelated retained artifact can degrade sealed cycle result. No claim of independently verified invalid-artifact tolerance.",
+    "RETAINED: full retained-bundle verification work and cancellation/shutdown bound need actual deployment validation.",
+    "RETAINED: cross-generation 256-entry inventory availability ceiling; no unapproved deletion of foreign or unknown bundles.",
+    "RETAINED: unexpected heartbeat exception can require operator restart; no claim of durable self-healing.",
+    "RETAINED: scheduled-hold is in-memory and not exposed as health state; maintenance may produce overdue notice.",
+    "RETAINED: clean shutdown of in-flight local backup seals failure, no same-cycle retry guarantee."
+  ],
+  "deployment": "Not authorized; no timer activation or owner inventory/restore/72h proof; T10 integration unresolved. Prior findings, dispositions and quality remain unwaived."
+}

@@ -4,6 +4,7 @@ from uuid import uuid4
 import msgspec
 from test_schedule_admission import installed
 
+from heterodyne.config import paths
 from heterodyne.wsd.ctl import CtlServer
 from heterodyne.wsd.health import read
 from heterodyne.wsd.maintenance_protocol import EffectWake, PairedBackup, request
@@ -96,3 +97,11 @@ def test_render_retains_arbitrary_approved_cadence_and_pinned_release(tmp_path):
     assert m.release_hash in units["heterodyne-pickup.service"]
     assert "Restart=" not in units["heterodyne-pickup.service"]
     assert "WakeSystem=false" in units["heterodyne-reconcile.timer"]
+
+    # Service settings append /wsd; the unit must pin the shared state root.
+    for job in ("pickup", "reconcile", "babysitter"):
+        text = units[f"heterodyne-{job}.service"]
+        environment = dict(line.removeprefix("Environment=").split("=", 1)
+                           for line in text.splitlines() if line.startswith("Environment="))
+        assert paths.state_dir(environment) / "wsd" == d.s.state_dir
+        assert paths.state_dir(environment) / "alerts" == d.s.state_dir.parent / "alerts"
