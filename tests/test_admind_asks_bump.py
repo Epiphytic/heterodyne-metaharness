@@ -71,11 +71,11 @@ def test_asks_bump_and_repeat_parse() -> None:
 def test_other_asks_arguments_are_refused_with_the_usage(text: str) -> None:
     with pytest.raises(commands.CommandError) as err:
         commands.parse(text)
-    assert str(err.value) == "Usage: !asks [bump|repeat]."
+    assert str(err.value) == "Usage: !asks [bump|repeat|retire <proof-token>]."
 
 
 def test_help_names_bump_and_repeat() -> None:
-    assert "!asks [bump|repeat]" in commands.HELP
+    assert "!asks [bump|repeat|retire <proof-token>]" in commands.HELP
 
 
 # --- B14: the setting --------------------------------------------------------------------------------
