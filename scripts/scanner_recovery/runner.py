@@ -13,6 +13,7 @@ import os
 import runpy
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -140,16 +141,20 @@ def h92_collection_check(nodes, manifest):
         all(node.startswith("tests/test_sandbox_hostread.py::") for node in nodes),
         "H92 must contain only hostread nodes",
     )
-    delta = manifest["collection_delta"]
+    adjacency_index(nodes, manifest["collection_delta"])
+
+
+def adjacency_index(nodes, delta):
     added = delta["added_node"]
-    recovery.require(added in nodes, "H92 added regression missing")
+    recovery.require(added in nodes, "Added regression missing")
     index = nodes.index(added)
     recovery.require(
         0 < index < len(nodes) - 1
         and nodes[index - 1] == delta["immediate_predecessor"]
         and nodes[index + 1] == delta["immediate_successor"],
-        "H92 adjacency changed",
+        "Collection adjacency changed",
     )
+    return index
 
 
 def hold(result, message, error):
@@ -164,12 +169,25 @@ def finish_scratch(layout, folder, result):
     try:
         runtime = Path(layout["r"]["path"])
         recovery.require(recovery.private_directory(runtime) == layout["r"], "Runtime identity changed")
-        entries = sorted(runtime.iterdir())
-        result["runtime_entries_after"] = [path.name for path in entries]
-        recovery.require(
-            not any(path.name == "bus" or path.is_socket() for path in entries), "Runtime contains socket/bus"
-        )
-    except (OSError, ValueError) as error:
+        descriptor = os.open(runtime, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        entries = []
+        exposed = False
+        try:
+            opened = os.fstat(descriptor)
+            recovery.require(
+                (opened.st_dev, opened.st_ino) == (layout["r"]["device"], layout["r"]["inode"]),
+                "Runtime identity changed",
+            )
+            for parent, names, parent_fd in recovery.directory_entries(descriptor):
+                for name in names:
+                    info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                    entries.append(str(Path(parent) / name))
+                    exposed |= name == "bus" or stat.S_ISSOCK(info.st_mode)
+        finally:
+            os.close(descriptor)
+        result["runtime_entries_after"] = entries
+        recovery.require(not exposed, "Runtime contains socket/bus")
+    except (OSError, ValueError, KeyError) as error:
         result["runtime_error"] = str(error)
         hold(result, "Runtime check failed", error)
     # Preserve regardless of runtime result. An archive failure retains both earlier diagnostics.
@@ -177,6 +195,23 @@ def finish_scratch(layout, folder, result):
         archived = recovery.archive_scratch(layout, folder / "scratch-archive")
         result["scratch_archive_inventory_sha256"] = archived["sha256"]
         result["scratch_archive"] = archived
+        bounds = result.get("socket_path_budget_inventory", {}).get("receipt", {}).get("derivations")
+        if bounds is not None:
+            for observed in archived["surviving_socket_paths"]:
+                relative = Path(observed["path"])
+                base = relative.parts[0] if relative.parts[0] in recovery.CHILDREN else "root"
+                maxima = [
+                    row["maximum_encoded_bytes"]
+                    for row in bounds
+                    if row["kind"] == "socket" and row["base"] == base
+                ]
+                recovery.require(
+                    bool(maxima) and observed["socket_encoded_bytes"] <= max(maxima),
+                    "Observed socket exceeds source-backed reviewed maximum",
+                )
+                recovery.require(
+                    observed["socket_encoded_bytes"] <= 100, "Observed socket exceeds100byte budget"
+                )
     except (OSError, ValueError) as error:
         result["archive_error"] = str(error)
         hold(result, "Scratch preservation failed", error)
@@ -236,21 +271,13 @@ def predecessor_check(stage, old, receipt, supplement, chain_identity):
         )
 
 
-def pinned_inputs(w, original, h92=False):
+def pinned_inputs(w, original, h92=False, supplement=None):
     m = load(MANIFEST)
-    supplement = load(SUPPLEMENT)
+    supplement = load(SUPPLEMENT) if supplement is None else supplement
     validate_supplement(supplement, m)
     recovery.require(
         sha(MANIFEST.read_bytes()) == supplement["original_manifest_sha256"],
         "Runner precondition failed at original line 78",
-    )
-    recovery.require(
-        supplement["original_required_fields"] == m["result_contract"]["required_fields"],
-        "Runner precondition failed at original line 79",
-    )
-    recovery.require(
-        supplement["original_environment_allowlist"] == m["result_contract"]["environment_allowlist"],
-        "Runner precondition failed at original line 80",
     )
     for row in m["private_originals"]:
         data = (original / Path(row["private_relative"]).name).read_bytes()
@@ -335,21 +362,55 @@ def process_snapshot():
     }
 
 
+def group_has_writers(group):
+    """Read Linux process states; permission/read races fail closed except vanished PIDs."""
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+        except FileNotFoundError:
+            continue
+        if int(fields[2]) == group and fields[0] not in ("Z", "X"):
+            return True
+    return False
+
+
 def run(argv, env, cwd, folder, name, timeout, commands):
     t = time.monotonic()
-    record = {"argv": argv, "cwd": str(cwd), "timeout_seconds": timeout, "started_at": stamp()}
+    record = {
+        "argv": argv,
+        "cwd": str(cwd),
+        "timeout_seconds": timeout,
+        "started_at": stamp(),
+        "process_group_quiescent": False,
+    }
     commands.append(record)
     with (folder / name).open("xb") as log:
         proc = subprocess.Popen(
             argv, cwd=cwd, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True
         )
         timed_out = False
+        # Observe exit without reaping: the PID/PGID cannot be reused before killpg.
+        deadline = time.monotonic() + timeout
         try:
-            status = proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            os.killpg(proc.pid, signal.SIGKILL)
+            while os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None:
+                if time.monotonic() >= deadline:
+                    timed_out = True
+                    break
+                time.sleep(0.01)
+        finally:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             status = proc.wait(timeout=10)
+        # Killed orphan zombies cannot write; any live group member prevents preservation.
+        quiet_deadline = time.monotonic() + 5
+        while group_has_writers(proc.pid):
+            recovery.require(time.monotonic() < quiet_deadline, "Child process group did not quiesce")
+            time.sleep(0.01)
+        record["process_group_quiescent"] = True
     record.update(actual_exit_or_signal=status, timeout=timed_out, elapsed_seconds=time.monotonic() - t)
     return record
 
@@ -358,13 +419,7 @@ def collection_check(nodes, count, m, broad):
     recovery.require(len(nodes) == len(set(nodes)) == count, "Exact count and uniqueness required")
     if broad:
         d = m["collection_delta"]
-        added = d["added_node"]
-        i = nodes.index(added)
-        recovery.require(i > 0 and i + 1 < len(nodes), "Runner precondition failed at original line 145")
-        recovery.require(
-            nodes[i - 1] == d["immediate_predecessor"] and nodes[i + 1] == d["immediate_successor"],
-            "Runner precondition failed at original line 146",
-        )
+        i = adjacency_index(nodes, d)
         minus = nodes[:i] + nodes[i + 1 :]
         recovery.require(
             sha(json.dumps(minus).encode()) == d["ordered_minus_added_legacy_sha256"],
@@ -433,7 +488,9 @@ def main():
         original.is_dir() and a.private_originals.is_absolute(),
         "Runner precondition failed at original line 198",
     )
-    m, chunks, expected = pinned_inputs(w, original, a.stage == "h92")
+    supplement_data = SUPPLEMENT.read_bytes()
+    supplement = json.loads(supplement_data)
+    m, chunks, expected = pinned_inputs(w, original, a.stage == "h92", supplement)
     snapshot_paths = (
         [
             p
@@ -448,9 +505,6 @@ def main():
         else PATHS
     )
     count, expected_key, phase, required = STAGES[a.stage]
-    supplement_data = SUPPLEMENT.read_bytes()
-    supplement = json.loads(supplement_data)
-    validate_supplement(supplement, m)
     disposition_data = a.baseline_disposition.read_bytes()
     disposition = json.loads(disposition_data)
     inventory_data = a.inventory.read_bytes()
@@ -576,7 +630,12 @@ def main():
     }
     planned_layout = {key: {"path": "/" + "x" * 15 + "/" + key} for key in recovery.CHILDREN}
     planned_layout["root"] = {"path": "/" + "x" * 15}
-    recovery.validate_inventory(w, planned_layout, source_inventory)
+    candidates = recovery.source_candidates(w)
+    candidate_files = {reference.rsplit(":", 1)[0] for reference in candidates}
+    candidate_file_hashes = {name: sha((w / name).read_bytes()) for name in sorted(candidate_files)}
+    recovery.validate_inventory(
+        w, planned_layout, source_inventory, raw=inventory_data, measured=True, candidates=candidates
+    )
     recovery.construction_probes(supplement)
     diagnostic_nodes: list[str] = []
     if a.stage == "diagnostic":
@@ -667,7 +726,14 @@ def main():
         layout = recovery.create_layout()
         result["private_runtime_layout"] = layout
         result["environment_filesystem_preflight"] = recovery.filesystem_preflight(layout)
-        result["socket_path_budget_inventory"] = recovery.validate_inventory(w, layout, source_inventory)
+        recovery.require(
+            {name: sha((w / name).read_bytes()) for name in candidate_file_hashes} == candidate_file_hashes,
+            "Inventory candidate source files changed after planning",
+        )
+        result["inventory_source_file_sha256"] = candidate_file_hashes
+        result["socket_path_budget_inventory"] = recovery.validate_inventory(
+            w, layout, source_inventory, raw=inventory_data, measured=True, candidates=candidates
+        )
         result["socket_construction_probe"] = recovery.socket_construction_probe(layout)
         result["baseline_mode_disposition"] = {
             "receipt": disposition,
@@ -852,6 +918,10 @@ def main():
                 result["verification_result_or_error"] = {"PASS": verdict}
         recovery.require(snapshot(w, snapshot_paths) == before, "Source drift after execution")
     except BaseException as exc:
+        if isinstance(exc, recovery.LayoutCreationError):
+            layout = exc.layout
+            result["private_runtime_layout"] = layout
+            result["partial_layout_error"] = str(exc)
         result["verification_result_or_error"] = {"HOLD": type(exc).__name__, "reason": str(exc)}
     finally:
         if (folder / "junit.xml").exists():
@@ -895,7 +965,11 @@ def main():
                 json.dumps(nodes, ensure_ascii=True, separators=(",", ":")).encode()
             )
         if layout is not None:
-            finish_scratch(layout, folder, result)
+            if all(command.get("process_group_quiescent") is True for command in result["invocation_argv"]):
+                finish_scratch(layout, folder, result)
+            else:
+                result["archive_error"] = "Unconfirmed child group quiescence; scratch retained in place"
+                hold(result, "Scratch copy refused before quiescence", ValueError(result["archive_error"]))
         result["unavailable_fields"] = [k for k in supplement["required_fields"] if result.get(k) is None]
         try:
             slot_check(a.reservation, reservation)

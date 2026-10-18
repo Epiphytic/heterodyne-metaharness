@@ -25,12 +25,13 @@ frozen whole offline suite, including final-suite modules. The inventory contain
 `source_root`, exact `source_candidates` from `environment.source_candidates`,
 `reviewed_by_controller: true`, and nonempty `derivations`. Every candidate line
 must be covered by references and a concrete reason. Socket rows additionally
-bind base (`p`,`t`,`r`,`root`), case-component bytes, suffix bytes and exact maximum
+bind base (`h`,`p`,`t`,`r`,`root`), case-component bytes, suffix bytes and exact maximum
 encoded bytes. Maximum calculations reserve the full16-byte root/18-byte child
 budget and include the separator before a nonempty case component; suffix_bytes
 includes every separator in the remaining suffix. Actual shorter roots never
 change a reviewed worst-case bound. Tmux rows bind fixture-owned `-S`/`-L` or actual audited guard source
-references. Non-endpoint rows need the source-backed explanation. This deliberately
+references. Lines containing socket or tmux tokens cannot be assigned non-endpoint rows;
+non-endpoint rows still need a source-backed explanation. This deliberately
 requires controller review; keyword matching alone does not prove a path bound
 or tmux isolation. Missing or changed coverage HOLDs before scanner execution.
 The enumeration includes indirect Python bind/connect/Unix calls throughout the
@@ -75,3 +76,37 @@ Runtime checks and archiving run independently; either failure preserves the
 original HOLD diagnostic and prevents PASS. Directory traversal opens only
 no-follow directory descriptors and propagates listing/open errors. It never
 opens a symlink target, and only a complete archive gets an inventory digest.
+
+Second-review repairs retain the original 51+6 fields, 14 environment keys,
+plugins, product, dependencies and test oracles. Source candidates now include
+systemd `.service`/`.socket` units and extensionless shebang scripts. The parsed
+supplement and raw inventory bytes each have one identity; execution reuses the
+candidate map and rechecks complete candidate-file hashes before any child.
+
+Every socket derivation used by the runner also supplies
+`worst_case_component` and `worst_case_suffix`: actual UTF-8 path components
+whose encoded byte lengths equal the reviewed component/suffix maxima. Suffixes
+include their leading separator. The helper reconstructs each worst-case path
+under the literal private base and records length, reviewed maximum and margin
+to 100. These witnesses supplement source review; arbitrary witness strings do
+not prove reachability. The controller must cover every reachable constructor
+and invocation with exact source references and reject dynamic/unbounded paths.
+No complete inventory for an actual scanner source freeze is shipped here.
+
+The retained archive inventory additionally records encoded lengths and margins
+for surviving socket entries without opening them. Unlisted bases, lengths
+above the reviewed maximum for their base, or lengths above 100 HOLD while
+preserving the archive. Transient sockets removed before preservation are not
+observed: no sampling or absence claim replaces the complete source-backed
+constructor bounds. Runtime socket/bus checks remain a separate no-follow,
+depth-first check of the entire private runtime tree.
+
+After every child, including normal exit, the runner observes the leader without
+reaping, kills its process group and waits for all non-zombie members to vanish
+before preservation. The unreaped leader prevents PID/PGID reuse before the
+kill. This proves group quiescence, not containment of a process that deliberately
+escapes into another session; test-owned tmux/server cleanup and audited
+isolation remain required inventory obligations. Unconfirmed group quiescence
+retains scratch in place and refuses to copy it. Construction exceptions after
+mkdtemp carry their partial layout into the HOLD result; available scratch is
+archived independently of an absent runtime child. No failed attempt retries.

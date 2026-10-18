@@ -42,6 +42,14 @@ def private_directory(path: Path) -> dict[str, int | str]:
     }
 
 
+class LayoutCreationError(OSError):
+    """Construction failed after allocation; caller must retain the partial root."""
+
+    def __init__(self, layout: dict[str, Any], cause: Exception):
+        super().__init__(str(cause))
+        self.layout = layout
+
+
 def create_layout() -> dict[str, Any]:
     parent = Path("/tmp")  # noqa: S108 - approved exact root-owned01777 parent; exclusive mkdtemp below
     info = parent.lstat()
@@ -53,14 +61,18 @@ def create_layout() -> dict[str, Any]:
         "Real root-owned /tmp mode01777 required",
     )
     root = Path(tempfile.mkdtemp(prefix="hz", dir=parent))
-    root.chmod(0o700)
-    require(len(os.fsencode(root)) <= 16, "Private root exceeds16bytes")
-    rows = {"root": private_directory(root)}
-    for name in CHILDREN:
-        child = root / name
-        child.mkdir(mode=0o700)
-        require(len(os.fsencode(child)) <= 18, "Private child exceeds18bytes")
-        rows[name] = private_directory(child)
+    rows: dict[str, Any] = {"root": {"path": str(root)}}
+    try:
+        root.chmod(0o700)
+        require(len(os.fsencode(root)) <= 16, "Private root exceeds16bytes")
+        rows["root"] = private_directory(root)
+        for name in CHILDREN:
+            child = root / name
+            child.mkdir(mode=0o700)
+            require(len(os.fsencode(child)) <= 18, "Private child exceeds18bytes")
+            rows[name] = private_directory(child)
+    except (OSError, ValueError) as error:
+        raise LayoutCreationError(rows, error) from error
     return rows
 
 
@@ -245,18 +257,42 @@ def source_candidates(source: Path) -> dict[str, str]:
             require(not (Path(parent) / name).is_symlink(), "Source inventory refuses symlinked directories")
         for name in sorted(files):
             path = Path(parent) / name
-            if path.suffix not in (".py", ".sh", ".bash", ".toml", ".yaml", ".yml", ".ini", ".cfg"):
+            selected = path.suffix in (
+                ".py",
+                ".sh",
+                ".bash",
+                ".toml",
+                ".yaml",
+                ".yml",
+                ".ini",
+                ".cfg",
+                ".service",
+                ".socket",
+            )
+            # Extensionless launchers must not evade shell/config inventory.
+            if not selected and path.suffix:
                 continue
             require(not path.is_symlink(), "Source inventory refuses symlinked files")
-            for number, line in enumerate(path.read_bytes().splitlines(), 1):
+            data = path.read_bytes()
+            if not selected and not data.startswith(b"#!"):
+                continue
+            for number, line in enumerate(data.splitlines(), 1):
                 if line.strip() and (path.suffix != ".py" or any(token in line for token in tokens)):
                     candidates[f"{path.relative_to(source)}:{number}"] = digest(line)
     return candidates
 
 
-def validate_inventory(source: Path, layout: dict[str, Any], inventory: dict[str, Any]) -> dict[str, Any]:
+def validate_inventory(
+    source: Path,
+    layout: dict[str, Any],
+    inventory: dict[str, Any],
+    *,
+    raw: bytes | None = None,
+    measured: bool = False,
+    candidates: dict[str, str] | None = None,
+) -> dict[str, Any]:
     """Require reviewed derivations for every source candidate, without guessing bounds."""
-    candidates = source_candidates(source)
+    candidates = source_candidates(source) if candidates is None else candidates
     require(inventory.get("source_candidates") == candidates, "Source inventory coverage changed")
     require(bool(candidates), "Empty source inventory cannot admit execution")
     require(inventory.get("source_root") == str(source), "Inventory source root mismatch")
@@ -264,6 +300,8 @@ def validate_inventory(source: Path, layout: dict[str, Any], inventory: dict[str
     if not isinstance(rows, list) or not rows:
         raise ValueError("Source-backed derivations required")
     covered: set[str] = set()
+    measured_paths = []
+    source_lines: dict[str, list[bytes]] = {}
     basetemp = Path(layout["p"]["path"])
     for row in rows:
         require(isinstance(row, dict) and bool(row.get("reason")), "Missing source derivation")
@@ -273,11 +311,39 @@ def validate_inventory(source: Path, layout: dict[str, Any], inventory: dict[str
         require(
             all(isinstance(ref, str) and ref in candidates for ref in references), "Unknown source reference"
         )
+        lines = []
+        for reference in references:
+            filename, number = reference.rsplit(":", 1)
+            if filename not in source_lines:
+                source_lines[filename] = (source / filename).read_bytes().splitlines()
+            line = source_lines[filename][int(number) - 1]
+            require(digest(line) == candidates[reference], "Inventory reference bytes changed")
+            lines.append(line)
         covered.update(references)
         kind = row.get("kind")
         require(kind in ("socket", "tmux", "non-endpoint"), "Unknown inventory derivation kind")
+        if any(b"tmux" in line.lower() for line in lines):
+            require(kind == "tmux", "tmux endpoint requires isolation classification")
+        elif any(
+            any(
+                token in line.lower()
+                for token in (
+                    b".sock",
+                    b"af_unix",
+                    b".bind(",
+                    b".connect(",
+                    b"unix_connection",
+                    b"unix_server",
+                    b"socket_path",
+                    b"socketpath",
+                    b"listenstream=",
+                )
+            )
+            for line in lines
+        ):
+            require(kind == "socket", "socket endpoint requires bounded classification")
         if kind == "socket":
-            require(row.get("base") in ("p", "t", "r", "root"), "Unbound socket base")
+            require(row.get("base") in ("h", "p", "t", "r", "root"), "Unbound socket base")
             component = row.get("case_component_bytes")
             suffix = row.get("suffix_bytes")
             if type(component) is not int or type(suffix) is not int:
@@ -290,6 +356,8 @@ def validate_inventory(source: Path, layout: dict[str, Any], inventory: dict[str
                 maximum <= 100 and row.get("maximum_encoded_bytes") == maximum,
                 "Socket derivation exceeds budget or does not match",
             )
+            if measured:
+                measured_paths.append(measured_socket_path(row, base))
         if kind == "tmux":
             require(
                 row.get("isolation") in ("fixture-owned-S", "fixture-owned-L", "audited-guard"),
@@ -303,7 +371,10 @@ def validate_inventory(source: Path, layout: dict[str, Any], inventory: dict[str
     require(covered == set(candidates), "Unreviewed socket/tmux inventory candidates")
     require(inventory.get("reviewed_by_controller") is True, "Controller inventory review required")
     return {
-        "inventory_sha256": digest(json.dumps(inventory, sort_keys=True).encode()),
+        "inventory_sha256": digest(
+            raw if raw is not None else json.dumps(inventory, sort_keys=True).encode()
+        ),
+        "measured_paths": measured_paths,
         "candidates": len(candidates),
         "derivations": len(rows),
         "basetemp": str(basetemp),
@@ -311,29 +382,51 @@ def validate_inventory(source: Path, layout: dict[str, Any], inventory: dict[str
     }
 
 
-def directory_entries(root_fd: int):
-    """Walk only nofollow directory descriptors; every listing/open error propagates."""
-    pending = [(".", os.dup(root_fd))]
-    try:
-        while pending:
-            parent, descriptor = pending.pop()
+def measured_socket_path(row: dict[str, Any], base: Path) -> dict[str, Any]:
+    component = row.get("worst_case_component")
+    suffix = row.get("worst_case_suffix")
+    if not isinstance(component, str) or not isinstance(suffix, str):
+        raise ValueError("Source-backed reconstructed maximum path required")
+    require(
+        len(os.fsencode(component)) == row["case_component_bytes"]
+        and len(os.fsencode(suffix)) == row["suffix_bytes"],
+        "Reconstructed path lengths differ from reviewed bounds",
+    )
+    require(
+        not component.startswith("/")
+        and ".." not in component.split("/")
+        and suffix.startswith("/")
+        and ".." not in suffix.split("/")
+        and "\0" not in component + suffix,
+        "Reconstructed path must remain in its private base",
+    )
+    path = Path(str(base) + ("/" + component if component else "") + suffix)
+    length = socket_budget(path)
+    return {
+        "path": str(path),
+        "encoded_bytes": length,
+        "reviewed_maximum": row["maximum_encoded_bytes"],
+        "margin_to_100": 100 - length,
+        "references": row["references"],
+    }
+
+
+def directory_entries(root_fd: int, parent: str = "."):
+    """Borrow root_fd; traverse depth-first with one owned descriptor per level."""
+    names = sorted(os.listdir(root_fd))  # noqa: PTH208 - descriptor-relative; Path would reopen by name
+    yield parent, names, root_fd
+    for name in names:
+        info = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+        if stat.S_ISDIR(info.st_mode):
+            child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
             try:
-                names = sorted(os.listdir(descriptor))  # noqa: PTH208 - descriptor-relative; Path would reopen by name
-                yield parent, names, descriptor
-                for name in reversed(names):
-                    info = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
-                    if stat.S_ISDIR(info.st_mode):
-                        child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
-                        opened = os.fstat(child)
-                        if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
-                            os.close(child)
-                            raise ValueError("Scratch directory changed")
-                        pending.append((str(Path(parent) / name), child))
+                opened = os.fstat(child)
+                require(
+                    (opened.st_dev, opened.st_ino) == (info.st_dev, info.st_ino), "Scratch directory changed"
+                )
+                yield from directory_entries(child, str(Path(parent) / name))
             finally:
-                os.close(descriptor)
-    finally:
-        for _, descriptor in pending:
-            os.close(descriptor)
+                os.close(child)
 
 
 def archive_scratch(
@@ -411,6 +504,9 @@ def archive_scratch(
                         os.close(source_fd)
                 else:
                     row["kind"] = "excluded-special"
+                    if stat.S_ISSOCK(info.st_mode):
+                        length = len(os.fsencode(root / relative))
+                        row.update(socket_encoded_bytes=length, margin_to_100=100 - length)
                 inventory.append(row)
     finally:
         os.close(root_fd)
@@ -425,4 +521,9 @@ def archive_scratch(
             os.fsync(descriptor)
     finally:
         os.close(destination_fd)
-    return {"sha256": digest(data), "bytes": total, "entries": len(inventory)}
+    return {
+        "sha256": digest(data),
+        "bytes": total,
+        "entries": len(inventory),
+        "surviving_socket_paths": [row for row in inventory if "socket_encoded_bytes" in row],
+    }

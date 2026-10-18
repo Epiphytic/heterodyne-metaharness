@@ -183,7 +183,19 @@ class ReviewRegressionTests(unittest.TestCase):
                 "source_root": str(work),
                 "source_candidates": refs,
                 "reviewed_by_controller": True,
-                "derivations": [{"kind": "non-endpoint", "references": list(refs), "reason": "fixture"}],
+                "derivations": [
+                    {
+                        "kind": "socket",
+                        "references": list(refs),
+                        "reason": "fixture",
+                        "base": "p",
+                        "case_component_bytes": 0,
+                        "suffix_bytes": 13,
+                        "maximum_encoded_bytes": 31,
+                        "worst_case_component": "",
+                        "worst_case_suffix": "/fixture.sock",
+                    }
+                ],
             },
         )
         disposition = write(
