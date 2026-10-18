@@ -1,6 +1,6 @@
 # Pure action contracts (Plan5 Stage 0 / btq-71276)
 
-This package implements only the pure P0 boundary admitted by `btq-l6eeo`.
+This package implements the pure P0/P1 boundaries admitted by `btq-l6eeo`.
 Its design and governing amendment are archived at revision
 `cb180b72c21a157f721be1e4fa57ccfd03d4a11b`, under
 `docs/adr/2026-10-16-plan5-actions-and-executor-d4.md` and
@@ -18,17 +18,17 @@ cross-field consistency. Typed host data is **not authentication**: a later
 integration must obtain these facts from verified launch/config/native sources,
 check current generation and ownership, and prohibit client-supplied replacements.
 Policy revision and permission-widening facts likewise require trusted producers.
-No session socket, native reader, origin verifier, persistence, or model is added.
+No session socket, native reader, origin verifier, production persistence, or model is added.
 
 The fixed JSON limits are 32768 encoded bytes, depth 8, 512 total scalar/container
 nodes (including object keys), and 8192 characters per string. Text rejects C0,
-DEL/C1, surrogate, and Unicode line-separator controls and reuses `secret_value`.
+DEL/C1, surrogate, Unicode formatting characters, and Unicode line-separator controls and reuses `secret_value`.
 Unknown fields, duplicate keys, floats, boolean integers, and unsupported versions
 refuse with safe fixed diagnostics. Request revisions/generations/PR numbers are
 positive integers at most 2^31-1. IDs use the integrated queue grammar
 `[a-z][a-z0-9-]{0,31}-[0-9a-z]{5}`; aliases and opaque host identities use separate
 bounded grammars. Configuration has at most 64 unique entries in each namespace,
-subject also to the total byte/node limits.
+with separate configuration bounds of 131072 bytes and 8192 nodes.
 
 Repository configuration explicitly selects `sha1` (40 lowercase hex digits) or
 `sha256` (64). Pure refs are restricted full `refs/heads/` names at most 255 ASCII
@@ -54,15 +54,275 @@ digest: it includes kind/effect/resolved facts and logical session scope while
 excluding explanatory prose, generation, approval ID, and request revision.
 Future persistence must keep its denial across generations of that same session.
 `materiality` compares already canonical semantic projections conservatively;
-unique equal meaning is minor, while ambiguity or changed target/requirements/
+unique equal meaning is minor (uniqueness defaults to false), while ambiguity or changed target/requirements/
 question/action/outward/destructive meaning requires confirmation. It performs
 no parsing, alias resolution, routing, confirmation, or dispatch.
 
 `REGISTRY` has exactly five immutable unavailable entries. `adapter_refusal`
-validates and always refuses; there is no enable switch or dispatcher. P1/P2/Q0,
+validates and always refuses; there is no enable switch or dispatcher. P2/Q0,
 scanner integration, Plan5i consumers, decision writers, executors, credentials,
 and deployment remain separate prerequisites. An unavailable adapter remains
 unavailable even when a pure policy result is `escalate` or a human answers an ask.
 
 The synthetic named test module is `tests/test_actions_p0.py`. It does not open a
 store or run Git, processes, network, native queue, scanner, or model operations.
+
+
+## P1 offline durability and reducers (btq-efddg)
+
+P1 adds no daemon, CLI, configured factory, enabled adapter, production schema
+migration, native queue reader/writer, launcher, credential, or transport. Every
+boolean observation is a **synthetic port fact**, not a proof of authentication.
+A future admitted integration must derive it from authoritative current sources.
+`UnavailablePorts` always refuses and all five registry entries remain unavailable.
+
+`requests.new_request` validates the immutable action/origin/resolved tuple before
+allocation. `issue_allocation` must be committed before calling even the fake
+create port. Its creation key contains workstream, logical session, bead and
+sequence. Unknown acknowledgement permits only three read-only lookups, due at
+1/5/30 seconds, and unique adoption. No lookup authorizes another create. Every
+observed shell remains associated; duplicate history requires an exact, currently
+authenticated repair observation with closed-orphan readbacks. That repair also
+cannot recreate a shell. The reducer then orders blocker creation, park while
+retaining the claim, exact requested-source landing, whole native ask binding,
+sufficiency, and filed readback. Source/generation/digest changes cannot skip these
+steps. Two same-session grooming revisions clear old ask/judgement bindings, retain
+session denial history, record a nondecreasing generation, and require a fresh
+park readback before landing. Prior denied canonical identities cannot be groomed
+back into an approvable request.
+
+`pin_ask` retains opaque whole canonical native bytes plus its supplied native
+digest. It does not compute, replace or authenticate that digest. The later native
+adapter must assemble and compare the full action data and native context, using
+the existing native algorithm. Passing fixture bytes here grants no authority.
+
+`decisions` separates durable inbox recording, first valid decision, one write intent, exact native
+readback, close, pin finalization, and committed state. Close alone is insufficient.
+Unknown writes permit readback, not another write. Surface, current principal,
+purpose and current digest observations are all required. A heart's optional
+follow-up proposal has separate bookkeeping and cannot rewrite the original event.
+A revoked/stale prewrite event can be marked invalid; a write-issued event requires
+exact authenticated conflicting native readback before replacement. Every admitted incoming
+event retains an inbox record, including duplicate/superseded decision handling.
+A previously superseded candidate can be reconsidered when the earlier candidate
+is invalidated, without duplicating its inbox row. An invalidated event cannot
+resurrect via replay. An exact authenticated native-conflict readback is adopted as
+native-written, never submitted as another native decision write. Authenticated
+groom/deny cards permit denial at ask-pinned/sufficient; they never grant approval
+before filing, including after two exhausted grooming revisions.
+Denial reasons are bounded to 1024 Unicode scalars, with the same text-safety rules.
+Permission widening defaults to true (hard deny); callers must positively establish
+non-widening. This is a safety default, not a permission-model implementation.
+
+`dispatch` binds one approval/revision/digest/target/attempt and startup nonce hash.
+Preparation has 30 seconds and claims have five seconds, both clipped by the
+original fixed 60-second deadline; retries never reset that deadline. At most three
+launcher preparations use distinct startup/claim nonces. Conditional claim and
+retirement must share the future native atomic boundary. The fixture journal CAS
+models that boundary, committing consumed state before acknowledgement. Consumed,
+unknown or crashed attempts never become a fresh initial-effect capability.
+Reconciliation permits three read-only observations at 1/5/30 seconds; absence is
+not replay permission. Confirmed success plus cleanup releases locks. Exhausted
+absence needs exact currently authenticated fixed repair, which can settle the
+failed attempt and release its locks, but cannot retry it. Actual authentication,
+process-tree cleanup and effect evidence remain unavailable adapter obligations.
+Unconsumed held attempts also support exact authenticated no-effect settlement;
+ambiguous claims first exhaust the bounded readbacks. Persisted `dispatch_kind`
+distinguishes the retained initial attempt from separate read-only reconciliation
+rows. Each reconciliation has a distinct attempt and startup/claim nonce lineage;
+settling its row cannot release the initial attempt's resources or permit an effect.
+Reconcile records cannot become ready, receive an effect nonce, or consume a claim.
+`finish_reconciliation` records the read-only invocation's evidence, outcome and
+cleanup. A parent observation consumes one exact settled child identity and matches
+its evidence/outcome in the same transaction as the parent lookup counter. Child
+identities cannot be reused; the next child requires the preceding parent observation.
+The journal permits one unsettled reconciliation and three total retained invocations
+per approval. Successful parent settlement requires a previously consumed effect claim.
+
+`settle_dispatch` additionally accepts an exact authenticated, explicitly
+operator-attested success after exhausted unknown readbacks and cleanup proof.
+Its `recovery_operator_event` distinguishes that disposition from machine evidence;
+it must not be rendered as machine-verified or attributed execution. Conflicting
+absent/success attestations, stale pins and missing cleanup refuse. This single
+settlement reducer cannot grant a claim.
+An already consumed attempt retains its consumed flag forever.
+
+`FixtureJournal` only creates/opens explicitly private temporary fixture databases,
+with a separate application ID and exact schema. Its v1-to-v2 migration is an
+explicit rollback-able **fixture** migration, not a WSD/native migration. Requests,
+versions and audit events commit together under BEGIN IMMEDIATE. Capacity is two
+outstanding requests per workstream/bead across sessions/generations, 128 globally,
+4096 retained requests and 16384 audit events. Full storage holds for explicit
+recovery; history is not silently pruned. Terminal capacity is freed only after
+all associated shells and blockers have consistent terminal readbacks. Phase-specific
+settlement additionally requires a committed deny, a settled successful initial
+dispatch or exact operator-attested failed initial dispatch with cleanup, a
+known-unposted cancellation, or exact authenticated allocation abandonment.
+Denial settlement and the session denial row commit atomically. Dispatch insertion
+corroborates the same journal's committed execution approve and exact digest/revision
+in its transaction; constructor booleans alone cannot authorize it. Repeated exact
+terminal reports/settlements are acknowledged without new events, including after
+restart and lost acknowledgements. Native
+Beads remain authoritative in any future integration.
+
+Sorted resource, canonical-effect and approval locks survive restart and uncertain
+outcomes. The approval's dispatch row is retained permanently, preventing initial
+replay even after settlement. A denied canonical intent is blocked before shell
+allocation across generations of its logical session; alias spelling is excluded
+from the identity while real effect fields remain. A changed intent must retain
+its session's prior denial identities (at most 64, otherwise hold) rather than
+pretend that the previous denial did not occur. These fingerprints and fixture
+row locators are separate from native approval digests. Existing request progress
+refreshes denial history from the same journal transaction; a later unrelated
+denial cannot freeze cleanup or grooming. A revised or newly filed denied effect
+still refuses. The journal recomputes canonical identities and reconstructs legal
+Request, Decision and Dispatch transitions through the closed pure reducers.
+Arbitrary callback output cannot skip phases, erase immutable pins/history or
+release an unknown/filed request via cancellation. These checks corroborate
+synthetic observations; they do not authenticate future real adapter facts.
+
+Named synthetic offline tests are `test_actions_p0.py`, `test_actions_p1.py`,
+`test_actions_p1_dispatch.py`, `test_actions_p1_hardening.py`, `test_actions_p1_r1.py`, `test_actions_p1_r2.py`, and `test_actions_p1_r3.py`. SQLite operations
+only target temporary test files. Fake ports are in-memory and cannot reach a
+queue, session socket, effect target, model, service or network. Passing them does
+not establish live adapter readiness or authorize deployment.
+
+Remaining integration obligations: no production authentication, cleanup, timer or
+expiry/reboot observer is implemented. An uncertain dispatch retains its locks;
+clock expiry alone never proves launcher exit. `denied` is a reserved dispatch
+state; authenticated request/decision denial currently prevents dispatch insertion.
+The unchanged strict text codec rejects Unicode format characters (including
+ZWJ/ZWNJ); denial reasons now consistently convert that failure to `Refused`.
+The exact v2 fixture schema has no session-key denial index; its bounded scan is
+not presented as constant-time. Audit capacity uses the integer-primary-key maximum
+rather than a repeated full event count. No historical fixture rows are deleted.
+
+
+Third-review integrity repair: decision insertion re-runs `begin_decision` against
+the unique durable request, including its phase, revision, context and supplied
+event authority flags. Dispatch insertion also requires that request to be filed.
+Denial recording loads the exact stored request; a committed denial must settle as
+denied, never cancelled. A filed request can finish protocol bookkeeping after
+exact operator-attested failed dispatch settlement and cleanup; the retained
+dispatch outcome remains failed and never becomes replay permission.
+
+`TransitionObservation` supplies independent synthetic clock, allocation elapsed,
+and recovery inputs to journal validation. These inputs are not inferred from a
+proposed state or authenticated by this package. A future trusted adapter must
+sample current time and authenticate exact recovery scope/readbacks. Nonempty
+observations are retained atomically alongside the state event; refused transitions
+retain neither. Explicit operator attestation is distinguished from machine proof.
+
+### Fourth-review observation and recovery closure
+
+`TransitionObservation.decision_readback` and `.reconciliation_readback` are
+separate typed synthetic port results. The journal does not infer current
+policy, native read success, read-only invocation completion, effect outcome or
+cleanup from a callback's proposed state. Decision operations corroborate the
+current durable request revision/digest. An active decision blocks grooming and
+cancellation; a committed denial writes canonical session denial history in the
+same transaction, before request cleanup. A retained native-conflict decision
+cannot be discarded as an invalidated prewrite event.
+
+Allocation issuance retains its independently sampled valid clock with the
+write-ahead event. The journal derives lookup backoff from that retained sample
+and a new clock, ignoring caller elapsed integers or start assertions. Missing
+historical issuance clocks hold for explicit recovery. Dispatch discontinuity
+(reboot or UTC/monotonic divergence) allows exact authenticated operator outcome
+and cleanup settlement without unreachable scheduled lookups; it never allows
+initial-effect replay or renews a claim. Ordinary continuous-clock uncertainty
+still exhausts the three read-only observations before operator settlement.
+
+A filed request without a live decision or dispatch has an explicit authenticated
+withdrawal/cleanup path through `CancellationRecovery`. Silence alone cannot
+cancel it. The `completed` lifecycle phase now carries `completion_effect`:
+`succeeded` or `absent`, derived from its settled dispatch. `None` on legacy or
+non-completed rows is unknown, never business success. Absent parent evidence
+survives later unknown/absent reads, whose own child events remain retained.
+Held preparation attempts cannot allocate read-only reconciliation children.
+
+The private fixture journal still performs a bounded approval lookup over at
+most 4096 request rows. Indexed persistence and its migration/rollback proof are
+deferred noncritical performance work; no production contention guarantee is
+claimed. All new observations are explicit synthetic attestations, not verified
+credentials or proof a real worker ran. All five live adapters remain unavailable.
+
+
+### Fifth-review independent observations and bounded recovery
+
+Journal dispatch transitions require a closed `dispatch_operation` tag. Worker
+reports require a separate `DispatchReadback` bound to approval, revision, digest,
+target, attempt, claim and expected version; callback proposals cannot supply
+their own effect evidence. Existing non-null evidence cannot be overwritten, and
+definitive absence cannot be downgraded through `uncertain`. These readbacks are
+synthetic test-port facts, not authenticated real worker observations.
+
+Every terminal request requires independent `CleanupReadback` for its exact key,
+origin, version and complete shell set, including native terminal/blocker facts.
+Visible ask-pinned/sufficient requests require the same authenticated withdrawal
+observation as filed requests; silence or an arbitrary cancellation proposal does
+not discard a visible decision opportunity.
+
+Allocation and dispatch lookup backoffs are measured from the previous retained
+lookup clock (or issuance/start for the first read), so their intervals are truly
+1, 5 and 30 seconds. Clock-discontinuity recovery on either path requires an
+explicit fixture clock callback. At dispatch insertion, allocation issuance and
+each clock-bearing transition, the journal samples it once inside the transaction,
+injects that sample into the canonical observation, and retains a separate
+clock-provenance event. `ObservedReducer` passes that canonical observation to the
+proposal callback so it need not predict an advancing clock. Recovery
+requires that provenance for the exact retained anchor and a matching explicit
+dispatch anchor; missing legacy provenance holds. A caller-selected boot ID alone
+cannot bypass reads while the trusted clock provider remains unchanged. The mutable
+fixture `db.clock` callback is an explicit trusted test-injection boundary; retained
+provenance does not defend against a caller replacing that provider. It is not a
+production clock-port implementation.
+The exact authenticated recovery may adopt a canonical allocation with closed
+orphans, abandon the cleaned allocation, or settle the dispatch; it never recreates
+a shell or grants another effect claim. Historical missing anchors remain HOLD.
+
+The fixed 16384-event limit reserves 96 recovery events per admitted outstanding
+request. New admission and ordinary progress stop before consuming those reserves.
+Only finite denial/terminal/recovery progress can consume its owner's reserve;
+usage is durably retained in the same transaction, including its own usage marker.
+One owner's repeated operations cannot consume another owner's reserve. Three
+serial reconciliation invocations, their observations and final authenticated
+settlement/cleanup are covered by actual-capacity regressions, including a sampled
+clock on every transition, three independently cleaned failed preparations, and
+an unapplied final read. Those paths consume at most 44 of the 96 reserved events.
+No history is pruned,
+no event limit is raised, and no archival mechanism is introduced. A fully retained
+terminal journal can still HOLD new work; archival/retention requires a separately
+admitted design. An already-full historical journal without headroom also holds.
+
+Review R5 and all eight author dispositions are retained in `docs/reviews/`. The
+new named offline module is `tests/test_actions_p1_r5.py`; previous R1–R4 modules
+remain part of the regression command. No live adapter readiness is claimed.
+
+
+R7 distinguishes bounded read-only invocation attempts from actual target reads.
+A failed preparation, after exact authenticated cleanup settlement, consumes one
+of the three child invocation slots but supplies no `reconciliation_effect` and
+never increments the parent's read count. A later bounded child may proceed only
+when all previous children are settled and every successful read has been applied.
+Read-only children cannot restart preparation and thereby multiply that limit.
+After all three retained single-launch children settle, an existing exact scoped
+operator recovery can attest the parent outcome and cleanup using the exact child
+IDs. This retains operator attribution; it does not turn failed reads into absence.
+Live children, invented IDs, legacy multiplied launch histories and missing cleanup
+remain HOLD. No extra effect claim or general clearing authority is introduced.
+
+
+R8 gates each child invocation before insertion at the successive 1/5/30-second
+intervals, even when preparation fails. Preparation failure requires a separate
+`LauncherReadback` bound to the exact approval, attempt, startup and version, with
+launcher-exited and no-children observations. These remain explicit synthetic
+attestations, not process inspections.
+
+Authenticated parent settlement must acknowledge the exact retained child
+dispositions, including every unapplied result. A contradictory success on a
+failed or unconsumed parent has a bounded operator-attested outcome/cleanup exit;
+it does not erase that child evidence, consume the initial claim, authorize a
+replay, or invent further reads. Three arbitrary attempt IDs alone do not prove
+exhaustion. The journal binds supplied dispositions to actual durable children;
+standalone reducers cannot independently authenticate their synthetic inputs.

@@ -1,0 +1,69 @@
+{
+  "review_ordinal": 7,
+  "actual_verdict": "REVISE",
+  "raw_sha256": "a8bbceec64ae43381783bfcdbd2d55388617bdf6915c1e6391012b46d888e400",
+  "review_range": "35176c855b2773f0d1ab51f577c4e02c95a1967b..fb9a30c51865d56406e94882170344eaea8f126f",
+  "all_prior_rounds_preserved": true,
+  "findings": [
+    {
+      "ordinal": 1,
+      "finding_verbatim": "1. `src/heterodyne/actions/journal.py:612`: Clock-discontinuity verification compares the journal's sampled clock against an anchor the caller supplied (the request issuance/lookup observation.now, Dispatch.started from prepare(now), or the dispatch lookup observation.now), so a caller-selected boot ID still bypasses the three lookups, contradicting README line 271.\n\n   Failure scenario: Journal created with clock=real sampler on boot 'B'. Caller issues allocation (allocation-intent -> allocation-unknown, transitions.py:154) with observation.now=Clock('fake',1,1); _observed_clock accepts any well-formed clock and it is retained as the request-observation. Immediately (0 lookups) the caller transitions to reconciled-abandoned (or recover_allocation) with a single AbandonmentRecovery(clock_discontinuity=True, observed_now=<sampler value>). _recovery_clock samples 'B', reads started='fake', clock_elapsed raises on the boot_id mismatch, and the transition is accepted as discontinuous; recover_allocation/settle_request then skip allocation_lookups==3. The same works for dispatch: prepare/ready/consume all run on boot 'fake' (_within only checks against value.started), the dispatch goes uncertain, and settle_dispatch with clock_discontinuity skips the three reconciliation lookups. The R6 tests themselves drive caller clocks on boot 'continuous'.",
+      "disposition": "fixed",
+      "author_response": "Journal-sampled exact clock provenance is retained at dispatch insertion and every clock-bearing transition, including issuance and lookups. Discontinuity recovery requires the exact anchor provenance. Legacy/missing provenance holds. Fake issuance/prepare/lookup and genuine reboot regressions cover this; older positive tests now model independent evolving samples."
+    },
+    {
+      "ordinal": 2,
+      "finding_verbatim": "2. `src/heterodyne/actions/journal.py:431`: A reconciliation child that leaves the preparing state through preparation-failed (not rejected for dispatch_kind='reconcile') can only be settled by an operator, which leaves it without reconciliation_effect. After that the parent can never add another child (reconciliations != lookups) or advance lookups, so its resources stay held permanently unless a clock discontinuity is proven.\n\n   Failure scenario: Parent uncertain with lookups=0. A reconcile child is added, its launcher fails, and preparation-failed moves it to held. restart-preparation is refused after 3 attempts or past its 60s deadline (or under reserve, because restart is not counted as recovery progress), so the child stays held. With the new R6 fence the parent cannot settle while the child is unsettled. The operator settles the child with settle_dispatch, giving state failed, settled, reconciliation_effect=None. The lookup operation now refuses this child (reconciliation_effect is None). _add_reconciliation counts 1 child against parent.reconciliation_lookups=0 and refuses every new child. settle_dispatch on the parent needs lookups==3. The parent is wedged and its resource, effect and approval locks are never released.",
+      "disposition": "fixed",
+      "author_response": "D4 lines 546\u2013548 bounds three read-only attempts, then needs-human; lines 558\u2013570 permits exact authenticated disposition/cleanup when machine proof is impossible. Failed preparation consumes one retained single-launch child slot but never a read count or target absence. All three children must be settled with cleanup before exact journal-correlated operator settlement; failed, mixed, live-child and invented-ID regressions cover this. Children cannot multiply attempts by restarting preparation; legacy multiplied histories hold."
+    },
+    {
+      "ordinal": 3,
+      "finding_verbatim": "3. `src/heterodyne/actions/requests.py:395`: settle_request still durably copies recovery_operator_event and recovery_evidence from any AbandonmentRecovery or CancellationRecovery it is given, including on 'completed', 'denied' and allocated..landed cancellation paths that never validate it (R6#6 is still present).\n\n   Failure scenario: A 'completed' transition whose observation carries abandonment_recovery=AbandonmentRecovery(operator_event='forged', evidence=<digest>, authenticated_current=False, clock_discontinuity=False) passes _recovery_clock (single recovery, no discontinuity). The terminal request is written with recovery_operator_event='forged' as if an authenticated operator recovery happened.",
+      "disposition": "fixed",
+      "author_response": "settle_request rejects a recovery unless this terminal phase actually validates the corresponding abandonment or visible-ask withdrawal. Unused recovery cannot create a terminal operator audit attribution."
+    },
+    {
+      "ordinal": 4,
+      "finding_verbatim": "4. `src/heterodyne/actions/journal.py:584`: The multiple-recovery check excludes cancellation_recovery, so an observation can still carry two recovery attestations (abandonment plus cancellation). Which one applies is decided implicitly by value.phase in request_transition.\n\n   Failure scenario: A 'cancelled' transition carrying both an AbandonmentRecovery(clock_discontinuity=True) and a CancellationRecovery makes the journal sample and verify the abandonment clock (possibly replacing observation.now), while settle_request uses the cancellation recovery. Unused, conflicting attestations are retained in the observation event and the 'exactly one recovery' invariant the R6 fix claims does not hold.",
+      "disposition": "fixed",
+      "author_response": "The exclusive-recovery guard now includes cancellation_recovery. Two attestations are rejected before reduction, including no-op proposals."
+    },
+    {
+      "ordinal": 5,
+      "finding_verbatim": "5. `src/heterodyne/actions/dispatch.py:348`: settle_dispatch re-derives discontinuity against 'clock_anchor or value.started', while the journal verified it against _dispatch_lookup_clock (the last lookup's clock) and only checks clock_anchor when it is non-None, so the two disagree when lookups>0 and the anchor is None (R6#7 is still present).\n\n   Failure scenario: Lookups=2, clock_anchor=None, last lookup L on boot B2, started on boot B1, sampled now on boot B2 and continuous with L. The journal raises clock-recovery-not-discontinuous, which is correct. With now on B3 the journal accepts. A reducer-only caller is checked against started instead and accepts the B2 case. Two validators exist for one fact, and only the journal's is safe.",
+      "disposition": "fixed at durable boundary; pure reducer limitation retained",
+      "author_response": "The journal now requires clock_anchor to exactly equal its proven current dispatch anchor, including when lookups are nonzero. None no longer falls back at the durable boundary. The standalone pure reducer still permits its original-start fallback for explicit synthetic use; it does not prove journal provenance and is not an operational port. The existing last-lookup positive/forged-anchor fixture now includes sampled anchor provenance."
+    },
+    {
+      "ordinal": 6,
+      "finding_verbatim": "6. `src/heterodyne/actions/journal.py:364`: add_dispatch and allocation issuance (allocation-intent treated as recovery progress in _recovery_progress) can spend the owner's terminal reserve on new effect work, contrary to 'historical missing headroom HOLD new work' (R6#4 is still present).\n\n   Failure scenario: The journal is at MAX_EVENTS minus reserved. add_dispatch calls _terminal_budget and inserts an initial dispatch plus its locks, using reserve events. preparing->ready is not progress, so ready is refused under reserve and the dispatch can only go held, consuming more reserve. The finite 96-event recovery headroom is burned on work that should have been held.",
+      "disposition": "fixed",
+      "author_response": "New initial dispatch admission no longer selects terminal reserve. Initial allocation issuance no longer qualifies as recovery progress. Capacity refusal rolls back all initial dispatch/resource writes; two focused reserve regressions cover this. Read-only reconciliation and finite terminal settlement retain reserve access."
+    },
+    {
+      "ordinal": 7,
+      "finding_verbatim": "7. `src/heterodyne/actions/dispatch.py:298`: reconcile_lookup's succeeded branch runs before the failed-state preservation, so a parent already proven definitively absent is flipped to settled 'succeeded' by a later contradictory child read (R6#5 is still present).\n\n   Failure scenario: report(effect=absent, evidence=E1, cleanup=True) gives state failed. The next finished child reports reconciliation_effect=succeeded with cleanup and evidence E2. The lookup sets state=succeeded, settled=True, evidence=E2, the R6 fence passes, resources are released, and the request completes with completion_effect='succeeded' and no operator review.",
+      "disposition": "fixed",
+      "author_response": "Contradictory success after definitive absence is refused and requires authenticated recovery. Prior failed evidence remains unchanged; ordinary unknown/absent reads retain existing behavior."
+    },
+    {
+      "ordinal": 8,
+      "finding_verbatim": "8. `src/heterodyne/actions/journal.py:541`: The new child-liveness fence duplicates the reconciliation-children scan in _add_reconciliation (same LIKE query and decode loop) instead of sharing one helper.\n\n   Failure scenario: Two copies of the child enumeration (journal.py:410-413 and :541-547) must stay in sync. A future change to the child key format or settled semantics updated in one place silently weakens either the admission check or the release fence.",
+      "disposition": "fixed",
+      "author_response": "_reconciliation_children is shared by admission, the parent release fence and exact exhaustion provenance validation."
+    },
+    {
+      "ordinal": 9,
+      "finding_verbatim": "9. `src/heterodyne/actions/journal.py:603`: Dead checks remain in _recovery_clock: the inner 'not isinstance(recovery, DispatchRecovery)' and the final 'else: raise clock-recovery-record-mismatch' for Decision are now unreachable after the new up-front mismatch check.\n\n   Failure scenario: Redundant branches make the validation order harder to audit and suggest record kinds can reach those points when they cannot. Removing them keeps a single mismatch guard.",
+      "disposition": "fixed",
+      "author_response": "Removed the redundant inner recovery type failure and terminal Decision branch. The upfront mismatch guard remains; local type narrowing is explicit without a second raising mismatch branch."
+    },
+    {
+      "ordinal": 10,
+      "finding_verbatim": "10. `src/heterodyne/actions/transitions.py:157`: Request transitions are still routed by proposal shape (recovery_operator_event presence, value.phase) instead of an explicit operation tag that requires exactly one matching observation type (R6#8 is still present).\n\n    Failure scenario: Findings 1, 3 and 4 above all come from observation fields being selected implicitly. Each new request recovery path must re-audit which recovery field is consulted, which is how decoy and unvalidated-recovery routes keep reappearing.",
+      "disposition": "deferred structural refactor",
+      "author_response": "Request routing remains a closed proposal-validated reducer map rather than adding a new operation-tag API in this critical repair. Actual bypasses from findings 1/3/4 are fixed with independent sampled provenance, terminal recovery eligibility and the four-field exclusive guard. A fully tagged request API remains noncritical architectural debt; no claim that this finding itself is fully resolved."
+    }
+  ]
+}
