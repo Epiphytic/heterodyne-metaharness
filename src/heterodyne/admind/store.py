@@ -842,6 +842,13 @@ class Store:
         return [_ask(r) for r in rows]
 
     @_locked
+    def approval_lineage(self, bead: str, limit: int) -> list[AskRow]:
+        """Bounded approval history in insertion order, excluding unrelated question/merge asks."""
+        rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE bead=? AND kind='approval' "  # noqa: S608
+                               "ORDER BY rowid LIMIT ?", (bead, limit)).fetchall()
+        return [_ask(r) for r in rows]
+
+    @_locked
     def capacity_asks(self) -> list[AskRow]:
         """Separate capacity projection; raw status selectors retain their original meaning."""
         rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE {CAPACITY_ACTIVE_SQL} "  # noqa: S608

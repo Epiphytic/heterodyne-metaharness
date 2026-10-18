@@ -806,10 +806,10 @@ class Admind:
         self.posts_in_flight += 1
         try:
             async with self.ask_post_lock:
+                with self.store.transaction(read_only=True):
+                    if operations.bead_binding(self.store, req.bead) is not None:
+                        return asks.refused("source-owned bead; use approval.operation.v1")
                 if req.kind == "approval":
-                    with self.store.transaction(read_only=True):
-                        if operations.bead_binding(self.store, req.bead) is not None:
-                            return asks.refused("source-owned bead; use approval.operation.v1")
                     return await self.post_approval(req, peer)
                 return self.post_ask(req, peer)
         finally:
@@ -1455,6 +1455,11 @@ class Admind:
                     unauthorised = not self.authorised(mid)
                 if not unauthorised:
                     if not self.store.issue_decision(a, maintenance_retry=maintenance_retry):
+                        with self.store.transaction():
+                            if not operations.decision_allowed(self.store, a.ask_id):
+                                self.close_refused(a, "cancelled", "Source withdrew this approval request; "
+                                                   "no native decision was issued.", "source-withdrawn")
+                                return
                         self.conflict(a, "deciding")
                         self.finish(mid, "done", CONFLICT.format(ask_id=a.ask_id, bead=bead), "ask")
                         return
@@ -1560,8 +1565,22 @@ class Admind:
             with self.store.transaction():
                 binding = operations.bead_binding(self.store, bead)
                 if binding is not None and binding[1]:
-                    # Withdrawal fenced replacement cards, not the already issued native attempt.
+                    # Both callers have positive evidence of no decision: preflight refusal or
+                    # actual untouched readback. Withdrawal forbids replacement, not settlement.
+                    text = "Source withdrew this approval request; no native decision was recorded."
+                    closed = self.store.close_attempt(
+                        a.ask_id, mid, expect_status="deciding", settled=settled, exit_status=code,
+                        new_status="cancelled", outcome=text, decided_by=None)
+                    if closed:
+                        self.finish(mid, "done", text, "ask")
                     return
+                if isinstance(fresh, FreshCard):
+                    try:
+                        operations.before_commit(self.store, bead, None if binding is None else binding[0])
+                    except operations.Invalid as error:
+                        fresh = ("Source lineage cannot accept a replacement card.", str(error))
+                        text = STALE_NOT_REFRESHED.format(bead=bead, shown=shown, now=now_,
+                                                          why=fresh[0].rstrip("."))
                 closed = self.store.close_attempt(a.ask_id, mid, expect_status="deciding", settled=settled,
                                                   exit_status=code, new_status="stale", outcome=text,
                                                   decided_by=None)
@@ -1767,6 +1786,19 @@ class Admind:
             return
         # Backoff persists even on failed policy/readback, including across daemon restarts.
         if not self.store.defer_maintenance(a, self.wallclock() + MAINTENANCE_RETRY_SECONDS):
+            return
+        if not operations.decision_allowed(self.store, ask_id):
+            # Withdrawal stops future issuance, but cannot attest what a previous child did.
+            # Read-only native evidence must still distinguish untouched from recorded/unknown.
+            settled, back = await self.read_and_settle(a, row.bead)
+            if settled == "recorded" and back is not None:
+                self.settle_maintenance_recorded(a, row, back)
+            elif settled == "untouched":
+                with self.store.transaction():
+                    self.close_refused(a, "cancelled", "Source withdrew this approval request; "
+                                       "no native decision was recorded.", "source-withdrawn")
+            else:
+                self.hold_maintenance(a, "native-conflict" if settled == "blocked" else "read-unavailable")
             return
         reason = self.maintenance_authority_reason(a)
         if reason is not None:

@@ -310,8 +310,11 @@ def test_refresh_after_withdraw_does_not_emit_descendant(unit: Unit) -> None:
     before = len(unit.store.pending())
     asyncio.run(unit.daemon.refresh(APPROVE, card_row(), readout(digest=D2), "refused", None, ""))
     after = call(unit, request("status"))
-    assert len(after.lineage) == 1 and after.lineage[0].status == "deciding"
-    assert len(unit.store.pending()) == before
+    assert len(after.lineage) == 1 and after.lineage[0].status == "cancelled"
+    assert after.lineage[0].attempt is None
+    assert after.result == "withdrawn"
+    # Positive no-decision settlement queues the original attempt reply, never a new card.
+    assert len(unit.store.pending()) == before + 1
 
 
 def test_concurrent_exact_posts_create_one_card(unit: Unit) -> None:

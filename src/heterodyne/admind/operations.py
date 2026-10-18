@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import re
 import sqlite3
 import uuid
 from typing import TYPE_CHECKING, Literal, NamedTuple
@@ -23,7 +22,6 @@ if TYPE_CHECKING:
 
 MAX_REQUEST, MAX_REPLY = 16_384, 1_048_576
 MAX_OPERATIONS, MAX_LINEAGE, MAX_PARTS = 4096, 256, 4096
-BEAD = re.compile(r"[a-z][a-z0-9-]{0,31}-[0-9a-z]{5}")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS approval_operations (
@@ -94,11 +92,14 @@ def check(req: Request) -> str | None:
             return "malformed"
         if any(fulfillment.HEX.fullmatch(x) is None for x in (req.source, req.journal, req.intent_hash)):
             return "identity"
-        if str(uuid.UUID(req.operation)) != req.operation:
+        try:
+            if str(uuid.UUID(req.operation)) != req.operation:
+                return "identity"
+        except ValueError:
             return "identity"
         if (req.bead is None) != (req.context_digest is None):
             return "binding"
-        if req.bead is not None and (BEAD.fullmatch(req.bead) is None
+        if req.bead is not None and (approvals.BEAD_ID.fullmatch(req.bead) is None
                                     or fulfillment.HEX.fullmatch(req.context_digest or "") is None):
             return "binding"
         if req.mode == "post" and req.bead is None:
@@ -116,6 +117,8 @@ def decode(data: bytes) -> Request:
         if why:
             raise Invalid(why)
         return req
+    except Invalid:
+        raise
     except (ValueError, msgspec.DecodeError, RecursionError):
         raise Invalid("malformed") from None
 
@@ -161,15 +164,13 @@ def decision_allowed(store: Store, ask_id: str) -> bool:
 def lineage(store: Store, bead: str | None) -> list[AskRow]:
     if bead is None:
         return []
-    ids = store.db.execute("SELECT ask_id FROM asks WHERE bead=? ORDER BY rowid LIMIT ?",
-                           (bead, MAX_LINEAGE + 1)).fetchall()
-    if len(ids) > MAX_LINEAGE:
+    history = store.approval_lineage(bead, MAX_LINEAGE + 1)
+    if len(history) > MAX_LINEAGE:
         raise Invalid("lineage-capacity")
     rows: list[AskRow] = []
     seen: set[str] = set()
-    for item in ids:
-        row = store.ask(str(item[0]))
-        if row is None or row.kind != "approval" or asks.normalise_id(row.ask_id) != row.ask_id:
+    for row in history:
+        if row.kind != "approval" or asks.normalise_id(row.ask_id) != row.ask_id:
             raise Invalid("lineage-incomplete")
         if row.digest is None or fulfillment.HEX.fullmatch(row.digest) is None:
             raise Invalid("lineage-incomplete")
@@ -228,29 +229,47 @@ def view(store: Store, req: Request, uid: int, result: str = "ok", code: str = "
     if bound is None:
         return Reply("not-found", "not-found")
     rows = lineage(store, req.bead)
-    views: list[Row] = []
-    total = 0
-    for row in rows:
-        linked = store.db.execute("SELECT operation_key FROM approval_operation_asks WHERE ask_id=?",
-                                  (row.ask_id,)).fetchone()
-        if linked is None or linked[0] != key(req):
-            raise Invalid("lineage-incomplete")
-        answers = store.db.execute("SELECT message_id FROM ask_answers WHERE ask_id=? ORDER BY seq LIMIT ?",
-                                  (row.ask_id, MAX_PARTS + 1)).fetchall()
-        attempts = store.db.execute("SELECT ref FROM ask_attempts WHERE ask_id=? ORDER BY rowid LIMIT ?",
-                                   (row.ask_id, MAX_PARTS + 1)).fetchall()
-        parts = store.db.execute("SELECT key FROM outbox WHERE key GLOB ? OR key GLOB ? OR key GLOB ? "
-                                "ORDER BY seq LIMIT ?",
-                                (f"ask:{row.ask_id}:*", f"asknote:{row.ask_id}:*",
-                                 f"askd:{row.ask_id}:*", MAX_PARTS + 1)).fetchall()
-        total += len(parts) + len(answers) + len(attempts)
-        if total > MAX_PARTS:
-            raise Invalid("lineage-parts-capacity")
-        attempt = store.current_attempt(row.ask_id)
-        views.append(Row(row.ask_id, row.status, row.digest, row.refreshed_from,
-                         None if attempt is None else attempt.message_id,
-                         [str(a[0]) for a in answers], [str(a[0]) for a in attempts],
-                         [str(a[0]) for a in parts]))
+    operation_key = key(req)
+    links = store.db.execute(
+        "SELECT l.ask_id,a.attempt FROM approval_operation_asks l JOIN asks a ON a.ask_id=l.ask_id "
+        "WHERE l.operation_key=?", (operation_key,)).fetchall()
+    current = {str(item[0]): None if item[1] is None else str(item[1]) for item in links}
+    if set(current) != {row.ask_id for row in rows}:
+        raise Invalid("lineage-incomplete")
+    answers = store.db.execute(
+        "SELECT x.ask_id,x.message_id FROM ask_answers x JOIN approval_operation_asks l "
+        "ON l.ask_id=x.ask_id WHERE l.operation_key=? ORDER BY x.ask_id,x.seq LIMIT ?",
+        (operation_key, MAX_PARTS + 1)).fetchall()
+    attempts = store.db.execute(
+        "SELECT x.ask_id,x.ref,x.message_id FROM ask_attempts x JOIN approval_operation_asks l "
+        "ON l.ask_id=x.ask_id WHERE l.operation_key=? ORDER BY x.ask_id,x.rowid LIMIT ?",
+        (operation_key, MAX_PARTS + 1)).fetchall()
+    # One pass over outbox keys, joined through the indexed lineage IDs. No per-row GLOB scans.
+    parts = store.db.execute(
+        "SELECT l.ask_id,o.key FROM outbox o CROSS JOIN approval_operation_asks l ON l.ask_id=CASE "
+        "WHEN o.key GLOB 'ask:????:*' THEN substr(o.key,5,4) "
+        "WHEN o.key GLOB 'asknote:????:*' THEN substr(o.key,9,4) "
+        "WHEN o.key GLOB 'askd:????:*' THEN substr(o.key,6,4) END "
+        "WHERE l.operation_key=? ORDER BY o.seq LIMIT ?",
+        (operation_key, MAX_PARTS + 1)).fetchall()
+    if len(answers) + len(attempts) + len(parts) > MAX_PARTS:
+        raise Invalid("lineage-parts-capacity")
+    answer_ids: dict[str, list[str]] = {row.ask_id: [] for row in rows}
+    decision_refs: dict[str, list[str]] = {row.ask_id: [] for row in rows}
+    outbox_keys: dict[str, list[str]] = {row.ask_id: [] for row in rows}
+    observed_attempts: set[tuple[str, str]] = set()
+    for item in answers:
+        answer_ids[str(item[0])].append(str(item[1]))
+    for item in attempts:
+        decision_refs[str(item[0])].append(str(item[1]))
+        observed_attempts.add((str(item[0]), str(item[2])))
+    for item in parts:
+        outbox_keys[str(item[0])].append(str(item[1]))
+    if any(attempt is not None and (ask_id, attempt) not in observed_attempts
+           for ask_id, attempt in current.items()):
+        raise Invalid("lineage-incomplete")
+    views = [Row(row.ask_id, row.status, row.digest, row.refreshed_from, current[row.ask_id],
+                 answer_ids[row.ask_id], decision_refs[row.ask_id], outbox_keys[row.ask_id]) for row in rows]
     if bound[4] and result == "ok":
         result = ("decision-in-flight" if any(r.status in {"deciding", "uncertain"} or r.attempt is not None
                                              for r in views) else "withdrawn")
@@ -305,8 +324,9 @@ async def handle(daemon: Admind, req: Request, peer: Peer) -> Reply:
 async def post(daemon: Admind, req: Request, peer: Peer) -> Reply:
     if req.bead is None or daemon.approve_bead is None:
         return Reply("refused", "approvals-unavailable")
-    refusal = daemon.approval_post_refusal(req.bead)
-    if refusal:
+    with daemon.store.transaction(read_only=True):
+        adopting = bool(lineage(daemon.store, req.bead))
+    if not adopting and daemon.approval_post_refusal(req.bead):
         return Reply("refused", "post-gate")
     try:
         readout = await daemon.approve_bead.read(req.bead)
@@ -334,17 +354,20 @@ async def post(daemon: Admind, req: Request, peer: Peer) -> Reply:
         if not isinstance(fresh, FreshCard):
             return Reply("refused", "post-gate")
         enroll(daemon.store, req, peer.uid if peer.uid is not None else -1)
-        daemon.commit_approval(fresh, peer.pid, operation_key=key(req))
+        superseded = daemon.commit_approval(fresh, peer.pid, operation_key=key(req))
         reply = view(daemon.store, req, peer.uid if peer.uid is not None else -1, "posted", "posted")
         record_transition(daemon.store, req, peer.uid if peer.uid is not None else -1, peer.pid,
                           Reply("not-found", "not-found"), reply)
+    daemon.audit_posted(fresh, peer.pid, superseded)
     return reply
 
 
 def withdraw(daemon: Admind, req: Request, uid: int, pid: int | None = None) -> Reply:
     with daemon.store.transaction():
         before = view(daemon.store, req, uid)
-        if before.withdrawn and not any(row.status in {"open", "answered"} for row in before.lineage):
+        if before.withdrawn and not any(row.status in {"open", "answered"}
+                                        and not daemon.store.fulfillment.protected(row.ask_id)
+                                        for row in before.lineage):
             return before
         enroll(daemon.store, req, uid)
         rows = lineage(daemon.store, req.bead)
@@ -355,7 +378,7 @@ def withdraw(daemon: Admind, req: Request, uid: int, pid: int | None = None) -> 
                     or daemon.store.current_attempt(row.ask_id) is not None):
                 continue
             if daemon.store.fulfillment.protected(row.ask_id):
-                raise Invalid("fulfillment-protected")
+                continue
             daemon.store.set_ask(row.ask_id, "cancelled")
             daemon.ask_notice(row.ask_id, "cancelled", key(req),
                               f"Ask {row.ask_id} was withdrawn by its source. "
