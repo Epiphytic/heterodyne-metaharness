@@ -45,8 +45,8 @@ def test_all_fields_required(key: str) -> None:
     ("op", "tick"), ("op", None), ("version", True), ("version", 1.0),
     ("version", 2), ("version", "1"), ("generation", 3),
     ("job", "backup_bundle"), ("job", "PICKUP"), ("job", []),
-    ("request_id", "123"), ("generation", "{" + str(uuid4()) + "}"),
-    ("installation_id", str(uuid4()).upper()), ("installation_id", None),
+    ("request_id", "123"), ("generation", "{9b4ac8ab-4f66-48ee-8ebb-84ed6383d899}"),
+    ("installation_id", "A691605E-52FE-4BC0-AC24-ACEE2DAE1E62"), ("installation_id", None),
 ])
 def test_wrong_types_and_variants_refused(key: str, value: object) -> None:
     raw = payload()
@@ -105,7 +105,7 @@ def test_reply_distinguishes_admission_from_unconfirmed() -> None:
 
 
 @pytest.mark.parametrize("key,value", [
-    ("version", 1), ("request_id", str(uuid4())), ("status", "success"),
+    ("version", 1), ("request_id", "efe0e283-4efc-4a75-810d-021cc1fdede1"), ("status", "success"),
     ("reason", "stopping"), ("targets", "129"), ("targets", "02"),
     ("targets", "-1"), ("targets", 2), ("joined", "3"), ("joined", "1.0"),
 ])
