@@ -1091,10 +1091,22 @@ class Admind:
         if sub is not None:
             self.remind(mid, sub)
             return
+        from heterodyne.admind.retirement import publish_notice
+        with self.store.transaction():
+            for ask_id, attempt_id, _ in self.store.maintenance_pending():
+                attempt = self.store.current_attempt(ask_id)
+                if attempt is not None and attempt.message_id == attempt_id:
+                    publish_notice(self, attempt, refresh=True)
         at = asks.now()
         lines = [asks.list_line(r, at) for r in self.store.capacity_asks()]
         lines += [f"{r.ask_id} fulfilled (lifecycle); original answer retained"
                   for r in self.store.fulfilled_asks(20)]
+        for ask_id, attempt_id, _ in self.store.maintenance_pending():
+            attempt = self.store.current_attempt(ask_id)
+            proof = None if attempt is None else self.store.retirement.eligible(attempt)
+            if proof is not None:
+                lines.append(f"{ask_id} attempt {attempt_id}: reply to its recovery notice with "
+                             f"!asks retire {proof.token}")
         self.finish(mid, "done", "\n".join(lines) or NO_ACTIVE_ASKS, "cmd")
         self.audit.write("command", message_id=mid, command="asks", asks=len(lines))
 
@@ -1380,14 +1392,15 @@ class Admind:
                             CONFLICT.format(ask_id=a.ask_id, bead=row.bead if row else ""), "ask")
                 return
             decision = "denial" if a.action == "deny" else "approval"
-            next_step = ("Automatic retry is suspended. Authenticated recovery is not available in this "
-                         "version; the separate recovery design must be approved and implemented. "
+            next_step = ("Automatic retry is suspended. See the separate recovery notice for eligibility. "
                          if reason in MAINTENANCE_SUSPENDED else
                          "It will retry after fresh card and operator-authority checks. ")
             self.ask_notice(a.ask_id, "maintenance-" + reason, a.message_id,
                             f"Ask {a.ask_id}: {decision} received and held ({reason}). "
                             "No decision was issued by the invocation that returned maintenance HOLD. "
                             + next_step + "The original reply is preserved.", a.message_id)
+            from heterodyne.admind.retirement import publish_notice
+            publish_notice(self, a, refresh=reason in MAINTENANCE_SUSPENDED)
         self.audit_quietly("ask", action="maintenance-held", ask_id=a.ask_id,
                            message_id=a.message_id, reason=reason)
 
@@ -1414,7 +1427,7 @@ class Admind:
         authority_reason: str | None = None
         stop: tuple[str, str, str] | None = None
         r: Readout | Busy | None = None
-        proven_hold = False
+        proven_hold: approvals.MaintenanceHold | None = None
         latch_token = self.store.get("maintenance_latch_token")
         try:
             self.audit.write("ask", action="deciding", message_id=mid, ask_id=a.ask_id, bead=bead,
@@ -1435,7 +1448,7 @@ class Admind:
                         return
                     result = await ab.decide(a, bead, on_launch)        # step 7
                     if isinstance(result, approvals.MaintenanceHold):
-                        proven_hold = True
+                        proven_hold = result
                     else:
                         code, line = result
         except asyncio.CancelledError:
@@ -1449,7 +1462,7 @@ class Admind:
                 word = (exc.word if isinstance(exc, BtqError)
                         else "unavailable" if isinstance(exc, OSError) and audited else "error")
                 stop = ("open", PREFLIGHT_FAILED.format(bead=bead, word=word), word)
-        if proven_hold:
+        if proven_hold is not None:
             # Outside the ambiguous-child catch. Once this small commit succeeds, overlay/notice
             # publication failure cannot turn a proven HOLD into an ordinary restart settlement.
             # A process/storage failure before this commit is still ordinary R26 unknown issuance;
@@ -1459,7 +1472,9 @@ class Admind:
                 self.finish(mid, "done", CONFLICT.format(ask_id=a.ask_id, bead=bead), "ask")
                 return
             revoked = self.latched() or self.store.get("maintenance_latch_token") != latch_token
-            self.hold_maintenance(a, "latched" if revoked else "maintenance")
+            with self.store.transaction():
+                self.store.retirement.record_hold(a, proven_hold)
+                self.hold_maintenance(a, "latched" if revoked else "maintenance")
             return
         if unauthorised:
             if maintenance_retry:
@@ -2468,6 +2483,10 @@ class Admind:
                 await self.decide(mid, cmd, target)
                 return
             if cmd.name == "asks":
+                if cmd.arg == "retire":
+                    from heterodyne.admind.retirement import retire
+                    await retire(self, mid, cmd.rest or "", target)
+                    return
                 await self.list_asks(mid, cmd.arg)
                 return
             if cmd.name == "answer":

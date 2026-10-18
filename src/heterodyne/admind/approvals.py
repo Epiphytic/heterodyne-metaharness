@@ -10,8 +10,11 @@ anything is settled. The outcome of a decision is never parsed from its output: 
 """
 
 import asyncio
+import hashlib
 import json
+import os
 import re
+import stat
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -110,7 +113,10 @@ Settled = Literal["recorded", "untouched", "blocked"]
 
 @dataclass(frozen=True)
 class MaintenanceHold:
-    """The enrolled child proved this invocation issued no native mutation."""
+    """Closed child result; empty legacy markers are never retirement evidence."""
+
+    stdout: bytes = b""
+    adapter_identity: str = ""
 
 
 def maintenance_hold(code: int, out: bytes) -> bool:
@@ -167,6 +173,21 @@ class ApproveBead:
     def __init__(self, binary: Path) -> None:
         self.binary = binary
 
+    def identity(self) -> str:
+        """Bounded actual adapter bytes, captured on both sides of the child; no caller identity."""
+        try:
+            fd = os.open(self.binary, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+            with os.fdopen(fd, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= 8 << 20:
+                    return ""
+                source = stream.read((8 << 20) + 1)
+            if not source or len(source) > 8 << 20:
+                return ""
+            return hashlib.sha256(source).hexdigest()
+        except OSError:
+            return ""
+
     async def _run(self, argv: list[str], timeout: float, cap: int,
                    on_launch: Callable[[], None] | None) -> tuple[int, bytes, bytes]:
         """Run approve-bead, launched with no await since the caller's last check (R11). `on_launch` is
@@ -215,10 +236,11 @@ class ApproveBead:
     async def decide(self, a: Attempt, bead: str,
                      on_launch: Callable[[], None] | None = None) -> tuple[int, str] | MaintenanceHold:
         """Return a closed pre-effect MaintenanceHold, or (exit status, redacted first stderr line)."""
+        identity = self.identity()
         code, out, err = await self._run(decision_argv(self.binary, a, bead), DECIDE_SECONDS, MAX_OUTPUT,
                                        on_launch)
         if maintenance_hold(code, out):
-            return MaintenanceHold()
+            return MaintenanceHold(out, identity if identity == self.identity() else "")
         lines = err.decode("utf-8", "replace").splitlines()
         return code, quoted(lines[0].strip()) if lines else ""
 

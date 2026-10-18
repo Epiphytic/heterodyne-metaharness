@@ -381,6 +381,14 @@ class Store:
             self.db.close()
             raise
 
+        from heterodyne.admind.retirement import Retirement
+        self.retirement = Retirement(self)
+        try:
+            self.retirement.migrate()
+        except BaseException:
+            self.db.close()
+            raise
+
     def migrate_guard(self) -> None:
         from heterodyne.admind.guard_state import migrate
         with self.transaction():
@@ -1057,7 +1065,7 @@ class Store:
             if cur.rowcount != 1:
                 return False
             self.db.execute("INSERT INTO ask_attempts(ask_id, message_id, action, operator, ref, digest, "
-                            "note, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                            "note, started_at, proof_capable_since_begin) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)",
                             (a.ask_id, a.message_id, a.action, a.operator, a.ref, a.digest, a.note, now()))
             self.db.execute("UPDATE inbound SET status = 'executing' WHERE message_id = ?", (a.message_id,))
             return True
@@ -1160,6 +1168,9 @@ class Store:
             row = self.ask(a.ask_id)
             if row is None or row.status != "deciding" or self.current_attempt(a.ask_id) != a:
                 return False
+            generation = self.retirement.generation(a)
+            if generation is None or generation[0] >= (1 << 63) - 1:
+                return False
             if maintenance_retry:
                 if row.outcome != "pending-maintenance":
                     return False
@@ -1167,6 +1178,8 @@ class Store:
                                       (a.ask_id, a.message_id))
                 if cur.rowcount != 1:
                     return False
+            self.db.execute("UPDATE ask_attempts SET invocations = invocations + 1 "
+                            "WHERE ask_id = ? AND message_id = ?", (a.ask_id, a.message_id))
             outcome = "maintenance-issuing" if maintenance_retry else "decision-issuing"
             self.db.execute("UPDATE asks SET outcome = ?, updated_at = ? WHERE ask_id = ?",
                             (outcome, now(), a.ask_id))
