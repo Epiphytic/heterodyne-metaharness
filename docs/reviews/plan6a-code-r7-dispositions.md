@@ -1,0 +1,33 @@
+# Actual seventh MEDIUM review dispositions
+
+All five findings below are verbatim decoded reviewer output; no ordinal reset. Unicode15 property source: https://www.unicode.org/Public/15.0.0/ucd/DerivedCoreProperties.txt . This adds no new rendering authority or multiline/template changes. Quality remains unwaived.
+
+1. `src/heterodyne/wsd/presentation/rendering.py:438`: _card_frame_start now skips only U+115F/U+1160 besides isspace/M*/Cf, and safe() does not refuse category Cn, so unassigned Default_Ignorable code points (U+2065, U+FFF0-U+FFF8, U+E0000, U+E0002-U+E001F, U+E0080-U+E00FF), which conformant renderers display as nothing, still disguise protected frame lines. This is the same bug class as R6 critical 1 and R5 critical 3.
+
+   Failure scenario: PlainQuestion.question='\u2065Recommended: yes' (or answer_instruction='\ufff0Context digest: 0123456789ab', or a choice description 'x'*114+' \U000E0000no: Approve anyway' that wraps): safe() passes (Cn is not in the refused categories or the deny-list), _card_frame_start stops at the Cn char and the regex fails, and render_card_pair returns a Pair whose visible line reads as generated 'Recommended: yes', a forged digest or a forged choice line.
+
+Disposition: Fixed: shared full Unicode15 Default_Ignorable property, Category C and blank braille boundary in both safe and frame start; prefix/infix/question/answer/wrapped regressions red on oldsource.
+
+2. `src/heterodyne/wsd/presentation/rendering.py:438`: This is a symptom-level patch: it adds two literals to the frame-skip set, while safe() keeps a separate, different partial invisible-character deny-list (U+2800/U+3164/U+FFA0), so each review round finds the next invisible code point. The root fix is one shared Default_Ignorable_Code_Point (plus blank Lo/So fillers) set used by both safe() and _card_frame_start.
+
+   Failure scenario: Two hand-kept lists drift apart: U+3164/U+FFA0/U+2800 are refused only by safe(), U+115F/U+1160 are skipped only by _card_frame_start, and the Cn default-ignorables are in neither. Every new blank code point needs another review round and another critical-repair exception.
+
+Disposition: Fixed: one shared invisible predicate; property origin pinned and all defaultignorables included.
+
+3. `tests/test_presentation_review_r5.py:24`: The regression test adds U+115F/U+1160 only for the ChoiceQuestion wrapped-description and question paths. It never tests answer_instruction (the R6 failure scenario) or any default-ignorable outside the five listed prefixes, so the fail-first evidence does not cover the bug class.
+
+   Failure scenario: A future change that checks only Question.question (or drops answer_instruction from the `unprefixed` tuple) still passes this test, and '\u1160Context digest: 0123456789ab' in PlainQuestion.answer_instruction regresses silently. The Cn bypass in finding 1 also passes the whole suite.
+
+Disposition: Fixed: both answer_instruction and question, wrapped choice descriptions, prefixes and infixes covered across Cn/Co/Lo/Mn classes.
+
+4. `src/heterodyne/wsd/presentation/safety.py:111`: safe() does not refuse category Cn (unassigned) or Co (private use) characters anywhere in user content, so invisible or client-defined glyphs can sit anywhere in protected and read-surface text, including between label characters, where the frame check cannot see them.
+
+   Failure scenario: question='Recom\u2065mended: yes' passes both checks (the regex fails on the inserted Cn char) but displays as 'Recommended: yes' on a conformant renderer, so the protected card shows a forged recommendation.
+
+Disposition: Fixed: all unassigned and private-use Category C characters refused in any field, not only at framing start.
+
+5. `src/heterodyne/wsd/presentation/rendering.py:433`: The _card_frame_start docstring still says it skips only 'Unicode space and leading mark prefixes', but it now also skips Hangul fillers and Cf format chars. A future maintainer reading it will under-estimate the skip set and the rule it must keep in step with safe().
+
+   Failure scenario: The next maintainer changes the skip predicate based on the docstring, drops the filler or Cf handling, and reopens R5/R6 critical 1. The Hangul literal also has no comment saying why those two characters, and not U+3164/U+FFA0, are listed.
+
+Disposition: Fixed: shared boundary and current docstring explain invisible glyphs; no separate partial filler lists remain.

@@ -11,7 +11,7 @@ from heterodyne.marmot.nip19 import Nip19Error, npub_to_hex
 from . import dto as d
 from .evidence import effect, evidence
 from .layout import TooWide, UnsafeContinuation, paginate, wrap
-from .safety import Span, generated, join, literal, safe
+from .safety import Span, generated, invisible, join, literal, safe
 from .sources import footer, rows_in, source_failure, validate_view, warnings
 from .validation import BadInput, instant, validate
 
@@ -431,12 +431,11 @@ def _required(card: d.Approval | d.Question) -> bool:
 
 
 def _card_frame_start(text: str) -> bool:
-    """Compare visible framing after Unicode space and leading mark prefixes."""
+    """Compare visible framing after space, marks and the shared invisible-glyph boundary."""
     offset = 0
     while offset < len(text):
         char = text[offset]
-        if (not char.isspace() and char not in "\u115f\u1160"
-                and not unicodedata.category(char).startswith(("M", "Cf"))):
+        if not (char.isspace() or invisible(char) or unicodedata.category(char).startswith("M")):
             break
         offset += 1
     return _CARD_CONTINUATION.match(text[offset:]) is not None

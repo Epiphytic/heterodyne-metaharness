@@ -30,6 +30,25 @@ _RESERVED = re.compile(
 )
 
 
+# Unicode 15.0 DerivedCoreProperties Default_Ignorable_Code_Point (4174 codepoints).
+# https://www.unicode.org/Public/15.0.0/ucd/DerivedCoreProperties.txt
+# Category C is also refused, including unassigned/private-use glyphs; U+2800 is blank.
+_DEFAULT_IGNORABLE = re.compile(
+    r"[\u00ad\u034f\u061c\u115f-\u1160\u17b4-\u17b5\u180b-\u180f"
+    r"\u200b-\u200f\u202a-\u202e\u2060-\u206f\u2800\u3164"
+    r"\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufff8"
+    r"\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0000-\U000e0fff]"
+)
+
+
+def invisible(char: str) -> bool:
+    """One shared refusal boundary for invisible, unassigned and client-defined glyphs."""
+    if char.isascii():
+        return char < " " or char == "\x7f"
+    return (unicodedata.category(char).startswith("C") or char in "\u2028\u2029"
+            or _DEFAULT_IGNORABLE.fullmatch(char) is not None)
+
+
 @dataclass(frozen=True)
 class Span:
     text: str
@@ -113,11 +132,7 @@ def safe(span: Span, policy: RenderPolicy, *, multiline: bool = False, final: bo
     for index, char in enumerate(text):
         if char == "\n" and (multiline or final):
             continue
-        if unicodedata.category(char) in ("Cc", "Cf", "Cs", "Zl", "Zp") or char in (
-            "\u2800",
-            "\u3164",
-            "\uffa0",
-        ):
+        if invisible(char):
             if not (final and _covered(index, index + 1, span.template)):
                 return False
     if any(pattern.search(text) for _, pattern in SECRET_VALUES):
