@@ -1,0 +1,72 @@
+{
+  "actual_review_ordinal": 9,
+  "actual_review_verdict": "REVISE",
+  "raw_sha256": "b284cc8776f7765898568c2d498378e74e36a6a7608241c9bc07ed374e51d9fc",
+  "findings": [
+    {
+      "number": 1,
+      "finding_verbatim": "1. `src/heterodyne/actions/journal.py:683`: The broadened disposition check now runs for any DispatchRecovery on a reconcile child, works out 'applied' against the child itself (whose reconciliation_attempts is always empty), and then refuses because old.dispatch_kind != 'initial'. A held child whose preparation failed can never be operator-settled once any sibling has a reconciliation_effect.\n\n   Failure scenario: Parent goes uncertain. Child #1 finishes with effect=unknown and the parent lookup applies it (child #1 is now in parent.reconciliation_attempts). Five seconds later child #2 is inserted and fails preparation (state held, settled=False). The operator settles child #2: _recovery_clock gets children=[c1,c2], computes c1.applied = c1 in c2.reconciliation_attempts = False, so unread=True; dispatch_kind=='reconcile' then raises reconciliation-exhaustion-provenance-required no matter what observed_reconciliations contains. Child #2 is wedged. _add_reconciliation refuses child #3 (reconcile-invocation-still-held). Parent settlement refuses (child not settled), and so does the final release loop. Resource, effect and approval locks are never deleted. The R8 capacity test misses this because its preparation-failed children all come before the only child that has an effect.",
+      "disposition": "FIXED",
+      "response": "Only initial dispatches validate sibling reconciliation dispositions. Held read children retain their own exact scope/cleanup recovery checks; they cannot release parent resources. Regression covers completed/applied read in each of the three positions followed by held-child cleanup and final parent/request settlement within the existing 96-event reserve."
+    },
+    {
+      "number": 2,
+      "finding_verbatim": "2. `src/heterodyne/actions/journal.py:478`: The child launch gate clock_elapsed(previous_start, value.started) raises on any boot change, so after a reboot (the main reason a parent is uncertain) no reconciliation read can ever launch. Separately, when db.clock is None the gate uses the caller-supplied value.started, so the 1/5/30 spacing is caller-controlled.\n\n   Failure scenario: The host reboots while the parent is executing, and the parent becomes uncertain on the new boot. Every add_dispatch for a reconcile child raises dispatch-clock-or-deadline, which is a different code from reconcile-attempt-not-due, so the only exit is operator discontinuity settlement and no machine read is possible. In a journal built without a clock, a caller passes prepare_reconciliation(..., now=parent.started + 31s) three times back-to-back and passes every gate. 'All three read launches gated 1/5/30' holds only under an injected clock.",
+      "disposition": "DEFERRED",
+      "response": "Boot discontinuity remains an explicit operator recovery path. Clock injection is trusted; clockless fixture callers supply observations. No live adapter is enabled. A reboot-safe reconciliation schedule needs a separately approved clock policy before activation."
+    },
+    {
+      "number": 3,
+      "finding_verbatim": "3. `src/heterodyne/actions/dispatch.py:387`: The pure settle_dispatch 'conflict' bypass relies entirely on caller-built ReconciliationDisposition rows, so one fabricated row with effect=succeeded and applied=False lifts the lookups==3 requirement in the reducer. That brings back the R8#5 two-validator gap through a new field.\n\n   Failure scenario: A reducer-only caller with a failed, claim-consumed parent at lookups=0 passes observed_reconciliations=(ReconciliationDisposition('x',1,'succeeded',None,True,True,False),). bound and conflict are both True, so the parent settles without any child having existed. Only the journal's equality check against stored children catches this.",
+      "disposition": "BOUNDARY",
+      "response": "Pure reducers consume explicit trusted synthetic attestations; journal independently binds exact durable child facts. No live authority adapter accepts arbitrary caller-built rows."
+    },
+    {
+      "number": 4,
+      "finding_verbatim": "4. `src/heterodyne/actions/journal.py:550`: The journal silently overwrites the operator-supplied recovery.observed_now (and observation.now) with its own sample, so the retained '-observation' event no longer records what the operator attested. The operator's value is never compared with the sample.\n\n   Failure scenario: The operator attests observed_now=Clock('B',5,5), but the sampler returns Clock('C',9,9). The journal swaps in C, finds it discontinuous from the anchor and settles. The retained observation shows C as the attested value, and nothing detects that the operator's attestation disagreed with the trusted sample. 'Exact-scope attestation' is not exact on this field.",
+      "disposition": "DEFERRED",
+      "response": "Sampler is authoritative and retained observations record the effective sampled value. Preserving separately the claimed operator timestamp is an audit refinement required before live clock recovery."
+    },
+    {
+      "number": 5,
+      "finding_verbatim": "5. `src/heterodyne/actions/journal.py:381`: add_dispatch rebases started, deadline_ns and preparation_deadline_ns onto the sampled clock but returns None, so the caller's in-memory Dispatch differs from the stored record.\n\n   Failure scenario: A caller prepares at caller-time T, add_dispatch stores started=S (the sample), and the caller then builds a legacy reducer or prepare_reconciliation from its own copy started at T. Comparisons such as `candidate != value` or later deadline arithmetic diverge, giving dispatch-transition-not-closed or the wrong deadline, unless every caller re-reads with db.get.",
+      "disposition": "DOCUMENTED",
+      "response": "Journal owns sampled timestamps; callers re-read inserted dispatch before subsequent reduction, as the sampled fixture does. No adapter is enabled."
+    },
+    {
+      "number": 6,
+      "finding_verbatim": "6. `src/heterodyne/actions/dispatch.py:374`: The first child's 1-second gate (and the parent's first lookup gate) is measured from the parent's dispatch start, not from when the parent became uncertain or failed, so the first read is effectively ungated.\n\n   Failure scenario: The parent starts at t=0 and goes uncertain at t=50s. Child #1 launches immediately at t=50s because 50 >= 1. Child spacing therefore starts at whenever uncertainty happened, not at the D4 '1/5/30 seconds' after the uncertain result.",
+      "disposition": "DEFERRED",
+      "response": "Current first spacing anchor is dispatch start; uncertainty-result scheduling is a preactivation timing-policy limitation, not permission for effect replay."
+    },
+    {
+      "number": 7,
+      "finding_verbatim": "7. `src/heterodyne/actions/dispatch.py:369`: completed_reconciliation_attempts can be derived from observed_reconciliations, but both are kept and cross-checked in two places (settle_dispatch and _recovery_clock). Each validator has slightly different rules: the reducer allows 1-3 facts, while the journal requires exactly 3 children when the IDs are given.\n\n   Failure scenario: The two exhaustion encodings can drift, and an operator payload has to state the same IDs twice. Dropping completed_reconciliation_attempts and deriving exhaustion as len(observed)==3 removes a whole class of mismatch refusals and halves the validation surface.",
+      "disposition": "DEFERRED",
+      "response": "Preserve both evidence encodings for compatibility in this critical-only repair; journal cross-check remains authoritative."
+    },
+    {
+      "number": 8,
+      "finding_verbatim": "8. `src/heterodyne/actions/journal.py:530`: needs_clock is an ad-hoc list of operation names plus recovery flags placed in the shared transition path, so a new clock-bearing operation silently skips sampling and provenance unless someone remembers to add it here.\n\n   Failure scenario: A future operation added to dispatch_transition that calls _observed_clock without being listed here gets the caller's observation.now when it supplies one, or no clock otherwise, and writes no '-clock' event. Later _proven_clock recovery then holds for good. Sampling once on every clock-configured transition, or having dispatch_transition declare which operations need a clock, removes this special-case list.",
+      "disposition": "DEFERRED",
+      "response": "Closed operation set remains explicit; any future clock-bearing transition must extend journal provenance and its tests."
+    },
+    {
+      "number": 9,
+      "finding_verbatim": "9. `src/heterodyne/actions/journal.py:555`: cast(ObservedReducer[Any], reducer) right after an isinstance check is redundant.\n\n   Failure scenario: The cast adds noise and hides type errors. `reducer.reduce(old, observation)` inside the isinstance branch narrows the type the same way.",
+      "disposition": "DEFERRED",
+      "response": "Static narrowing cast retained because configured type checker required it in the previous repair."
+    },
+    {
+      "number": 10,
+      "finding_verbatim": "10. `src/heterodyne/actions/journal.py:684`: Every DispatchRecovery transition, plus the settled-initial release loop, re-queries and JSON-decodes all reconciliation children with a LIKE scan, sometimes twice per transaction.\n\n    Failure scenario: A parent settle runs _reconciliation_children in _recovery_clock and again in the release check, which is two LIKE scans and up to six decodes per transaction. It is small but redundant: fetch once and pass the tuple through.",
+      "disposition": "DEFERRED",
+      "response": "At most three children; redundant bounded reads retained to avoid changing provenance validation in the critical repair."
+    }
+  ],
+  "limits": [
+    "All five live adapters unavailable; no deployment or native effects.",
+    "Prior full-project typing and quality gates remain UNWAIVED.",
+    "Actual next review must retain the full history and post-third repair exception."
+  ]
+}

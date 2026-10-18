@@ -680,15 +680,18 @@ class FixtureJournal:
             isinstance(old, Dispatch) != isinstance(recovery, DispatchRecovery) or isinstance(old, Decision)
         ):
             raise Refused("clock-recovery-record-mismatch")
-        if isinstance(old, Dispatch) and isinstance(recovery, DispatchRecovery):
+        if (
+            isinstance(old, Dispatch)
+            and old.dispatch_kind == "initial"
+            and isinstance(recovery, DispatchRecovery)
+        ):
             children = self._reconciliation_children(old.approval_id)
             facts = tuple(reconciliation_disposition(old, child) for child in children)
             unread = any(item.effect is not None and not item.applied for item in facts)
             if (
                 unread or recovery.completed_reconciliation_attempts or recovery.observed_reconciliations
             ) and (
-                old.dispatch_kind != "initial"
-                or any(
+                any(
                     not child.settled or not child.cleanup_proven or child.launch_attempts != 1
                     for child in children
                 )

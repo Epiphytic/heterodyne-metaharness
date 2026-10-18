@@ -232,8 +232,10 @@ def test_cleanup_attestation_is_bound_and_cannot_hide_live_launcher(tmp_path, fi
         assert not db.get("dispatch", dispatch_key(child)).cleanup_proven
 
 
-@pytest.mark.parametrize("unread", [False, True])
-def test_full_three_attempt_terminal_budget_and_unapplied_read_disposition(tmp_path, monkeypatch, unread):
+@pytest.mark.parametrize("read_index,unread", [(0, False), (1, False), (2, False), (2, True)])
+def test_full_three_attempt_terminal_budget_and_unapplied_read_disposition(
+    tmp_path, monkeypatch, unread, read_index
+):
     import test_actions_p1_r1 as r1
 
     import heterodyne.actions.journal as journal
@@ -255,7 +257,7 @@ def test_full_three_attempt_terminal_budget_and_unapplied_read_disposition(tmp_p
             now = later(now, spacing)
             child = dis.prepare_reconciliation(retired, f"read-{n}", str(n + 1) * 64, now)
             db.add_dispatch(child)
-            if unread and n == 2:
+            if n == read_index:
                 child = db.transition(
                     "dispatch",
                     dispatch_key(child),
@@ -263,6 +265,24 @@ def test_full_three_attempt_terminal_budget_and_unapplied_read_disposition(tmp_p
                     lambda old: dis.finish_reconciliation(old, evidence=f.DIGEST, cleanup_proven=True),
                     observation=msgspec.structs.replace(f.reconciliation_observation(child), now=now),
                 )
+                if not unread:
+                    parent = db.transition(
+                        "dispatch",
+                        parent.approval_id,
+                        parent.version,
+                        lambda old: dis.reconcile_lookup(
+                            old,
+                            elapsed_seconds=1,
+                            effect="unknown",
+                            evidence=f.DIGEST,
+                            cleanup_proven=False,
+                        ),
+                        observation=TransitionObservation(
+                            dispatch_operation="lookup",
+                            now=now,
+                            reconciliation_key=dispatch_key(child),
+                        ),
+                    )
             else:
                 child = db.transition(
                     "dispatch",
@@ -353,7 +373,7 @@ def test_full_three_attempt_terminal_budget_and_unapplied_read_disposition(tmp_p
         assert db.db.execute("SELECT count(*) FROM resources").fetchone() == (0,)
         used = db._reserve_used(request_key(final))
         assert used <= journal.TERMINAL_RESERVE == 96
-        assert used <= 44  # Includes three independently retired invocations and sampled observations.
+        assert used <= 47  # Includes an applied read and its retained sampled observations.
 
 
 def test_three_arbitrary_strings_are_not_pure_settlement_proof(tmp_path):
