@@ -828,7 +828,7 @@ def test_approval_readout_parses_a_busy_reply_and_an_approval(h: H) -> None:
         wbtq.approval_readout(r.approval_bead, binary=h.approve_bead)
 
 
-def test_every_pickup_advances_the_installs_once(tmp_path: Path) -> None:
+def test_pickup_does_not_run_approval_network_io(tmp_path: Path) -> None:
     class Recording:
         def __init__(self) -> None:
             self.advanced: list[int] = []
@@ -842,7 +842,7 @@ def test_every_pickup_advances_the_installs_once(tmp_path: Path) -> None:
     assert rig.pickup() is Outcome.STARTED
     rig.clock.advance(30)
     rig.pickup()
-    assert fake.advanced == [rig.clock() - 30, rig.clock()]
+    assert fake.advanced == []
 
 
 def test_an_approval_with_null_denied_fields_is_approved(h: H) -> None:
@@ -1211,6 +1211,7 @@ def test_a_taint_signal_holds_every_bead_on_the_install_and_writes_one_alert(
 
     monkeypatch.setattr(Parker, "park", park)
     key = rig.key("btq-1")
+    verify.taint(h.taint, "codex", a, verify.INSTALL_CHANGED)
     rig.runtime.report(WS, InstallTainted(key, 1, "codex", a))
     rig.pickup()
     assert parks == [("btq-1", (), INSTALL_TAINTED, True)]
@@ -1218,6 +1219,7 @@ def test_a_taint_signal_holds_every_bead_on_the_install_and_writes_one_alert(
     alerts = [p for p in h.alerts.iterdir() if not p.name.startswith(".")]
     assert len(alerts) == 1 and re.fullmatch(r"harness-taint-codex-[0-9a-f]{12}-[0-9]+\.json", alerts[0].name)
     assert f"codex manifest {a[-12:]}" in alerts[0].read_text()
+    verify.taint(h.taint, "codex", a, verify.INSTALL_CHANGED)
     rig.runtime.report(WS, InstallTainted(key, 1, "codex", a))     # again: still one alert for the install
     rig.pickup()
     assert [p.name for p in h.alerts.iterdir() if not p.name.startswith(".")] == [alerts[0].name]
@@ -1231,6 +1233,7 @@ def test_a_taint_whose_alert_cannot_be_written_still_holds_the_bead(rigged: tupl
     h.alerts.mkdir(parents=True, exist_ok=True)
     h.alerts.chmod(0o500)
     try:
+        verify.taint(h.taint, "codex", a, verify.INSTALL_CHANGED)
         rig.runtime.report(WS, InstallTainted(rig.key("btq-1"), 1, "codex", a))
         rig.pickup()
         assert HELD in rig.beads.show(WS, "btq-1").labels
@@ -1245,12 +1248,16 @@ def alert_names(h: H) -> list[str]:
 
 def test_a_retaint_after_verify_alerts_again_and_verify_and_remove_delete_the_old_alert(h: H) -> None:
     _, a = published(h)
+    verify.taint(h.taint, "codex", a, verify.INSTALL_CHANGED)
     h.ops.tainted("codex", a)
+    verify.taint(h.taint, "codex", a, verify.INSTALL_CHANGED)
     h.ops.tainted("codex", a)
     [first] = alert_names(h)
     h.ops.verify("codex", a)
     assert alert_names(h) == []
+    verify.taint(h.taint, "codex", a, verify.INSTALL_CHANGED)
     h.ops.tainted("codex", a)                       # tainted again after the clear: a new alert
+    verify.taint(h.taint, "codex", a, verify.INSTALL_CHANGED)
     h.ops.tainted("codex", a)
     [second] = alert_names(h)
     assert second != first
@@ -1366,7 +1373,7 @@ def test_a_published_outcome_naming_another_install_fails(h: H, monkeypatch: pyt
     monkeypatch.setattr(h.store, "state", lambda _adapter, _install: "published")
     h.ops.advance(h.clock())
     done = row(h, staging_id)
-    assert (done.state, done.failure) == ("failed", sc.RECOVERY_FAILED)
+    assert done.state == "approved" and done.failure == ""
 
 
 @pytest.mark.parametrize("change", [{"drop": ["format"]}, {"override": {"format": None}},
@@ -1447,7 +1454,7 @@ def test_a_row_that_fails_to_advance_logs_no_exception_text(
     with caplog.at_level(logging.DEBUG):
         h.ops.advance(h.clock())
         h.ops.advance(h.clock())
-    assert "advancing failed; retried each pickup (RuntimeError)" in caplog.text and not leaked(caplog)
+    assert "advancing failed; retried each harness tick (RuntimeError)" in caplog.text and not leaked(caplog)
 
 
 def test_a_failed_store_recovery_logs_no_exception_text(
@@ -1461,6 +1468,7 @@ def test_a_failed_store_recovery_logs_no_exception_text(
 def test_an_old_alert_that_cannot_be_removed_logs_no_exception_text(
         h: H, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
     _, a = published(h)
+    verify.taint(h.taint, "codex", a, verify.INSTALL_CHANGED)
     h.ops.tainted("codex", a)
     monkeypatch.setattr(Path, "unlink", raising(OSError(5, LEAK)))
     with caplog.at_level(logging.DEBUG):
@@ -1473,7 +1481,8 @@ def test_a_pickup_whose_install_advance_fails_logs_no_exception_text(
     rig, h = rigged
     monkeypatch.setattr(h.ops, "advance", raising(RuntimeError(LEAK)))
     with caplog.at_level(logging.DEBUG):
-        rig.pickup()
+        wsd = assembled(settings_for(h.tmp / "daemon"), h.journal, h.runtime, h.world, h.ops)
+        wsd.harness_advance()
     assert "advancing the install approvals failed (RuntimeError)" in caplog.text and not leaked(caplog)
 
 
@@ -1484,6 +1493,7 @@ def test_a_taint_alert_that_fails_logs_no_exception_text(
     select(h, "codex", pin_of(h, "codex", a))
     assert rig.pickup() is Outcome.STARTED
     monkeypatch.setattr(h.ops, "tainted", raising(RuntimeError(LEAK)))
+    verify.taint(h.taint, "codex", a, verify.INSTALL_CHANGED)
     rig.runtime.report(WS, InstallTainted(rig.key("btq-1"), 1, "codex", a))
     with caplog.at_level(logging.DEBUG):
         rig.pickup()
@@ -1504,7 +1514,7 @@ def test_a_startup_install_recovery_that_fails_logs_no_exception_text(
     journal = Journal(s.journal)
     try:
         wsd = assembled(s, journal, FakeRuntime(), World(tmp_path / "btq-state"), Failing())
-        with caplog.at_level(logging.DEBUG):
+        with caplog.at_level(logging.DEBUG), pytest.raises(RuntimeError):
             wsd.startup()
     finally:
         journal.close()
@@ -1533,7 +1543,11 @@ def test_a_harness_op_io_error_logs_no_exception_text(
 def test_a_withheld_upstream_version_never_reaches_the_logs(h: H, caplog: pytest.LogCaptureFixture) -> None:
     package = json.dumps({**CODEX_PACKAGE, "version": LEAK}).encode()
     archive = tar_of({**CODEX_TREE, "codex-package.json": package}, prefix=CODEX_STRIP)
-    h.opener.files.update(codex_files(archive))
+    h.opener.files.update(
+        {key.replace("0.160.0", LEAK): value for key, value in codex_files(archive).items()}
+    )
+    h.recipes["codex"] = replace(h.recipes["codex"], version=LEAK)
+    h.ops.settings = h.settings
     with caplog.at_level(logging.DEBUG):
         r = settle(h, h.ops.install("codex", None))
     assert (r.state, r.failure) == ("failed", wh.ASK_UNPOSTABLE) and LEAK not in wh.ASK_UNPOSTABLE
@@ -1567,7 +1581,9 @@ GHP = "v" + "ghp_" + hashlib.sha256(b"t10 ghp version").hexdigest()[:36]
 def published_ghp(h: H) -> str:
     package = json.dumps({**CODEX_PACKAGE, "version": GHP}).encode()
     archive = tar_of({**CODEX_TREE, "codex-package.json": package}, prefix=CODEX_STRIP)
-    h.opener.files.update(codex_files(archive))
+    h.opener.files.update({key.replace("0.160.0", GHP): value for key, value in codex_files(archive).items()})
+    h.recipes["codex"] = replace(h.recipes["codex"], version=GHP)
+    h.ops.settings = h.settings
     _, install = published(h)
     assert GHP in install
     return install
@@ -1577,6 +1593,7 @@ def test_a_published_installs_upstream_version_never_reaches_a_log_or_alert(
         h: H, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
     a = published_ghp(h)
     label = f"codex manifest {a[-12:]}"
+    verify.taint(h.taint, "codex", a, verify.INSTALL_CHANGED)
     h.ops.tainted("codex", a)
     [alert] = alert_names(h)
     text = (h.alerts / alert).read_text()
@@ -1601,6 +1618,7 @@ def test_a_failed_taint_alert_names_the_install_by_its_label(
     assert rig.pickup() is Outcome.STARTED
     a = f"{GHP}-{running[-12:]}"
     monkeypatch.setattr(h.ops, "tainted", raising(RuntimeError("alert")))
+    verify.taint(h.taint, "codex", a, verify.INSTALL_CHANGED)
     rig.runtime.report(WS, InstallTainted(rig.key("btq-1"), 1, "codex", a))
     with caplog.at_level(logging.DEBUG):
         rig.pickup()

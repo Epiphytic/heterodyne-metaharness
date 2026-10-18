@@ -173,10 +173,6 @@ class Scheduler:
         with self.parker.entry():
             self.wake_at = None
             try:
-                self.d.harness.advance(self.d.clock())
-            except Exception as exc:  # noqa: BLE001 - an install approval's trouble never stops the workstream
-                log.error("advancing the install approvals failed (%s)", type(exc).__name__)
-            try:
                 outcome = self._pickup(trigger)
             except BeadsUnavailable as exc:
                 self.d.journal.hold(self.ws.name, Reason.BEADS_UNREACHABLE, type(exc).__name__)
@@ -274,6 +270,12 @@ class Scheduler:
         if entry is None or entry.ws != name:
             return
         if isinstance(signal, InstallTainted):
+            try:
+                if not self.d.harness.taint_current(signal.adapter, signal.install):
+                    return  # A queued report cannot recreate a taint cleared by verify/remove.
+            except OSError as exc:
+                # An unreadable marker is not proof that the install is safe.
+                log.warning("checking a reported install taint failed (%s)", type(exc).__name__)
             row = j.state(name, entry.bead)
             if row is not None and row.state in (BeadState.RUNNING, BeadState.WAITING_INPUT):
                 self.parker.park(entry.bead, (), INSTALL_TAINTED, True)

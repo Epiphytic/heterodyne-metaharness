@@ -139,14 +139,29 @@ def _checkout() -> Path:
 
 
 def _commit(root: Path) -> str:
-    """The checkout's HEAD, which an install approval names; "" when this is not a git checkout (the
-    install then refuses `NO_COMMIT`)."""
-    try:
-        out = subprocess.run(["git", "-C", str(root), "rev-parse", "--verify", "-q", "HEAD^{commit}"],
+    """Only a clean source checkout containing this actual imported package supplies provenance.
+
+    An enclosing Git repository around site-packages is not a source checkout. Git repository
+    redirection variables cannot change the repository being checked. Non-editable or dirty
+    installs remain unavailable for managed install approvals rather than asserting an unrelated HEAD.
+    """
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    def git(*args: str) -> str:
+        out = subprocess.run(["git", "-C", str(root), *args], env=env,
                              stdin=subprocess.DEVNULL, capture_output=True, timeout=GIT_SECONDS, check=True)
-    except (OSError, subprocess.SubprocessError):
+        return out.stdout.decode(errors="strict").strip()
+    try:
+        if Path(git("rev-parse", "--show-toplevel")).resolve() != root.resolve():
+            return ""
+        package = root / "src" / "heterodyne" / "__init__.py"
+        if package.resolve() != Path(heterodyne.__file__).resolve():
+            return ""
+        git("ls-files", "--error-unmatch", "src/heterodyne/__init__.py")
+        if git("status", "--porcelain", "--untracked-files=all", "--", "src/heterodyne"):
+            return ""
+        return git("rev-parse", "--verify", "-q", "HEAD^{commit}")
+    except (OSError, ValueError, subprocess.SubprocessError):
         return ""
-    return out.stdout.decode(errors="replace").strip()
 
 
 def _no_readout(why: str, bead: str) -> btq.Readout | btq.Busy:

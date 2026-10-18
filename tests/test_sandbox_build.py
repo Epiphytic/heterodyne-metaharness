@@ -1,4 +1,3 @@
-import subprocess
 from collections.abc import Mapping
 from functools import partial
 from pathlib import Path
@@ -237,8 +236,7 @@ def test_wsd_builds_the_harness_operations_against_admind(tmp_path: Path) -> Non
         # The commit ref names this checkout by path, as btq resolves it, and its HEAD.
         checkout = Path(heterodyne.__file__).resolve().parents[2]
         assert ops.repo == str(checkout)
-        head = subprocess.run(["git", "-C", ops.repo, "rev-parse", "HEAD"], capture_output=True, check=True)
-        assert ops.commit == head.stdout.decode().strip()
+        assert ops.commit == build_module._commit(checkout)  # Dirty source must not assert clean HEAD.
         with pytest.raises(btq.ReadoutFailed):
             ops.readout("btq-1")
         no_accounts = WsdSettings(s.state_dir, 60, 3600, 3, tmp_path / "btq", {}, (), None)

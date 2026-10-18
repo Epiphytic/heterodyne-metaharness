@@ -71,7 +71,7 @@ from heterodyne.wsd.btq import QueueFactory
 from heterodyne.wsd.checkpoints import Checkpoint, nothing
 from heterodyne.wsd.ctl import CtlReply, CtlRequest, CtlServer, HarnessRequest, refusal
 from heterodyne.wsd.gate import ClaimGate
-from heterodyne.wsd.harness import HarnessOps, HarnessRefused, Pruning
+from heterodyne.wsd.harness import HarnessOps, HarnessRefused, Pruning, install_label
 from heterodyne.wsd.journal import Journal, JournalBusy, ResolvedEnd
 from heterodyne.wsd.recovery import Recovered, recover
 from heterodyne.wsd.runtime import (
@@ -88,7 +88,7 @@ from heterodyne.wsd.scheduler import Outcome, Scheduler, Trigger, TriggerKind
 from heterodyne.wsd.settings import WsdSettings, resolve, restart_fields, restart_view
 from heterodyne.wsd.states import BeadState, WsState
 from heterodyne.wsd.usage import NoUsageReader, UsageReader
-from heterodyne.wsd.workstream import Deps, HarnessHooks, NoHarness, WorkstreamSettings, no_selection
+from heterodyne.wsd.workstream import Deps, HarnessHooks, NoHarness, WorkstreamSettings, no_selection, utc_now
 
 NEEDS_A_HUMAN = "not idle; a human must act"
 FINISHED = frozenset({BeadState.CLOSED, BeadState.DROPPED})
@@ -110,11 +110,12 @@ class JobFailed(Exception):
     workstream will be recovered again before its next pickup."""
 
 
+HARNESS_LANE = "\x00harness"
 STATUS_LANE = ""        # not a workstream slug (slugs are never empty)
 PAUSE_STATE = "pause-state"     # the one key pause and resume share: the last one asked is applied
 RELOAD = "reload"
 NO_HARNESS = "managed installs are not set up in this wsd"
-HARNESS_FAILED = "the harness operation failed on an I/O error or a busy journal; wsd's log says which"
+HARNESS_FAILED = "the harness operation failed; wsd's log says which exception type"
 log = logging.getLogger(__name__)
 
 
@@ -245,7 +246,9 @@ class Wsd:
         self.reloading: tuple[asyncio.AbstractEventLoop, asyncio.Lock] | None = None
         self.stopping = False
         self.shutdown = threading.Lock()        # held while every lane closes; see Lane
-        self.lanes = {name: Lane(name, self.shutdown) for name in [STATUS_LANE, *parts.schedulers]}
+        self.lanes = {
+            name: Lane(name, self.shutdown) for name in [STATUS_LANE, HARNESS_LANE, *parts.schedulers]
+        }
         self.wanted_pause: dict[str, bool] = {}     # the last pause or resume asked, per workstream
         self.wakes: dict[str, asyncio.TimerHandle] = {}     # the armed quota wake, per workstream
         self.waking: set[asyncio.Task[None]] = set()        # wake pickups not yet finished
@@ -302,13 +305,29 @@ class Wsd:
     def startup(self) -> dict[str, Outcome]:
         """Settle the managed installs (plan 4c T10: before any pickup, so no guard reads a pin meanwhile),
         recover every workstream, then run one startup pickup each (§3.3 step 6 comes after this)."""
-        try:
-            self.parts.harness.recover()
-        except Exception as exc:  # noqa: BLE001 - the rows stay as they were; the next advance retries
-            log.error("the managed installs' recovery failed (%s)", type(exc).__name__)
+        self.harness_recover()
+        self.harness_advance()
         for name in self.parts.schedulers:
             self.recover_one(name)
         return {name: self.pickup_one(name, Trigger(TriggerKind.STARTUP)) for name in self.parts.schedulers}
+
+    def harness_recover(self) -> None:
+        try:
+            self.parts.harness.recover()
+        except Exception as exc:  # noqa: BLE001 - no pickup may precede a failed recovery
+            log.error("the managed installs' recovery failed (%s)", type(exc).__name__)
+            raise
+
+    def harness_advance(self) -> None:
+        try:
+            self.parts.harness.advance(utc_now())
+        except Exception as exc:  # noqa: BLE001 - retain rows and retry on the next harness tick
+            log.error("advancing the install approvals failed (%s)", type(exc).__name__)
+
+    async def _harness_every(self) -> None:
+        while True:
+            await asyncio.sleep(self.s.backstop_seconds)
+            await self._run(HARNESS_LANE, "advance", self.harness_advance)
 
     def reload_one(self, name: str, ws: WorkstreamSettings) -> dict[str, str]:
         """`wsctl reload` on one workstream's lane (AU-4 §5.2): swap its settings, then re-gate its
@@ -334,31 +353,34 @@ class Wsd:
             if h.action == "list":
                 listing = ops.list(h.adapter)
                 where = " (fallback store)" if listing.fallback else ""
-                return CtlReply("ok", f"{len(listing.installs)} install(s){where}", listing.installs)
+                safe = {install_label(v["adapter"], k): {**v, "version": "withheld (upstream text)"}
+                        for k, v in listing.installs.items()}
+                return CtlReply("ok", f"{len(safe)} install(s){where}", safe)
             if h.action == "install":
                 staging_id = ops.install(adapter, h.version)
+                ops.wait()  # The lane owns the approval worker through its final durable receipt.
                 return CtlReply("ok", f"staged {staging_id}; its approval is being created and posted")
             if h.action == "verify":
                 ops.verify(adapter, install)
-                return CtlReply("ok", f"{adapter} {install} verified")
+                return CtlReply("ok", f"{install_label(adapter, install)} verified")
             if h.action == "use":
                 ops.use(adapter, install)
-                return CtlReply("ok", f"{adapter} uses {install} from its next launch")
+                return CtlReply("ok", f"{install_label(adapter, install)} selected from its next launch")
             if h.action == "rollback":
                 ops.rollback(adapter)
                 return CtlReply("ok", f"{adapter} rolled back; its next launch uses the previous install")
             if h.action == "remove":
                 ops.remove(adapter, install)
-                return CtlReply("ok", f"{adapter} {install} removed")
+                return CtlReply("ok", f"{install_label(adapter, install)} removed")
             done = ops.prune(h.confirm)
-            data = {name: {"adapter": a} for name, a in done.adapters.items()}
+            data = {install_label(a, name): {"adapter": a} for name, a in done.adapters.items()}
             if isinstance(done, Pruning):
                 return CtlReply("ok", f"prune would remove {len(done.installs)} install(s); run wsctl "
                                       f"harness prune --confirm {done.code} within 10 minutes", data)
             return CtlReply("ok", f"pruned {len(done.installs)} install(s)", data)
         except (HarnessRefused, StoreRefused) as exc:
             return CtlReply("refused", exc.constant)
-        except (OSError, JournalBusy) as exc:
+        except Exception as exc:  # noqa: BLE001 - the boundary logs types, never untrusted exception text
             log.error("wsctl harness %s failed (%s)", h.action, type(exc).__name__)
             return CtlReply("failed", HARNESS_FAILED)
 
@@ -487,7 +509,7 @@ class Wsd:
         if self.stopping:
             raise Stopping
         fut = self.lanes[lane].submit(key, fn)
-        if lane != STATUS_LANE:
+        if lane in self.parts.schedulers:
             self._arm_on(lane, fut)
         try:
             return await asyncio.shield(asyncio.wrap_future(fut))  # type: ignore[return-value]
@@ -565,7 +587,7 @@ class Wsd:
             return await self._reload()
         if req.op == "harness" and req.harness is not None:
             harness = req.harness
-            return await asyncio.to_thread(self.harness_one, harness)
+            return await self._run(HARNESS_LANE, object(), lambda: self.harness_one(harness))
         if req.op == "unlanded" and req.ws is not None:
             name = req.ws
             return await self._run(name, ("unlanded", name), lambda: self.unlanded_one(name))
@@ -704,6 +726,8 @@ class Wsd:
 
     async def _startup(self) -> None:
         """`startup`, on the lanes: every workstream's recovery, and only then the startup pickups."""
+        await self._run(HARNESS_LANE, "recover", self.harness_recover)
+        await self._run(HARNESS_LANE, "advance", self.harness_advance)
         recoveries: list[Coroutine[Any, Any, object]] = [
             self._run(name, "recover", lambda n=name: self.recover_one(n)) for name in self.parts.schedulers]
         await asyncio.gather(*recoveries)
@@ -742,6 +766,7 @@ class Wsd:
                       for name in self.parts.schedulers
                       for seconds, kind, job in ((self.s.backstop_seconds, "pickup", self._backstop),
                                                  (self.s.reconcile_seconds, "reconcile", self.reconcile_one))]
+            timers.append(asyncio.create_task(self._harness_every()))
             await asyncio.wait([stopping, *timers], return_when=asyncio.FIRST_COMPLETED)
             for task in timers:
                 if task.done():

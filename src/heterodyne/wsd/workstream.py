@@ -109,6 +109,10 @@ class HarnessHooks(Protocol):
         """Start-up's: close interrupted `use` ops and finish interrupted publishes."""
         ...
 
+    def taint_current(self, adapter: str, install: str) -> bool:
+        """Whether the durable marker still requires the reported hold."""
+        ...
+
     def tainted(self, adapter: str, install: str) -> None:
         """An install was found tainted: write its alert."""
         ...
@@ -122,6 +126,10 @@ class NoHarness:
 
     def recover(self) -> None:
         pass
+
+    def taint_current(self, adapter: str, install: str) -> bool:
+        """Whether the durable marker still requires the reported hold."""
+        return True
 
     def tainted(self, adapter: str, install: str) -> None:
         pass

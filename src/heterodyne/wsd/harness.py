@@ -4,7 +4,7 @@ E14) and the taint alerts (E17).
 `install` fetches and stages the recipe, journals a `staged` row and replies with the staging ID; a worker
 thread then composes the approval bead's text, refuses it if admind's scanner would flag any of it
 (`ASK_UNPOSTABLE`), creates the bead and posts it on admind's `ask.sock`. From then on wsd only reads the
-bead: `advance`, from every pickup, runs `approve-bead <bead> --json` and applies E13's predicates
+bead: `advance`, on a separate harness timer, runs `approve-bead <bead> --json` and applies E13's predicates
 (`approvals.verdict`). An approved row is published with the digest it was staged with; `recover`, at
 start-up, settles every row a crash left `approved` from what the store reports, never from the name.
 
@@ -66,6 +66,8 @@ NOTHING_TO_ROLL_BACK = "the adapter's selection has no previous install"
 IN_USE = "the install is in use"
 CONFIRM_REQUIRED = "prune needs the code a prune without one gave, within 10 minutes, once"
 SELECTION_UNREADABLE = "the selection file can't be read; `heterodyne config check` says why"
+BAD_VERSION = "the requested version is not a safe release component or differs from the staged CLI"
+VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9.+_-]{0,127}")
 BAD_CONTENT = "a content item's archive can't be unpacked to be checked"
 
 ACTOR_CTL = "wsctl"             # an op a `wsctl harness` request ran
@@ -181,6 +183,8 @@ class HarnessOps:
         self.repo = repo
         self.failing: set[str] = set()          # staging IDs whose last advance raised (logged once)
         self.readout_refusal = readout_refusal  # why `readout` can't work (NO_APPROVE_BEAD...), or ""
+        self.workers: list[threading.Thread] = []
+        self.worker_lock = threading.Lock()
         self.lock = threading.RLock()
         self.alerts_lock = threading.Lock()
         self.code: tuple[str, int, dict[str, str]] | None = None   # the prune code, when, and what it lists
@@ -203,6 +207,11 @@ class HarnessOps:
         if recipe.defaults is not None or any(c.git is None or c.commit is None for c in recipe.content):
             raise HarnessRefused(UNSUPPORTED_SOURCE)
         version = recipe.version if version is None else version
+        if not VERSION.fullmatch(version):
+            raise HarnessRefused(BAD_VERSION)
+        # Refuse a busy/unusable journal before staging an otherwise unowned tree.
+        with self.journal.transaction():
+            pass
         with ExitStack() as stack:
             try:
                 got = self._fetch(stack, impl, recipe, version)
@@ -210,6 +219,8 @@ class HarnessOps:
                                           login_names(), verity=not self.settings.fallback,
                                           target=recipe.target)
                 manifest = self.store.staged_manifest(staged.id)
+                if manifest.version != version:
+                    raise HarnessRefused(BAD_VERSION)
             except (sc.Refused, StoreRefused) as exc:
                 raise HarnessRefused(exc.constant) from None
             except AdapterError as exc:
@@ -218,14 +229,28 @@ class HarnessOps:
                 raise HarnessRefused(FETCH_FAILED) from None
         now = iso(self.clock())
         install = sc.install_name(manifest.version, staged.digest)
-        with self.lock:
+        with self.lock, self.journal.transaction():
             self.journal.harness_insert(HarnessInstall(staged.id, adapter, staged.digest, manifest.version,
                                                        "", "", "", "staged", "", "", now, now))
             self.journal.harness_event(now, ACTOR_CTL, "install", adapter, install, "staged")
-        worker = threading.Thread(target=self._ask, name=f"harness-ask-{adapter}", daemon=True,
+        worker = threading.Thread(target=self._ask, name=f"harness-ask-{adapter}",
                                   args=(staged.id, adapter, install, manifest, staged, got))
-        worker.start()
+        with self.worker_lock:
+            self.workers = [w for w in self.workers if w.is_alive()]
+            self.workers.append(worker)
+            worker.start()
         return staged.id
+
+    def wait(self) -> None:
+        """Keep the admitting daemon lane running until its approval workers settle.
+
+        The daemon's ordinary bounded drain/Undrained policy covers this wait; no executor or
+        daemon thread can silently outlive shutdown accounting.
+        """
+        with self.worker_lock:
+            workers = tuple(self.workers)
+        for worker in workers:
+            worker.join()
 
     def _fetch(self, stack: ExitStack, impl: Adapter, recipe: Recipe, version: str) -> _Fetched:
         """Every artifact fetched and checked, open read-only (closed and removed when `stack` ends)."""
@@ -389,7 +414,7 @@ class HarnessOps:
                         log.debug("install %s: advancing failed again (%s)", label, kind)
                     else:
                         self.failing.add(row.staging_id)
-                        log.error("install %s: advancing failed; retried each pickup (%s)", label, kind)
+                        log.error("install %s: advancing failed; retried each harness tick (%s)", label, kind)
                 else:
                     self.failing.discard(row.staging_id)
 
@@ -432,8 +457,9 @@ class HarnessOps:
             self._end(row, "failed", NOT_APPROVED)
             return
         at = iso(self.clock())
-        approved = self.journal.harness_set(row.staging_id, at, state="approved")
-        self.journal.harness_event(at, ACTOR_WSD, "approved", row.adapter, self._name(row))
+        with self.journal.transaction():
+            approved = self.journal.harness_set(row.staging_id, at, state="approved")
+            self.journal.harness_event(at, ACTOR_WSD, "approved", row.adapter, self._name(row))
         self.cp(APPROVED_POINT)
         self._settle(approved)
 
@@ -477,19 +503,24 @@ class HarnessOps:
             if outcome is not None and outcome.startswith("failed:"):
                 self._end(row, "failed", outcome.removeprefix("failed:"))
                 return
-            self._end(row, "failed", sc.RECOVERY_FAILED)
+            raise HarnessRefused(sc.RECOVERY_FAILED)
         except StoreRefused as exc:
-            self._end(row, "failed", exc.constant)
+            if exc.constant == sc.NAME_CONFLICT:
+                self._end(row, "failed", exc.constant)  # The store positively refused publication.
+            else:
+                raise HarnessRefused(exc.constant) from None
 
     def _published(self, row: HarnessInstall, install: str) -> None:
         at = iso(self.clock())
-        self.journal.harness_set(row.staging_id, at, state="published", install=install)
-        self.journal.harness_event(at, ACTOR_WSD, "published", row.adapter, install)
+        with self.journal.transaction():
+            self.journal.harness_set(row.staging_id, at, state="published", install=install)
+            self.journal.harness_event(at, ACTOR_WSD, "published", row.adapter, install)
 
     def _end(self, row: HarnessInstall, state: str, failure: str) -> None:
         at = iso(self.clock())
-        self.journal.harness_set(row.staging_id, at, state=state, failure=failure)
-        self.journal.harness_event(at, ACTOR_WSD, state, row.adapter, self._name(row), failure)
+        with self.journal.transaction():
+            self.journal.harness_set(row.staging_id, at, state=state, failure=failure)
+            self.journal.harness_event(at, ACTOR_WSD, state, row.adapter, self._name(row), failure)
 
     @staticmethod
     def _name(row: HarnessInstall) -> str:
@@ -506,7 +537,12 @@ class HarnessOps:
             if approved:
                 self._recover_store()
             for row in approved:
-                self._settle(row)
+                try:
+                    self._settle(row)
+                except HarnessRefused as exc:
+                    # Preserve OPEN protection without disabling the control socket or unrelated lanes.
+                    log.error("install %s: recovery remains unresolved (%s)",
+                              _label(row.adapter, row.digest), type(exc).__name__)
 
     # --- use, rollback, verify ---
 
@@ -519,6 +555,8 @@ class HarnessOps:
 
     def _check(self, adapter: str, pin: InstallPin) -> None:
         """E11's checks: the launcher's, then each content item's."""
+        if any(r.adapter == adapter for r in self.journal.harness_installs("approved")):
+            raise HarnessRefused(sc.RECOVERY_FAILED)
         impl = ADAPTERS[adapter]
         try:
             v = verify.verify_pin(self.store, impl, pin, self.taint_dir, problems=self.store_problems)
@@ -623,7 +661,8 @@ class HarnessOps:
             return True
         if (adapter, install) in j.harness_opened():
             return True
-        return any(r.adapter == adapter and self._name(r) == install for r in j.harness_installs(*OPEN))
+        return any(r.adapter == adapter and (r.state == "approved" or self._name(r) == install)
+                   for r in j.harness_installs(*OPEN))
 
     def _remove(self, adapter: str, install: str, action: str) -> None:
         try:
@@ -708,6 +747,12 @@ class HarnessOps:
                                                  "state": state})
             return Listing(out, self.store.fallback)
 
+    def taint_current(self, adapter: str, install: str) -> bool:
+        if not ALERT_ADAPTER.fullmatch(adapter) or not sc.INSTALL.fullmatch(install):
+            return False
+        with self.lock:
+            return verify.tainted(self.taint_dir, adapter, install)
+
     def tainted(self, adapter: str, install: str) -> None:
         """An install was found tainted (E17): its one alert (until the taint is cleared), and the event."""
         if not ALERT_ADAPTER.fullmatch(adapter) or not sc.INSTALL.fullmatch(install):
@@ -716,7 +761,9 @@ class HarnessOps:
         text = (f"The install {install_label(adapter, install)} is tainted: its tree is not the one its "
                 "manifest describes. Every launch on it refuses, and the beads running on it are held, until "
                 "it is restored and verified again, or removed.")
-        with self.alerts_lock:
+        with self.lock, self.alerts_lock:
+            if not verify.tainted(self.taint_dir, adapter, install):
+                return
             at = self.clock()
             if alerts.write(self.alerts_dir, self._alert_id(adapter, install), text, at=at):
                 self.journal.harness_event(iso(at), ACTOR_WSD, "tainted", adapter, install)
