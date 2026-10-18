@@ -381,9 +381,9 @@ def current_projection(
             # Denial is determined from the P0 action before any judgement input or
             # receipt is interpreted. An absent cached envelope is reconstructed
             # through the same strict P0 codec, never treated as permission.
-            if type(policy) is not PolicyFacts:
+            if type(action) is not Request:
                 return c.EscalateProposal("invalid_host")
-            if policy.widens_permissions is True:
+            if action.phase == "denied":
                 return c.DenyProposal()
             if action.approval_id is None:
                 return c.EscalateProposal("invalid_host")
@@ -395,6 +395,16 @@ def current_projection(
                 action.request_revision,
                 action.config,
             )
+            if (
+                type(action.prior_denials) is not tuple
+                or len(action.prior_denials) > 64
+                or any(not digest_syntax(item) for item in action.prior_denials)
+            ):
+                return c.EscalateProposal("invalid_host")
+            if denial_key(envelope, action.config) in action.prior_denials:
+                return c.DenyProposal()
+            if type(policy) is not PolicyFacts:
+                return c.EscalateProposal("invalid_host")
             floor = evaluate_policy(
                 envelope,
                 action.config,
@@ -402,7 +412,24 @@ def current_projection(
                 {} if host_overrides is None else host_overrides,
                 {} if restrict is None else restrict,
             )
-            return c.DenyProposal() if floor.tier == "hard_deny" else c.EscalateProposal("input_profile")
+            if floor.tier == "hard_deny":
+                return c.DenyProposal()
+            # The hard floor above is about this P0 action, not proof that a
+            # permission DTO describes it. Bind the subject and current policy
+            # before projecting any other outcome; the semantic bridge stays off.
+            selected = _prepared(request, privacy)
+            if (
+                not isinstance(selected, c.PermissionRequest)
+                or action.phase not in {"ask-pinned", "sufficient", "filed"}
+                or selected.subject.task_id != action.origin.bead
+                or selected.subject.session_ref != action.origin.session_key
+                or selected.workstream_id != action.origin.workstream
+                or selected.revision != action.request_revision
+                or policy.revision != selected.policy_revision.sha256
+                or (action.policy_revision is not None and action.policy_revision != policy.revision)
+            ):
+                return c.EscalateProposal("stale_digest")
+            return c.EscalateProposal("input_profile")
         selected = _prepared(request, privacy)
         binding = _bind(
             action,
@@ -540,6 +567,8 @@ def record_groom(
     request: object,
     privacy: c.PrivacyContext,
     model: ModelSpec,
+    *,
+    boot_id: str = "fake-provider-unattested-boot",
 ) -> GroomState:
     """Record advice, reconciling already consumed P1 revisions without another groom.
 
@@ -547,18 +576,14 @@ def record_groom(
     elsewhere. A later negative assessment at revision two has a fixed concern exit.
     New callers use groom_request to require current negative advice before advancing.
     """
-    if type(action) is not Request or not _valid_groom_state(state, action):
+    if not _valid_groom_state(state, action):
         raise Refused("groom-origin-refused")
-    binding, proposal = _groom_projection(receipt, action, request, privacy, model)
+    binding, proposal = _groom_projection(receipt, action, request, privacy, model, boot_id)
     if not isinstance(proposal, c.NeedsGrooming):
         return state
     if receipt.input_digest in state.assessed:
         return state
-    if (
-        type(action.groom_revisions) is not int
-        or not 0 <= action.groom_revisions <= 2
-        or (state.revisions and action.groom_revisions <= state.revisions[-1])
-    ):
+    if state.revisions and action.groom_revisions <= state.revisions[-1]:
         raise Refused("groom-budget-refused")
     return GroomState(
         action.origin,
@@ -579,15 +604,16 @@ def groom_request(
     privacy: c.PrivacyContext,
     model: ModelSpec,
     *,
+    boot_id: str = "fake-provider-unattested-boot",
     intent: Intent,
     resolved: Resolved,
     source: str,
     origin: Origin,
 ) -> Request:
     """No session effect: only current recorded negative advice can spend a P1 groom."""
-    if type(action) is not Request or not _valid_groom_state(state, action):
+    if not _valid_groom_state(state, action):
         raise Refused("groom-advice-required")
-    binding, proposal = _groom_projection(receipt, action, request, privacy, model)
+    binding, proposal = _groom_projection(receipt, action, request, privacy, model, boot_id)
     if (
         not state.assessed
         or state.failures != action.groom_revisions
@@ -616,13 +642,14 @@ def repin_enrichment(
     *,
     whole_ask: bytes,
     context_digest: str,
+    boot_id: str = "fake-provider-unattested-boot",
 ) -> Request:
     """Rebuild opaque host-observed ask from a current validated enrichment proposal.
 
     A future native adapter must prove candidate-to-canonical-ask equivalence. This
     transition enforces distinct bytes/digest, clears sufficiency and charges no groom.
     """
-    proposal = current_projection(receipt, action, request, privacy, model)
+    proposal = current_projection(receipt, action, request, privacy, model, boot_id=boot_id)
     if not isinstance(proposal, c.EnrichmentProposal):
         raise Refused("enrichment-proposal-required")
     return repin_enriched_ask(action, whole_ask, context_digest, digest(proposal.candidate))
@@ -647,11 +674,13 @@ def concern(
     privacy: c.PrivacyContext,
     model: ModelSpec,
     reason: ConcernCode,
+    *,
+    boot_id: str = "fake-provider-unattested-boot",
 ) -> Concern:
     """After two P1 revisions and current negative advice, expose only fixed labels."""
-    if type(action) is not Request or not _valid_groom_state(state, action) or not state.receipts:
+    if not _valid_groom_state(state, action) or not state.receipts:
         raise Refused("concern-refused")
-    binding, proposal = _groom_projection(state.receipts[-1], action, request, privacy, model)
+    binding, proposal = _groom_projection(state.receipts[-1], action, request, privacy, model, boot_id)
     if (
         state.failures != 2
         or action.groom_revisions != 2
@@ -666,7 +695,12 @@ def concern(
 
 
 def _groom_projection(
-    receipt: Receipt, action: Request, request: object, privacy: c.PrivacyContext, model: ModelSpec
+    receipt: Receipt,
+    action: Request,
+    request: object,
+    privacy: c.PrivacyContext,
+    model: ModelSpec,
+    boot_id: str,
 ) -> tuple[str, c.Projection]:
     """Validate receipt identity even when native lint supplies the negative advice."""
     if type(receipt) is not Receipt:
@@ -675,14 +709,14 @@ def _groom_projection(
     binding = _bind(action, selected, privacy, model)
     if receipt.input_digest != binding or receipt.kind != "sufficiency":
         raise Refused("groom-receipt-refused")
-    return binding, _sufficiency_projection(receipt, selected, privacy, model, binding)
+    return binding, _sufficiency_projection(receipt, selected, privacy, model, binding, boot_id)
 
 
 def _concern_reason(gaps: tuple[c.Gap, ...]) -> ConcernCode:
     """Fixed deterministic labels; never copy model prose to the public concern."""
     if any(gap.code == "native_lint" for gap in gaps):
         return "lint-failed"
-    if any(gap.field == "/context" for gap in gaps):
+    if any(gap.field in {"/context", "/candidate/title", "/candidate/description"} for gap in gaps):
         return "missing-context"
     if any(gap.field.startswith("/candidate/ask/target") for gap in gaps):
         return "ambiguous-target"
