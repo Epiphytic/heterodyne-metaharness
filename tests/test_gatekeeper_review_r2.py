@@ -1,6 +1,6 @@
 """Bounded public-seam regressions from the actual second HIGH review."""
 
-from typing import Any
+from typing import Any, cast
 
 import msgspec
 import pytest
@@ -71,7 +71,9 @@ def test_normalized_response_enforces_whole_response_budget():
         ),
     )
     assert v.check_result(body, req.value, privacy()) == c.Invalid("result", "oversize", "")
-    assert sufficiency_disposition(req, c.Completed(c.Valid(body))) == c.HoldUnavailable("bad_output")
+    assert sufficiency_disposition(req, c.Completed(c.Valid(cast(Any, body)))) == c.HoldUnavailable(
+        "bad_output"
+    )
 
 
 @pytest.mark.parametrize("path", [("snapshot_sha256",), ("policy_revision", "sha256")])
@@ -99,8 +101,10 @@ def test_cyclic_model_and_origin_records_fail_closed():
     cycle = []
     cycle.append(cycle)
     req = ready("sufficiency")
-    assert sufficiency_disposition(req, c.Completed(c.Valid(cycle))) == c.HoldUnavailable("bad_output")
-    assert intake_disposition(c.OriginGap(cycle), None) == c.HoldUnavailable("invalid_host")
+    assert sufficiency_disposition(req, c.Completed(c.Valid(cast(Any, cycle)))) == c.HoldUnavailable(
+        "bad_output"
+    )
+    assert intake_disposition(c.OriginGap(cast(Any, cycle)), None) == c.HoldUnavailable("invalid_host")
 
 
 def test_dict_subclass_cannot_smuggle_an_egress_mapping():
