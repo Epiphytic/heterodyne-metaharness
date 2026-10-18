@@ -1,0 +1,122 @@
+{
+  "version": 1,
+  "status": "Unreviewed proposed finite admission; no implementation or human approval",
+  "author": "Codex",
+  "task": "btq-voe5f",
+  "source_base": "a73e91d367bd626556371f33a46e25f003243c6e",
+  "approved_archive": "cb180b72c21a157f721be1e4fa57ccfd03d4a11b",
+  "original_design": "45e239a53bdb3bee82d6d44125c021abe296f60d",
+  "sources": [
+    {
+      "commit": "cb180b72c21a157f721be1e4fa57ccfd03d4a11b",
+      "path": "docs/adr/2026-10-16-plan5-actions-and-executor-d4.md",
+      "sha256": "de7239b72a3ac2b63d1d05f4143212e6f4ea83193bfe1ac3b4279bb28ba8c5f8",
+      "git_blob": "3f8daea6ad2133436caf1aecb05003fc9a636519"
+    },
+    {
+      "commit": "cb180b72c21a157f721be1e4fa57ccfd03d4a11b",
+      "path": "docs/adr/2026-10-16-plan5-governing-amendment-admission.md",
+      "sha256": "2f9c0700310826e0917e1294fb4603affa3ed7de3cca369dcdb33bd2358ae1b6",
+      "git_blob": "5c414b7ac8efcfbcd4de4812d21c088e9d94a77a"
+    },
+    {
+      "commit": "cb180b72c21a157f721be1e4fa57ccfd03d4a11b",
+      "path": "evidence/f5e/staged-target-graph.DRAFT.json",
+      "sha256": "0f47214935560d69112f23b484cbe50d472a340cd0fe7146ed0b43660228c039",
+      "git_blob": "17fce784baf75abee50e0a457aabca79d13f1c8e"
+    },
+    {
+      "commit": "dd38be7a39c1cdfdcd61a5555c7e3a0ff8b4ee9c",
+      "path": "src/heterodyne/actions/README.md",
+      "sha256": "ec65d853139b344bfc0c3f49ed2b0046507485b66e55c2fcf318446670e434d5",
+      "git_blob": "a3ab7dd3ca3b0532b139b04f64e523bd48fa38c9"
+    },
+    {
+      "commit": "dd38be7a39c1cdfdcd61a5555c7e3a0ff8b4ee9c",
+      "path": "src/heterodyne/actions/requests.py",
+      "sha256": "56c022b49bd987b2a7aa4eddf1bca70a4468a0677c6efa3334b90dda8f5801e3",
+      "git_blob": "e9d376ca3e948c883e0f101e5d35d75815a92d4c"
+    },
+    {
+      "commit": "dd38be7a39c1cdfdcd61a5555c7e3a0ff8b4ee9c",
+      "path": "src/heterodyne/actions/decisions.py",
+      "sha256": "0cd5dca0a4f2005eaefa36d892926caf306b0d85be3d8491c77cebeeda2016c5",
+      "git_blob": "74993c6874b3293105223e83c36ae03e0788ae9d"
+    },
+    {
+      "commit": "dd38be7a39c1cdfdcd61a5555c7e3a0ff8b4ee9c",
+      "path": "src/heterodyne/actions/dispatch.py",
+      "sha256": "792d0a17a739f024dd18c775959c983096c54138aa92e02c274d4d779d98b901",
+      "git_blob": "c8a6f0b2be05cb508a360c01e9ad5589f6d4802d"
+    },
+    {
+      "commit": "dd38be7a39c1cdfdcd61a5555c7e3a0ff8b4ee9c",
+      "path": "src/heterodyne/actions/journal.py",
+      "sha256": "1548c0251d6694e2e96a7e5f91f4aa2e96228fada2d67a83e73d42df7dcbf340",
+      "git_blob": "0d16d3d9b2a6ea802e768a54c3fa75b636c5378e"
+    },
+    {
+      "commit": "dd38be7a39c1cdfdcd61a5555c7e3a0ff8b4ee9c",
+      "path": "src/heterodyne/actions/transitions.py",
+      "sha256": "3d8e7b99a214db7713316935dbe7b1fe571ffc2f56c4951414eb84146f2376cf",
+      "git_blob": "de518c80d9e56f12ee25f6400e1a113989728819"
+    },
+    {
+      "commit": "dd38be7a39c1cdfdcd61a5555c7e3a0ff8b4ee9c",
+      "path": "src/heterodyne/actions/policy.py",
+      "sha256": "a10eb3238270dd89b677e58bc51fe3c9116dafff92d59afe0945a2f1e2d37226",
+      "git_blob": "e33247052590a78076b383be7e4f0aacfafc4cab"
+    },
+    {
+      "commit": "dd38be7a39c1cdfdcd61a5555c7e3a0ff8b4ee9c",
+      "path": "src/heterodyne/actions/fake_ports.py",
+      "sha256": "555a191876d34c79407dcb602dbf0981503a1addb480a99352be8bc6d7226cba",
+      "git_blob": "d45c262d2bc32ff78ca4c7f97744f4404a71d530"
+    },
+    {
+      "commit": "00ff9fc2071ecb22f6d950422232ca1c95a5540e",
+      "path": "src/heterodyne/actions/judgement.py",
+      "sha256": "3a9c90104b8ca91c32c966fdbbe166f2e537338de800bcfc6dd0847edd1d6bae",
+      "git_blob": "4a6b4e9b2cf0fd62acce4a0fac8b8e7f09fe86e9"
+    },
+    {
+      "commit": "00ff9fc2071ecb22f6d950422232ca1c95a5540e",
+      "path": "src/heterodyne/gatekeeper/contracts.py",
+      "sha256": "c9d41d042fad5c1444b6f0a7f3644bd86ad7fd436bc7fee4685104e48f9e91ba",
+      "git_blob": "db940f6482757e1109636d30e66cc75bed29256a"
+    },
+    {
+      "commit": "00ff9fc2071ecb22f6d950422232ca1c95a5540e",
+      "path": "src/heterodyne/gatekeeper/validate.py",
+      "sha256": "b325317c940854b50f71ad3ab9c0b7583b61cfa3da56338356b3af9780018e22",
+      "git_blob": "53561b1babd764209bf95d419d2d6496ced76e96"
+    },
+    {
+      "commit": "f80412a853a2b81ec87d3e7fbf18c6c9c91f7cb2",
+      "path": "btq_actions/core.py",
+      "sha256": "88ccf97977f49d4719749c66e645c2f7d4ae951243bea696f6479c64a8b45ab0",
+      "git_blob": "74f089c5b57548794bd4665c08d4d61b5e4cc456"
+    },
+    {
+      "path": "docs/reviews/2026-10-18-plan5-next-p1-r11.md",
+      "sha256": "1b4d5d9ddc97879936323d1894d584e7ff27a7d0582969c2e2e428bb1971ad3d",
+      "kind": "byte-exact actual review output; original ordinal unchanged"
+    },
+    {
+      "path": "docs/reviews/2026-10-18-plan5-next-p2-r4.md",
+      "sha256": "a0276cba50eeda9d244a759699aabb13996476485f9780ba973e7790aed9a880",
+      "kind": "byte-exact actual review output; original ordinal unchanged"
+    }
+  ],
+  "availability": {
+    "P1": "merged dd38; actual R11 APPROVE offline only, eight retained findings",
+    "P2": "source00ff; docs1865; PR118 not asserted merged/CI complete",
+    "Q0": "f804 candidate pending controller second HIGH, no backend/default factory"
+  },
+  "method": [
+    "Semble search exact actions/ports/judgement locations",
+    "ripwire pack-task (bounded output disclosure retained)",
+    "git show exact objects; no tests, model, queue or live effects"
+  ],
+  "missing_public_filename": "docs/reviews/efddg-code-r11-medium.md absent at dd38 and efddg HEAD; actual N log copied byte-exact under this design-specific path"
+}
