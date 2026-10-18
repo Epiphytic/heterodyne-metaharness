@@ -212,3 +212,37 @@ proposed state or authenticated by this package. A future trusted adapter must
 sample current time and authenticate exact recovery scope/readbacks. Nonempty
 observations are retained atomically alongside the state event; refused transitions
 retain neither. Explicit operator attestation is distinguished from machine proof.
+
+### Fourth-review observation and recovery closure
+
+`TransitionObservation.decision_readback` and `.reconciliation_readback` are
+separate typed synthetic port results. The journal does not infer current
+policy, native read success, read-only invocation completion, effect outcome or
+cleanup from a callback's proposed state. Decision operations corroborate the
+current durable request revision/digest. An active decision blocks grooming and
+cancellation; a committed denial writes canonical session denial history in the
+same transaction, before request cleanup. A retained native-conflict decision
+cannot be discarded as an invalidated prewrite event.
+
+Allocation issuance retains its independently sampled valid clock with the
+write-ahead event. The journal derives lookup backoff from that retained sample
+and a new clock, ignoring caller elapsed integers or start assertions. Missing
+historical issuance clocks hold for explicit recovery. Dispatch discontinuity
+(reboot or UTC/monotonic divergence) allows exact authenticated operator outcome
+and cleanup settlement without unreachable scheduled lookups; it never allows
+initial-effect replay or renews a claim. Ordinary continuous-clock uncertainty
+still exhausts the three read-only observations before operator settlement.
+
+A filed request without a live decision or dispatch has an explicit authenticated
+withdrawal/cleanup path through `CancellationRecovery`. Silence alone cannot
+cancel it. The `completed` lifecycle phase now carries `completion_effect`:
+`succeeded` or `absent`, derived from its settled dispatch. `None` on legacy or
+non-completed rows is unknown, never business success. Absent parent evidence
+survives later unknown/absent reads, whose own child events remain retained.
+Held preparation attempts cannot allocate read-only reconciliation children.
+
+The private fixture journal still performs a bounded approval lookup over at
+most 4096 request rows. Indexed persistence and its migration/rollback proof are
+deferred noncritical performance work; no production contention guarantee is
+claimed. All new observations are explicit synthetic attestations, not verified
+credentials or proof a real worker ran. All five live adapters remain unavailable.

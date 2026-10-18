@@ -178,12 +178,23 @@ def test_journal_checks_independent_actual_clock_not_reducer_clock(tmp_path, sec
 def test_allocation_backoff_requires_independent_elapsed_observation(tmp_path):
     with closing(FixtureJournal.create(tmp_path / "fixture")) as db:
         key = db.add_request(f.initial())
-        value = db.transition("request", key, 0, f.issue_allocation)
+        value = db.transition(
+            "request",
+            key,
+            0,
+            f.issue_allocation,
+            observation=TransitionObservation(now=f.Clock("allocation", 1, 1)),
+        )
 
         def proposal(old):
             return f.observe_allocation(old, ("btq-ab123",), lookup_ok=True, elapsed_seconds=1)
 
-        for observation in (TransitionObservation(), TransitionObservation(allocation_elapsed_seconds=0)):
+        for observation in (
+            TransitionObservation(),
+            TransitionObservation(
+                allocation_elapsed_seconds=0, now=f.Clock("allocation", 1 + (0) * 10**9, 1 + (0) * 10**9)
+            ),
+        ):
             with pytest.raises(Refused):
                 db.transition("request", key, value.version, proposal, observation=observation)
         assert db.get("request", key) == value
@@ -220,6 +231,7 @@ def test_parent_readback_requires_settled_child_and_joins_exact_outcome(tmp_path
             lambda old: dis.finish_reconciliation(
                 old, evidence=f.DIGEST, cleanup_proven=True, effect="unknown"
             ),
+            observation=f.reconciliation_observation(child, effect="unknown"),
         )
         with pytest.raises(Refused):
             db.transition("dispatch", parent.approval_id, parent.version, proposal, observation=observation)
@@ -260,6 +272,7 @@ def test_parent_backoff_uses_observed_clock_not_proposal_elapsed(tmp_path):
             dispatch_key(child),
             0,
             lambda old: dis.finish_reconciliation(old, evidence=f.DIGEST, cleanup_proven=True),
+            observation=f.reconciliation_observation(child, effect="unknown"),
         )
         with pytest.raises(Refused, match="not-due"):
             db.transition(
@@ -371,7 +384,7 @@ def test_journal_cancel_after_deny_refuses_and_preserves_atomic_denial_route(tmp
                 request.version,
                 lambda old: settle_request(old, "cancelled", **r1.cleanup(old)),
             )
-        assert not db.denied(request.denial_identity, request.origin.session_key)
+        assert db.denied(request.denial_identity, request.origin.session_key)
         done = db.transition(
             "request",
             key,
@@ -386,8 +399,16 @@ def test_journal_cancel_after_deny_refuses_and_preserves_atomic_denial_route(tmp
 def test_explicit_observation_retained_atomically_with_transition(tmp_path):
     with closing(FixtureJournal.create(tmp_path / "fixture")) as db:
         key = db.add_request(f.initial())
-        value = db.transition("request", key, 0, f.issue_allocation)
-        observation = TransitionObservation(allocation_elapsed_seconds=0)
+        value = db.transition(
+            "request",
+            key,
+            0,
+            f.issue_allocation,
+            observation=TransitionObservation(now=f.Clock("allocation", 1, 1)),
+        )
+        observation = TransitionObservation(
+            allocation_elapsed_seconds=0, now=f.Clock("allocation", 1 + (0) * 10**9, 1 + (0) * 10**9)
+        )
         with pytest.raises(Refused):
             db.transition(
                 "request",
@@ -396,8 +417,12 @@ def test_explicit_observation_retained_atomically_with_transition(tmp_path):
                 lambda old: f.observe_allocation(old, ("btq-ab123",), lookup_ok=True, elapsed_seconds=1),
                 observation=observation,
             )
-        assert not db.db.execute("SELECT 1 FROM events WHERE kind='request-observation'").fetchall()
-        observation = TransitionObservation(allocation_elapsed_seconds=1)
+        assert (
+            db.db.execute("SELECT count(*) FROM events WHERE kind='request-observation'").fetchone()[0] == 1
+        )
+        observation = TransitionObservation(
+            allocation_elapsed_seconds=1, now=f.Clock("allocation", 1 + (1) * 10**9, 1 + (1) * 10**9)
+        )
         result = db.transition(
             "request",
             key,
@@ -406,7 +431,9 @@ def test_explicit_observation_retained_atomically_with_transition(tmp_path):
             observation=observation,
         )
         row = db.db.execute(
-            "SELECT version,data FROM events WHERE kind='request-observation' AND key=?", (key,)
+            "SELECT version,data FROM events WHERE kind='request-observation' AND key=? "
+            "ORDER BY version DESC LIMIT 1",
+            (key,),
         ).fetchone()
         assert row[0] == result.version
         assert msgspec.json.decode(row[1], type=TransitionObservation) == observation

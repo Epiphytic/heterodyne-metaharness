@@ -13,6 +13,38 @@ from heterodyne.actions.dispatch import Clock, Dispatch, DispatchRecovery
 from heterodyne.actions.policy import request_denial_key
 
 
+class DecisionReadback(Record, frozen=True):
+    """Independent synthetic native/policy read, not a production authentication token."""
+
+    approval_id: str
+    request_revision: int
+    digest: str
+    expected_version: int
+    authority_current: bool = False
+    current_check: bool = False
+    native_read_ok: bool = False
+    native_event: dec.DecisionObservation | None = None
+    heart_readback: bool = False
+
+
+class ReconciliationReadback(Record, frozen=True):
+    """Explicit fake read-only worker result, independent of the proposed child state."""
+
+    approval_id: str
+    revision: int
+    digest: str
+    target: str
+    attempt_id: str
+    parent_attempt_id: str
+    expected_version: int
+    evidence: str
+    effect: Literal["succeeded", "absent", "unknown"]
+    read_only: bool = False
+    invocation_finished: bool = False
+    effect_cleanup_proven: bool = False
+    cleanup_proven: bool = False
+
+
 class TransitionObservation(Record, frozen=True):
     """Independent synthetic port input, never recovered from a proposed state.
 
@@ -26,6 +58,11 @@ class TransitionObservation(Record, frozen=True):
     abandonment_recovery: req.AbandonmentRecovery | None = None
     dispatch_recovery: DispatchRecovery | None = None
     reconciliation_key: str | None = None
+    decision_readback: DecisionReadback | None = None
+    reconciliation_readback: ReconciliationReadback | None = None
+    # Supplied only from the journal's retained issuance observation, never caller time.
+    allocation_started: Clock | None = None
+    cancellation_recovery: req.CancellationRecovery | None = None
 
 
 EMPTY_OBSERVATION = TransitionObservation()
@@ -43,7 +80,11 @@ def request_transition(
         raise req.Refused("denial-identity-not-derived")
     candidate = None
     if value.phase in req.TERMINAL_REQUESTS:
-        recovery = observation.abandonment_recovery
+        recovery = (
+            observation.cancellation_recovery
+            if value.phase == "cancelled"
+            else observation.abandonment_recovery
+        )
         candidate = req.settle_request(
             old,
             cast(Literal["completed", "denied", "cancelled", "reconciled-abandoned"], value.phase),
@@ -57,6 +98,10 @@ def request_transition(
             recovery=recovery,
         )
     elif old.phase == "allocation-intent":
+        from heterodyne.actions.dispatch import clock_elapsed
+
+        now = _observed_clock(observation)
+        clock_elapsed(now, now)
         candidate = req.issue_allocation(old)
     elif old.phase == "allocation-unknown":
         if value.recovery_operator_event is not None:
@@ -71,6 +116,10 @@ def request_transition(
                 elapsed_seconds=_allocation_elapsed(observation),
             )
     elif old.phase in {"ask-pinned", "sufficient"} and value.phase == "blocker-pending":
+        if isinstance(decision, dec.Decision) and (
+            decision.phase != "invalid" or decision.observed_native_event is not None
+        ):
+            raise req.Refused("groom-decision-unsettled")
         candidate = req.groom(old, value.intent, value.resolved, value.requested_source, origin=value.origin)
     elif old.phase in {"allocated", "blocker-pending", "parked"}:
         operation = {"allocated": "blocker", "blocker-pending": "park", "parked": "land"}[old.phase]
@@ -104,39 +153,73 @@ def request_transition(
 
 
 def _allocation_elapsed(observation: TransitionObservation) -> int:
-    value = observation.allocation_elapsed_seconds
-    if type(value) is not int or value < 0:
+    from heterodyne.actions.dispatch import clock_elapsed
+
+    if observation.allocation_started is None:
         raise req.Refused("allocation-time-observation-required")
-    return value
+    return clock_elapsed(observation.allocation_started, _observed_clock(observation))
 
 
-def decision_transition(old: dec.Decision, value: dec.Decision) -> None:
+def decision_transition(
+    old: dec.Decision,
+    value: dec.Decision,
+    *,
+    request: req.Request,
+    observation: TransitionObservation = EMPTY_OBSERVATION,
+) -> None:
+    read = observation.decision_readback
+    if read is None or (read.approval_id, read.request_revision, read.digest, read.expected_version) != (
+        old.approval_id,
+        old.request_revision,
+        old.digest,
+        old.version,
+    ):
+        raise req.Refused("decision-observation-required")
     candidate = None
     if value.phase == "invalid":
+        if value.invalid_reason == "authority-revoked" and read.authority_current:
+            raise req.Refused("decision-authority-not-revoked")
+        if value.invalid_reason == "digest-stale" and request.context_digest == old.digest:
+            raise req.Refused("decision-digest-not-stale")
         candidate = dec.invalidate_decision(
             old,
             reason=cast(
                 Literal["authority-revoked", "digest-stale", "native-conflict"], value.invalid_reason
             ),
-            current_check=True,
-            readback=value.observed_native_event,
-            native_read_ok=True,
+            current_check=read.current_check,
+            readback=read.native_event if value.invalid_reason == "native-conflict" else None,
+            native_read_ok=read.native_read_ok,
         )
-    elif old.phase == "pending":
-        candidate = dec.issue_decision(old, fresh_authority=True, current_digest=old.digest)
-    elif old.phase == "write-issued":
-        candidate = dec.read_decision(old, value.event, read_ok=True)
-    elif old.phase in {"native-written", "native-closed", "pins-finished"}:
-        operation = {"native-written": "close", "native-closed": "pins", "pins-finished": "finish"}[old.phase]
-        candidate = dec.finalize_decision(
-            old,
-            cast(Literal["close", "pins", "finish"], operation),
-            readback=old.event,
-            current_digest=old.digest,
-            native_readback=True,
-        )
-    elif old.phase == "committed":
-        candidate = dec.settle_heart_proposal(old, proposal_readback=True)
+    else:
+        if (request.approval_id, request.request_revision, request.context_digest) != (
+            old.approval_id,
+            old.request_revision,
+            old.digest,
+        ) or request.phase not in (
+            {"filed"} if old.event.value == "approve" else {"filed", "ask-pinned", "sufficient"}
+        ):
+            raise req.Refused("decision-current-request-mismatch")
+        if old.phase == "pending":
+            candidate = dec.issue_decision(
+                old, fresh_authority=read.authority_current, current_digest=request.context_digest or ""
+            )
+        elif old.phase == "write-issued":
+            candidate = dec.read_decision(old, read.native_event, read_ok=read.native_read_ok)
+        elif old.phase in {"native-written", "native-closed", "pins-finished"}:
+            if read.native_event is None:
+                raise req.Refused("decision-native-readback-required")
+            operation = {"native-written": "close", "native-closed": "pins", "pins-finished": "finish"}[
+                old.phase
+            ]
+            candidate = dec.finalize_decision(
+                old,
+                cast(Literal["close", "pins", "finish"], operation),
+                readback=read.native_event,
+                current_digest=request.context_digest or "",
+                native_readback=read.native_read_ok and read.authority_current,
+            )
+        elif old.phase == "committed":
+            candidate = dec.settle_heart_proposal(old, proposal_readback=read.heart_readback)
     if candidate != value:
         raise req.Refused("decision-transition-not-closed")
 
@@ -152,11 +235,37 @@ def dispatch_transition(
     from heterodyne.actions import dispatch as dis
 
     if old.dispatch_kind == "reconcile":
+        read = observation.reconciliation_readback
+        if (
+            read is None
+            or (
+                read.approval_id,
+                read.revision,
+                read.digest,
+                read.target,
+                read.attempt_id,
+                read.parent_attempt_id,
+                read.expected_version,
+            )
+            != (
+                old.approval_id,
+                old.revision,
+                old.digest,
+                old.target,
+                old.attempt_id,
+                old.parent_attempt_id,
+                old.version,
+            )
+            or not read.read_only
+            or not read.invocation_finished
+        ):
+            raise req.Refused("reconciliation-observation-required")
         candidate = dis.finish_reconciliation(
             old,
-            evidence=value.evidence or "",
-            cleanup_proven=value.cleanup_proven,
-            effect=value.reconciliation_effect or "unknown",
+            evidence=read.evidence,
+            cleanup_proven=read.cleanup_proven,
+            effect=read.effect,
+            effect_cleanup_proven=read.effect_cleanup_proven,
         )
     elif value.recovery_operator_event is not None:
         recovery = observation.dispatch_recovery
@@ -183,16 +292,15 @@ def dispatch_transition(
             != (old.approval_id, old.revision, old.digest, old.target, old.resource)
             or reconciliation.attempt_id in old.reconciliation_attempts
             or not reconciliation.cleanup_proven
-            or reconciliation.evidence != value.evidence
-            or (value.state == "succeeded") != (reconciliation.reconciliation_effect == "succeeded")
+            or reconciliation.reconciliation_effect is None
         ):
             raise req.Refused("settled-reconciliation-provenance-required")
         candidate = dis.reconcile_lookup(
             old,
             elapsed_seconds=elapsed,
-            effect="succeeded" if value.state == "succeeded" else "unknown",
-            evidence=value.evidence,
-            cleanup_proven=value.cleanup_proven,
+            effect=reconciliation.reconciliation_effect,
+            evidence=reconciliation.evidence,
+            cleanup_proven=reconciliation.reconciliation_cleanup_proven,
         )
     elif value.state == "ready" and value.claim_deadline_ns is not None:
         candidate = dis.ready(

@@ -113,13 +113,17 @@ def persist_filed_request(db, approval_id="btq-ab123"):
             return request
     sequence = db.db.execute("SELECT count(*) FROM requests").fetchone()[0] + 1
     key = db.add_request(initial(sequence))
-    value = db.transition("request", key, 0, issue_allocation)
+    value = db.transition(
+        "request", key, 0, issue_allocation, observation=TransitionObservation(now=Clock("allocation", 1, 1))
+    )
     value = db.transition(
         "request",
         key,
         value.version,
         lambda v: observe_allocation(v, (approval_id,), lookup_ok=True, elapsed_seconds=1),
-        observation=TransitionObservation(allocation_elapsed_seconds=1),
+        observation=TransitionObservation(
+            allocation_elapsed_seconds=1, now=Clock("allocation", 1 + (1) * 10**9, 1 + (1) * 10**9)
+        ),
     )
     for operation in ("blocker", "park", "land"):
         value = db.transition(
@@ -169,9 +173,14 @@ def persist_decision(db, value="approve", approval_id="btq-ab123"):
         result.approval_id,
         result.version,
         lambda v: issue_decision(v, fresh_authority=True, current_digest=DIGEST),
+        observation=decision_observation(result),
     )
     result = db.transition(
-        "decision", result.approval_id, result.version, lambda v: read_decision(v, observation, read_ok=True)
+        "decision",
+        result.approval_id,
+        result.version,
+        lambda v: read_decision(v, observation, read_ok=True),
+        observation=decision_observation(result),
     )
     for operation in ("close", "pins", "finish"):
         result = db.transition(
@@ -181,6 +190,7 @@ def persist_decision(db, value="approve", approval_id="btq-ab123"):
             lambda v, operation=operation: finalize_decision(
                 v, operation, readback=observation, current_digest=DIGEST, native_readback=True
             ),
+            observation=decision_observation(result, native=observation),
         )
     return result
 
@@ -211,7 +221,10 @@ def persist_reconcile_observation(db, parent, elapsed, *, effect="unknown", clea
         "dispatch",
         dispatch_key(child),
         0,
-        lambda old: dis.finish_reconciliation(old, evidence=DIGEST, cleanup_proven=True, effect=effect),
+        lambda old: dis.finish_reconciliation(
+            old, evidence=DIGEST, cleanup_proven=True, effect=effect, effect_cleanup_proven=cleanup
+        ),
+        observation=reconciliation_observation(child, effect=effect, effect_cleanup=cleanup),
     )
     return db.transition(
         "dispatch",
@@ -413,9 +426,17 @@ def test_cleanup_missing_stale_or_duplicate_shells_cannot_free_capacity():
 def test_stale_version_cannot_release_successor_or_duplicate_effect(tmp_path):
     db = FixtureJournal.create(tmp_path / "fixture.sqlite")
     key = db.add_request(initial())
-    db.transition("request", key, 0, issue_allocation)
+    db.transition(
+        "request", key, 0, issue_allocation, observation=TransitionObservation(now=Clock("allocation", 1, 1))
+    )
     with pytest.raises(Refused):
-        db.transition("request", key, 0, issue_allocation)
+        db.transition(
+            "request",
+            key,
+            0,
+            issue_allocation,
+            observation=TransitionObservation(now=Clock("allocation", 1, 1)),
+        )
     assert db.get("request", key).version == 1
     db.close()
 
@@ -702,3 +723,44 @@ def test_fixture_upgrade_missing_path_never_creates_and_bad_version_never_create
     with pytest.raises(Refused, match="fixture-schema-version"):
         create_fixture(path, version=True)
     assert not path.exists()
+
+
+def decision_observation(value, *, native=None, authority_current=True):
+    """Explicit synthetic port facts for fixtures; no production authority is provided."""
+    from heterodyne.actions.transitions import DecisionReadback
+
+    return TransitionObservation(
+        decision_readback=DecisionReadback(
+            value.approval_id,
+            value.request_revision,
+            value.digest,
+            value.version,
+            authority_current=authority_current,
+            current_check=True,
+            native_read_ok=True,
+            native_event=value.event if native is None else native,
+            heart_readback=True,
+        )
+    )
+
+
+def reconciliation_observation(value, *, effect="unknown", effect_cleanup=False):
+    from heterodyne.actions.transitions import ReconciliationReadback
+
+    return TransitionObservation(
+        reconciliation_readback=ReconciliationReadback(
+            value.approval_id,
+            value.revision,
+            value.digest,
+            value.target,
+            value.attempt_id,
+            value.parent_attempt_id,
+            value.version,
+            DIGEST,
+            effect,
+            read_only=True,
+            invocation_finished=True,
+            cleanup_proven=True,
+            effect_cleanup_proven=effect_cleanup,
+        )
+    )

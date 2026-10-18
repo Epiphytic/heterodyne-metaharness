@@ -61,7 +61,13 @@ def test_groom_new_generation_requires_park_readback():
 def test_duplicate_delivery_returns_advanced_record(tmp_path):
     db = FixtureJournal.create(tmp_path / "fixture.sqlite")
     key = db.add_request(f.initial())
-    advanced = db.transition("request", key, 0, issue_allocation)
+    advanced = db.transition(
+        "request",
+        key,
+        0,
+        issue_allocation,
+        observation=TransitionObservation(now=f.Clock("allocation", 1, 1)),
+    )
     assert db.add_request(f.initial()) == key
     assert db.get("request", key) == advanced
     db.close()
@@ -108,13 +114,21 @@ def test_denial_settlement_and_durable_session_denial_are_atomic(tmp_path):
     db = FixtureJournal.create(tmp_path / "fixture.sqlite")
     # Persist the filing through the same versioned reducer stream as production fixtures.
     key = db.add_request(f.initial())
-    value = db.transition("request", key, 0, issue_allocation)
+    value = db.transition(
+        "request",
+        key,
+        0,
+        issue_allocation,
+        observation=TransitionObservation(now=f.Clock("allocation", 1, 1)),
+    )
     value = db.transition(
         "request",
         key,
         value.version,
         lambda v: observe_allocation(v, ("btq-ab123",), lookup_ok=True, elapsed_seconds=1),
-        observation=TransitionObservation(allocation_elapsed_seconds=1),
+        observation=TransitionObservation(
+            allocation_elapsed_seconds=1, now=f.Clock("allocation", 1 + (1) * 10**9, 1 + (1) * 10**9)
+        ),
     )
     for operation in ("blocker", "park", "land"):
         value = db.transition(
@@ -205,6 +219,7 @@ def test_invalid_prewrite_replaced_but_all_inbox_events_remain(tmp_path):
         original.approval_id,
         0,
         lambda v: dec.invalidate_decision(v, reason="authority-revoked", current_check=True),
+        observation=f.decision_observation(original, authority_current=False),
     )
     next_event = msgspec.structs.replace(f.event("deny"), event_id="event-2")
     replacement = dec.begin_decision(
@@ -302,34 +317,18 @@ def test_reconciliation_has_separate_persisted_kind_identity_and_no_initial_effe
 
     path = tmp_path / "fixture.sqlite"
     db = FixtureJournal.create(path)
-    f.persist_decision(db)
-    clock = dis.Clock("boot", 1, 1)
-    parent = dis.prepare(
-        "btq-ab123",
-        1,
-        f.DIGEST,
-        f.DIGEST,
-        "initial",
-        "resource",
-        "c" * 64,
-        clock,
-        fake_finalized_approval=True,
-    )
-    db.add_dispatch(parent)
-    parent = db.transition(
-        "dispatch",
-        parent.approval_id,
-        0,
-        lambda v: dis.preparation_failed(v, launcher_exited=True, no_children=True),
-    )
-    reconciler = dis.prepare_reconciliation(parent, "read-only-1", "d" * 64, clock)
+    from test_actions_p1_r3 import ready_parent
+
+    parent, clock = ready_parent(db, consumed=False)
+    parent = db.transition("dispatch", parent.approval_id, parent.version, dis.uncertain)
+    reconciler = dis.prepare_reconciliation(parent, "read-only-1", "f" * 64, clock)
     db.add_dispatch(reconciler)
     key = dispatch_key(reconciler)
     assert key != parent.approval_id
     with pytest.raises(Refused):
         dis.ready(reconciler, parent.startup_hash, clock, fresh_gates=True, startup_readback=True)
     with pytest.raises(Refused):
-        db.add_dispatch(dis.prepare_reconciliation(parent, "read-only-2", "d" * 64, clock))
+        db.add_dispatch(dis.prepare_reconciliation(parent, "read-only-2", "f" * 64, clock))
     db.close()
     db = FixtureJournal(path)
     assert db.get("dispatch", key).dispatch_kind == "reconcile"
@@ -429,13 +428,21 @@ def test_new_generation_groom_journal_keeps_stable_session_and_requires_repark(t
     db = FixtureJournal.create(tmp_path / "fixture.sqlite")
     original = f.initial()
     key = db.add_request(original)
-    value = db.transition("request", key, 0, issue_allocation)
+    value = db.transition(
+        "request",
+        key,
+        0,
+        issue_allocation,
+        observation=TransitionObservation(now=f.Clock("allocation", 1, 1)),
+    )
     value = db.transition(
         "request",
         key,
         value.version,
         lambda v: observe_allocation(v, ("btq-ab123",), lookup_ok=True, elapsed_seconds=1),
-        observation=TransitionObservation(allocation_elapsed_seconds=1),
+        observation=TransitionObservation(
+            allocation_elapsed_seconds=1, now=f.Clock("allocation", 1 + (1) * 10**9, 1 + (1) * 10**9)
+        ),
     )
     for operation in ("blocker", "park", "land"):
         value = db.transition(
@@ -542,6 +549,7 @@ def test_native_conflict_replacement_must_match_observed_first_event(tmp_path):
         first.approval_id,
         0,
         lambda v: dec.issue_decision(v, fresh_authority=True, current_digest=f.DIGEST),
+        observation=f.decision_observation(first),
     )
     observed = msgspec.structs.replace(f.event("deny"), event_id="actual-first")
     db.transition(
@@ -551,6 +559,7 @@ def test_native_conflict_replacement_must_match_observed_first_event(tmp_path):
         lambda v: dec.invalidate_decision(
             v, reason="native-conflict", current_check=True, readback=observed, native_read_ok=True
         ),
+        observation=f.decision_observation(value, native=observed),
     )
     wrong = dec.begin_decision(
         f.filed(),
@@ -574,7 +583,13 @@ def test_full_audit_store_still_acknowledges_duplicates_without_mutation(tmp_pat
     assert db.add_request(f.initial()) == key
     assert db.transition("request", key, 0, lambda v: v) == f.initial()
     with pytest.raises(Refused, match="capacity"):
-        db.transition("request", key, 0, issue_allocation)
+        db.transition(
+            "request",
+            key,
+            0,
+            issue_allocation,
+            observation=TransitionObservation(now=f.Clock("allocation", 1, 1)),
+        )
     assert db.get("request", key) == f.initial()
     assert db.db.execute("SELECT count(*) FROM events").fetchone()[0] == 1
     db.close()

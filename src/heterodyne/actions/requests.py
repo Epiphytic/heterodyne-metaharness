@@ -74,6 +74,8 @@ class Request(Record, frozen=True):
     recovery_operator_event: str | None = None
     recovery_evidence: str | None = None
     recovery_closed_orphans: tuple[str, ...] = ()
+    # "completed" means terminal lifecycle, never an implicit business-success assertion.
+    completion_effect: Literal["succeeded", "absent"] | None = None
 
 
 def changed[T: Record](value: T, **updates: object) -> T:
@@ -335,6 +337,10 @@ def settle_request(
             and decision.event.value == "deny"
         ):
             raise Refused("committed-denial-requires-denied-settlement")
+        if isinstance(decision, Decision) and (
+            decision.phase != "invalid" or decision.observed_native_event is not None
+        ):
+            raise Refused("request-cancellation-decision-unresolved")
         if value.phase not in {
             "allocated",
             "blocker-pending",
@@ -342,8 +348,27 @@ def settle_request(
             "landed",
             "ask-pinned",
             "sufficient",
+            "filed",
         }:
             raise Refused("request-cancellation-not-unposted")
+        if value.phase == "filed":
+            if (
+                not isinstance(recovery, CancellationRecovery)
+                or (recovery.key, recovery.origin, recovery.expected_version, recovery.shell_ids)
+                != (value.key, value.origin, value.version, value.shell_ids)
+                or not recovery.authenticated_current
+                or not recovery.exact_repair_scope
+                or not recovery.native_withdrawal_readback
+                or not recovery.cleanup_proven
+                or not digest_syntax(recovery.evidence)
+                or not safe_label(recovery.operator_event)
+                or (
+                    isinstance(decision, Decision)
+                    and (decision.phase != "invalid" or decision.observed_native_event is not None)
+                )
+                or dispatch is not None
+            ):
+                raise Refused("filed-cancellation-not-authenticated")
     else:
         if (
             value.phase != "allocation-unknown"
@@ -362,11 +387,16 @@ def settle_request(
         value,
         phase=phase,
         cleanup_confirmed=True,
+        completion_effect=(
+            "succeeded" if isinstance(dispatch, Dispatch) and dispatch.state == "succeeded" else "absent"
+        )
+        if phase == "completed"
+        else value.completion_effect,
         recovery_operator_event=recovery.operator_event
-        if isinstance(recovery, AbandonmentRecovery)
+        if isinstance(recovery, (AbandonmentRecovery, CancellationRecovery))
         else value.recovery_operator_event,
         recovery_evidence=recovery.evidence
-        if isinstance(recovery, AbandonmentRecovery)
+        if isinstance(recovery, (AbandonmentRecovery, CancellationRecovery))
         else value.recovery_evidence,
     )
 
@@ -449,3 +479,18 @@ def recover_allocation(value: Request, observation: AllocationRecovery) -> Reque
         recovery_evidence=observation.evidence_digest,
         recovery_closed_orphans=tuple(sorted(observation.closed_orphans)),
     )
+
+
+class CancellationRecovery(Record, frozen=True):
+    """Synthetic observation of exact authenticated withdrawal and native cleanup."""
+
+    key: CreationKey
+    origin: Origin
+    expected_version: int
+    shell_ids: tuple[str, ...]
+    evidence: str
+    operator_event: str
+    authenticated_current: bool = False
+    exact_repair_scope: bool = False
+    native_withdrawal_readback: bool = False
+    cleanup_proven: bool = False

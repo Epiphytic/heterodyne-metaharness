@@ -334,7 +334,7 @@ class FixtureJournal:
             not isinstance(parent, Dispatch)
             or parent.dispatch_kind != "initial"
             or parent.settled
-            or parent.state not in {"held", "uncertain", "failed"}
+            or parent.state not in {"uncertain", "failed"}
             or (parent.attempt_id, parent.revision, parent.digest, parent.target, parent.resource)
             != (value.parent_attempt_id, value.revision, value.digest, value.target, value.resource)
             or not set((*parent.retired_startups, parent.startup_hash)).issubset(value.retired_startups)
@@ -409,7 +409,10 @@ class FixtureJournal:
                 )
             else:
                 if isinstance(old, Decision) and isinstance(value, Decision):
-                    decision_transition(old, value)
+                    request = self._request_for_approval(old.approval_id)
+                    decision_transition(old, value, request=request, observation=observation)
+                    if value.phase == "committed" and value.event.value == "deny":
+                        self._denial(request, value)
                 elif isinstance(old, Dispatch) and isinstance(value, Dispatch):
                     reconciliation = None
                     if observation.reconciliation_key is not None:
@@ -442,7 +445,18 @@ class FixtureJournal:
     def _request_proposal(self, old: Request, value: Request, observation: TransitionObservation) -> Request:
         row = self.db.execute("SELECT 1 FROM decisions WHERE key=?", (value.approval_id or "",)).fetchone()
         decision = self.get("decision", value.approval_id or "") if row else None
-        dispatch = self.get("dispatch", value.approval_id or "") if value.phase == "completed" else None
+        dispatch_row = self.db.execute(
+            "SELECT 1 FROM dispatches WHERE key=?", (value.approval_id or "",)
+        ).fetchone()
+        dispatch = self.get("dispatch", value.approval_id or "") if dispatch_row else None
+        # The issuance clock is write-ahead journal history, never caller-supplied elapsed time.
+        if old.phase == "allocation-unknown" and value.recovery_operator_event is None:
+            row = self.db.execute(
+                "SELECT data FROM events WHERE kind='request-observation' AND key=? AND version=1",
+                (request_key(old),),
+            ).fetchone()
+            issued = msgspec.json.decode(row[0], type=TransitionObservation) if row else EMPTY_OBSERVATION
+            observation = msgspec.structs.replace(observation, allocation_started=issued.now)
         request_transition(old, value, decision=decision, dispatch=dispatch, observation=observation)
         if value.phase == "denied":
             self._denial(value, decision)

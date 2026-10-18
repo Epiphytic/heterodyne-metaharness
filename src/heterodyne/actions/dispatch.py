@@ -51,6 +51,7 @@ class Dispatch(Record, frozen=True):
     parent_attempt_id: str | None = None
     reconciliation_attempts: tuple[str, ...] = ()
     reconciliation_effect: Literal["succeeded", "absent", "unknown"] | None = None
+    reconciliation_cleanup_proven: bool = False
 
 
 def _clock(value: Clock) -> None:
@@ -68,15 +69,21 @@ def _clock(value: Clock) -> None:
 
 
 def elapsed_seconds(value: Dispatch, now: Clock) -> int:
+    return clock_elapsed(value.started, now)
+
+
+def clock_elapsed(started: Clock, now: Clock) -> int:
+    """Elapsed time is valid only on one continuous independently sampled clock."""
+    _clock(started)
     _clock(now)
     if (
-        now.boot_id != value.started.boot_id
-        or now.mono_ns < value.started.mono_ns
-        or now.utc_ns < value.started.utc_ns
-        or abs((now.utc_ns - value.started.utc_ns) - (now.mono_ns - value.started.mono_ns)) > 1_000_000_000
+        now.boot_id != started.boot_id
+        or now.mono_ns < started.mono_ns
+        or now.utc_ns < started.utc_ns
+        or abs((now.utc_ns - started.utc_ns) - (now.mono_ns - started.mono_ns)) > 1_000_000_000
     ):
         raise Refused("dispatch-clock-or-deadline")
-    return (now.mono_ns - value.started.mono_ns) // 1_000_000_000
+    return (now.mono_ns - started.mono_ns) // 1_000_000_000
 
 
 def _within(value: Dispatch, now: Clock) -> None:
@@ -302,9 +309,12 @@ def reconcile_lookup(
     return changed(
         value,
         reconciliation_lookups=value.reconciliation_lookups + 1,
-        state="uncertain",
-        cleanup_proven=cleanup_proven,
-        evidence=evidence,
+        state="failed"
+        if value.state == "failed"
+        or (effect == "absent" and cleanup_proven and digest_syntax(evidence or ""))
+        else "uncertain",
+        cleanup_proven=value.cleanup_proven if value.state == "failed" else cleanup_proven,
+        evidence=value.evidence if value.state == "failed" else evidence,
     )
 
 
@@ -325,15 +335,30 @@ class DispatchRecovery(Record, frozen=True):
     effect_definitively_absent: bool = False
     cleanup_proven: bool = False
     effect_attested_succeeded: bool = False
+    # Explicit recovery of a discontinuous clock; never permits initial-effect replay.
+    clock_discontinuity: bool = False
+    observed_now: Clock | None = None
 
 
 def settle_dispatch(value: Dispatch, observation: DispatchRecovery) -> Dispatch:
     """Exact operator-attested outcome and cleanup; never machine attribution or retry."""
+    discontinuous = False
+    if observation.clock_discontinuity and observation.observed_now is not None:
+        _clock(observation.observed_now)
+        try:
+            elapsed_seconds(value, observation.observed_now)
+        except Refused:
+            discontinuous = True
     if (
         value.state not in {"held", "uncertain", "failed"}
         or value.settled
-        or (value.claim_consumed and value.reconciliation_lookups != 3)
-        or (not value.claim_consumed and value.state != "held" and value.reconciliation_lookups != 3)
+        or (value.claim_consumed and value.reconciliation_lookups != 3 and not discontinuous)
+        or (
+            not value.claim_consumed
+            and value.state != "held"
+            and value.reconciliation_lookups != 3
+            and not discontinuous
+        )
         or (
             observation.approval_id,
             observation.revision,
@@ -373,6 +398,7 @@ def finish_reconciliation(
     evidence: str,
     cleanup_proven: bool,
     effect: Literal["succeeded", "absent", "unknown"] = "unknown",
+    effect_cleanup_proven: bool = False,
 ) -> Dispatch:
     """Retire a read-only invocation; its evidence does not itself settle the parent effect."""
     if (
@@ -393,6 +419,7 @@ def finish_reconciliation(
         cleanup_proven=True,
         evidence=evidence,
         reconciliation_effect=effect,
+        reconciliation_cleanup_proven=effect_cleanup_proven,
     )
 
 
@@ -401,7 +428,7 @@ def prepare_reconciliation(value: Dispatch, attempt_id: str, startup_hash: str, 
     if (
         value.dispatch_kind != "initial"
         or value.settled
-        or value.state not in {"held", "uncertain", "failed"}
+        or value.state not in {"uncertain", "failed"}
         or attempt_id == value.attempt_id
         or startup_hash in (value.startup_hash, value.claim_hash)
         or startup_hash in value.retired_startups

@@ -14,7 +14,13 @@ from heterodyne.actions.transitions import TransitionObservation
 
 def persist_request(db, sequence=1, until="filed"):
     key = db.add_request(f.initial(sequence))
-    value = db.transition("request", key, 0, issue_allocation)
+    value = db.transition(
+        "request",
+        key,
+        0,
+        issue_allocation,
+        observation=TransitionObservation(now=f.Clock("allocation", 1, 1)),
+    )
     value = db.transition(
         "request",
         key,
@@ -22,7 +28,9 @@ def persist_request(db, sequence=1, until="filed"):
         lambda v: f.observe_allocation(
             v, (("btq-ab123" if sequence == 1 else "btq-cd456"),), lookup_ok=True, elapsed_seconds=1
         ),
-        observation=TransitionObservation(allocation_elapsed_seconds=1),
+        observation=TransitionObservation(
+            allocation_elapsed_seconds=1, now=f.Clock("allocation", 1 + (1) * 10**9, 1 + (1) * 10**9)
+        ),
     )
     for op in ("blocker", "park", "land"):
         value = db.transition(
@@ -102,6 +110,7 @@ def test_superseded_inbox_candidate_replayed_after_invalid_first(tmp_path):
         first.approval_id,
         0,
         lambda v: dec.invalidate_decision(v, reason="authority-revoked", current_check=True),
+        observation=f.decision_observation(first, authority_current=False),
     )
     assert db.add_decision(second) == "recorded"
     assert db.get("decision", first.approval_id).event == second.event
@@ -149,12 +158,14 @@ def test_groom_failure_authenticated_deny_is_durable(tmp_path):
             decision.approval_id,
             decision.version,
             lambda v: dec.issue_decision(v, fresh_authority=True, current_digest=f.DIGEST),
+            observation=f.decision_observation(decision),
         )
         decision = db.transition(
             "decision",
             decision.approval_id,
             decision.version,
             lambda v: dec.read_decision(v, v.event, read_ok=True),
+            observation=f.decision_observation(decision),
         )
         for op in ("close", "pins", "finish"):
             decision = db.transition(
@@ -164,6 +175,7 @@ def test_groom_failure_authenticated_deny_is_durable(tmp_path):
                 lambda v, op=op: dec.finalize_decision(
                     v, op, readback=v.event, current_digest=f.DIGEST, native_readback=True
                 ),
+                observation=f.decision_observation(decision),
             )
     done = db.transition(
         "request",
@@ -183,7 +195,13 @@ def test_arbitrary_reducer_cannot_free_outstanding_slot(tmp_path, until):
         key, value = persist_request(db)
     else:
         key = db.add_request(f.initial())
-        value = db.transition("request", key, 0, issue_allocation)
+        value = db.transition(
+            "request",
+            key,
+            0,
+            issue_allocation,
+            observation=TransitionObservation(now=f.Clock("allocation", 1, 1)),
+        )
     with pytest.raises(Refused):
         db.transition(
             "request", key, value.version, lambda v: changed(v, phase="cancelled", cleanup_confirmed=True)
@@ -199,8 +217,11 @@ def test_journal_recomputes_initial_denial_identity(tmp_path):
 
 def test_reconcile_cannot_issue_effect_claim_even_with_fresh_nonce(tmp_path):
     db = FixtureJournal.create(tmp_path / "journal")
-    parent, clock = held_parent(db)
-    value = dis.prepare_reconciliation(parent, "read-1", "d" * 64, clock)
+    from test_actions_p1_r3 import ready_parent
+
+    parent, clock = ready_parent(db, consumed=False)
+    parent = db.transition("dispatch", parent.approval_id, parent.version, dis.uncertain)
+    value = dis.prepare_reconciliation(parent, "read-1", "f" * 64, clock)
     with pytest.raises(Refused):
         dis.ready(value, "e" * 64, clock, fresh_gates=True, startup_readback=True)
     forged = msgspec.structs.replace(
@@ -223,6 +244,7 @@ def test_native_conflict_adopted_without_another_native_write(tmp_path):
         first.approval_id,
         0,
         lambda v: dec.issue_decision(v, fresh_authority=True, current_digest=f.DIGEST),
+        observation=f.decision_observation(first),
     )
     db.transition(
         "decision",
@@ -231,6 +253,7 @@ def test_native_conflict_adopted_without_another_native_write(tmp_path):
         lambda v: dec.invalidate_decision(
             v, reason="native-conflict", current_check=True, readback=native, native_read_ok=True
         ),
+        observation=f.decision_observation(value, native=native),
     )
     assert db.add_decision(candidate) == "recorded"
     adopted = db.get("decision", first.approval_id)
@@ -241,11 +264,14 @@ def test_native_conflict_adopted_without_another_native_write(tmp_path):
 
 def test_only_one_reconcile_invocation_may_be_unsettled(tmp_path):
     db = FixtureJournal.create(tmp_path / "journal")
-    parent, clock = held_parent(db)
-    first = dis.prepare_reconciliation(parent, "read-1", "d" * 64, clock)
+    from test_actions_p1_r3 import ready_parent
+
+    parent, clock = ready_parent(db, consumed=False)
+    parent = db.transition("dispatch", parent.approval_id, parent.version, dis.uncertain)
+    first = dis.prepare_reconciliation(parent, "read-1", "f" * 64, clock)
     db.add_dispatch(first)
     second = msgspec.structs.replace(
-        dis.prepare_reconciliation(parent, "read-2", "e" * 64, clock),
+        dis.prepare_reconciliation(parent, "read-2", "a" * 64, clock),
         retired_startups=(*first.retired_startups, first.startup_hash),
     )
     with pytest.raises(Refused):
@@ -432,6 +458,7 @@ def test_invalidated_candidate_never_resurrects_from_inbox_replay(tmp_path):
         first.approval_id,
         0,
         lambda v: dec.invalidate_decision(v, reason="authority-revoked", current_check=True),
+        observation=f.decision_observation(first, authority_current=False),
     )
     assert db.add_decision(first) == "superseded"
     assert db.get("decision", first.approval_id) == invalid
@@ -487,14 +514,23 @@ def test_attested_success_rejects_stale_or_other_attempt(change):
 def test_declared_cleanup_cannot_forge_abandonment_or_alter_request_fields(tmp_path):
     db = FixtureJournal.create(tmp_path / "journal")
     key = db.add_request(f.initial())
-    value = db.transition("request", key, 0, issue_allocation)
+    value = db.transition(
+        "request",
+        key,
+        0,
+        issue_allocation,
+        observation=TransitionObservation(now=f.Clock("allocation", 1, 1)),
+    )
     for elapsed in (1, 5, 30):
         value = db.transition(
             "request",
             key,
             value.version,
             lambda v, elapsed=elapsed: f.observe_allocation(v, (), lookup_ok=False, elapsed_seconds=elapsed),
-            observation=TransitionObservation(allocation_elapsed_seconds=elapsed),
+            observation=TransitionObservation(
+                allocation_elapsed_seconds=elapsed,
+                now=f.Clock("allocation", 1 + (elapsed) * 10**9, 1 + (elapsed) * 10**9),
+            ),
         )
     for updates in (
         {"phase": "reconciled-abandoned", "cleanup_confirmed": True},
