@@ -44,6 +44,7 @@ from heterodyne.admind import (
     guard_state,
     membership,
     notices,
+    operations,
     summarize,
     verbs,
 )
@@ -415,7 +416,8 @@ class Admind:
         self.posts_in_flight = 0                # ask posts on ask.sock being handled (R15)
         self.ask_post_lock = asyncio.Lock()     # posts run one at a time (R22)
         self.ask_server: ctl.JsonSocketServer[
-            asks.AskRequest | fulfillment.Request, asks.AskReply | fulfillment.Reply] | None = None
+            asks.AskRequest | fulfillment.Request | operations.Request,
+            asks.AskReply | fulfillment.Reply | operations.Reply] | None = None
         self.approve_bead = None if settings.approve_bead is None else ApproveBead(settings.approve_bead)
 
     # --- state helpers -------------------------------------------------------------------------
@@ -679,12 +681,11 @@ class Admind:
             self.ask_server = ctl.JsonSocketServer(
                 self.s.state_dir / asks.ASK_SOCKET, self.on_ask_wire, self.audit, kind="ask",
                 max_request=asks.MAX_REQUEST, max_reply=asks.MAX_REPLY,
-                request_type=asks.AskRequest | fulfillment.Request,
-                check=lambda req: (fulfillment.check(req) if isinstance(req,
-                    fulfillment.Request) else asks.check(req)),
+                request_type=asks.AskRequest | fulfillment.Request | operations.Request,
+                check=self.check_ask_wire,
                 refused=asks.refused, failed=asks.failed,
-                describe=lambda req: ({"op": type(req).__name__} if isinstance(req,
-                    fulfillment.Request) else asks.describe(req)))
+                describe=lambda req: (asks.describe(req) if isinstance(req, asks.AskRequest) else
+                    {"op": type(req).__name__}))
             await self.ask_server.start()
             await self.start_agent(startup=True)
             async with asyncio.TaskGroup() as tg:
@@ -724,14 +725,28 @@ class Admind:
         return ctl.CtlReply(result, redact(message))
 
     # --- asks (relay spec) ----------------------------------------------------------------------
-    async def on_ask_wire(self, req: asks.AskRequest | fulfillment.Request,
-                          peer: ctl.Peer) -> asks.AskReply | fulfillment.Reply:
+    @staticmethod
+    def check_ask_wire(req: asks.AskRequest | fulfillment.Request | operations.Request) -> str | None:
+        """Validate the selected closed protocol without weakening legacy DTO checks."""
+        if isinstance(req, operations.Request):
+            return operations.check(req)
+        if isinstance(req, fulfillment.Request):
+            return fulfillment.check(req)
+        return asks.check(req)
+
+    async def on_ask_wire(self, req: asks.AskRequest | fulfillment.Request | operations.Request,
+                          peer: ctl.Peer) -> asks.AskReply | fulfillment.Reply | operations.Reply:
+        if isinstance(req, operations.Request):
+            return await self.on_operation(req, peer)
         if isinstance(req, fulfillment.Request):
             reply = await self.on_fulfillment(req, peer)
             if len(msgspec.json.encode(reply)) > fulfillment.MAX_REPLY:
                 return fulfillment.Reply("unavailable", "lifecycle reply exceeds bound")
             return reply
         return await self.on_ask(req, peer)
+
+    async def on_operation(self, req: operations.Request, peer: ctl.Peer) -> operations.Reply:
+        return await operations.handle(self, req, peer)
 
     async def on_fulfillment(self, req: fulfillment.Request, peer: ctl.Peer) -> fulfillment.Reply:
         """Separate opt-in protocol. No long-lived daemon lock or external operation is involved."""
@@ -791,6 +806,9 @@ class Admind:
         self.posts_in_flight += 1
         try:
             async with self.ask_post_lock:
+                with self.store.transaction(read_only=True):
+                    if operations.bead_binding(self.store, req.bead) is not None:
+                        return asks.refused("source-owned bead; use approval.operation.v1")
                 if req.kind == "approval":
                     return await self.post_approval(req, peer)
                 return self.post_ask(req, peer)
@@ -901,6 +919,9 @@ class Admind:
         """Spec §8 "Post an approval ask", under `ask_post_lock` (R22): read the bead with approve-bead,
         prepare the card from its readout, then commit it in one transaction."""
         bead = req.bead or ""
+        with self.store.transaction(read_only=True):
+            if operations.bead_binding(self.store, bead) is not None:
+                return asks.refused("source-owned bead; use approval.operation.v1")
         refusal = self.approval_post_refusal(bead)
         if refusal is not None or self.approve_bead is None:
             return self.approval_refused(bead, refusal or ASK_NO_APPROVALS, "limits")
@@ -943,12 +964,14 @@ class Admind:
         row = dataclasses.replace(row, body=asks.approval_body(r, card), card_parts=len(card.card_chunks))
         return FreshCard(row, card)
 
-    def commit_approval(self, fresh: FreshCard, peer_pid: int | None) -> list[str]:
+    def commit_approval(self, fresh: FreshCard, peer_pid: int | None, *,
+                        operation_key: str | None = None) -> list[str]:
         """Inside the caller's transaction: supersede the bead's open and answered asks, store the fresh
         one and queue its card. Returns the superseded ask IDs."""
         row, bead = fresh.row, fresh.row.bead
         superseded: list[str] = []
         with self.store.transaction():
+            bound_key = operations.before_commit(self.store, bead, operation_key)
             for old in self.store.asks_with_status("open", "answered"):
                 if old.bead == bead and not self.store.fulfillment.protected(old.ask_id):
                     superseded.append(old.ask_id)
@@ -956,6 +979,8 @@ class Admind:
                     self.ask_notice(old.ask_id, "superseded", row.ask_id, ASK_SUPERSEDED_NOTICE.format(
                         old=old.ask_id, new=row.ask_id, bead=bead))
             self.store.insert_ask(row, peer_pid)
+            if bound_key is not None:
+                operations.attach(self.store, bound_key, row.ask_id)
             self.post_parts(f"ask:{row.ask_id}", fresh.card.card_chunks, owner=None)  # checked chunks
         return superseded
 
@@ -1352,6 +1377,9 @@ class Admind:
     def close_refused(self, a: Attempt, new_status: str, text: str, why: str) -> None:
         """Close the attempt before anything was launched, with its reply, in one compare-and-set."""
         with self.store.transaction():
+            if new_status == "open" and self.store.operation_withdrawn(a.ask_id):
+                new_status, text, why = ("cancelled", "Source withdrew this approval request; "
+                                         "no native decision was issued.", "source-withdrawn")
             closed = self.store.close_attempt(a.ask_id, a.message_id, expect_status="deciding",
                                               settled="refused", exit_status=None, new_status=new_status,
                                               outcome=text, decided_by=None)
@@ -1360,7 +1388,7 @@ class Admind:
         if not closed:
             self.conflict(a, "deciding")
             return
-        self.audit.write("ask", action="refused", message_id=a.message_id, ask_id=a.ask_id, reason=why,
+        self.audit_quietly("ask", action="refused", message_id=a.message_id, ask_id=a.ask_id, reason=why,
                          status=new_status)
 
     def conflict(self, a: Attempt, expected: str) -> None:
@@ -1430,6 +1458,10 @@ class Admind:
                     unauthorised = not self.authorised(mid)
                 if not unauthorised:
                     if not self.store.issue_decision(a, maintenance_retry=maintenance_retry):
+                        if self.store.operation_withdrawn(a.ask_id):
+                            self.close_refused(a, "cancelled", "Source withdrew this approval request; "
+                                               "no native decision was issued.", "source-withdrawn")
+                            return
                         self.conflict(a, "deciding")
                         self.finish(mid, "done", CONFLICT.format(ask_id=a.ask_id, bead=bead), "ask")
                         return
@@ -1532,13 +1564,36 @@ class Admind:
                 text += f'\napprove-bead said: "{line}"'
             thread = self.attempt_thread(a.ask_id, mid)        # the updated content goes where the reply goes
             superseded: list[str] = []
+            closed = False
             with self.store.transaction():
-                closed = self.store.close_attempt(a.ask_id, mid, expect_status="deciding", settled=settled,
-                                                  exit_status=code, new_status="stale", outcome=text,
-                                                  decided_by=None)
-                if closed:
+                binding = operations.bead_binding(self.store, bead)
+                if binding is not None and binding[1]:
+                    # Both callers have positive evidence of no decision: preflight refusal or
+                    # actual untouched readback. Withdrawal forbids replacement, not settlement.
+                    text = "Source withdrew this approval request; no native decision was recorded."
+                    closed = self.store.close_attempt(
+                        a.ask_id, mid, expect_status="deciding", settled=settled, exit_status=code,
+                        new_status="cancelled", outcome=text, decided_by=None)
+                    if closed:
+                        self.finish(mid, "done", text, "ask")
+                    withdrawn = True
+                else:
+                    withdrawn = False
+                if not withdrawn and isinstance(fresh, FreshCard):
+                    try:
+                        operations.before_commit(self.store, bead, None if binding is None else binding[0])
+                    except operations.Invalid as error:
+                        fresh = ("Source lineage cannot accept a replacement card.", str(error))
+                        text = STALE_NOT_REFRESHED.format(bead=bead, shown=shown, now=now_,
+                                                          why=fresh[0].rstrip("."))
+                if not withdrawn:
+                    closed = self.store.close_attempt(a.ask_id, mid, expect_status="deciding",
+                                                      settled=settled, exit_status=code, new_status="stale",
+                                                      outcome=text, decided_by=None)
+                if closed and not withdrawn:
                     if isinstance(fresh, FreshCard):
-                        superseded = self.commit_approval(fresh, None)
+                        superseded = self.commit_approval(
+                            fresh, None, operation_key=None if binding is None else binding[0])
                     for i, part in enumerate(updated):      # the request part is the bare event ID
                         self.post(f"askd:{a.ask_id}:{mid.removeprefix(REACTION_PREFIX)}:{i}", part, thread,
                                   lane=2, owner=self.request_owners(mid))
@@ -1547,11 +1602,13 @@ class Admind:
             self.conflict(a, "deciding")
             return
         self.audit.write("ask", action="refused" if settled == "refused" else "decided", message_id=mid,
-                         ask_id=a.ask_id, bead=bead, reason="stale", outcome=settled, status="stale",
-                         exit_status=code, fresh=fresh.row.ask_id if isinstance(fresh, FreshCard) else None,
+                         ask_id=a.ask_id, bead=bead, reason="source-withdrawn" if withdrawn else "stale",
+                         outcome=settled, status="cancelled" if withdrawn else "stale",
+                         exit_status=code,
+                         fresh=fresh.row.ask_id if not withdrawn and isinstance(fresh, FreshCard) else None,
                          refresh_refused=None if isinstance(fresh, FreshCard) else fresh[1],
                          updated_parts=len(updated))
-        if isinstance(fresh, FreshCard):
+        if not withdrawn and isinstance(fresh, FreshCard):
             self.audit_posted(fresh, None, superseded)
 
     async def read_and_settle(self, a: Attempt, bead: str) -> tuple[str, Readout | None]:
@@ -1574,6 +1631,8 @@ class Admind:
         both settle from the read-back like every other outcome. approve-bead's stderr line is quoted in
         every reply that has one (R12): inside the untouched and blocked wording, and on a line of its own
         after the recorded and uncertain wording (exit 5's warning, say)."""
+        if settled == "untouched" and self.store.operation_withdrawn(a.ask_id):
+            return "cancelled", "Source withdrew this approval request; no native decision was recorded."
         if settled == "untouched":
             return "open", (UNTOUCHED.format(line=line, bead=bead) if line
                             else UNTOUCHED_SILENT.format(bead=bead))
@@ -1632,7 +1691,7 @@ class Admind:
             return
         settled, back = await self.read_and_settle(a, row.bead)
         new_status, text = self.settlement(settled, back, a, row.bead, "")
-        if settled == "untouched":
+        if settled == "untouched" and new_status == "open":
             text = RECONCILE_RESTARTED if restarted else RECONCILE_STRANDED.format(ask_id=ask_id)
         with self.store.transaction():
             closed = self.store.close_attempt(ask_id, attempt, expect_status=status, settled=settled,
@@ -1737,6 +1796,18 @@ class Admind:
             return
         # Backoff persists even on failed policy/readback, including across daemon restarts.
         if not self.store.defer_maintenance(a, self.wallclock() + MAINTENANCE_RETRY_SECONDS):
+            return
+        if not operations.decision_allowed(self.store, ask_id):
+            # Withdrawal stops future issuance, but cannot attest what a previous child did.
+            # Read-only native evidence must still distinguish untouched from recorded/unknown.
+            settled, back = await self.read_and_settle(a, row.bead)
+            if settled == "recorded" and back is not None:
+                self.settle_maintenance_recorded(a, row, back)
+            elif settled == "untouched":
+                self.close_refused(a, "cancelled", "Source withdrew this approval request; "
+                                   "no native decision was recorded.", "source-withdrawn")
+            else:
+                self.hold_maintenance(a, "native-conflict" if settled == "blocked" else "read-unavailable")
             return
         reason = self.maintenance_authority_reason(a)
         if reason is not None:

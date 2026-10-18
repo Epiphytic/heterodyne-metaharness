@@ -29,6 +29,7 @@ from typing import Any, Literal, NamedTuple, cast, overload
 import msgspec
 
 from heterodyne import platform
+from heterodyne.admind import operations
 from heterodyne.admind.audit import Audit
 from heterodyne.admind.settings import MAX_NAME
 from heterodyne.admind.settings import NAME_CONTROLS as CONTROL  # one contract with policy (B2)
@@ -174,22 +175,33 @@ class JsonSocketServer[Req, Rep: msgspec.Struct]:
         task.add_done_callback(lambda done: self.handlers.pop(done, None))
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        operation_request = False
         try:
             try:
                 line = await asyncio.wait_for(reader.readline(), READ_SECONDS)
-                if len(line.rstrip(b"\n")) > self.max_request:      # the delimiter does not count
+                if self.kind == "ask":
+                    envelope = msgspec.json.decode(line)
+                    operation_request = (isinstance(envelope, dict)
+                                         and cast(dict[str, object], envelope).get("type")
+                                         == "approval.operation.v1")
+                if len(line.rstrip(b"\n")) > self.max_request:
                     raise ValueError("request too long")
-                req = msgspec.json.decode(line, type=self.request_type)
+                req = (cast(Req, operations.decode(line)) if operation_request
+                       else msgspec.json.decode(line, type=self.request_type))
                 if self.kind == "ask":
                     from heterodyne.admind import fulfillment
                     if isinstance(cast(object, req), fulfillment.Request):
                         fulfillment.strict_json(line, limit=self.max_request)
+            except operations.Invalid as error:
+                reply = cast(Rep, operations.Reply("refused", str(error)))
             except (TimeoutError, ValueError, msgspec.DecodeError):
-                reply = self.refused("malformed request")
+                reply = (cast(Rep, operations.Reply("refused", "malformed")) if operation_request
+                         else self.refused("malformed request"))
             else:
                 refusal = self.check(req)
                 if refusal is not None:
-                    reply = self.refused(refusal)
+                    reply = (cast(Rep, operations.Reply("refused", refusal)) if operation_request
+                             else self.refused(refusal))
                 else:
                     fields = self.describe(req)
                     self.audit.write(self.kind, **fields)     # redacted centrally (B16)
@@ -203,11 +215,13 @@ class JsonSocketServer[Req, Rep: msgspec.Struct]:
                     except Exception as exc:  # noqa: BLE001 - fixed wording; the type goes to the audit
                         self.audit.write(self.kind, action="handler-failed", op=fields.get("op"),
                                          error=type(exc).__name__)
-                        reply = self.failed()
+                        reply = (cast(Rep, operations.Reply("unavailable", "handler-failed"))
+                                 if operation_request else self.failed())
             data = msgspec.json.encode(reply)
             if len(data) > self.max_reply:
                 self.audit.write(self.kind, action="reply-too-large", size=len(data))
-                data = msgspec.json.encode(self.failed())
+                data = msgspec.json.encode(operations.Reply("unavailable", "reply-capacity")
+                                           if operation_request else self.failed())
             writer.transport.set_write_buffer_limits(high=0)   # drain() waits for an empty buffer
             writer.write(data + b"\n")
             await asyncio.wait_for(writer.drain(), WRITE_SECONDS)

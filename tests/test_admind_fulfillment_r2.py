@@ -188,7 +188,7 @@ def test_legacy_socket_duplicate_keys_unchanged_but_new_union_strict(tmp_path):
             max_request=asks.MAX_REQUEST,
             max_reply=asks.MAX_REPLY,
             request_type=asks.AskRequest | f.Request,
-            check=lambda req: f.check(req) if isinstance(req, f.Request) else asks.check(req),
+            check=u.daemon.check_ask_wire,
             refused=asks.refused,
             failed=asks.failed,
             describe=lambda req: {"op": type(req).__name__},
