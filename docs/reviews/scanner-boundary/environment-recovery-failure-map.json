@@ -1,0 +1,1908 @@
+{
+  "version": 1,
+  "source_junit_sha256": "b1eed644a4b097e98dcef0b82ff5d30bcfb27d1c9c0bb179f1570bb90594a029",
+  "source_result_sha256": "d036ff9b308c04298b288b5a5d54efc133fe7b346eee94c016c268d99e13db4e",
+  "counts": {
+    "expected-scanner-assertion": 4,
+    "observed-AF_UNIX-path-too-long": 55,
+    "unexplained-requires-diagnostic": 318,
+    "observed-systemd-runtime-directory": 2
+  },
+  "failures": [
+    {
+      "node": "tests/test_admind_approvals.py::test_quoted_line_stays_within_the_cap",
+      "classification": "expected-scanner-assertion",
+      "failure_text_sha256": "1311370c8111e1fcbc2f05793ec4a427383e9b02f2729f0623a55ddf0f149f96"
+    },
+    {
+      "node": "tests/test_admind_approvals.py::test_approval_card_refuses_a_chunk_redaction_would_change",
+      "classification": "expected-scanner-assertion",
+      "failure_text_sha256": "26cbc91b66ed4dd8e72932141ac54dc16f6d1a09685311de34190ba70ba6802f"
+    },
+    {
+      "node": "tests/test_admind_r13_redact.py::test_an_escape_next_to_hex_is_redacted_in_one_pass",
+      "classification": "expected-scanner-assertion",
+      "failure_text_sha256": "127b8a3acc6bd4d2e056857850ad15533f1d0b86230475d881e40bb16afecda5"
+    },
+    {
+      "node": "tests/test_admind_r13_redact.py::test_a_marker_that_makes_a_boundary_is_redacted_again",
+      "classification": "expected-scanner-assertion",
+      "failure_text_sha256": "5b1b0bf98fb8da527b4ebd1717daf9cf98d4b02517a4dfb21f155f0f8bb5762c"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_one_verified_run_passes_and_is_acknowledged",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "e81155dbc17ad826feed7529d1c18ddfc36194c1f6a680c3a203cdabb2cb7bab"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_the_verdict_is_read_only_after_close",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "abf41fc115887d2249b4c312f06cb607c270594e1806a0df3ce26cfa95eed735"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_a_forger_after_the_probe_fails_the_gate",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "c0394c48b2d42c4851eac0e5644461b7d8d3188d85c21ea64f75157fd673ac7f"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_bad_results_fail[lines0-missing checks: b]",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "74f22bcf5aaf741aaf4e708d4d75628176fe7d5bc2e67c197ec0b0c43329fb63"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_bad_results_fail[lines1-failed checks: b]",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "49c60c256fed200bcb3735c19a9a6a1c9e1e0557cc99b1af29085e7bd267b82c"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_bad_results_fail[lines2-the probe did not finish cleanly]",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "39f20d4dd511c950ac49cb6507c98d6f9f1c540e6cf0a2dc54642a83f42179ad"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_bad_results_fail[lines3-malformed result]",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "d56d4d28dd0af2e74f22e4ad30ed58ec17b44679847157a65e2b7a9f028dfdc9"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_bad_results_fail[lines4-malformed result]",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "e5292b90d7c523a8d111f2f374814830c3ffd022d478feb3982f1003716cd547"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_bad_results_fail[lines5-unexpected checks: c]",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "aa92c87decfe3a08180a28a9d672dc7d952996a3ae80d079d55ba33fd12b3315"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_bad_results_fail[lines6-malformed result]",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "a6c5abeca4f4bc4706c5e7a8130b43334206a22a0a7393558b37da17bf57dc05"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_bad_results_fail[lines7-malformed result]",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "592dfed216aa87b8ef0af9ebe80a7156e6fec182c20468643c6819cfd767c039"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_bad_results_fail[lines8-malformed result]",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "137e8c0b1a24e7744e425bce1cd457bd78c9eda994964b6e4be70fbedee0ce3d"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_bad_results_fail[lines9-malformed result]",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "1c869b0bc981e78323a05dd756dd40ff84e750b1955ac2dbc6c939ae1b465635"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_bad_results_fail[lines10-malformed result]",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "83d86c67aff1a93a561a1ab7693b1d31b39c8f80c517f3c327d0988486500088"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_bad_results_fail[lines11-malformed result]",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "1a7b58ae8fb13a842375b1f42e54cdaf30f46044977debbbef1ae1aca641e983"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_bad_results_fail[lines12-malformed result]",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "4deb96838cd90757527c9ac6b75021d056d1e78716acc9ede95399cf9ecc3d25"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_bad_results_fail[lines13-malformed result]",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "69755895d5642bb37e6a95ae6da9f33cfc526dcae05d3473def8fc9e13aa7d9c"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_bad_results_fail[lines14-malformed result]",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "ada1059b8bf123c010f301e7b0482f0affaa8674413958ad2c1a70aed2a56142"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_bad_results_fail[lines15-the probe did not finish cleanly]",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "5be5c6ca992a06263c567bc51658091b97378daad528296b44d03e294b0d05bb"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_trailing_data_after_the_ack_fails",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "b7a74582f9b01973182696f0dbddab8e7eb31f9f848756a8df99d22a318a278a"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_a_peer_that_changes_before_done_fails",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "7d2b2404246246871e9e5ec0ee528cdc80810c863121eb24d226441be567fa10"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_no_run_at_all_fails",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "20ad99ffcecf47d26e1895cd0d47fe495d4990c0f197a87b2803a5623fe3f86f"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_a_peer_credential_failure_counts_as_rejected",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "dbdd3679efe02a8d22b938777b122d41635803d354547c12e17b43b4942921d0"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_a_peer_replaced_during_the_proc_reads_is_rejected[at-accept]",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "af06630874fab5a60678dfa50343debaec708c278c98e9c5cc546c06c933afce"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_a_peer_replaced_during_the_proc_reads_is_rejected[at-done]",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "7c7c1bf58debb41713128d9a1340a28c9dcbcbc16baaa3e656c936104c825bfc"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_a_peer_replaced_before_pinning_is_rejected",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "2064e11e0e35e4954c0d10b1b50f9f526a4ce35c8ed0bad85c2d61c8a57651aa"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_a_run_that_does_not_end_with_a_clean_eof_fails[timeout]",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "4adde4650c84f94f97d091864b78b3c68bf5a5dd3631bcb4fe85a7fd2178068c"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_a_run_that_does_not_end_with_a_clean_eof_fails[shutdown]",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "b972c1ad52bd53ccf2627ac6919fd58a1ce2f8e7ee5f52b89ec5dc048a1d5378"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_a_run_that_does_not_end_with_a_clean_eof_fails[error]",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "e4b423c7c67d6a0215bc2572d3666ae729ee958e7196e832e6367930331b6101"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_a_run_that_does_not_end_with_a_clean_eof_fails[ack-failed]",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "6916d60fd46e0a6b02ed9374dd84223b9f0cf0b92a5d2a0e5ca8b2beaaa844ee"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_a_clean_run_ends_with_eof",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "ce134686447cdb4b6ddae0ff48ae2608181fbf35596fefa27a0fb76f26ad659d"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_the_deadline_applies_to_completion",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "d6a3779fad9b80abce785be99a81d25782b18a531a70485a63bf15dd0b4a82b1"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_done_in_time_with_a_late_handshake_fails",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "a88481c3e1cefe1af6e5d3236ba22deee4222b884bd898398bba6725d53c3096"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_a_real_probe_process_is_checked_alive_at_done[wait-]",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "1abb5a78e18550c20f8c45a644014271c742f5f7a4b78e63bad51fc23c05b2fc"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_a_real_probe_process_is_checked_alive_at_done[exit-the probe changed before it finished]",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "2aa8508a64d1c68cab48a4ab73008ff1206e4e9c28a6a210bcde19e9a131ae06"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_an_oversized_unterminated_line_is_malformed_without_buffering_it",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "30eb1707be09bc86c0d969bf5874a6658b6c3448d33c82f3d42f256322af4705"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_a_stalled_peer_hits_its_deadline",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "9c67492b2dd4aa2e747e69c9baaf00d6ed983f38acab2dd19997599622600587"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_a_connection_flood_is_capped_and_rejected",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "a9ca71dbcefe50053f7419db112975f065820dcc89a49c84d03be40ea4feb832"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_close_ends_stalled_peers_and_their_workers",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "19d643eb889eaaa1eb5673b569711dbd2c7f1d09eade0adef822d93f1078c5af"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_a_failed_start_leaves_nothing_behind[chmod]",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "3330df0c9f305475374aabfb523b157958031e6faee80e902fcd8b147507cb1b"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_a_failed_start_leaves_nothing_behind[listen]",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "e8469c2066f385e4f1d4ef106c8d338e008484f5b1cceb8c30b15a2763462cb0"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_a_failed_start_leaves_nothing_behind[thread]",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "7df39a68695d171272ef0fc9f8113edb2307e24e903e7c741aefca76e6e5579e"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_a_cli_and_probe_in_namespaces_the_agent_made_are_rejected",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "99cbda8a269d91ac18b65e1e1bfeae8b6d303f782b2a9a237ca18901c871ddec"
+    },
+    {
+      "node": "tests/test_sandbox_channel.py::test_a_probe_traced_after_it_connected_fails_at_completion",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "fddced493c372c358bc51404fee5de5bea21807c832224788f3e9aa8d8ef7f22"
+    },
+    {
+      "node": "tests/test_sandbox_create_recovery.py::test_replacement_keeps_prior_unknown_and_sweeps_late_sandbox",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "11b723a18836fb862dbc6cb8b420cbeb9abbad8f0f9a996bd4a22f500b59a595"
+    },
+    {
+      "node": "tests/test_sandbox_create_recovery.py::test_running_backstop_is_restored_after_lost_watcher",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "2276509e8e355ec9ddb3c824566534de559ff2a3a82bf8121c0da37e68a98c74"
+    },
+    {
+      "node": "tests/test_sandbox_create_recovery.py::test_teardown_gone_precedes_watcher_kill_only_after_confirmed_delete[False]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "94f51df5582e148eda315f9b83c2f311ac256663846f946b852d305115b1456a"
+    },
+    {
+      "node": "tests/test_sandbox_create_recovery.py::test_teardown_gone_precedes_watcher_kill_only_after_confirmed_delete[True]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "c412f985296d3b48e6ec12b06f85a848ab845c8c923d913881760e02be44bd25"
+    },
+    {
+      "node": "tests/test_sandbox_create_recovery.py::test_unconfirmed_arm_submits_nothing_and_can_be_retried[no-ready]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "297ef95c211ec418e2b0ba742cf94b41a80ebcc2421d7401ccc6a9785e8628eb"
+    },
+    {
+      "node": "tests/test_sandbox_create_recovery.py::test_unconfirmed_arm_submits_nothing_and_can_be_retried[ready-dead]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "8e43f2d64a1549349ec4e59550c0d67e9e3681f5cc60f009412b1e8f7459f58b"
+    },
+    {
+      "node": "tests/test_sandbox_create_recovery.py::test_unconfirmed_arm_submits_nothing_and_can_be_retried[tmux-error]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "1c46fa5d58b72bcad05718771e03349e8c1f78a1591c78f3b7f8a70fab178e7c"
+    },
+    {
+      "node": "tests/test_sandbox_create_recovery.py::test_submission_and_return_evidence_surround_create_record_writes",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "f23d7ee63343dc8073080c6941b78853b4627f6808cf2c6d30fd2bddd81a8820"
+    },
+    {
+      "node": "tests/test_sandbox_create_recovery.py::test_failed_submission_never_submits_backend_create",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "24ade2f489c7aad0389997f6ef9220b3b17079970c4d1ce088fe61eda73c32d5"
+    },
+    {
+      "node": "tests/test_sandbox_create_recovery.py::test_failed_returned_write_still_records_created_then_r2_repairs",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "63eac8b4101ca45e756bcdc35de632b126b0f7301d7314f438095c2d59bab2d1"
+    },
+    {
+      "node": "tests/test_sandbox_create_recovery.py::test_deadline_never_submitted_evidence_precedes_flag_clear",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "0f6dd8b895ddf3b2436587bc553a795e34664d5b2eddcca511bcaea5a6a2de2d"
+    },
+    {
+      "node": "tests/test_sandbox_create_recovery.py::test_gone_write_failure_keeps_teardown_watcher",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "b1694b23843a93082fa879a01116cb3a3cf731cd44ae88415f190314be57c80b"
+    },
+    {
+      "node": "tests/test_sandbox_create_recovery.py::test_crash_after_returned_before_created_keeps_settlement",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "63d87102a2a48e0b4d028fa15d844a1ce8011d16e388409c783a2fc75cb6ac5e"
+    },
+    {
+      "node": "tests/test_sandbox_create_recovery.py::test_failed_never_submitted_write_retains_unknown_flag",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "796be697008ceb21d85dcf7bb261e89f765d4aec02e5580b1fb0785b81b0d75a"
+    },
+    {
+      "node": "tests/test_sandbox_create_recovery.py::test_live_watcher_without_ready_times_out_before_create",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "e13c9841048f262be05acdbc45d4ec106fedac8859179c624ac4145745e03cc4"
+    },
+    {
+      "node": "tests/test_sandbox_create_recovery.py::test_teardown_of_unknown_or_reappearing_sibling_does_not_poison_recovery[1]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "fdaf7008cf72ce1fb8a2ceb7885e86b1440d2eb1e97ef240d210ea86adf3ab56"
+    },
+    {
+      "node": "tests/test_sandbox_create_recovery.py::test_teardown_of_unknown_or_reappearing_sibling_does_not_poison_recovery[7]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "38c3fd4a640b2df892261bfbd6cf6f47b571a31369024ef5ea7f73196da2e7e5"
+    },
+    {
+      "node": "tests/test_sandbox_live_teardown.py::test_a_clean_teardown_reports_nothing",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "f2d13126ae67a40f87df019a0fc12a38eb2f7303bfb49159ea984012e0f85f92"
+    },
+    {
+      "node": "tests/test_sandbox_live_teardown.py::test_an_ended_record_whose_create_is_unresolved_is_uncertain",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "7f791fb42906d3a2afeebe3fcb5698e0d07561fb7cc845ec85f54594f38826b4"
+    },
+    {
+      "node": "tests/test_sandbox_live_teardown.py::test_an_earlier_generations_late_create_is_uncertain",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "3cde708fb0320775cf5de71562b2f43cf0742602721793cf098e175aa6b26375"
+    },
+    {
+      "node": "tests/test_sandbox_live_teardown.py::test_every_session_is_tried_and_a_listed_sandbox_or_a_failed_list_is_uncertain",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "42390475e15cea4d92a736a5fa5ef9f95dc33ed0b4625685ffca0f4e052fea80"
+    },
+    {
+      "node": "tests/test_sandbox_live_teardown.py::test_a_session_launched_through_another_runtime_is_stopped_through_it",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "77dab3d8612d45f680ba3b5429a107b15dbcb8ffefd5b1b1eb5bfbbe7e1c2535"
+    },
+    {
+      "node": "tests/test_sandbox_openshell_selftest.py::test_agent_path_passes_on_one_verified_run",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "b047b68f0113d57c09969d78cb775ad6249645cc763c9d35eb4e8af770e1398f"
+    },
+    {
+      "node": "tests/test_sandbox_openshell_selftest.py::test_agent_path_fails_when_the_agent_never_runs_the_probe",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "dde56eb60904bd22872f1ce6a9459c0ce647ffb5d7b665b76269137af4e99ad4"
+    },
+    {
+      "node": "tests/test_sandbox_openshell_selftest.py::test_agent_path_a_canary_changed_while_the_probe_runs_fails_its_own_check[rename-away-other-accounts]",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "96e7f68d282ac1e7b50f31a55deb2f461186f8864bd62393ddbb13b6e20e0dbe"
+    },
+    {
+      "node": "tests/test_sandbox_openshell_selftest.py::test_agent_path_a_canary_changed_while_the_probe_runs_fails_its_own_check[rename-away-real-home]",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "5b661770c5cdd2eada7287dc8c5d8d361ffbd3fa7477f87f5034cac7b0b3dabb"
+    },
+    {
+      "node": "tests/test_sandbox_openshell_selftest.py::test_agent_path_a_canary_changed_while_the_probe_runs_fails_its_own_check[replace-other-accounts]",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "4fac7e30ac605baf46b65306f7e9e8d9cbb6f7480413d60f7b63367f21a74667"
+    },
+    {
+      "node": "tests/test_sandbox_openshell_selftest.py::test_agent_path_a_canary_changed_while_the_probe_runs_fails_its_own_check[replace-real-home]",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "5706f89ff83ba1322cf548a8ea7365471dc0754520f71e3ea6cc848f43e9f2db"
+    },
+    {
+      "node": "tests/test_sandbox_openshell_selftest.py::test_agent_path_a_canary_changed_while_the_probe_runs_fails_its_own_check[unlink-other-accounts]",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "a7f95602f6b3bcddf14ec9351e135173ba761b41b14dd0afea554d17b8004fe0"
+    },
+    {
+      "node": "tests/test_sandbox_openshell_selftest.py::test_agent_path_a_canary_changed_while_the_probe_runs_fails_its_own_check[unlink-real-home]",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "ac52b57e54c15e028cfbbdc46c0afdcd73ccb2efd1802bf240689f00caabd24a"
+    },
+    {
+      "node": "tests/test_sandbox_openshell_selftest.py::test_agent_path_a_probe_finishing_during_the_last_poll_fails",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "bc09019d1e171bfebae764468e4d37dd3de3e41ff0abac54b34e9ef83e6360ea"
+    },
+    {
+      "node": "tests/test_sandbox_openshell_selftest.py::test_agent_path_a_channel_that_fails_to_start_leaves_no_socket",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "0a0db8c3b565fb23215201d741310f0f9de15ff8318175ec5c4ae95d9105f8b8"
+    },
+    {
+      "node": "tests/test_sandbox_openshell_selftest.py::test_agent_path_a_handshake_finishing_after_the_deadline_fails",
+      "classification": "observed-AF_UNIX-path-too-long",
+      "failure_text_sha256": "84b8119538b367ee05557822de3dfd725433578cbce146a1323a877f7b97b546"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_claude_launch_runs_and_is_listed",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "666271f7ca9fa1cb486532f8e9fa5a49fcaf4729f6c8e3404e6427bbf0ad9a00"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_codex_launch_reports_its_thread_and_trusts_its_hooks",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "4b3a24227b90c3b169d9f3e05ba44708df8f6a765c6b5c0dcbd8b605de8ce232"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_exec_path_is_the_first_run_in_a_new_sandbox[p-one]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "82c1b385be39675a6961e20d314c75723a270a49addf3f7b38fcef2354a6347f"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_exec_path_is_the_first_run_in_a_new_sandbox[p-two]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "318bfbdc10535b646643bddd539b88da6d3976f39d3fbd5017a5746d1d871a5b"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_pane_command_has_no_empty_argument[p-one]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "55b860252c9e69df7243be9aead0afc5800e820d2a309613b44ffa83470b7637"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_pane_command_has_no_empty_argument[p-two]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "b8edae8c587a41c553eb7542b3e53f3b5ee13d6a92dda83244a56ae8040797eb"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_launch_is_idempotent_on_a_live_session",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "d824538fbf6da2f2afda272efee509e2c8f34cac58e694634cbe3e302ca92d5e"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_stop_ends_the_session_and_is_idempotent",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "4299dd07826af7416f860562fc450239ffd572b6dab33fff9e68f9a092a190fb"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_an_unconfirmed_stop_is_unavailable_and_stays_listed",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "e150d114dd778a62401f7ab9ca70b0b44b9d0bc3dafb943194186ddc30217c45"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_relaunch_resumes_the_same_native_session[p-one]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "9c699c45c667984e60bf9199b8a9f2e2f4dd45a6d62d52b04853aa9caf5e881d"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_relaunch_resumes_the_same_native_session[p-two]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "47b33d8d658f5dd6a80f37d33609320bd45c6e2cc88373775fe41b9f4d4f20c4"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_resume_that_holds_no_record_starts_fresh",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "51ea9747e89fc941e5befed38da2e0f06220559c510d751f6299d09d4126c98c"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_state_that_ran_but_is_gone_is_unavailable",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "9fe501697edfea149cf3146cbf917a8faef992049cd186167b338e3d1c2d6ff9"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_session_that_ran_with_its_whole_state_dir_deleted_is_unavailable[p-one-.claude]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "2aab6c5fdb3df65b40e5dd13cca6a9170558bc141be25e88ad767acaf1dc8ed0"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_session_that_ran_with_its_whole_state_dir_deleted_is_unavailable[p-two-.codex]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "0b1a62d106901a0a671051a281133a3ddd07c78a062fe5e6ac2161defcd28c91"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_home_link_planted_by_the_agent_refuses_the_relaunch",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "4cd9bc08ab069ad37429af3be6eb711cb4bb0cd81a2011ef7a9a4218c75fb1a4"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_sandbox_gets_a_private_git_dir_and_its_commits_land_on_stop",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "88adf4fa01ce6f8ffb4f42b973c793d6e4a66c7afc6a06749beb9fc03f7655df"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_commits_that_cant_land_refuse_the_relaunch",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "2b29a4166af9d0fee872b3387dca951907d0b794ed047f222e966cfe32d31913"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_unlanded_commits_hold_the_workstream_and_name_where_to_look",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "91defd81f9576e384f5ef999c2698a5165acc071329becdd241719820feeb2cb"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_record_write_lost_around_landing_is_recovered[True]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "674eebdbbe180b3242fa2e66c8845687a3caa97eeaf661e54a3903a8e8ceb3ac"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_record_write_lost_around_landing_is_recovered[False]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "246c3c61e5b93765468b95b63cc98e4e35d31257a8d11357d79e695669522367"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_named_account_binds_only_its_own_login[p-one-claude-code-.credentials.json]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "5b89d9f972eb840da682b828c903422659fbaa2af5ae251e2747ff1fec220892"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_named_account_binds_only_its_own_login[p-two-codex-auth.json]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "298db23468543b919c57d9cbd65b4b73f7bf9473da5d206407725bbd6161da14"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_default_launch_still_protects_every_named_account",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "f5191c04a367fd53d8a9b1fdc43b4cb134688c2e9df7a15bf79bdecb3c286b41"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_key_and_the_login_are_read_under_the_accounts_lock",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "1623c0932808f0bf6381f6802e6ccdf7608b30f3c91cbd398dfda90f402176bc"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_held_lock_refuses_the_launch_within_its_bound",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "f27e42fa34885dad08e4addd1427d58b07e5cb3b89e072b743c522061780300b"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_login_repointed_after_the_locked_check_is_never_bound[after_the_check]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "2f7932b77ab8b9607fcde17c47f7b08a3460070d18fbc720d3c4025104564e93"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_login_repointed_after_the_locked_check_is_never_bound[during_the_create]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "7ac0c5bf7503fe2880b058505111b6ae88cb6323ef5c88b77edf265e65ae2390"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_login_made_stale_after_the_locked_check_refuses_the_launch[replace_with_short_lived-after_the_check]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "5b5108be74062ac0f19291b4ff2354b341ece4fb6841fdfafe50b94b881dba20"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_login_made_stale_after_the_locked_check_refuses_the_launch[replace_with_short_lived-during_the_create]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "7f6af7cab0b659cab5e09f72bb26523a48cbb40dd044ec5fdbb91089edba1977"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_login_made_stale_after_the_locked_check_refuses_the_launch[rewrite_short_lived_in_place-after_the_check]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "007de425b9912cd182a274eb49ff48da345c78c859c42ac849830999e555eaaa"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_login_made_stale_after_the_locked_check_refuses_the_launch[rewrite_short_lived_in_place-during_the_create]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "2e6e9a93b69bb5ddc31db7b64ff3c9ab70bc3f473b8db743e4589a0e1bd0df8f"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_bound_login_is_read_again_under_the_lock",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "297507e98960c9477199d5f4e34c7bb524d0e7ad71a0761d00a0c059a71c5ef2"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_freshness_gate_reads_the_chosen_accounts_login",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "69674ee2f0cb19498db03adea3edf41c895a98589287b9cfd9d41b5153d58492"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_claude_handoff_starts_the_d7_session_fresh",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "0b720d06d01d27f4a5969f2d57bbad7f69a9d64e68cd65f382c4d4eb677c42c3"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_codex_handoff_starts_a_new_thread",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "dfce8f633823b1a9feab4920ad367d52c171136f0e005baa5500e0cf5c2a7835"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_deadline_runs_from_the_logins_exposure_not_from_a_slow_start",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "77413629b7ee956e2cca4818665ae71c774c2c071364bfd8a17d716da2f6d500"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_launch_that_outlasts_its_window_is_refused_and_cleaned_up",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "7122f86da7d30ba8fb36ee357d55203cfa4b9870b49c7dba49ea2c20789911e0"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_failed_step_deletes_the_sandbox[exec]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "8e3ed1af291822bc16b05a6cd7e3f579082b05d2919d03cd6ede9a94d9362ce6"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_failed_step_deletes_the_sandbox[agent]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "ceafe7744ef5f8179a60c90161f08cbd26411d1a6b6392660a186233d7241b4a"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_failed_step_deletes_the_sandbox[create]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "d31a0818063ece92e595c1a9610c61cd4c5398aac77297ced236a37edb5a819c"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_failed_step_whose_cleanup_is_unconfirmed_is_uncertain",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "cd2aad722a55bfa77305f9ea759d12d1fdebb9a4ff1b15445c5953c4b8a0fea1"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_dead_pane_is_cleaned_up",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "2b18778d6d35ea0fed6d9a2f2d93fe602dc3a95c6dc9b73361fa7e5b3b0f0edd"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_an_unlistable_backend_or_record_is_unavailable",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "5e94ef569f93012d214e0f989dfd81cd45738072eb60814b3b6cd90c3cce8f51"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_restarted_runtime_rebinds_the_live_session",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "364c402e63cc9778cbd1f358e40e24e8cd1b33b1de8f03af91179b13f56ab9e5"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_pin_refused_at_the_end_keeps_the_commits_unlanded",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "ada50520270066faff9484ae539902f6312f4961343dc037e667636f93601f82"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_worktree_gone_before_the_landing_keeps_the_commits_unlanded",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "46b41909f27fe66a7904b73071543be0bbbf9f4e0586f6460c91c9afc22041ea"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_record_unreadable_after_create_still_cleans_up",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "32604dcddba68637841a3622b11dfdff825c294b34f61201ec6e3fe49a32a523"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_record_writes_lost_after_create_still_clean_up_but_never_land",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "14fc0258cc861b60c898c4b1d9de5c22c596ef15ed83558e7f03097fbf2b9276"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_private_git_dir_gone_after_seeding_is_unlanded",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "b3974b848923b9bc970eba534f94f1f448d57b4502e592c984bfbde971506c59"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_lifetime_stop_whose_landing_fails_owes_its_wip_and_commits_none",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "b4b6d953e8a41fc14f8bea0fc52553fbc8fb20d252626c1cb71f4503a3946b19"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_failed_lifetime_wip_is_kept_and_retried_once[before]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "7010c0cb97db801fef446a15630038ee7aaae65d736678b9c17283d5021cdb51"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_failed_lifetime_wip_is_kept_and_retried_once[after]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "b7d080eb1a7fe44fe2e36564d9f2485b8c64e8d5cb18548df573f4171d421344"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_an_owed_wip_that_still_fails_refuses_the_relaunch",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "19a0ed087421ab68030d245a973fce88ad801681bfb99df6ecffc3abfb64cc05"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_resume_that_reports_no_session_start_fails[p-one]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "90816f19c22ad61236ca463b00b4166ee7b91e109d721b5c06e45f707d5286e2"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_resume_that_reports_no_session_start_fails[p-two]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "1040d6c63f6edd2f119ace8997d6162565f42234e51c0a0ab1cdd172e3a23a37"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_crashed_wsds_socket_path_is_removed",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "e717b23919e9a6e09c7d630d77f9781abd4ecb09aec1781817451eaeea9d4938"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_record_that_vanishes_after_create_leaves_a_hold",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "849fa13ddd28fed3b0165ddcb2fc4e99451882d906bb17f0f950879a5f283f52"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_git_directory_without_its_record_refuses_a_fresh_launch",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "bc100b032b0c6006bc2549d0d3009cda93155ffe9c8648184427a7218252f763"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_tmux_server_it_cant_reach_never_confirms_the_pane_gone",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "1de1f181d1516ab130c3d2b7ac0789f8b1d39b86d74fe0a34f4fae893c9b2cb5"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_end_cause_needs_a_live_generation[stop]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "46ac3cf4df56b6a845888cd58b42f910866af170d6f69347104ff22668820453"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_end_cause_needs_a_live_generation[expire]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "31dd66fb6be2a1b87e1cbae03dcdddc2d5a17fb88e147522b0dd110e3c5985e6"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_end_cause_needs_a_live_generation[found dead]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "fc612fb68911ca80a17d8d3a2d7fef1192ccb92dcfc252c44dbb17bd065a990a"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_end_cause_needs_a_live_generation[stop dead]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "beb8aea074cf9a252805ac9e011783fea2fefc25c452d13cfb9d4d787a4cc3b5"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_end_cause_needs_a_live_generation[expire dead]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "9414ef5b37fb718edbf99845f69390eb1814382a09e9bb4ac633b10e6242151d"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_an_end_cause_is_never_changed[died]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "4dd956f94c42c5f69c8e2a64fca1d60d4b522f6293169a1c38cad4904a49c60c"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_an_end_cause_is_never_changed[stopped]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "f694e05f90b06c20171792f8b9022b6ce7c4d77b4032ce05df0d3e004dddbc95"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_healthy_stop_whose_cause_cant_be_written_stops_nothing[stop]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "d61fc2958691e9c2cde2d38bd27ab02dfc574a605781e18547ef7f5d04f06c03"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_healthy_stop_whose_cause_cant_be_written_stops_nothing[expire]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "f8b72ac0c4859a0be7a491e3c5c16b1cb67924c9c01033786746a7db709b53ac"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_delayed_discovery_after_the_deadline_is_a_death",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "c6391281b0d2434b2e933b16967fe5d42ded74498e8dad6a2ff1cb300bda7d6a"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_late_pickup_still_ends_lifetime[long earlier job-sessions]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "5816abf2f1cae124fbec95b3e5fa45ef74866c6e75a767214b3d7b2cc491a946"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_late_pickup_still_ends_lifetime[long earlier job-racing stop]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "f8d96bbf6dcac698a4448ee92c27711ae3b3e09344bc6cd8a0588693660bd02a"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_late_pickup_still_ends_lifetime[long earlier job-expire]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "11a005883aa5d7b7883ce657fd1445909d232b8671f2abd7c9b640b4a9004434"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_late_pickup_still_ends_lifetime[lane contention-sessions]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "c516ad842d845eda60bdb48834f89af44734062d70ab0571c27940f78ab369fd"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_late_pickup_still_ends_lifetime[lane contention-racing stop]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "875f9bab75b0aef590b871e42a5c0b2f877beb41adf267f56f20f2fb535a79e4"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_late_pickup_still_ends_lifetime[lane contention-expire]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "4ae7af749b3b04cd9484063c2aa021e419004dcd9f5c67280fb288c84c58f00a"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_late_pickup_still_ends_lifetime[stale now-sessions]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "1e72e8a71c33212bf765531f435ce892f4c959cc4a62edd76b6b04f5338d8fef"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_late_pickup_still_ends_lifetime[stale now-racing stop]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "ef954b56a976af4fa7ecb740a1c5f28c95b53c2f4758e992e85753b0f6cff8f7"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_late_pickup_still_ends_lifetime[stale now-expire]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "0c3fc71f234e3a27d2c8dfd6c429fc2fed51be638fec121978d7b85d18e4edf7"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_generation_dead_at_the_deadline_has_no_marker_and_died",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "73a1581139b42a35b8f1c717e96290ea90bfc8d9a1aa50d5cb3475f4665d58bd"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_crash_after_the_marker_and_before_the_kill_is_lifetime[hard stop live]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "dc9038e4b232e35d4a41146c7ca696eac4dc44d2e00bbf4f3e3d6a642d7e8ff8"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_crash_after_the_marker_and_before_the_kill_is_lifetime[later death]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "0dadf8304802f2ecda4fc08dfeece47127a9b03d4bb8df80ad2922d510791408"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_crash_before_the_link_leaves_only_a_temporary_file",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "9d66c71821c69f60d746234be0afcc6d183b0b61c6e48544e8613a4a627912ce"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_marker_left_after_the_end_is_removed_by_the_next_launch",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "6c6c4c24dff36556c96899da4f10096c19192c7f44261ae77a1933d403d83837"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_marker_cannot_be_forged[wrong sandbox]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "355a16fb35e9fe19aa0c9230d6947752c7a5ad4958bb4f242e744779b25ee513"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_marker_cannot_be_forged[wrong generation]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "de766ce1e27e3b773dd2ae70a7bd971079cdc6f156744ca22b61ee51f3a6eaf4"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_marker_cannot_be_forged[malformed]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "01fa06b0658fbcc75a3b96f6b1d10136188b0d202cc014ae02677d9cf5585e69"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_marker_cannot_be_forged[not an object]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "8838fe06da9bb5085beac45551a5f49bffdf22731b9a1825e299fb2b849fef80"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_marker_cannot_be_forged[a link]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "858fbdb11c0b95e27e90d870b52b942d08be841e23b710eb67ff0e63754c05ba"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_marker_cannot_be_forged[a directory]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "791997ee836655d7c9e56d6f2d552ad8fa5d8c8ce05930f3cbfe3ffddb88dc7b"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_marker_cannot_be_forged[a fifo]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "d6b5e0950f82cce860ff7c1a039fd6c9638be347475d70fb6146cdd1359560af"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_marker_cannot_be_forged[in a bound directory]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "b05a57c3ace765329f96d968a972634e56d4ba90f434284647526fe0e3ca3f3d"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_marker_is_outside_every_bind",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "90df5ea80d1c81193275468875d688ed2135b8211156a7ca82b8232baaad2a8a"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_an_unreadable_marker_is_unavailable",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "b7bc567796fbef9890429d34fe0f367b2c5b1ee94aca90c81a63f1b47bacaf3d"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_ended_reports_generation_evidence",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "1fb96cb37fbe59aa83a50720b9a28861bcff65dd50c53012348029d6a130d470"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_legacy_stopping_record_is_finished_by_its_cause[lifetime]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "e5f79127dfad4e2cb10913d1947e2eb0bbcbc775339fe23da0f595e5ec3b64b1"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_legacy_stopping_record_is_finished_by_its_cause[]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "ae34e2c6a5b7b28e74c433660044fda3846da7d9bc29c7cae14631d7e575342c"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_second_session_on_the_same_bead_is_refused[running]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "4257104c244021ec53aa70d812a7e3b48f97dcf6224f521bc638d05568ba8db2"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_branch_is_free_once_the_first_session_ends",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "bb69e99765efcdf3f13522bfb9fd16de6192d8807eb2bdb7ecd7fe3292c94060"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_dead_but_not_ended_session_still_holds_the_branch",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "c272bfde1554c3dd45c284a5b8a3f8460a22fa55d18ca73b3d2a51e997db043a"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_an_unlanded_session_of_another_key_holds_the_branch",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "d4370a80a98a64fcbf828dc49bd440c746c30a7101e62c6ed9035eb000319e49"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_an_owed_wip_of_another_key_is_settled_first",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "9f6f8b2c2d7c18665bf8ddd6b0d16e8d558b26aeba107802df081e88c4c7f070"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_an_owed_wip_of_another_key_that_still_fails_holds_the_branch",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "49c2e19b824357d58afcdf04c53e3ca07114edcd37f42c61ae53225a599b5548"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_settled_wip_whose_mark_cant_be_cleared_holds_then_lands_once",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "22161ee63b9119b0e65bc9b1ce9fa2a7079ff75d897f8f73291bd7a9e75f2fbe"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_hold_in_another_workstream_clears_through_that_workstream",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "6b082d6ccecad658d222dcd0d82418e6762b8db3cdf36eef16d9fd511b6aad7e"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_stale_same_key_record_is_ended_before_the_check",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "cb7bea59f48f975796d3818c335957c2835e355007652b553039c2e0a43249dc"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_dead_running_same_key_session_is_ended_before_the_check",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "4b60cda0f5784099caaf5a4fc57ab6c5ab22f45a882c439849eb6a28c9eb11d5"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_repo_alias_is_the_same_repo",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "69a5b6a4d9d000904831b0ec9c50444dde0e855b539efe7e4cdac6ddfd14a347"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_other_beads_and_other_repos_are_not_refused",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "12120d29d8a60e7d5bf2766f6f2ce067d94482efc07b1cebe9ea7dcfb795ec43"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_unlanded_view[missing ref]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "b2e5dc6391045308512e86927adcb40a090476297cd507150ce89de40b00ebf1"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_unlanded_view[malformed packed-refs]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "5470cf60e13ec3ae4efd51f4fd13153bb1dad4fdde175ae8aaefbb886660cafd"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_unlanded_view[objects gone]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "568251962cfe2cdb0d66f0b0dd02026dce1ac59c3ad8c521e0383580a1bb1f80"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_unlanded_view_shows_a_diverged_tip",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "567b41c9c8bdf85ac4d3501b7c4fdd60dbcb9cb2929878ddec3ed14bf914eb78"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_land",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "b27ea8b395d5e914af07ccd9a49b250693b9d387b193c30779253e841656c410"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_land_refuses_a_diverged_branch",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "dcc5101f0f5f97bdaee362eaa816baa2414bc6d188c0f278ca79f4e728d3cd0c"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_keep",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "33f5d4967c6b258894efce5d84c3ebc5a2abce8c53d5cd1121f494c21b0dd7e4"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_keep_with_its_ref_taken[same tip]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "463667b9f4b50727f4f20a20de24e86ad3a0292c323573f7ae785f987b12e7c5"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_keep_with_its_ref_taken[another sha]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "91194de701c0eb4808d16f444f660cc6008d1686d310610fc0d5e1cfe3f9640f"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_keep_with_its_ref_taken[parent ref]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "b15a74b824dd392e575f79b0c256379124e070508fbde82049cc4377f2f867bd"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_keep_with_its_ref_taken[namespace ref]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "1e56711b64954633965c6464301470b3cb18e5356a8ae313ff7688208a140c11"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_discard",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "4f593e02f9541ae53cc839e79477e2106d674333f7dd9d9110ffb48b12dcea80"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_discards_an_unreadable_tip_without_tip",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "76c39e3fbff923807148913afa5e8d428555f268f5b5157a6f5121f7352f6890"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_refuses[moved tip]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "ef5f3fe5c58121b7f52e741a31710efb358b6be2398fdd37711590918627373a"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_refuses[wrong generation]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "8fae0b4a19184610956518bc2235530773e674d244b543d31bdc922042403f05"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_refuses[another workstream]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "051c476e7895a63f7e16e7d9bf2841b374849253a11b36d788c39b88fff000b3"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_refuses[not ended]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "08131e33934a5d01918ee4f7098ba828dcb621513fb72d93b210af98c46db40f"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_refuses[not unlanded]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "b6feccc88b4ad228d3eb3aa125608080acaaa0168382a1aa2692b502715ee50b"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_refuses[bad short ID]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "2bd2806470ca9e5b03953fa3a186f20c28dd9bd92e9cf1b64d0b119c4c2c7c40"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_refuses[pane]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "9e66472284266e624bd0e8f9c49fa147fde009d52f9febabfed6671c18f9b02d"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_refuses[older reaper]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "ec1579f2fd9f6b2a4f582a4a7afdc95640c1010e4190311288c41bdaf19b0528"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_refuses[older sandbox]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "d6fc84c82f83eab5685ddd4a8fa872ccf641302bd7d8fb270dc117dd5f2029a7"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_refuses[orphan]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "856add6df9824a306501803a6534f58724cb5653cc8954d1b7113a2300c18bf0"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_refuses[tmux listing]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "3336d4146d615dd796ee7f573a27bd04e566b9c2d3ee2ac94ed3320a4ee79d21"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_refuses[backend listing]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "1590380126f067a4cb17ec6151b7ac5bb9b2a5ff2654b6f4a1f684c421118321"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_clean_resolve_passes_every_point",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "859f6359c3f028afdde1ff67e2533449cf1dd606ad9e1b3a8c0eff34bf452f9e"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_import_is_durable_before_it_is_recorded[land-first]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "1c72c3fa4b34a84baab71ae1ffaf7dce436884c7023a6e13293d371ee03fc487"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_import_is_durable_before_it_is_recorded[land-replay]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "5106f555d5daa779aa1ab1b8a46a7630205ba7c44442a95e29d7b4a9dd72855d"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_import_is_durable_before_it_is_recorded[keep-first]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "f63059cf42b6f56f3388725e844beebb0a02faf974e6dde6d4efddf641494d19"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_import_is_durable_before_it_is_recorded[keep-replay]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "55bfd7247e4acad229d4191b63fa5f694213421efcca5f3abaceca4fe34cc637"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_state_directory_is_synced_before_the_first_intent",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "0c1f3734b88a5bc40322d78d6333f9b773690698d32576687628be55e87a8fd2"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replays_from_each_step[imported-land]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "d4681ce84faf732558dfff2a1ff39b4d0dc2da6e555fa6f2bede07654bcd3168"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replays_from_each_step[imported-keep]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "8bc53ed40a54287e09505bccac666f9aa349087c64ad737c1d15267a40bd828c"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replays_from_each_step[imported-discard]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "2c68b262ccbe38efb29050b782ae4216db3acd90e564b25b6fc473b8ca64504e"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replays_from_each_step[imported.recorded-land]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "6d9fe3160496af84a216edc2cc27d7036617900282aba4e3d7c36f026768bc6d"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replays_from_each_step[imported.recorded-keep]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "22ba93a4db68f016ac938fd1d1cf69527f5516a3fb5de880058bc37383dfd2b1"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replays_from_each_step[imported.recorded-discard]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "a3a82300af14a4d496d1a9575eb33aac726b99d94fc59dd6f99aba06533a1152"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replays_from_each_step[moved-land]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "0e2450eed15a7c1bc0e0fd7b8250594c53902474637ca905fc1748fbfe7d80af"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replays_from_each_step[moved-keep]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "1819f340894a4a818625b0b1730da18ee79bd9de97d65b6d1b2245dec1e0dd82"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replays_from_each_step[moved-discard]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "0682b3c872abaaa12801f28c72b0ce35f8acf8b5ad4dcfcb5730ea817639d615"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replays_from_each_step[moved.recorded-land]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "47ee1d19fc937ebe9b0a4027926c98c0e37d68d4c72820f11d0d90a9d7f665ee"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replays_from_each_step[moved.recorded-keep]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "c72dc512d4e52306883af2d0d4190e2acfbedecfbbbed6947a741ff00c65329f"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replays_from_each_step[moved.recorded-discard]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "e230df097240df4e25c6085ae51dc1b36565d8c1f12a5e2e2b258fecf5817c93"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replays_from_each_step[removed-land]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "de66243eeb12be3d6c648868b2d369bab9092518222bd12e2652b151dddb0144"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replays_from_each_step[removed-keep]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "8f60882dd4f8d010c5c510be84c9738f91270a1bc8b138e8b07a1dc6db8bda77"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replays_from_each_step[removed-discard]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "2069d9b95c2d3646f9eda5eb1eb967f12b68d8b17815bde103ded78e41d3bffd"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replays_from_each_step[removed.recorded-land]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "22b05bcb43eb82d88628ce19b1397de5616ab4d3aeff011186ac485d9e6f2bd0"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replays_from_each_step[removed.recorded-keep]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "3d51f85ee7bdb105b4676f80d9b23f87f59630aae8a57397799691e8f72ed277"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replays_from_each_step[removed.recorded-discard]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "2709abed9af67db5a4e6e26b2d6e6b9bd6174bb0b5b4cdf04bba2c2114b00b49"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replay_refuses_inconsistent_state[both present]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "e2302ecfe613c9533588d81075130d8f8874f772807acec6371a52aaa950267d"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replay_refuses_inconsistent_state[confirmed without S]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "ea03d404fb813206ec119d4462c676878d70bea161ac391ce0f406976b427d3f"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replay_refuses_inconsistent_state[S replaced]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "a864d89a5aca567681106404248e02f90e08209ed54b497d4a9c6050fba7df53"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replay_refuses_inconsistent_state[T replaced]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "f58f92c88896a2a11d977ebded7b5962a21d2c6457ce6a848566b72834d88e24"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replay_binds_the_intent_identity[workstream-imported]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "2e7b92ba484b91b70c5a5c302b25c3f01469d4b5b7f94bf02a1272268177bfd3"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replay_binds_the_intent_identity[workstream-imported.recorded]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "b3f7271d35e2dac006376ad1b9d8948ca06f34897dba06683fee2a7c83790beb"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replay_binds_the_intent_identity[workstream-moved]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "39421c1a1f90b1bf272542826c63442210b75eabb47552248b9493081e2b1e36"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replay_binds_the_intent_identity[workstream-moved.recorded]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "a9a5e95215de36d71e9c63dab89019596ad8ee7640928f0bc3ed975858b44945"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replay_binds_the_intent_identity[workstream-removed]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "b72504f7f84ba62acf504bd3d359069d0245931ad8774d58723bc350e0514c4d"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replay_binds_the_intent_identity[workstream-removed.recorded]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "094e02e8a25e395c2be3be89823cdb89876854826b06175354f947a9acfc45e5"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replay_binds_the_intent_identity[action-imported]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "4b9e0c03a8f38c079a821834be5f54ddb4dcbf8b2711d302adf28a4c44e2d06b"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replay_binds_the_intent_identity[action-imported.recorded]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "4468030786d9cda4fe02c68e189dd609c50da643ec5eeb3d4dc07117e443d37d"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replay_binds_the_intent_identity[action-moved]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "a650f905adbde2d949952019a9a754386e7f70ea68521c3abf9239342731b912"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replay_binds_the_intent_identity[action-moved.recorded]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "57c596febae56514225a80219d057e11e483fb73726032d0d016d860a0ce8467"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replay_binds_the_intent_identity[action-removed]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "fe65e3e6ee694df3cd34e0d6d80ae5df4d91e74206d78e069ff38ceb3190195e"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replay_binds_the_intent_identity[action-removed.recorded]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "4eaa3912077cacc7e679d57180921f15f7755a89ea72641934cce966003639ab"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replay_binds_the_intent_identity[tip-imported]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "b9bd1cc03fb97bf49c16dd8aa8dcafa3e7db88553f1d337661f94290698769bf"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replay_binds_the_intent_identity[tip-imported.recorded]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "ca230e560a8dd0ea67ec596faf43111cad4d7390ef3c7ca9c18988bd3d6f1a29"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replay_binds_the_intent_identity[tip-moved]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "4752b1eb5cb18b70afda28273715286e2518c478286da5bcd794fc6b0b98e6f0"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replay_binds_the_intent_identity[tip-moved.recorded]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "c1511c53d6426ad14747fbaaeae756f8b755635e8a987defcca4dcfc3bd29589"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replay_binds_the_intent_identity[tip-removed]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "61a856813287ac9e4b9addd86ff745b9b6d559c62e2fe0c3207a3778482dbe32"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replay_binds_the_intent_identity[tip-removed.recorded]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "47c564a20be13b4af20c1d25679741a8c8114abb18e36f1177849301aac102b4"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replay_binds_the_intent_identity[generation-imported]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "d169ff2b6483d595880c4c45ae8d34ffb9fd3d4972ee0ac1b1355f64f78a42a9"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replay_binds_the_intent_identity[generation-imported.recorded]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "2613cde57c3a1ddbd3d7487c084ffffe30bc85eb73bd18cf6b5dbb286829ad88"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replay_binds_the_intent_identity[generation-moved]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "0da6a15e69b5c20c1761f5b6713e36a405c897428c06f1a528c9291f9a0ba1d7"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replay_binds_the_intent_identity[generation-moved.recorded]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "f120f8e8a16414979165410f16ddbb6b338082bf08c942cc1c85dbcfa8572978"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replay_binds_the_intent_identity[generation-removed]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "8fae46a2c138aab434025065d690e4839c20aefd4075e9a7aa7bbba5fa2d3435"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_resolve_replay_binds_the_intent_identity[generation-removed.recorded]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "65cdd9ce790fe95a4c0a2c78f18734e93de9aa00b2f7f095e6f3e5e02d0c626e"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_hold_clears_after_resolve",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "b91ec93fc3bfa0ea0f2f904cd76ac5de84027ba9a51468cccb070a323ad7754e"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_resolve_job_replays_from_each_point_with_one_journal_entry[imported]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "89ce0ba0461b03ca6d426d1ed6822340ca3ca69c8229f89fee70d0f38e1b89f3"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_resolve_job_replays_from_each_point_with_one_journal_entry[imported.recorded]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "879e0bcd9a95183c754c696b0c0791e1e7f737e96a9ead34d64727229474107f"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_resolve_job_replays_from_each_point_with_one_journal_entry[moved]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "f768a9fc99a372f72dbeabd540bc151c58732bbc7686535e292f3175dfd14007"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_resolve_job_replays_from_each_point_with_one_journal_entry[moved.recorded]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "3eadd88bde85076568a760c96997005b7ce1fadd5865c703ed315052d5560992"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_resolve_job_replays_from_each_point_with_one_journal_entry[removed]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "96e7b704e156d03a3b5cb19861a5f8a077b1ae2d33f3e669e80b87787e1bbf70"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_resolve_job_replays_from_each_point_with_one_journal_entry[removed.recorded]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "c0d99bada0b86fcf6a92f374e37d3f7af4d30bfde49f4d009ee8b2a5a7fa2931"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_resolve_job_replays_from_each_point_with_one_journal_entry[resolve.resolved]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "ebd865f6896e09bb635f38f449ce9c40468074732cb7a91ae4682273f471e975"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_resolve_job_replays_from_each_point_with_one_journal_entry[resolve.journaled]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "952aaab3a9218906f95a469cb78a9e45e3083f57b365c34e901857065dd8c5c5"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_failed_journal_entry_keeps_the_removed_intent_and_the_hold",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "3cbbaa6e2b07ade64e141b5149445dfe54192baf681affdffc450e2ae81885ec"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_resolved_generation_has_no_end_to_read[land]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "5078e0f14fb062311d0146b02f8136d38dd2adf57a2e487c14a055c6d11a6b90"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_resolved_generation_has_no_end_to_read[keep]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "a415c5acf1a991d85c773e163db6ea54b31df7a978a0c29d5d448245625b1660"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_resolved_generation_has_no_end_to_read[discard]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "480c87300ff47362db26064f5add1faf52f6517e84f9cefe672a708dcbe8581c"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_confirmed_intent_carries_the_records_end[land-stopped]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "1d7bd8fdbc2a263e6a2fc20daab3042a34f232940e87896d869fc370001f24fa"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_confirmed_intent_carries_the_records_end[land-lifetime]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "54a1d3b3ad5aaf21b7320714993c21893a04b72d7a46b9d063e926a590e2df08"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_confirmed_intent_carries_the_records_end[land-died]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "24106533101ef9db3ca1d506e22fffa7743a6ea4805053d5f5ba6836c4e0ad7f"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_confirmed_intent_carries_the_records_end[land-legacy lifetime]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "2dc3ac2679638d43cb21c3fde2428585b814d08a2c2313953a98fd1f03b3c184"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_confirmed_intent_carries_the_records_end[land-legacy death]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "057257e8233f181fe9c101c1ac60060010d1cdbd57c0cfffcbb9637d48ba30be"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_confirmed_intent_carries_the_records_end[keep-stopped]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "db1d570e8f1b242847dd904de24a8661cb04d1625a3a7a5cb32aac8566b2cf71"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_confirmed_intent_carries_the_records_end[keep-lifetime]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "e2bc050e33cd4528f256bb75bafb4a59d06b00a9b768ba78e34a5f92ad170f04"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_confirmed_intent_carries_the_records_end[keep-died]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "dd6b7a226fca6e3ac17be022434beb94136ccf3fc7b3446879dfccbe31fa5308"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_confirmed_intent_carries_the_records_end[keep-legacy lifetime]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "b7b59b14a34f107e72779a658b80d7e3279b5fd102fcbbb71eb298ca2e350754"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_confirmed_intent_carries_the_records_end[keep-legacy death]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "6fb930f8effc0503025e4ea06b1f504d3c34b2bb93ef2aa9e40338469948845d"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_confirmed_intent_carries_the_records_end[discard-stopped]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "b6877ed196c34dd41a6ad0715e83470a609799cf8cddb5443e605d80a54c5d52"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_confirmed_intent_carries_the_records_end[discard-lifetime]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "0b047241044f6ae6b17e1e8680214e1161cc10976585dd14461ad0485b894fe4"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_confirmed_intent_carries_the_records_end[discard-died]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "2af7b78da0203e35b215088a5cf2815f45fac2874819f080f3c9c178ee48385c"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_confirmed_intent_carries_the_records_end[discard-legacy lifetime]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "ab84668ba00cdb46b5f98b9890f68332b70f89bba7e323074e698212246c00a3"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_confirmed_intent_carries_the_records_end[discard-legacy death]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "8c6e280dba13a885b4084ccc19e1287e04e7c8d71eec8367d2b9fdc8a242efe9"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_replay_takes_the_end_from_the_intent[imported]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "147ab0219c4d46f62886380c9fd5768853d0a88d4917fba00e8145e9ee43b84d"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_replay_takes_the_end_from_the_intent[imported.recorded]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "f962f9a8286b677b65634a58456851b7bf455324bf16e8ae379527d6eaaf54a7"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_replay_takes_the_end_from_the_intent[moved]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "c627d2c39e0a0ca3e758b5db34fce8768524aa058ff7534cdce70a55be1e0a46"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_replay_takes_the_end_from_the_intent[moved.recorded]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "ceafc9393e65db81ebf57d52e623a70dc4d8e8d56a6a814002964330e8bbb7bc"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_replay_takes_the_end_from_the_intent[removed]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "b2ff0fe4a11917ac46a9194c9ca8fb3fbfd0e11ce24e09030dee0f9a30c9d2ac"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_replay_takes_the_end_from_the_intent[removed.recorded]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "2a2add4f62c4ecce1c3fbc888c18a98001b9f7cb01236f5e514775d64caf275e"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_an_intent_from_before_wpyv5_has_no_end[imported]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "1a3933d609406be5f0d08960cc52f95236b34d301a64c823f4ad67e14cae7aab"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_an_intent_from_before_wpyv5_has_no_end[imported.recorded]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "a2b3b412d319be1b4ecf25c667a1b4adb4078b35ca2d44ee72901f18d740e7c9"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_an_intent_from_before_wpyv5_has_no_end[moved]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "38eb2aaff75dcd7b1c2cc5830d61502f790a59f186e038b7099106db68f460bf"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_an_intent_from_before_wpyv5_has_no_end[moved.recorded]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "7390d77080712552a335ba4228f0c94029101d3c13f4127dbfe5b3228696cb92"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_an_intent_from_before_wpyv5_has_no_end[removed]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "4483d8e296bc1757468b244e75f21d6c68202c8a9df96e52bc6084d69e12f057"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_an_intent_from_before_wpyv5_has_no_end[removed.recorded]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "16b65e3c5f8ecb2be3658017cfd668abc8c458c03403f04e6ee50164bb8b4c28"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_an_unknown_cause_in_an_intent_is_a_death",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "23ac0217695b17514593e5d32d8b856a2080490601eef2e5bd2ded0298588b0f"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_manual_land_then_resolve_land_carries_the_end",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "488b4a3ce5308a8831bef82686ef0ce86218051b3d1615b054d2bf707226edb8"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_with_every_capability_off_no_producer_runs",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "a2900568a650b8cb30576fb940ba46ce03f1a1fcd049867d3fce14bfd12afaad"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_claude_status_line_is_usage_from_its_own_session",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "6468103fa5422d96b13d9789a0d582d46d90b04c130c8806cc06447da14f02e0"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_claude_rate_limit_is_a_limit_and_ends_the_turn",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "33968cd739c797ff3f6329b4f04e938cbbc14f4e091d7ca90f0d9da19a62ee52"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_stop_failure_is_a_limit_only_with_e_and_rate_limit[caps0-rate_limit]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "9d41256a8140a753f686623da401b172251c58f14c3694f8628124861dc221f6"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_stop_failure_is_a_limit_only_with_e_and_rate_limit[caps1-overloaded]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "e369c91737968424c4638211f73bdcc6622c5845412225ab745928004fca7aab"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_codex_read_is_polled_when_due",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "2c70f849eb5c84754e9b6bb7848a9a46c49063098248e386edb9a08246a6a095"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_draining_signals_reads_no_login",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "88f2f349057d76246f2f6ff5a24514ffc9c962b3cff15163c6063b30ff57b8d0"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_codex_read_serves_each_capability_alone[caps0-kinds0]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "6160ec13f1eae3b4010587cf0fdd2d3d758159e96536ba2a6961e22393782ac4"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_the_codex_read_serves_each_capability_alone[caps1-kinds1]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "de62f705c20e303a285b146f8750c59f41a236bc75e5fed7622029c2e24bae6d"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_read_that_fails_reports_nothing_and_names_why[error-True-AnswerError]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "35aa54755b6da16b163824f23ebf5fc253f794f3bf8c3c43d5fe75e58107824e"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_read_that_fails_reports_nothing_and_names_why[garbage-True-JSONDecodeError]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "b046d838032e04dffad722d5950ac7d19886e27609c035af967c6b4171057178"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_read_that_fails_reports_nothing_and_names_why[close-True-ClosedOutput]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "43604d7dae3dcb8ba751ccac2cc94cbdb04724ad1f7ded1acac4a46ed8ce3897"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_read_that_fails_reports_nothing_and_names_why[exit-True-ExitStatus]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "21a3c8c9f9242fc9724df0b0415df4bc1fe2f5aa92a741604c885c7182728e15"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_read_that_fails_reports_nothing_and_names_why[None-False-AnswerError]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "cfa5c64955da6d745aa60e9da65f04c91f59cd525f67e85422a4297aa4858ef4"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_read_past_its_bound_is_a_failure_and_its_server_ends",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "f5e60cd8f2c22264178f84f9352aa62bfa01cea4c7321653f770afe8cf3a9482"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_read_whose_script_is_missing_is_its_exit_status",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "02ec2c3ea5fea84b33b56c253122329e583e365159a8b10acfdcae1ce9fbc648"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_only_a_clean_exit_with_a_reading_is_a_reading[127-exit 127]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "6e3f8da9f98e93ccc537f427b8aa8bfb2a4a05f26bc39a744af2e4300401364b"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_only_a_clean_exit_with_a_reading_is_a_reading[1-exit 1]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "268f55f2dd8abb8c8b9e0559d3301742cfcee0c7f6262a972971b54dcc28b81d"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_only_a_clean_exit_with_a_reading_is_a_reading[0-unparsed]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "b153d4b33331f421190444aec73955d26ff3351e7a1a2130b842926f93e4ea82"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_rebound_session_still_reports",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "6f06b8e4b8f9761e1fc0da224ad2c813516551ced82996ec23346569a4274a55"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_a_flood_of_reports_keeps_only_the_newest",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "4164a7b18cae35a38473eba1c1312d9455abbe7682a6c28c53fdf6fdba35944c"
+    },
+    {
+      "node": "tests/test_sandbox_runtime.py::test_signals_never_raise",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "4f6ca25158c035651a148f91141da05ed5192295b19deca4dc62c76516b0d512"
+    },
+    {
+      "node": "tests/test_sandbox_scheduler.py::test_pickup_runs_the_bead_in_a_sandbox[p-one]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "63c42366974261c352ed63f82a4daeb53f8139cb0c93390d423ae1c028b533f4"
+    },
+    {
+      "node": "tests/test_sandbox_scheduler.py::test_pickup_runs_the_bead_in_a_sandbox[p-two]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "295e54a1fa2677709a6c8adc5a7a3a1e90f27ab93f185671d099797ec7c4ed57"
+    },
+    {
+      "node": "tests/test_sandbox_scheduler.py::test_the_lifetime_stop_relaunches_the_same_session[p-one]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "ff34efc3624b8642a30a1cd47323f5b9d9dd5917a3e0ee801f74739e743522fa"
+    },
+    {
+      "node": "tests/test_sandbox_scheduler.py::test_the_lifetime_stop_relaunches_the_same_session[p-two]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "7bc56c7d058c00635f31bbabbe1d8c4e53fef6a519daf2c1517f9acd61bafdb7"
+    },
+    {
+      "node": "tests/test_sandbox_scheduler.py::test_a_relaunch_the_gate_refuses_needs_a_human[both0]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "23a7cb839cab406b498dfeae8393325dff82f3125209323850861c44696006e7"
+    },
+    {
+      "node": "tests/test_sandbox_scheduler.py::test_a_lifetime_wip_that_fails_once_lands_before_the_relaunch",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "8374dc54ecf3e74ee17c985d9a2c85656309fd6225afd6fcf1239b7375eee5e2"
+    },
+    {
+      "node": "tests/test_sandbox_scheduler.py::test_a_lifetime_wip_that_keeps_failing_holds_the_relaunch[both0]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "c5345178a3275e1df11fd1662bad20bef1e1a3eef914cf24ca05da22a5aa9e1b"
+    },
+    {
+      "node": "tests/test_sandbox_scheduler.py::test_an_unlanded_lifetime_stop_makes_no_wip_and_holds_the_workstream[both0]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "26c3f9205235998db5b2ef968c2856516a56243af20d679f23d36b5ee2a242f0"
+    },
+    {
+      "node": "tests/test_sandbox_scheduler.py::test_a_park_or_defer_over_unlanded_commits_makes_no_wip[park]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "b684f6fc78f6a9c91f7882f9690d9c7f55da3f916e3ca3a4c6c7ba59dc8564c2"
+    },
+    {
+      "node": "tests/test_sandbox_scheduler.py::test_a_park_or_defer_over_unlanded_commits_makes_no_wip[defer]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "813361525ab070fc544c1b06ba82632fab42048b1fb3c4d62880261523464e13"
+    },
+    {
+      "node": "tests/test_sandbox_scheduler.py::test_a_reaped_lifetime_end_resets_the_crash_count_through_the_guard[both0]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "c8033ee604d97a0f09f56f383f0ce3fecccb44bf928f32da88b654575d612b5a"
+    },
+    {
+      "node": "tests/test_sandbox_scheduler.py::test_a_credential_named_leftover_is_journaled_redacted",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "2483e13410383d003b1d55cb8ef5c2cc2f7dd9ee199912480293cc1b0ad4af0d"
+    },
+    {
+      "node": "tests/test_sandbox_taint.py::test_a_change_found_at_session_end_taints_and_signals_every_session_on_the_install",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "b858ee100bffef81236477c4b8d2fcb8fae5c986bffee603f8d3fd9a9ec92cf7"
+    },
+    {
+      "node": "tests/test_sandbox_taint.py::test_the_walk_repeats_every_ten_minutes_while_a_session_runs",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "5cf320eb9ff1bbac970381cdbfdcfafee26025c9c2111b2ae045884897d7d1ce"
+    },
+    {
+      "node": "tests/test_sandbox_taint.py::test_the_marker_is_written_before_the_signal_and_survives_a_restart",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "38d527ad75b1ed7d0a49ff5252b0a01d033f93dbb93220024334e994287bc024"
+    },
+    {
+      "node": "tests/test_sandbox_taint.py::test_a_walk_that_finds_nothing_writes_no_marker_and_sends_no_signal",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "47e1e0a9d8d26dc91e61a0231d55e726b0e4559d17f7dd0f4753d90b85e715db"
+    },
+    {
+      "node": "tests/test_sandbox_taint.py::test_a_login_file_copied_in_under_the_fallback_is_found_by_the_next_walk",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "f305fee2179da616db21046a535173d1d04551b673e286799178e5bbfe0a086f"
+    },
+    {
+      "node": "tests/test_sandbox_taint.py::test_two_workstreams_on_one_install_walk_it_once_per_interval_and_each_gets_its_signals",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "95aabad1e258099b23c453ddda5acb4f58a29f0725d8052718dd6e1612b5668f"
+    },
+    {
+      "node": "tests/test_sandbox_taint.py::test_an_existing_marker_re_signals_the_live_sessions_on_its_install",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "b1d9208300db810b82a66da701dd4af241808576f997a99b8b9fa6a1c62ab51f"
+    },
+    {
+      "node": "tests/test_sandbox_taint.py::test_the_end_walk_runs_after_the_teardown_and_signals_the_ending_generation",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "769a34d5babaeb9240744c4e0268f5a46434355f5608876166cfc82247b9cd5f"
+    },
+    {
+      "node": "tests/test_sandbox_taint.py::test_a_walk_that_cant_run_taints_nothing_and_is_tried_again_at_the_next_expire",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "a5e894e418cdf39c1160432c6d5774da4840684cebb21ae18e010aa6f6dca9bb"
+    },
+    {
+      "node": "tests/test_sandbox_taint.py::test_a_walk_that_cant_run_never_blocks_a_lifetime_stop",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "ffb865df8b47f4796346dbf48307fec2e3cb38227393b21313e6b5855a862ef8"
+    },
+    {
+      "node": "tests/test_sandbox_taint.py::test_a_watch_between_a_launchs_verify_and_its_record_refuses_the_launch",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "65fd6bbc45513a6e7529b6a6ca986905d2ab36b1f05f60fef720650da474fd6b"
+    },
+    {
+      "node": "tests/test_units.py::test_the_admind_render_passes_systemd_analyze_verify",
+      "classification": "observed-systemd-runtime-directory",
+      "failure_text_sha256": "92c990752802b8302b76cd8e05e59953e2d7c609316044b1e0e8db2b346069cb"
+    },
+    {
+      "node": "tests/test_units.py::test_the_wsd_render_passes_systemd_analyze_verify",
+      "classification": "observed-systemd-runtime-directory",
+      "failure_text_sha256": "b1bb0ca1067a1bb6e8c83b9ad00a448a86065e098952e30740f0894854aadef0"
+    },
+    {
+      "node": "tests/test_wsd_lifetime.py::test_nothing_stops_before_the_window",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "8077b8c67137aa29ec7844ac47705d3a18036121ae02c7dddda3931d7294dc38"
+    },
+    {
+      "node": "tests/test_wsd_lifetime.py::test_an_idle_session_stops_softly_once_the_window_opens",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "ac2f50f62103203aad73dbea774198c2e259d629c35f91b303589adcaa0d5882"
+    },
+    {
+      "node": "tests/test_wsd_lifetime.py::test_a_session_with_no_turn_boundary_stops_hard_at_the_deadline",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "0a974ac971721837ade237385b415076d29476296d59cfc1b7f36812b21cf09d"
+    },
+    {
+      "node": "tests/test_wsd_lifetime.py::test_an_unconfirmed_lifetime_stop_keeps_its_wip_owed[expire]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "f3116658abfc47c89f427c07f528991068a1f11544207a31278aab27f71091e7"
+    },
+    {
+      "node": "tests/test_wsd_lifetime.py::test_an_unconfirmed_lifetime_stop_keeps_its_wip_owed[sessions]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "eedcf76731570730321d27bbaad42b9d421097cbf12ab02e1bfe0276845e816a"
+    },
+    {
+      "node": "tests/test_wsd_lifetime.py::test_a_sandbox_the_reaper_deleted_ends_with_its_lifetime_wip",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "f368b675cf69dc90f5e67b6dbfe37ee8f348965e9cbc2e738a69a36e0dd2e53d"
+    },
+    {
+      "node": "tests/test_wsd_lifetime.py::test_a_crash_around_the_lifetime_stop_replays_the_wip_exactly_once[expire-stopping]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "9c5d5ee46ffb4f0012a20c8fb56e73f8f7525544559952335fa1d51150372c48"
+    },
+    {
+      "node": "tests/test_wsd_lifetime.py::test_a_crash_around_the_lifetime_stop_replays_the_wip_exactly_once[expire-ended]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "d24f94498fab7bc25248ec8b1f689da0a6fab412dfcfb06c8b5a2692c4e2704b"
+    },
+    {
+      "node": "tests/test_wsd_lifetime.py::test_a_crash_around_the_lifetime_stop_replays_the_wip_exactly_once[expire-committed]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "ce523257a578b92b045a8c9d0d67b9b61aef4f27f0508e9fafa6459473195564"
+    },
+    {
+      "node": "tests/test_wsd_lifetime.py::test_a_crash_around_the_lifetime_stop_replays_the_wip_exactly_once[launch-stopping]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "944ec4e32ba88ac5029581364f5fcf1bcf264babf600118a0460fc1e6b641944"
+    },
+    {
+      "node": "tests/test_wsd_lifetime.py::test_a_crash_around_the_lifetime_stop_replays_the_wip_exactly_once[launch-ended]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "15451fa25bf2fc336a82af6c7220d245b56351a53efb7f68bc6d6a5ba56d97f9"
+    },
+    {
+      "node": "tests/test_wsd_lifetime.py::test_a_crash_around_the_lifetime_stop_replays_the_wip_exactly_once[launch-committed]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "c0de4971f51f0e81a6fd2a7b52bbdf9c5f37354f8a2c4ec170c895b717f0cb01"
+    },
+    {
+      "node": "tests/test_wsd_lifetime.py::test_a_failed_wip_commit_is_recorded_and_retried",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "708b033a62825797160e686fb1a59bb923508f5750fc1ae634270f8b637a1e95"
+    },
+    {
+      "node": "tests/test_wsd_lifetime.py::test_a_create_that_times_out_keeps_its_watcher_through_cleanup",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "3200a86bfd3b2fbcff4d689a651f511d5bb9296fc6b41aab0d666315463427f4"
+    },
+    {
+      "node": "tests/test_wsd_lifetime.py::test_the_next_generation_never_removes_an_earlier_watcher",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "eb4870a1f9461fe2e4b54e0a44fee3395db8f0c52c4a85dedbeafdce8d90686b"
+    },
+    {
+      "node": "tests/test_wsd_lifetime.py::test_one_stop_that_fails_does_not_keep_the_next_from_stopping",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "634a9698858b5f1581af23845cd2aa17268d7b883c32db624648f6b5ff547b05"
+    },
+    {
+      "node": "tests/test_wsd_lifetime.py::test_a_lifetime_stop_whose_landing_fails_makes_no_host_wip",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "236d2a85ad22bb00af28e5f0c15698a603bd6edf850db1ecddd3c01163ec38a2"
+    },
+    {
+      "node": "tests/test_wsd_lifetime.py::test_a_launch_stalled_past_its_deadline_creates_nothing",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "dfa4acf6df1f71ade6945d20ff908c5df050d8e72b0c49e00e8bb270d1231832"
+    },
+    {
+      "node": "tests/test_wsd_lifetime.py::test_a_crash_during_the_create_leaves_a_watcher_that_waits_for_the_record",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "b944e61f4480bbffda0d8ef0a695ac1388cd309d092dfb7c821da19d55daeef9"
+    },
+    {
+      "node": "tests/test_wsd_lifetime.py::test_a_stall_after_the_deadline_check_never_lets_the_watcher_go",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "36e7a0942946b45a03f31c5d862e366205bbd493e2e598856fb96bb4db913e85"
+    },
+    {
+      "node": "tests/test_wsd_lifetime.py::test_a_create_that_returns_past_its_deadline_is_destroyed_at_once",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "6735af16da654441f7c43f9f4ff9767fa36ea2ade52e8166f30e88559ad53b36"
+    },
+    {
+      "node": "tests/test_wsd_lifetime.py::test_a_record_from_before_created_replays_and_keeps_its_watcher[expire]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "a4eadfcedc1a4711744c1f5162fa1a0aa9436c990e1fe6bfbcfd72060eab24ea"
+    },
+    {
+      "node": "tests/test_wsd_lifetime.py::test_a_record_from_before_created_replays_and_keeps_its_watcher[launch]",
+      "classification": "unexplained-requires-diagnostic",
+      "failure_text_sha256": "38945a431123d60d0e3c26f87bbf0ff1be1aeba127a1d9aafb62a10ba559fa3e"
+    }
+  ]
+}
