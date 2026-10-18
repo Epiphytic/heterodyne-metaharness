@@ -7,10 +7,10 @@ import pytest
 import test_actions_p1 as f
 import test_actions_p1_r1 as r1
 import test_actions_p1_r3 as r3
+from actions_journal_fixture import FixtureJournal
 
 from heterodyne.actions import dispatch as dis
 from heterodyne.actions import requests as req
-from heterodyne.actions.journal import FixtureJournal
 from heterodyne.actions.transitions import TransitionObservation
 
 
@@ -45,11 +45,13 @@ def test_forged_issuance_clock_cannot_create_discontinuity(tmp_path):
 @pytest.mark.parametrize("legacy", [False, True])
 def test_only_journal_proven_issuance_allows_reboot_recovery(tmp_path, legacy):
     now = dis.Clock("old", 1, 1)
-    with closing(FixtureJournal.create(tmp_path / "fixture", clock=None if legacy else lambda: now)) as db:
+    with closing(FixtureJournal.create(tmp_path / "fixture", clock=lambda: now)) as db:
         key = db.add_request(f.initial())
         value = db.transition(
             "request", key, 0, req.issue_allocation, observation=TransitionObservation(now=now)
         )
+        if legacy:
+            db.db.execute("DELETE FROM events WHERE kind='request-clock'")
         now = dis.Clock("new", 1, 100)
         db.clock = lambda: now
         recovery = abandonment(value, now)

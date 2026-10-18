@@ -7,9 +7,10 @@ import pytest
 import test_actions_p1 as f
 import test_actions_p1_r1 as r1
 import test_actions_p1_r2 as r2
+from actions_journal_fixture import FixtureJournal
 
 from heterodyne.actions import dispatch as dis
-from heterodyne.actions.journal import FixtureJournal, dispatch_key, request_key
+from heterodyne.actions.journal import dispatch_key, request_key
 from heterodyne.actions.requests import Refused, changed, settle_request
 from heterodyne.actions.transitions import TransitionObservation
 
@@ -36,10 +37,11 @@ def test_unissued_claim_cannot_become_uncertain_or_successful():
     with pytest.raises(Refused):
         dis.uncertain(value)
     forged = msgspec.structs.replace(value, state="uncertain")
-    with pytest.raises(Refused):
-        dis.reconcile_lookup(
-            forged, elapsed_seconds=1, effect="succeeded", evidence=f.DIGEST, cleanup_proven=True
-        )
+    observed = dis.reconcile_lookup(
+        forged, elapsed_seconds=1, effect="succeeded", evidence=f.DIGEST, cleanup_proven=True
+    )
+    assert observed.state == "uncertain" and not observed.settled and not observed.claim_consumed
+    assert observed.reconciliation_lookups == 1
 
 
 def test_failed_settlement_can_finish_request_without_claim_replay():
@@ -170,7 +172,8 @@ def test_journal_checks_independent_actual_clock_not_reducer_clock(tmp_path, sec
                 observation=TransitionObservation(dispatch_operation="consume-claim", now=now),
             )
         assert not db.get("dispatch", parent.approval_id).claim_consumed
-        with pytest.raises(Refused, match="clock-observation-required"):
+        db.clock = None
+        with pytest.raises(Refused, match="journal-clock-sampler-required"):
             db.transition(
                 "dispatch",
                 parent.approval_id,
@@ -196,9 +199,7 @@ def test_allocation_backoff_requires_independent_elapsed_observation(tmp_path):
 
         for observation in (
             TransitionObservation(),
-            TransitionObservation(
-                allocation_elapsed_seconds=0, now=f.Clock("allocation", 1 + (0) * 10**9, 1 + (0) * 10**9)
-            ),
+            TransitionObservation(now=f.Clock("allocation", 1 + (0) * 10**9, 1 + (0) * 10**9)),
         ):
             with pytest.raises(Refused):
                 db.transition("request", key, value.version, proposal, observation=observation)
@@ -433,9 +434,7 @@ def test_explicit_observation_retained_atomically_with_transition(tmp_path):
             f.issue_allocation,
             observation=TransitionObservation(now=f.Clock("allocation", 1, 1)),
         )
-        observation = TransitionObservation(
-            allocation_elapsed_seconds=0, now=f.Clock("allocation", 1 + (0) * 10**9, 1 + (0) * 10**9)
-        )
+        observation = TransitionObservation(now=f.Clock("allocation", 1 + (0) * 10**9, 1 + (0) * 10**9))
         with pytest.raises(Refused):
             db.transition(
                 "request",
@@ -447,9 +446,7 @@ def test_explicit_observation_retained_atomically_with_transition(tmp_path):
         assert (
             db.db.execute("SELECT count(*) FROM events WHERE kind='request-observation'").fetchone()[0] == 1
         )
-        observation = TransitionObservation(
-            allocation_elapsed_seconds=1, now=f.Clock("allocation", 1 + (1) * 10**9, 1 + (1) * 10**9)
-        )
+        observation = TransitionObservation(now=f.Clock("allocation", 1 + (1) * 10**9, 1 + (1) * 10**9))
         result = db.transition(
             "request",
             key,

@@ -1,0 +1,62 @@
+{
+  "version": "plan5-c1-inputs.v1",
+  "author": "Codex",
+  "task": "btq-7917l",
+  "source_base": "77e3c4a833ea6385cc48bbda3fcea61b54bdf622",
+  "approved_design": {
+    "commit": "092c10221660605598bb41151b496bda0f0bfa38",
+    "path": "docs/designs/2026-10-18-plan5-next-finite-stage.md",
+    "sha256": "4b1aaf694b2b55f7f3141053c28792b21bfcdfae4ac1e18231888972ac90f8cf"
+  },
+  "review_inputs": [
+    {
+      "path": "docs/reviews/2026-10-18-plan5-next-p1-r11.md",
+      "sha256": "1b4d5d9ddc97879936323d1894d584e7ff27a7d0582969c2e2e428bb1971ad3d",
+      "historical_round": 11,
+      "source": "admitted historical report; not a C1 review"
+    },
+    {
+      "path": "docs/reviews/2026-10-18-plan5-next-p2-r4.md",
+      "sha256": "a0276cba50eeda9d244a759699aabb13996476485f9780ba973e7790aed9a880",
+      "historical_round": 4,
+      "source": "admitted historical report; not a C1 review"
+    }
+  ],
+  "scope": "offline C1 only; no new review/approval or production evidence",
+  "p1_integrated": {
+    "commit": "dd38be7a39c1cdfdcd61a5555c7e3a0ff8b4ee9c",
+    "tree": "749459c221360cbff9a539ab505bf50b91935ab0"
+  },
+  "p2_reviewed": {
+    "commit": "00ff9fc2071ecb22f6d950422232ca1c95a5540e",
+    "tree": "f60cde7f1656c3ecf658d7bf3d3d337cebbe42f8"
+  },
+  "p2_actual_merge": {
+    "commit": "77e3c4a833ea6385cc48bbda3fcea61b54bdf622",
+    "tree": "02b0b1470216642d65a4e2fddb02df4b899a0b37"
+  },
+  "offline_measurement": {
+    "scope": "serial synthetic representative permission projection; no provider/native ports; not maximum-payload or production latency",
+    "iterations": 1000,
+    "request_encoded_bytes": 806,
+    "action_encoded_bytes": 2573,
+    "nanoseconds": {
+      "min": 3399986,
+      "median": 3526509.0,
+      "p95": 3679492,
+      "max": 10574989,
+      "total": 3570489159
+    },
+    "outcomes": {
+      "EscalateProposal": 1000
+    }
+  },
+  "quality": {
+    "regressions": 93,
+    "minor": 24,
+    "preexisting_worse": 73,
+    "new_symbol": 20,
+    "gating": 49,
+    "waived": false
+  }
+}

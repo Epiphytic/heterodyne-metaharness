@@ -286,7 +286,6 @@ def reconcile_lookup(
 ) -> Dispatch:
     if (
         value.dispatch_kind != "initial"
-        or (effect == "succeeded" and not value.claim_consumed)
         or value.state not in {"uncertain", "failed"}
         or value.settled
         or value.reconciliation_lookups >= 3
@@ -296,6 +295,9 @@ def reconcile_lookup(
         raise Refused("reconciliation-not-due")
     if effect not in {"succeeded", "absent", "unknown"}:
         raise Refused("invalid-reconciliation")
+    if effect == "succeeded" and not value.claim_consumed:
+        # Count the actual read without attributing another actor's effect to this claim.
+        return changed(value, reconciliation_lookups=value.reconciliation_lookups + 1)
     if value.state == "failed" and effect == "succeeded":
         raise Refused("reconciliation-outcome-conflict-needs-authenticated-recovery")
     if effect == "succeeded" and cleanup_proven and digest_syntax(evidence or ""):
@@ -433,6 +435,7 @@ def settle_dispatch(value: Dispatch, observation: DispatchRecovery) -> Dispatch:
             )
         )
         or observation.effect_definitively_absent == observation.effect_attested_succeeded
+        or (observation.effect_definitively_absent and any(item.effect == "succeeded" for item in facts))
         or (observation.effect_attested_succeeded and not value.claim_consumed)
         or not digest_syntax(observation.evidence)
         or not safe_label(observation.operator_event)

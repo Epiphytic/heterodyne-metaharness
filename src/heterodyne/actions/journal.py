@@ -26,7 +26,7 @@ from heterodyne.actions.dispatch import (
     clock_elapsed,
     reconciliation_disposition,
 )
-from heterodyne.actions.policy import request_denial_key
+from heterodyne.actions.policy import DENIAL_DOMAIN, request_denial_key
 from heterodyne.actions.requests import (
     TERMINAL_REQUESTS,
     CancellationRecovery,
@@ -251,12 +251,17 @@ class FixtureJournal:
         if row is None:
             raise Refused("fixture-record-missing-decision-or-request")
         try:
-            return msgspec.json.decode(row[0], type=cls)
+            value = msgspec.json.decode(row[0], type=cls)
+            if isinstance(value, Request) and value.denial_domain != DENIAL_DOMAIN:
+                raise Refused("legacy-denial-domain-needs-provenance")
+            return value
         except msgspec.DecodeError:
             raise Refused("fixture-record-corrupt") from None
 
     def add_request(self, value: Request) -> str:
         key, data = request_key(value), request_bytes(value)
+        if value.denial_domain != DENIAL_DOMAIN:
+            raise Refused("legacy-denial-domain-needs-provenance")
         if value.version != 0 or value.phase != "allocation-intent":
             raise Refused("request-not-initial")
         with self.transaction():
@@ -380,16 +385,15 @@ class FixtureJournal:
             raise Refused("dispatch-not-initial")
         with self.transaction():
             sampled = self._sample_clock()
-            if sampled is not None:
-                value = msgspec.structs.replace(
-                    value,
-                    started=sampled,
-                    deadline_ns=sampled.mono_ns + value.deadline_ns - value.started.mono_ns,
-                    preparation_deadline_ns=sampled.mono_ns
-                    + value.preparation_deadline_ns
-                    - value.started.mono_ns,
-                )
-                data = encode_record(value)
+            value = msgspec.structs.replace(
+                value,
+                started=sampled,
+                deadline_ns=sampled.mono_ns + value.deadline_ns - value.started.mono_ns,
+                preparation_deadline_ns=sampled.mono_ns
+                + value.preparation_deadline_ns
+                - value.started.mono_ns,
+            )
+            data = encode_record(value)
             decision = self.get("decision", value.approval_id)
             request = self._request_for_approval(value.approval_id)
             if (
@@ -529,6 +533,7 @@ class FixtureJournal:
             old = self.get(kind, key)
             needs_clock = (
                 observation.now is not None
+                or (isinstance(old, Request) and old.phase == "allocation-intent")
                 or isinstance(reducer, ObservedReducer)
                 or observation.dispatch_operation
                 in {"ready", "consume-claim", "restart-preparation", "lookup"}
@@ -592,7 +597,7 @@ class FixtureJournal:
                         reconciliation = self.get("dispatch", observation.reconciliation_key)
                     if value.reconciliation_lookups != old.reconciliation_lookups:
                         observation = msgspec.structs.replace(
-                            observation, reconciliation_started=self._dispatch_lookup_clock(old)
+                            observation, reconciliation_started=self._dispatch_lookup_clock(old, proven=True)
                         )
                     dispatch_transition(old, value, observation=observation, reconciliation=reconciliation)
                     if value.reconciliation_lookups != old.reconciliation_lookups:
@@ -638,9 +643,9 @@ class FixtureJournal:
             )
         return False
 
-    def _sample_clock(self) -> Clock | None:
+    def _sample_clock(self) -> Clock:
         if self.clock is None:
-            return None
+            raise Refused("journal-clock-sampler-required")
         sampled = self.clock()
         clock_elapsed(sampled, sampled)
         return sampled
@@ -688,6 +693,8 @@ class FixtureJournal:
             children = self._reconciliation_children(old.approval_id)
             facts = tuple(reconciliation_disposition(old, child) for child in children)
             unread = any(item.effect is not None and not item.applied for item in facts)
+            if recovery.effect_definitively_absent and any(item.effect == "succeeded" for item in facts):
+                raise Refused("reconciliation-success-conflicts-with-absence")
             if (
                 unread or recovery.completed_reconciliation_attempts or recovery.observed_reconciliations
             ) and (
@@ -774,6 +781,7 @@ class FixtureJournal:
                 (request_key(old), old.version),
             ).fetchone()
             issued = msgspec.json.decode(row[0], type=TransitionObservation) if row else EMPTY_OBSERVATION
+            self._proven_clock("request", request_key(old), old.version, issued.now)
             observation = msgspec.structs.replace(observation, allocation_started=issued.now)
         request_transition(old, value, decision=decision, dispatch=dispatch, observation=observation)
         if value.phase == "denied":
@@ -825,7 +833,33 @@ class FixtureJournal:
                 raise Refused("denial-not-durable")
             self._denial(request, durable)
 
+    def _denial_provenance(self, session_key: str) -> None:
+        """Legacy opaque hashes cannot be silently reinterpreted in a new domain."""
+        for identity, approval in self.db.execute(
+            "SELECT identity,approval FROM denials WHERE session_key=?", (session_key,)
+        ):
+            value = self._request_for_approval(approval)
+            if (
+                value.denial_domain != DENIAL_DOMAIN
+                or value.origin.session_key != session_key
+                or value.denial_identity != identity
+                or identity != request_denial_key(value.intent, value.origin, value.resolved, value.config)
+            ):
+                raise Refused("legacy-denial-domain-needs-provenance")
+            decision = self.get("decision", approval)
+            if (
+                decision.phase != "committed"
+                or decision.event.value != "deny"
+                or decision.approval_id != value.approval_id
+                or decision.digest != value.context_digest
+                or decision.request_revision != value.request_revision
+                or decision.event.digest != decision.digest
+                or decision.event.approval_id != decision.approval_id
+            ):
+                raise Refused("denial-history-not-committed")
+
     def denied(self, identity: str, session_key: str) -> bool:
+        self._denial_provenance(session_key)
         return (
             self.db.execute(
                 "SELECT 1 FROM denials WHERE identity=? AND session_key=?", (identity, session_key)

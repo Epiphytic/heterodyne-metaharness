@@ -8,10 +8,11 @@ import test_actions_p1 as f
 import test_actions_p1_r1 as r1
 import test_actions_p1_r2 as r2
 import test_actions_p1_r3 as r3
+from actions_journal_fixture import FixtureJournal
 
 from heterodyne.actions import dispatch as dis
 from heterodyne.actions import requests as req
-from heterodyne.actions.journal import FixtureJournal, request_key
+from heterodyne.actions.journal import request_key
 from heterodyne.actions.transitions import TransitionObservation
 
 
@@ -92,6 +93,7 @@ def test_clock_discontinuity_recovery_requires_journal_clock_sampler(tmp_path):
             dis.uncertain,
             observation=TransitionObservation(dispatch_operation="uncertain"),
         )
+        db.clock = None
         recovery = dis.DispatchRecovery(
             parent.approval_id,
             parent.revision,
@@ -285,13 +287,13 @@ def test_reboot_during_allocation_has_exact_no_recreate_recovery(tmp_path, adopt
 def test_allocation_recovery_cannot_fabricate_discontinuity(tmp_path, mode):
     start = dis.Clock("old", 1, 1)
     actual = start
-    with closing(
-        FixtureJournal.create(tmp_path / "fixture", clock=None if mode == "no-sampler" else lambda: actual)
-    ) as db:
+    with closing(FixtureJournal.create(tmp_path / "fixture", clock=lambda: actual)) as db:
         key = db.add_request(f.initial())
         value = db.transition(
             "request", key, 0, req.issue_allocation, observation=TransitionObservation(now=start)
         )
+        if mode == "no-sampler":
+            db.clock = None
         actual = dis.Clock("old", 2, 2) if mode == "continuous" else dis.Clock("new", 1, 1)
         supplied = dis.Clock("forged", 1, 1) if mode == "mismatch" else actual
         recovery = req.AllocationRecovery(

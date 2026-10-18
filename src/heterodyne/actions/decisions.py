@@ -4,6 +4,7 @@ A hypothetical authenticated observation remains caller-supplied data. The futur
 sole writer owes current principal, purpose, surface/event and native context checks.
 """
 
+import unicodedata
 from typing import Literal
 
 from heterodyne.actions.codec import safe_label
@@ -46,6 +47,41 @@ class Decision(Record, frozen=True):
     observed_native_event: DecisionObservation | None = None
 
 
+def _validate_denial_reason(reason: str) -> None:
+    """Metadata permits visible emoji and line breaks without relaxing identifier rules."""
+    from heterodyne.config.secret_scan import secret_value
+
+    if (
+        any(
+            (
+                unicodedata.category(ch) in {"Cc", "Cs", "Cf"}
+                and ch not in "\r\n\t\u200d"
+                and not 0xE0020 <= ord(ch) <= 0xE007F
+            )
+            or ch in "\u2028\u2029"
+            for ch in reason
+        )
+        or (
+            reason
+            and not any(
+                not ch.isspace() and unicodedata.category(ch) not in {"Cf", "Cc", "Mn", "Me"} for ch in reason
+            )
+        )
+        or any(
+            ch == "\u200d"
+            and (
+                i == 0
+                or i == len(reason) - 1
+                or unicodedata.category(reason[i - 1]) != "So"
+                or unicodedata.category(reason[i + 1]) != "So"
+            )
+            for i, ch in enumerate(reason)
+        )
+        or secret_value(reason)
+    ):
+        raise Refused("decision-reason-unsafe")
+
+
 def begin_decision(
     request: Request,
     event: DecisionObservation,
@@ -73,15 +109,12 @@ def begin_decision(
             safe_label(v, 256) for v in (event.event_id, event.surface_id, event.operator_id, event.via_ref)
         )
         or not safe_label(event.at, 64)
+        or type(event.denial_reason) is not str
         or len(event.denial_reason) > 1024
+        or (event.value == "approve" and event.denial_reason != "")
     ):
         raise Refused("decision-observation-binding")
-    from heterodyne.actions.codec import InvalidAction, validate_text
-
-    try:
-        validate_text(event.denial_reason)
-    except InvalidAction:
-        raise Refused("decision-reason-unsafe") from None
+    _validate_denial_reason(event.denial_reason)
     return Decision(
         event.approval_id,
         expected_purpose,

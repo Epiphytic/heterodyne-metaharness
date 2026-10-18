@@ -6,10 +6,11 @@ import msgspec
 import pytest
 import test_actions_p1 as f
 import test_actions_p1_r3 as r3
+from actions_journal_fixture import FixtureJournal
 
 from heterodyne.actions import dispatch as dis
 from heterodyne.actions import requests as req
-from heterodyne.actions.journal import FixtureJournal, dispatch_key
+from heterodyne.actions.journal import dispatch_key
 from heterodyne.actions.transitions import TransitionObservation
 
 
@@ -39,7 +40,9 @@ def test_real_advancing_sampler_is_injected_once_without_caller_prediction(tmp_p
 
     with closing(FixtureJournal.create(tmp_path / "db", clock=clock)) as db:
         key = db.add_request(f.initial())
-        value = db.transition("request", key, 0, ObservedReducer(lambda old, obs: req.issue_allocation(old)))
+        value = db.transition(
+            "request", key, 0, ObservedReducer[req.Request](lambda old, obs: req.issue_allocation(old))
+        )
         assert len(calls) == 1
         data = db.db.execute(
             "SELECT data FROM events WHERE kind='request-observation' AND key=?", (key,)
@@ -146,15 +149,16 @@ def test_conflicting_child_has_exact_attested_exit_without_three_fake_reads(tmp_
                     lambda old, observed=bad: dis.settle_dispatch(old, observed),
                     observation=TransitionObservation(dispatch_operation="settle", dispatch_recovery=bad),
                 )
-        done = db.transition(
-            "dispatch",
-            parent.approval_id,
-            parent.version,
-            lambda old, observed=recovery: dis.settle_dispatch(old, observed),
-            observation=TransitionObservation(dispatch_operation="settle", dispatch_recovery=recovery),
-        )
-        assert done.settled and done.state == "failed" and done.reconciliation_lookups == 0
-        assert db.db.execute("SELECT count(*) FROM resources").fetchone() == (0,)
+        with pytest.raises(req.Refused, match="success-conflicts-with-absence"):
+            db.transition(
+                "dispatch",
+                parent.approval_id,
+                parent.version,
+                lambda old: dis.settle_dispatch(old, recovery),
+                observation=TransitionObservation(dispatch_operation="settle", dispatch_recovery=recovery),
+            )
+        assert db.get("dispatch", parent.approval_id) == parent
+        assert db.db.execute("SELECT count(*) FROM resources").fetchone() == (3,)
         assert db.get("dispatch", dispatch_key(child)).reconciliation_effect == "succeeded"
         with pytest.raises(req.Refused):
             db.add_dispatch(dis.prepare_reconciliation(parent, "again", "a" * 64, later(clock, 99)))

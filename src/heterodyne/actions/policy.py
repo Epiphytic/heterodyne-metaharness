@@ -28,6 +28,8 @@ from heterodyne.actions.contracts import (
 )
 from heterodyne.config.policy import RANK, effective_tiers
 
+DENIAL_DOMAIN = "plan5-denial-v2"
+
 _DEFAULT_TIERS = {"escalate": tuple(entry.kind for entry in REGISTRY)}
 
 
@@ -84,7 +86,7 @@ def request_denial_key(intent: Intent, origin: Origin, resolved_facts: Resolved,
         for key, value in resolved.items()
     }
     key = {
-        "domain": "plan5-denial-v1",
+        "domain": DENIAL_DOMAIN,
         "workstream": origin.workstream,
         "session_key": origin.session_key,
         "action": action,

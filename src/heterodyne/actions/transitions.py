@@ -10,7 +10,7 @@ from heterodyne.actions import decisions as dec
 from heterodyne.actions import requests as req
 from heterodyne.actions.contracts import Record
 from heterodyne.actions.dispatch import Clock, Dispatch, DispatchRecovery
-from heterodyne.actions.policy import request_denial_key
+from heterodyne.actions.policy import DENIAL_DOMAIN, request_denial_key
 
 
 class DecisionReadback(Record, frozen=True):
@@ -90,7 +90,6 @@ class TransitionObservation(Record, frozen=True):
     """
 
     now: Clock | None = None
-    allocation_elapsed_seconds: int | None = None
     allocation_recovery: req.AllocationRecovery | None = None
     abandonment_recovery: req.AbandonmentRecovery | None = None
     dispatch_recovery: DispatchRecovery | None = None
@@ -132,6 +131,8 @@ def request_transition(
     dispatch: object = None,
     observation: TransitionObservation = EMPTY_OBSERVATION,
 ) -> None:
+    if value.denial_domain != DENIAL_DOMAIN:
+        raise req.Refused("legacy-denial-domain-needs-provenance")
     if value.denial_identity != request_denial_key(value.intent, value.origin, value.resolved, value.config):
         raise req.Refused("denial-identity-not-derived")
     candidate = None

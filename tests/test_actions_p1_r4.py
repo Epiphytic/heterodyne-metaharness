@@ -7,10 +7,11 @@ import pytest
 import test_actions_p1 as f
 import test_actions_p1_r2 as r2
 import test_actions_p1_r3 as r3
+from actions_journal_fixture import FixtureJournal
 
 from heterodyne.actions import decisions as dec
 from heterodyne.actions import dispatch as dis
-from heterodyne.actions.journal import FixtureJournal, dispatch_key
+from heterodyne.actions.journal import dispatch_key
 from heterodyne.actions.requests import Refused, groom
 from heterodyne.actions.transitions import TransitionObservation
 
@@ -147,9 +148,7 @@ def test_allocation_ignores_unanchored_integer_and_caller_start(tmp_path):
         value = db.transition(
             "request", key, 0, f.issue_allocation, observation=TransitionObservation(now=start)
         )
-        forged = TransitionObservation(
-            now=start, allocation_elapsed_seconds=30, allocation_started=dis.Clock("allocation", 0, 0)
-        )
+        forged = TransitionObservation(now=start, allocation_started=dis.Clock("allocation", 0, 0))
         with pytest.raises(Refused, match="not-due"):
             db.transition(
                 "request",

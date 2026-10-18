@@ -1,14 +1,14 @@
 """Review R1 regression scenarios; fake facts and disposable SQLite only."""
 
-from typing import TypedDict
+from typing import Literal, TypedDict, cast
 
 import msgspec
 import pytest
 import test_actions_p1 as f
+from actions_journal_fixture import FixtureJournal
 
 from heterodyne.actions import decisions as dec
 from heterodyne.actions import dispatch as dis
-from heterodyne.actions.journal import FixtureJournal
 from heterodyne.actions.requests import (
     CreationKey,
     Origin,
@@ -145,18 +145,17 @@ def test_denial_settlement_and_durable_session_denial_are_atomic(tmp_path):
         key,
         value.version,
         lambda v: observe_allocation(v, ("btq-ab123",), lookup_ok=True, elapsed_seconds=1),
-        observation=TransitionObservation(
-            allocation_elapsed_seconds=1, now=f.Clock("allocation", 1 + (1) * 10**9, 1 + (1) * 10**9)
-        ),
+        observation=TransitionObservation(now=f.Clock("allocation", 1 + (1) * 10**9, 1 + (1) * 10**9)),
     )
-    for operation in ("blocker", "park", "land"):
+    stages: tuple[Literal["blocker", "park", "land"], ...] = ("blocker", "park", "land")
+    for operation in stages:
         value = db.transition(
             "request",
             key,
             value.version,
             lambda v, operation=operation: f.observe_stage(
                 v,
-                operation,
+                cast(Literal["blocker", "park", "land"], operation),
                 key=v.key,
                 approval_id=f.required(v.approval_id),
                 origin=v.origin,
@@ -489,18 +488,17 @@ def test_new_generation_groom_journal_keeps_stable_session_and_requires_repark(t
         key,
         value.version,
         lambda v: observe_allocation(v, ("btq-ab123",), lookup_ok=True, elapsed_seconds=1),
-        observation=TransitionObservation(
-            allocation_elapsed_seconds=1, now=f.Clock("allocation", 1 + (1) * 10**9, 1 + (1) * 10**9)
-        ),
+        observation=TransitionObservation(now=f.Clock("allocation", 1 + (1) * 10**9, 1 + (1) * 10**9)),
     )
-    for operation in ("blocker", "park", "land"):
+    stages: tuple[Literal["blocker", "park", "land"], ...] = ("blocker", "park", "land")
+    for operation in stages:
         value = db.transition(
             "request",
             key,
             value.version,
             lambda v, operation=operation: f.observe_stage(
                 v,
-                operation,
+                cast(Literal["blocker", "park", "land"], operation),
                 key=v.key,
                 approval_id=f.required(v.approval_id),
                 origin=v.origin,

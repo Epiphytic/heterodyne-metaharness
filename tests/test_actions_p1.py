@@ -5,6 +5,7 @@ from typing import Literal, TypedDict, cast
 
 import msgspec
 import pytest
+from actions_journal_fixture import FixtureJournal
 
 from heterodyne.actions.contracts import (
     ActionConfig,
@@ -26,7 +27,7 @@ from heterodyne.actions.decisions import (
 )
 from heterodyne.actions.dispatch import Clock, consume_claim, prepare, ready, uncertain
 from heterodyne.actions.fake_ports import FakeEffect, FakeQueue, FakeSession, UnavailablePorts
-from heterodyne.actions.journal import FixtureJournal, create_fixture, upgrade_fixture
+from heterodyne.actions.journal import create_fixture, upgrade_fixture
 from heterodyne.actions.requests import (
     CreationKey,
     Refused,
@@ -192,9 +193,7 @@ def persist_filed_request(db, approval_id="btq-ab123"):
         key,
         value.version,
         lambda v: observe_allocation(v, (approval_id,), lookup_ok=True, elapsed_seconds=1),
-        observation=TransitionObservation(
-            allocation_elapsed_seconds=1, now=Clock("allocation", 1 + (1) * 10**9, 1 + (1) * 10**9)
-        ),
+        observation=TransitionObservation(now=Clock("allocation", 1 + (1) * 10**9, 1 + (1) * 10**9)),
     )
     for operation in STAGES:
 
