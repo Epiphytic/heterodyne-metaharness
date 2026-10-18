@@ -9,7 +9,7 @@ import hashlib
 import os
 import sqlite3
 import uuid
-from typing import TYPE_CHECKING, Literal, NamedTuple
+from typing import TYPE_CHECKING, Literal, NamedTuple, cast
 
 import msgspec
 
@@ -311,7 +311,7 @@ async def post(daemon: Admind, req: Request, peer: Peer) -> Reply:
         return Reply("refused", "context-conflict")
     # Initial enrollment adopts every historical row. A current live card can be reused; terminal
     # or obsolete history needs a new current card under the ordinary native/principal/limit gates.
-    uid = peer.uid if peer.uid is not None else -1
+    uid = cast(int, peer.uid)  # handle() refuses missing peer credentials before dispatch.
     with daemon.store.transaction():
         rows = lineage(daemon.store, req.bead)
         reusable = any(row.digest == req.context_digest and row.status in {"open", "answered",

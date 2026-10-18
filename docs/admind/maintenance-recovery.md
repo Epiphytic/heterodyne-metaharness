@@ -82,3 +82,18 @@ generation, operation, original record, effects root, enrollment, boot and obser
 BOOTTIME. Any consumed/issuing/receipt marker holds renewal. The queue must publish
 this certificate under EX and release its locks before calling admind. This package
 does not implement that executor or assert any native effect was absent/completed.
+
+
+Fresh proposals retain every old descriptor, decision and permit. Exactly one proposal pointer per
+operation is current. A new descriptor needs its own delivered notice and current authenticated
+consent; late replies to superseded notices cannot select it. Existing issued initiation windows
+must expire (or belong to a different verified boot) before supersession. Supersession does not
+prove nonconsumption or execution absence: queue EX original-state and effect validation remain
+mandatory. Unknown clock/boot and terminal operations refuse. The128 lifetime proposal bound
+counts historical proposals; exhaustion remains HOLD, without history deletion.
+
+Authenticated exact-thread revocation remains effective during wall-clock rollback or expiry.
+Recorded native-message conflicts fence that proposal's permit issue and repair, even if diagnostic
+refusal capacity is full. A new proposal cannot clear an old proposal's conflict or reuse its consent.
+Legacy proposal schema migration preserves rows transactionally; unexpected table schema, explicit indexes or triggers refuse.
+No runtime migration or production executor/status integration is claimed by offline tests.

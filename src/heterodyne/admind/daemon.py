@@ -792,7 +792,10 @@ class Admind:
                             await asyncio.shield(task)
                         except asyncio.CancelledError:
                             continue
-                    task.result()
+                        except Exception:  # worker failure must not replace cancellation
+                            break
+                    if not task.cancelled():
+                        task.exception()
                     raise
         except recovery.Invalid as exc:
             return recovery.Reply("refused", str(exc))
@@ -802,6 +805,9 @@ class Admind:
     async def recovery_message(self, ev: InboundMessage) -> None:
         if (ev.account_id_hex.lower() != self.account.lower()
                 or ev.group_id_hex.lower() != self.group.lower()):
+            self.audit.write("drop", reason="maintenance account/group mismatch",
+                             sender_prefix=ev.message.sender.account_id_hex[:8],
+                             text_chars=len(ev.message.text))
             return
         await self.check_group()
         sender = ev.message.sender.account_id_hex.lower()
@@ -912,9 +918,6 @@ class Admind:
         self.posts_in_flight += 1
         try:
             async with self.ask_post_lock:
-                with self.store.transaction(read_only=True):
-                    if operations.bead_binding(self.store, req.bead) is not None:
-                        return asks.refused("source-owned bead; use approval.operation.v1")
                 if req.kind == "approval":
                     return await self.post_approval(req, peer)
                 return self.post_ask(req, peer)
@@ -2486,10 +2489,6 @@ class Admind:
         verdict = guard.judge_message(ev, group_id=self.group, operators=self.operators,
                                       latched=self.latched())
         mid = ev.message.message_id_hex.lower()
-        if (recovery.COMMAND.fullmatch(ev.message.text) is not None
-                and MESSAGE_ID.fullmatch(mid)):
-            await self.recovery_message(ev)
-            return
         if verdict.action == "ignore":
             return
         if verdict.action == "drop":
@@ -2505,6 +2504,10 @@ class Admind:
         if not MESSAGE_ID.fullmatch(mid):
             self.audit.write("drop", operator=verdict.operator, reason="malformed message id",
                              text=own_text(ev.message.text))
+            return
+        if (recovery.COMMAND.fullmatch(ev.message.text) is not None
+                and MESSAGE_ID.fullmatch(mid)):
+            await self.recovery_message(ev)
             return
         if not self.store.claim_inbound(mid, sender_key=ev.message.sender.account_id_hex.lower()):
             self.audit.write("drop", operator=verdict.operator, message_id=mid, reason="replayed message id",

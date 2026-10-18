@@ -330,11 +330,16 @@ class Enrollment(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS maintenance_recovery_proposals (
- hash TEXT PRIMARY KEY, operation TEXT NOT NULL UNIQUE, descriptor BLOB NOT NULL,
+ hash TEXT PRIMARY KEY, operation TEXT NOT NULL, descriptor BLOB NOT NULL,
  notice_key TEXT NOT NULL UNIQUE, notice_text TEXT NOT NULL, created_at TEXT NOT NULL,
  state TEXT NOT NULL CHECK(state IN ('awaiting-consent','consented','revoked','terminal')),
  decision TEXT, operator TEXT, policy TEXT, generation INTEGER NOT NULL DEFAULT 0,
  permit BLOB, terminal BLOB);
+CREATE TABLE IF NOT EXISTS maintenance_recovery_current (
+ operation TEXT PRIMARY KEY, proposal TEXT NOT NULL UNIQUE);
+CREATE TABLE IF NOT EXISTS maintenance_recovery_conflicts (
+ proposal TEXT PRIMARY KEY, account TEXT NOT NULL, group_id TEXT NOT NULL,
+ message_id TEXT NOT NULL, payload_sha256 TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS maintenance_recovery_messages (
  account TEXT NOT NULL, group_id TEXT NOT NULL, message_id TEXT NOT NULL,
  payload_sha256 TEXT NOT NULL, proposal TEXT NOT NULL, provenance BLOB NOT NULL,
@@ -382,9 +387,85 @@ class Service:
         self.boottime = boottime or boot_ns
         self.boot = boot or boot_id
         with store.transaction():
+            self.upgrade_proposals()
             for statement in SCHEMA.split(";"):
                 if statement.strip():
                     store.db.execute(statement)
+
+    def upgrade_proposals(self) -> None:
+        """Remove the legacy per-operation uniqueness without discarding immutable history.
+
+        This known schema has no foreign keys, user indexes or triggers. Refuse unexpected
+        dependents rather than silently dropping them during the transactional rebuild.
+        """
+        db = self.store.db
+        row = db.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='maintenance_recovery_proposals'"
+        ).fetchone()
+        if row is None or "operation TEXT NOT NULL UNIQUE" not in row[0]:
+            return
+        if (
+            db.execute(
+                "SELECT 1 FROM sqlite_master WHERE tbl_name='maintenance_recovery_proposals' "
+                "AND type IN ('trigger','index') AND sql IS NOT NULL"
+            ).fetchone()
+            is not None
+        ):
+            raise Invalid("proposal-schema")
+        expected = (
+            SCHEMA.split(";")[0]
+            .strip()
+            .replace("CREATE TABLE IF NOT EXISTS", "CREATE TABLE")
+            .replace("operation TEXT NOT NULL,", "operation TEXT NOT NULL UNIQUE,")
+        )
+        if " ".join(row[0].split()) != " ".join(expected.split()):
+            raise Invalid("proposal-schema")
+        db.execute(
+            SCHEMA.split(";")[0].replace("maintenance_recovery_proposals", "maintenance_recovery_upgrade")
+        )
+        db.execute("INSERT INTO maintenance_recovery_upgrade SELECT * FROM maintenance_recovery_proposals")
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS maintenance_recovery_current "
+            "(operation TEXT PRIMARY KEY, proposal TEXT NOT NULL UNIQUE)"
+        )
+        db.execute(
+            "INSERT INTO maintenance_recovery_current SELECT operation,hash "
+            "FROM maintenance_recovery_proposals"
+        )
+        db.execute("DROP TABLE maintenance_recovery_proposals")
+        db.execute("ALTER TABLE maintenance_recovery_upgrade RENAME TO maintenance_recovery_proposals")
+
+    def current(self, operation: str, key: str) -> bool:
+        row = self.store.db.execute(
+            "SELECT proposal FROM maintenance_recovery_current WHERE operation=?", (operation,)
+        ).fetchone()
+        return row is not None and row[0] == key
+
+    def supersede(self, operation: str) -> None:
+        """A new consent may replace scope, never an active initiation window or terminal history."""
+        row = self.store.db.execute(
+            "SELECT p.state,p.permit,p.terminal FROM maintenance_recovery_current c "
+            "JOIN maintenance_recovery_proposals p ON p.hash=c.proposal WHERE c.operation=?",
+            (operation,),
+        ).fetchone()
+        if row is None:
+            return
+        if row[0] == "terminal" or row[2] is not None:
+            raise Invalid("operation-terminal")
+        if row[1] is not None:
+            old = decode(bytes(row[1]), dict[str, object])
+            boot = self.boot()
+            try:
+                if str(uuid.UUID(boot)) != boot:
+                    raise ValueError
+            except ValueError:
+                raise Invalid("boot") from None
+            tick = self.boottime()
+            deadline = old.get("initiate_before_boottime_ns")
+            if type(tick) is not int or tick < 0 or type(deadline) is not int:
+                raise Invalid("clock")
+            if old.get("boot_id") == boot and tick < deadline:
+                raise Invalid("permit-active")
 
     def enrollment(self) -> Enrollment:
         obj = decode(private_read(self.root / "enrollment.json"), Enrollment)
@@ -498,13 +579,14 @@ class Service:
         notice_key = ""
         with self.store.transaction():
             previous = self.store.db.execute(
-                "SELECT hash,descriptor FROM maintenance_recovery_proposals WHERE operation=?",
-                (obj.operation,),
+                "SELECT descriptor FROM maintenance_recovery_proposals WHERE hash=?",
+                (key,),
             ).fetchone()
             if previous is not None:
-                if previous[0] != key or bytes(previous[1]) != canonical(obj):
-                    raise Invalid("immutable-operation")
+                if bytes(previous[0]) != canonical(obj):
+                    raise Invalid("immutable-proposal")
                 return Reply("existing", "proposal already registered", self.get(key))
+            self.supersede(obj.operation)
             if (
                 self.store.db.execute("SELECT count(*) FROM maintenance_recovery_proposals").fetchone()[0]
                 >= 128
@@ -521,6 +603,11 @@ class Service:
                 "INSERT INTO maintenance_recovery_proposals "
                 "(hash,operation,descriptor,notice_key,notice_text,created_at,state) VALUES(?,?,?,?,?,?,?)",
                 (key, obj.operation, canonical(obj), notice_key, text, at.isoformat(), "awaiting-consent"),
+            )
+            self.store.db.execute(
+                "INSERT INTO maintenance_recovery_current VALUES(?,?) "
+                "ON CONFLICT(operation) DO UPDATE SET proposal=excluded.proposal",
+                (obj.operation, key),
             )
             self.store.insert_notice(notice_id, "maintenance", pid, 0, len(text), 0, 1, at.isoformat())
             post(notice_key + ":0", text)
@@ -553,7 +640,7 @@ class Service:
             reply_to=target,
             text=text,
         )
-        payload = sha({k: v for k, v in provenance.items() if k != "policy_sha256"})
+        payload = sha(provenance)
         with self.store.transaction():
             duplicate = self.store.db.execute(
                 "SELECT payload_sha256,outcome,proposal FROM maintenance_recovery_messages "
@@ -584,35 +671,26 @@ class Service:
                 raise Invalid("authority")
             provenance["policy_sha256"] = policy
             rows = self.store.db.execute(
-                "SELECT hash,descriptor,notice_key,state,created_at FROM "
+                "SELECT hash,descriptor,notice_key,state,created_at,notice_text FROM "
                 "maintenance_recovery_proposals WHERE substr(hash,1,24)=?",
                 (command[2],),
             ).fetchall()
             if len(rows) != 1:
                 raise Invalid("token")
-            key, raw, notice_key, state, created = rows[0]
+            key, raw, notice_key, state, created, notice_text = rows[0]
             deliveries = self.store.db.execute(
                 "SELECT message_id,text,status FROM outbox WHERE key IN (?,?) AND status='sent'",
                 (notice_key + ":0", notice_key + ":r0"),
             ).fetchall()
             delivery = deliveries[0] if len(deliveries) == 1 else None
-            if (
-                delivery is None
-                or delivery[2] != "sent"
-                or target is None
-                or delivery[0] != target
-                or delivery[1]
-                != self.store.db.execute(
-                    "SELECT notice_text FROM maintenance_recovery_proposals WHERE hash=?", (key,)
-                ).fetchone()[0]
-            ):
+            if delivery is None or target is None or delivery[0] != target or delivery[1] != notice_text:
                 raise Invalid("thread-unmapped")
             try:
                 self.live(descriptor(bytes(raw)), created)
-                live = True
+                live = self.current(descriptor(bytes(raw)).operation, key)
             except Invalid:
                 live = False
-            revoking = live and command[1] == "revoke" and state in ("awaiting-consent", "consented")
+            revoking = command[1] == "revoke" and state in ("awaiting-consent", "consented")
             if (
                 not revoking
                 and self.store.db.execute(
@@ -624,7 +702,7 @@ class Service:
             if authority() != policy:
                 raise Invalid("authority-drift")
             outcome = "history-only"
-            if live and command[1] == "revoke" and state in ("awaiting-consent", "consented"):
+            if revoking:
                 self.store.db.execute(
                     "UPDATE maintenance_recovery_proposals SET state='revoked' WHERE hash=?", (key,)
                 )
@@ -679,10 +757,22 @@ class Service:
             policy = authority()
             if policy is None:
                 return
+            if reason == "replay-mismatch":
+                self.store.db.execute(
+                    "INSERT OR IGNORE INTO maintenance_recovery_conflicts "
+                    "SELECT proposal,account,group_id,message_id,? FROM maintenance_recovery_messages "
+                    "WHERE account=? AND group_id=? AND message_id=? UNION ALL "
+                    "SELECT proposal,account,group_id,message_id,? FROM maintenance_recovery_revocations "
+                    "WHERE account=? AND group_id=? AND message_id=?",
+                    (payload, account, group, mid, payload, account, group, mid),
+                )
             if (
                 self.store.db.execute("SELECT count(*) FROM maintenance_recovery_refusals").fetchone()[0]
                 >= 128
             ):
+                # Conflict protection is retained even when the diagnostic ledger is full.
+                if reason == "replay-mismatch":
+                    return
                 raise Invalid("refusal-capacity")
             provenance["policy_sha256"] = policy
             self.store.db.execute(
@@ -701,9 +791,20 @@ class Service:
                 "created_at FROM maintenance_recovery_proposals WHERE hash=?",
                 (req.proposal_sha256,),
             ).fetchone()
-            if row is None or row[1] != "consented":
+            if row is None:
                 raise Invalid("not-consented")
             obj = descriptor(bytes(row[0]))
+            if not self.current(obj.operation, req.proposal_sha256):
+                raise Invalid("superseded")
+            if row[1] != "consented":
+                raise Invalid("not-consented")
+            if (
+                self.store.db.execute(
+                    "SELECT 1 FROM maintenance_recovery_conflicts WHERE proposal=?", (req.proposal_sha256,)
+                ).fetchone()
+                is not None
+            ):
+                raise Invalid("conflict")
             self.live(obj, row[7])
             current_policy = authority(row[3])
             if current_policy is None:
@@ -712,53 +813,58 @@ class Service:
                 raise Invalid("policy-drift")
             generation = row[5]
             previous = None if row[6] is None else bytes(row[6])
-            if previous is not None and req.certificate_sha256 is None:
-                self.publish_permit(req.proposal_sha256, previous)
-                return Reply(
-                    "issued", "existing generation; never blindly reissue", self.get(req.proposal_sha256)
+            repairing = previous is not None and req.certificate_sha256 is None
+            if previous is not None and repairing:
+                encoded = previous
+            else:
+                if previous is None and req.certificate_sha256 is not None:
+                    raise Invalid("unexpected-certificate")
+                if previous is not None:
+                    if generation >= 3:
+                        raise Invalid("generation-cap")
+                    old = decode(previous, dict[str, object])
+                    if old["boot_id"] != self.boot():
+                        raise Invalid("boot-changed")
+                    self.certificate(obj, req, old, enrolled)
+                if authority(row[3]) != current_policy:
+                    raise Invalid("authority-drift")
+                boot = self.boot()
+                try:
+                    if str(uuid.UUID(boot)) != boot:
+                        raise Invalid("boot")
+                except ValueError:
+                    raise Invalid("boot") from None
+                issued = self.boottime()
+                if type(issued) is not int or issued < 0:
+                    raise Invalid("clock")
+                value = dict(
+                    schema="maintenance-recovery-permit.v1",
+                    permit_id=str(uuid.uuid4()),
+                    proposal_sha256=req.proposal_sha256,
+                    decision_message_id=row[2],
+                    operator=row[3],
+                    policy_sha256=current_policy,
+                    boot_id=boot,
+                    issued_boottime_ns=issued,
+                    initiate_before_boottime_ns=issued + 30_000_000_000,
+                    state="issued",
+                    generation=generation + 1,
+                    previous_generation_sha256=None
+                    if previous is None
+                    else hashlib.sha256(previous).hexdigest(),
                 )
-            if previous is None and req.certificate_sha256 is not None:
-                raise Invalid("unexpected-certificate")
-            if previous is not None:
-                if generation >= 3:
-                    raise Invalid("generation-cap")
-                old = decode(previous, dict[str, object])
-                if old["boot_id"] != self.boot():
-                    raise Invalid("boot-changed")
-                self.certificate(obj, req, old, enrolled)
-            if authority(row[3]) != current_policy:
-                raise Invalid("authority-drift")
-            boot = self.boot()
-            try:
-                if str(uuid.UUID(boot)) != boot:
-                    raise Invalid("boot")
-            except ValueError:
-                raise Invalid("boot") from None
-            issued = self.boottime()
-            if type(issued) is not int or issued < 0:
-                raise Invalid("clock")
-            value = dict(
-                schema="maintenance-recovery-permit.v1",
-                permit_id=str(uuid.uuid4()),
-                proposal_sha256=req.proposal_sha256,
-                decision_message_id=row[2],
-                operator=row[3],
-                policy_sha256=current_policy,
-                boot_id=boot,
-                issued_boottime_ns=issued,
-                initiate_before_boottime_ns=issued + 30_000_000_000,
-                state="issued",
-                generation=generation + 1,
-                previous_generation_sha256=None if previous is None else hashlib.sha256(previous).hexdigest(),
-            )
-            encoded = canonical(value)
-            self.store.db.execute(
-                "UPDATE maintenance_recovery_proposals SET generation=?,permit=? WHERE hash=?",
-                (generation + 1, encoded, req.proposal_sha256),
-            )
+                encoded = canonical(value)
+                self.store.db.execute(
+                    "UPDATE maintenance_recovery_proposals SET generation=?,permit=? WHERE hash=?",
+                    (generation + 1, encoded, req.proposal_sha256),
+                )
         # DB commit precedes publication. A crash leaves exactly this candidate for idempotent repair.
         self.publish_permit(req.proposal_sha256, encoded)
-        return Reply("issued", "single-use enrolled publication", self.get(req.proposal_sha256))
+        return Reply(
+            "issued",
+            "existing generation; never blindly reissue" if repairing else "single-use enrolled publication",
+            self.get(req.proposal_sha256),
+        )
 
     def certificate(self, obj: Descriptor, req: Permit, old: dict[str, object], enrolled: Enrollment) -> None:
         generation = old["generation"]
