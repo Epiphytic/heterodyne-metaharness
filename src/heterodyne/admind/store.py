@@ -345,6 +345,14 @@ class Store:
                 if column not in {str(r[1]) for r in self.db.execute(f"PRAGMA table_info({table})")}:
                     self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
 
+        from heterodyne.admind.fulfillment import Lifecycle
+        self.fulfillment = Lifecycle(self)
+        try:
+            self.fulfillment.migrate()
+        except BaseException:
+            self.db.close()
+            raise
+
     @_locked
     def close(self) -> None:
         self.db.close()
@@ -684,6 +692,25 @@ class Store:
         return [_ask(r) for r in rows]
 
     @_locked
+    def capacity_asks(self) -> list[AskRow]:
+        """Separate capacity projection; raw status selectors retain their original meaning."""
+        rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE "  # noqa: S608
+            "(status IN ('open','answered','deciding','uncertain') AND NOT EXISTS "
+            "(SELECT 1 FROM ask_fulfillments f WHERE f.ask_id=asks.ask_id AND f.valid=1)) OR EXISTS "
+            "(SELECT 1 FROM ask_fulfillments f WHERE f.ask_id=asks.ask_id AND f.valid=0) "
+            "ORDER BY created_at,rowid").fetchall()
+        return [_ask(r) for r in rows]
+
+    @_locked
+    def inactive_asks(self, limit: int = 20) -> list[AskRow]:
+        rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE "  # noqa: S608
+            "(status NOT IN ('open','answered','deciding','uncertain') OR EXISTS "
+            "(SELECT 1 FROM ask_fulfillments f WHERE f.ask_id=asks.ask_id AND f.valid=1)) AND NOT EXISTS "
+            "(SELECT 1 FROM ask_fulfillments f WHERE f.ask_id=asks.ask_id AND f.valid=0) "
+            "ORDER BY created_at DESC,rowid DESC LIMIT ?", (limit,)).fetchall()
+        return [_ask(r) for r in rows]
+
+    @_locked
     def recent_asks(self, limit: int) -> list[AskRow]:
         """The `limit` newest asks that are no longer active (R24)."""
         marks = ", ".join("?" * len(ASK_ACTIVE))
@@ -699,12 +726,16 @@ class Store:
     @_locked
     def set_ask(self, ask_id: str, status: str, *, outcome: str | None = None,
                 decided_by: str | None = None) -> None:
+        if self.fulfillment.protected(ask_id):
+            raise ValueError("already fulfilled; original answer retained")
         self.db.execute("UPDATE asks SET status = ?, outcome = ?, decided_by = ?, updated_at = ? "
                         "WHERE ask_id = ?", (status, outcome, decided_by, now(), ask_id))
 
     @_locked
     def add_answer(self, ask_id: str, kind: str, operator: str, message_id: str, text: str,
                    choice: str | None = None) -> None:
+        if self.fulfillment.protected(ask_id):
+            raise ValueError("already fulfilled; original answer retained")
         self.db.execute("INSERT INTO ask_answers(ask_id, seq, kind, operator, message_id, text, at, choice) "
                         "VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM ask_answers WHERE ask_id = ?), "
                         "?, ?, ?, ?, ?, ?)",
@@ -852,6 +883,8 @@ class Store:
         """In one transaction: the ask `open -> deciding` with `attempt` set, the attempt row, and the
         inbound message `executing`. False, changing nothing, if the ask is not `open`."""
         with self.transaction():
+            if self.fulfillment.protected(a.ask_id):
+                return False
             cur = self.db.execute("UPDATE asks SET status = 'deciding', attempt = ?, updated_at = ? "
                                   "WHERE ask_id = ? AND status = 'open'", (a.message_id, now(), a.ask_id))
             if cur.rowcount != 1:
@@ -886,6 +919,8 @@ class Store:
             r = self.db.execute("SELECT status, attempt FROM asks WHERE ask_id = ?", (ask_id,)).fetchone()
             if r is None or r[0] != expect_status or r[1] != message_id:
                 return False
+            if self.fulfillment.protected(ask_id):
+                raise ValueError("already fulfilled; original answer retained")
             self.db.execute("UPDATE ask_attempts SET settled = ?, exit_status = COALESCE(?, exit_status) "
                             "WHERE ask_id = ? AND message_id = ?", (settled, exit_status, ask_id, message_id))
             self.db.execute("UPDATE asks SET status = ?, outcome = ?, decided_by = ?, attempt = ?, "

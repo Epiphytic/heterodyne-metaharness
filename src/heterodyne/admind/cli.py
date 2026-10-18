@@ -17,7 +17,7 @@ import msgspec
 
 from heterodyne import config as hconfig
 from heterodyne import units
-from heterodyne.admind import approvals, asks, ctl, initialised, links, refs, unit
+from heterodyne.admind import approvals, asks, ctl, fulfillment_cli, initialised, links, refs, unit
 from heterodyne.admind.agent import TMUX_SOCKET, AdminAgent, tmux_launcher
 from heterodyne.admind.audit import Audit
 from heterodyne.admind.commands import CommandRunner
@@ -247,6 +247,8 @@ def notice_command(s: AdmindSettings, args: argparse.Namespace) -> int:
 def ask_command(s: AdmindSettings, args: argparse.Namespace) -> int:
     """`admind ask post|get|wait|list|cancel`. Exit 0 on success, 1 when refused or failed (the reason on
     stderr), 69 when no daemon answers, 3 when `wait` times out."""
+    if args.ask_command == "fulfillment":
+        return fulfillment_cli.command(s, args)
     req: asks.AskRequest
     if args.ask_command == "post":
         post = _ask_post(args)
@@ -478,6 +480,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _ask_parser(ask: argparse.ArgumentParser) -> None:
     sub = ask.add_subparsers(dest="ask_command", required=True, parser_class=_QuietParser)
+    fulfillment_cli.parser(sub.add_parser(
+        "fulfillment", help="opt-in lifecycle; old get retains answered status"))
     post = sub.add_parser("post", help="post an ask; prints `ask <id> posted`")
     post.add_argument("--kind", required=True, choices=["question", "merge", "approval"])
     post.add_argument("--title", default="")
