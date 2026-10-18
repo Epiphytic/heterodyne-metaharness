@@ -196,7 +196,7 @@ def finish_scratch(layout, folder, result):
         archived = recovery.archive_scratch(layout, folder / "scratch-archive")
         result["scratch_archive_inventory_sha256"] = archived["sha256"]
         result["scratch_archive"] = archived
-        bounds = result.get("socket_path_budget_inventory", {}).get("receipt", {}).get("derivations")
+        bounds = (result.get("socket_path_budget_inventory") or {}).get("receipt", {}).get("derivations")
         if bounds is not None:
             for observed in archived["surviving_socket_paths"]:
                 relative = Path(observed["path"])

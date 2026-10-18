@@ -135,3 +135,15 @@ not contained by this helper. Their real fixture cleanup/isolation remains an
 unwaived stage-admission obligation, together with the complete source-backed
 constructor inventory and transient-socket measurement limits above. No scanner
 stage has been run or admitted by these repairs.
+
+Fourth-review failed-attempt preservation handles the mandatory inventory field
+while it is still None. Preflight failure and partial-layout failure retain HOLD,
+archive available scratch, and allow result.json to be written. Missing required
+evidence remains missing; no bounds or PASS are fabricated.
+
+The fourth review also records unwaived future stage gaps: bounded fixture-owned
+tmux -S paths, the exact overlap execution tree and symlinks, manual guard-source
+review, final ignored-candidate revalidation, and external hardlink copying. The
+runtime check and archive are separate observations. These limitations prohibit
+using this undeployed helper PoC as actual stage-admission evidence without their
+resolution; no scanner gate has been run.
