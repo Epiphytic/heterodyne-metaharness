@@ -154,3 +154,12 @@ are retained in docs/reviews/plan9-r3; source ingestion, duplicate cursor semant
 archive prefix selection, diagnostic containment and operational migration are
 not complete. Publishing this core does not close the collector/evaluator task
 or admit an operational proof adapter or release corpus.
+
+
+## Constructor-free source diagnostics
+
+The pinned-source adapter executes the actual complete native ask-digest and approval-validator implementations in a fresh namespace with constructor disabled and finite captured Git/native reads. Tests use an explicitly configured, exact-hash complete native source; an unconfigured environment skips only source-dependent positive fixtures and never substitutes another algorithm. The configured acceptance run passed270 tests with zero skips, while the generic adapter-only run passed1 and explicitly skipped29. Full typing covered385 files with zero errors.
+
+Actual fourth MEDIUM review accepted this diagnostic slice as a PoC. All ten findings remain open in [the review](../reviews/plan9-r4/review-medium.md). The captured policy and records are source-owner assertions. Native gap strings may contain unsanitized prose; module initialization may consult host path/home information; captured Git behavior is not equivalent for every invalid native input; execution error containment and negative-oracle coverage remain incomplete. This is private diagnostic plumbing, with no authority adapter, public-report sanitization guarantee or proof of entirely offline initialization. `require_authority` always raises HOLD. The evaluator retains its default Unavailable adapter.
+
+The original nine acceptance/binding test files remain byte-identical. Eleven new quality observations remain open and unwaived; previous review obligations, including F9 repeated proof/lock work, remain open. The operational collector, remaining source roles, corpus, runbooks and release qualification are incomplete, so the task remains open.
