@@ -113,7 +113,7 @@ class CleanupFacts(TypedDict):
 
 
 def cleanup(value: Request) -> CleanupFacts:
-    return dict(
+    return CleanupFacts(
         key=value.key,
         origin=value.origin,
         cleaned_shells=value.shell_ids,
@@ -158,7 +158,7 @@ def test_denial_settlement_and_durable_session_denial_are_atomic(tmp_path):
                 v,
                 operation,
                 key=v.key,
-                approval_id=v.approval_id,
+                approval_id=f.required(v.approval_id),
                 origin=v.origin,
                 source=f.SHA,
                 readback_ok=True,
@@ -189,7 +189,7 @@ def test_denial_settlement_and_durable_session_denial_are_atomic(tmp_path):
             lambda v: settle_request(v, "denied", decision=f.committed("deny"), **cleanup(v)),
             observation=f.cleanup_observation(value),
         )
-    assert not db.denied(value.denial_identity, value.origin.session_key)
+    assert not db.denied(f.required(value.denial_identity), value.origin.session_key)
     assert db.get("request", key) == value
     decision = f.persist_decision(db, "deny")
     done = db.transition(
@@ -199,7 +199,7 @@ def test_denial_settlement_and_durable_session_denial_are_atomic(tmp_path):
         lambda v: settle_request(v, "denied", decision=decision, **cleanup(v)),
         observation=f.cleanup_observation(value),
     )
-    assert done.phase == "denied" and db.denied(value.denial_identity, value.origin.session_key)
+    assert done.phase == "denied" and db.denied(f.required(value.denial_identity), value.origin.session_key)
     assert db.db.execute("SELECT outstanding FROM requests WHERE key=?", (key,)).fetchone()[0] == 0
     assert (
         db.transition(
@@ -408,7 +408,7 @@ def test_unconsumed_ambiguous_claim_requires_exhausted_readbacks_then_exact_reco
     done = dis.settle_dispatch(value, observation(value))
     assert done.settled and done.state == "failed" and not done.claim_consumed
     with pytest.raises(Refused):
-        dis.consume_claim(done, done.claim_hash, done.started, fresh_gates=True)
+        dis.consume_claim(done, f.required(done.claim_hash), done.started, fresh_gates=True)
 
 
 def test_report_ack_loss_is_noop_after_restart_without_duplicate_events(tmp_path):
@@ -502,7 +502,7 @@ def test_new_generation_groom_journal_keeps_stable_session_and_requires_repark(t
                 v,
                 operation,
                 key=v.key,
-                approval_id=v.approval_id,
+                approval_id=f.required(v.approval_id),
                 origin=v.origin,
                 source=f.SHA,
                 readback_ok=True,
@@ -521,7 +521,7 @@ def test_new_generation_groom_journal_keeps_stable_session_and_requires_repark(t
             value,
             "land",
             key=value.key,
-            approval_id=value.approval_id,
+            approval_id=f.required(value.approval_id),
             origin=new_origin,
             source=f.SHA,
             readback_ok=True,
@@ -530,7 +530,7 @@ def test_new_generation_groom_journal_keeps_stable_session_and_requires_repark(t
         value,
         "park",
         key=value.key,
-        approval_id=value.approval_id,
+        approval_id=f.required(value.approval_id),
         origin=new_origin,
         source=f.SHA,
         readback_ok=True,

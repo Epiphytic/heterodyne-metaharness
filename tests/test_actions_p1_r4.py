@@ -264,7 +264,8 @@ def test_absent_parent_evidence_survives_unknown_and_absent_reads():
     parent = msgspec.structs.replace(
         parent, state="failed", claim_consumed=True, evidence="a" * 64, cleanup_proven=True
     )
-    for elapsed, effect in ((1, "unknown"), (5, "absent")):
+    observations: tuple[tuple[int, f.Effect], ...] = ((1, "unknown"), (5, "absent"))
+    for elapsed, effect in observations:
         parent = dis.reconcile_lookup(
             parent, elapsed_seconds=elapsed, effect=effect, evidence="d" * 64, cleanup_proven=True
         )
@@ -303,7 +304,7 @@ def test_committed_deny_records_history_before_request_settlement(tmp_path):
     with closing(FixtureJournal.create(tmp_path / "fixture")) as db:
         decision = f.persist_decision(db, "deny")
         request = db.get("request", request_key(f.initial()))
-        assert db.denied(request.denial_identity, request.origin.session_key)
+        assert db.denied(f.required(request.denial_identity), request.origin.session_key)
         with pytest.raises(Refused, match="denied"):
             db.add_request(f.initial(2))
         done = db.transition(
@@ -364,7 +365,9 @@ def test_readonly_child_requires_exact_separate_finished_read(tmp_path, change):
         independent = f.reconciliation_observation(child, effect="succeeded", effect_cleanup=True)
         bad = msgspec.structs.replace(
             independent,
-            reconciliation_readback=msgspec.structs.replace(independent.reconciliation_readback, **change),
+            reconciliation_readback=msgspec.structs.replace(
+                f.required(independent.reconciliation_readback), **change
+            ),
         )
 
         def proposal(old):

@@ -32,15 +32,20 @@ def persist_request(db, sequence=1, until="filed"):
             allocation_elapsed_seconds=1, now=f.Clock("allocation", 1 + (1) * 10**9, 1 + (1) * 10**9)
         ),
     )
-    for op in ("blocker", "park", "land"):
-        value = db.transition(
-            "request",
-            key,
-            value.version,
-            lambda v, op=op: f.observe_stage(
-                v, op, key=v.key, approval_id=v.approval_id, origin=v.origin, source=f.SHA, readback_ok=True
-            ),
-        )
+    for op in f.STAGES:
+
+        def observe(v: f.Request, op: f.Stage = op) -> f.Request:
+            return f.observe_stage(
+                v,
+                op,
+                key=v.key,
+                approval_id=f.required(v.approval_id),
+                origin=v.origin,
+                source=f.SHA,
+                readback_ok=True,
+            )
+
+        value = db.transition("request", key, value.version, observe)
     value = db.transition(
         "request", key, value.version, lambda v: f.pin_ask(v, b"whole fixture ask", f.DIGEST, revision=1)
     )
@@ -138,7 +143,7 @@ def test_groom_failure_authenticated_deny_is_durable(tmp_path):
                     v,
                     op,
                     key=v.key,
-                    approval_id=v.approval_id,
+                    approval_id=f.required(v.approval_id),
                     origin=v.origin,
                     source=f.SHA,
                     readback_ok=True,
@@ -189,7 +194,7 @@ def test_groom_failure_authenticated_deny_is_durable(tmp_path):
         lambda v: settle_request(v, "denied", decision=decision, **r1.cleanup(v)),
         observation=f.cleanup_observation(value),
     )
-    assert done.phase == "denied" and db.denied(value.denial_identity, value.origin.session_key)
+    assert done.phase == "denied" and db.denied(f.required(value.denial_identity), value.origin.session_key)
     with pytest.raises(Refused):
         dec.begin_decision(value, f.event(), expected_purpose="execution", current_digest=f.DIGEST)
 
@@ -335,7 +340,7 @@ def test_attested_success_after_unknown_cleanup_is_bound_and_never_replays(tmp_p
         lambda v: dis.report(
             v,
             attempt_id=v.attempt_id,
-            claim_hash=v.claim_hash,
+            claim_hash=f.required(v.claim_hash),
             digest=v.digest,
             target=v.target,
             effect="succeeded",

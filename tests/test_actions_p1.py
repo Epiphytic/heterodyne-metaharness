@@ -1,13 +1,23 @@
 """Pure P1 reducers plus private temporary SQLite fixtures. No native/transport/model ports."""
 
 import sqlite3
+from typing import Literal, TypedDict, cast
 
 import msgspec
 import pytest
 
-from heterodyne.actions.contracts import ActionConfig, Intent, Origin, PushBranch, PushFacts, Repository
+from heterodyne.actions.contracts import (
+    ActionConfig,
+    Intent,
+    Origin,
+    PushBranch,
+    PushFacts,
+    Repository,
+)
 from heterodyne.actions.decisions import (
+    Decision,
     DecisionObservation,
+    Purpose,
     begin_decision,
     finalize_decision,
     issue_decision,
@@ -18,6 +28,7 @@ from heterodyne.actions.dispatch import Clock, consume_claim, prepare, ready, un
 from heterodyne.actions.fake_ports import FakeEffect, FakeQueue, FakeSession, UnavailablePorts
 from heterodyne.actions.journal import FixtureJournal, create_fixture, upgrade_fixture
 from heterodyne.actions.requests import (
+    CreationKey,
     Refused,
     Request,
     groom,
@@ -41,6 +52,66 @@ PUSH = PushBranch("product", "refs/heads/feature", "refs/heads/main", SHA)
 FACTS = PushFacts(REPO, ORIGIN.bead, PUSH.from_ref, PUSH.to_ref, SHA)
 
 
+Stage = Literal["blocker", "park", "land"]
+STAGES: tuple[Stage, ...] = ("blocker", "park", "land")
+Finalization = Literal["close", "pins", "finish"]
+FINALIZATIONS: tuple[Finalization, ...] = ("close", "pins", "finish")
+Effect = Literal["succeeded", "absent", "unknown"]
+Choice = Literal["approve", "deny"]
+
+
+def required[T](value: T | None) -> T:
+    """Narrow fixture facts explicitly; absence fails the fixture, never the oracle."""
+    assert value is not None
+    return value
+
+
+class StageOverrides(TypedDict, total=False):
+    key: CreationKey
+    approval_id: str
+    origin: Origin
+    source: str
+    readback_ok: bool
+
+
+class StageFacts(TypedDict):
+    key: CreationKey
+    approval_id: str
+    origin: Origin
+    source: str
+    readback_ok: bool
+
+
+class SufficiencyFacts(TypedDict):
+    digest: str
+    policy_revision: str
+    source: str
+    sufficient: bool
+
+
+class SufficiencyOverrides(TypedDict, total=False):
+    digest: str
+    policy_revision: str
+    source: str
+    sufficient: bool
+
+
+class CleanupFacts(TypedDict):
+    key: CreationKey
+    origin: Origin
+    cleaned_shells: tuple[str, ...]
+    blockers_clear: bool
+    native_terminal: bool
+
+
+class CleanupOverrides(TypedDict, total=False):
+    key: CreationKey
+    origin: Origin
+    cleaned_shells: tuple[str, ...]
+    blockers_clear: bool
+    native_terminal: bool
+
+
 def initial(sequence=1, origin=ORIGIN):
     return new_request(origin, sequence, Intent(1, PUSH), FACTS, CONFIG, SHA)
 
@@ -51,12 +122,12 @@ def allocated():
 
 def staged(phase="landed"):
     value = allocated()
-    for operation in ("blocker", "park", "land"):
+    for operation in STAGES:
         value = observe_stage(
             value,
             operation,
             key=value.key,
-            approval_id=value.approval_id,
+            approval_id=required(value.approval_id),
             origin=value.origin,
             source=SHA,
             readback_ok=True,
@@ -72,7 +143,7 @@ def filed():
     return observe_filed(value, digest=DIGEST, revision=1, native_readback=True)
 
 
-def event(value="approve"):
+def event(value: Choice = "approve"):
     return DecisionObservation(
         "event-1",
         "marmot-fixture",
@@ -89,15 +160,15 @@ def event(value="approve"):
     )
 
 
-def begun(value="approve"):
+def begun(value: Choice = "approve"):
     return begin_decision(filed(), event(value), expected_purpose="execution", current_digest=DIGEST)
 
 
-def committed(value="approve"):
+def committed(value: Choice = "approve"):
     result = read_decision(
         issue_decision(begun(value), fresh_authority=True, current_digest=DIGEST), event(value), read_ok=True
     )
-    for operation in ("close", "pins", "finish"):
+    for operation in FINALIZATIONS:
         result = finalize_decision(
             result, operation, readback=event(value), current_digest=DIGEST, native_readback=True
         )
@@ -125,12 +196,10 @@ def persist_filed_request(db, approval_id="btq-ab123"):
             allocation_elapsed_seconds=1, now=Clock("allocation", 1 + (1) * 10**9, 1 + (1) * 10**9)
         ),
     )
-    for operation in ("blocker", "park", "land"):
-        value = db.transition(
-            "request",
-            key,
-            value.version,
-            lambda v, operation=operation: observe_stage(
+    for operation in STAGES:
+
+        def observe(v: Request, operation: Stage = operation) -> Request:
+            return observe_stage(
                 v,
                 operation,
                 key=v.key,
@@ -138,8 +207,9 @@ def persist_filed_request(db, approval_id="btq-ab123"):
                 origin=v.origin,
                 source=SHA,
                 readback_ok=True,
-            ),
-        )
+            )
+
+        value = db.transition("request", key, value.version, observe)
     value = db.transition(
         "request",
         key,
@@ -160,7 +230,7 @@ def persist_filed_request(db, approval_id="btq-ab123"):
     )
 
 
-def persist_decision(db, value="approve", approval_id="btq-ab123"):
+def persist_decision(db, value: Choice = "approve", approval_id="btq-ab123"):
     """Drive the actual journal/reducers; a constructor boolean is never durable consent."""
     observation = msgspec.structs.replace(event(value), approval_id=approval_id)
     request = persist_filed_request(db, approval_id)
@@ -182,20 +252,24 @@ def persist_decision(db, value="approve", approval_id="btq-ab123"):
         lambda v: read_decision(v, observation, read_ok=True),
         observation=decision_observation(result),
     )
-    for operation in ("close", "pins", "finish"):
+    for operation in FINALIZATIONS:
+
+        def finalize(v: Decision, operation: Finalization = operation) -> Decision:
+            return finalize_decision(
+                v, operation, readback=observation, current_digest=DIGEST, native_readback=True
+            )
+
         result = db.transition(
             "decision",
             result.approval_id,
             result.version,
-            lambda v, operation=operation: finalize_decision(
-                v, operation, readback=observation, current_digest=DIGEST, native_readback=True
-            ),
+            finalize,
             observation=decision_observation(result, native=observation),
         )
     return result
 
 
-def persist_reconcile_observation(db, parent, elapsed, *, effect="unknown", cleanup=False):
+def persist_reconcile_observation(db, parent, elapsed, *, effect: Effect = "unknown", cleanup=False):
     import hashlib
 
     from heterodyne.actions import dispatch as dis
@@ -245,7 +319,7 @@ def test_create_ack_loss_unique_adoption_no_second_create():
         queue.create(value.key, "btq-ab123", lose_ack=True)
     value = observe_allocation(value, queue.lookup(value.key), lookup_ok=True, elapsed_seconds=1)
     assert value.phase == "allocated" and queue.create_calls == 1
-    assert value.envelope.idempotency_key == "btq-ab123"
+    assert required(value.envelope).idempotency_key == "btq-ab123"
     with pytest.raises(Refused):
         issue_allocation(value)
 
@@ -278,7 +352,7 @@ def test_native_stages_cannot_skip_blocker_or_park(operation):
             value,
             operation,
             key=value.key,
-            approval_id=value.approval_id,
+            approval_id=required(value.approval_id),
             origin=value.origin,
             source=SHA,
             readback_ok=True,
@@ -287,17 +361,23 @@ def test_native_stages_cannot_skip_blocker_or_park(operation):
 
 def test_native_stages_bind_exact_original_generation_and_requested_source():
     value = allocated()
-    for override in (
+    overrides: tuple[StageOverrides, ...] = (
         {"origin": msgspec.structs.replace(ORIGIN, generation=2)},
         {"source": "c" * 40},
         {"approval_id": "btq-cd456"},
         {"readback_ok": False},
-    ):
-        kwargs = dict(
-            key=value.key, approval_id=value.approval_id, origin=ORIGIN, source=SHA, readback_ok=True
+    )
+    for override in overrides:
+        kwargs = StageFacts(
+            key=value.key,
+            approval_id=required(value.approval_id),
+            origin=ORIGIN,
+            source=SHA,
+            readback_ok=True,
         )
+        kwargs.update(override)
         with pytest.raises(Refused):
-            observe_stage(value, "blocker", **(kwargs | override))
+            observe_stage(value, "blocker", **kwargs)
     session = FakeSession(ORIGIN.session_key, 2)
     with pytest.raises(Refused):
         session.park(ORIGIN.session_key, 1)
@@ -305,15 +385,17 @@ def test_native_stages_bind_exact_original_generation_and_requested_source():
 
 def test_complete_filing_and_stale_digest_source_policy_refused():
     value = pin_ask(staged(), b"whole native ask fixture", DIGEST, revision=1)
-    for wrong in (
+    wrong_facts: tuple[SufficiencyOverrides, ...] = (
         {"digest": "c" * 64},
         {"source": "c" * 40},
         {"policy_revision": "unknown"},
         {"sufficient": False},
-    ):
-        kwargs = dict(digest=DIGEST, policy_revision=DIGEST, source=SHA, sufficient=True)
+    )
+    for wrong in wrong_facts:
+        kwargs = SufficiencyFacts(digest=DIGEST, policy_revision=DIGEST, source=SHA, sufficient=True)
+        kwargs.update(wrong)
         with pytest.raises(Refused):
-            observe_sufficient(value, **(kwargs | wrong))
+            observe_sufficient(value, **kwargs)
     assert filed().phase == "filed"
     with pytest.raises(Refused):
         observe_filed(value, digest=DIGEST, revision=1, native_readback=True)
@@ -325,12 +407,12 @@ def test_groom_limit_and_source_change_clears_whole_ask_and_judgement():
         value = groom(value, Intent(1, PUSH, "corrected"), FACTS, SHA, origin=ORIGIN)
         assert value.phase == "blocker-pending" and value.ask_bytes is None and value.context_digest is None
         assert value.policy_revision is None and value.request_revision == revision
-        for operation in ("park", "land"):
+        for operation in STAGES[1:]:
             value = observe_stage(
                 value,
                 operation,
                 key=value.key,
-                approval_id=value.approval_id,
+                approval_id=required(value.approval_id),
                 origin=ORIGIN,
                 source=SHA,
                 readback_ok=True,
@@ -352,11 +434,12 @@ def test_decision_does_not_trust_actor_or_digest_alone(field):
 
 
 def test_wrong_purpose_digest_or_unfiled_shell_has_no_decision_route():
-    for request, observed, digest, purpose in [
+    cases: tuple[tuple[Request, DecisionObservation, str, Purpose], ...] = (
         (allocated(), event(), DIGEST, "execution"),
         (filed(), event(), "c" * 64, "execution"),
         (filed(), event(), DIGEST, "permission"),
-    ]:
+    )
+    for request, observed, digest, purpose in cases:
         with pytest.raises(Refused):
             begin_decision(request, observed, expected_purpose=purpose, current_digest=digest)
 
@@ -408,21 +491,23 @@ def test_two_outstanding_per_bead_across_generations_and_sessions(tmp_path):
 
 def test_cleanup_missing_stale_or_duplicate_shells_cannot_free_capacity():
     value = allocated()
-    for overrides in (
+    bad_cleanup: tuple[CleanupOverrides, ...] = (
         {"cleaned_shells": ()},
         {"blockers_clear": False},
         {"native_terminal": False},
         {"origin": msgspec.structs.replace(ORIGIN, generation=2)},
-    ):
-        kwargs = dict(
+    )
+    for overrides in bad_cleanup:
+        kwargs = CleanupFacts(
             key=value.key,
             origin=ORIGIN,
             cleaned_shells=value.shell_ids,
             blockers_clear=True,
             native_terminal=True,
         )
+        kwargs.update(overrides)
         with pytest.raises(Refused):
-            settle_request(value, "cancelled", **(kwargs | overrides))
+            settle_request(value, "cancelled", **kwargs)
 
 
 def test_stale_version_cannot_release_successor_or_duplicate_effect(tmp_path):
@@ -550,8 +635,8 @@ def test_denial_persists_across_generation_and_heart_proposal_is_separate(tmp_pa
     db.record_denial(request, decision)
     db.close()
     db = FixtureJournal(path)
-    assert db.denied(request.denial_identity, ORIGIN.session_key)
-    assert not db.denied(request.denial_identity, "other-session")
+    assert db.denied(required(request.denial_identity), ORIGIN.session_key)
+    assert not db.denied(required(request.denial_identity), "other-session")
     db.close()
     approved = msgspec.structs.replace(committed(), heart_proposal_pending=True)
     settled = settle_heart_proposal(approved, proposal_readback=True)
@@ -591,7 +676,7 @@ def test_exhausted_allocation_recovery_requires_exact_current_authenticated_scop
     assert fixed.recovery_operator_event == observation.operator_event
     assert fixed.recovery_evidence == observation.evidence_digest
     assert fixed.recovery_closed_orphans == observation.closed_orphans
-    assert fixed.envelope.idempotency_key == "btq-ab123"
+    assert required(fixed.envelope).idempotency_key == "btq-ab123"
     with pytest.raises(Refused):
         issue_allocation(fixed)
 
@@ -734,7 +819,7 @@ def test_fixture_upgrade_missing_path_never_creates_and_bad_version_never_create
         upgrade_fixture(path)
     assert not path.exists()
     with pytest.raises(Refused, match="fixture-schema-version"):
-        create_fixture(path, version=True)
+        create_fixture(path, version=cast(Literal[1, 2], True))  # Deliberately malformed bool probe.
     assert not path.exists()
 
 
@@ -757,7 +842,7 @@ def decision_observation(value, *, native=None, authority_current=True):
     )
 
 
-def reconciliation_observation(value, *, effect="unknown", effect_cleanup=False):
+def reconciliation_observation(value, *, effect: Effect = "unknown", effect_cleanup=False):
     from heterodyne.actions.transitions import ReconciliationReadback
 
     return TransitionObservation(
@@ -829,7 +914,13 @@ def report_observation(value, *, effect, evidence, cleanup):
     )
 
 
-def launcher_observation(value, operation="preparation-failed", **kwargs):
+def launcher_observation(
+    value,
+    operation: Literal[
+        "preparation-failed", "retire-unconsumed", "restart-preparation"
+    ] = "preparation-failed",
+    **kwargs,
+):
     from heterodyne.actions.transitions import LauncherReadback
 
     return TransitionObservation(

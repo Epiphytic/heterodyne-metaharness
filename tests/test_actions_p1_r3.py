@@ -408,7 +408,7 @@ def test_journal_cancel_after_deny_refuses_and_preserves_atomic_denial_route(tmp
                 request.version,
                 lambda old: settle_request(old, "cancelled", **r1.cleanup(old)),
             )
-        assert db.denied(request.denial_identity, request.origin.session_key)
+        assert db.denied(f.required(request.denial_identity), request.origin.session_key)
         done = db.transition(
             "request",
             key,
@@ -416,7 +416,9 @@ def test_journal_cancel_after_deny_refuses_and_preserves_atomic_denial_route(tmp
             lambda old: settle_request(old, "denied", decision=decision, **r1.cleanup(old)),
             observation=f.cleanup_observation(request),
         )
-        assert done.phase == "denied" and db.denied(request.denial_identity, request.origin.session_key)
+        assert done.phase == "denied" and db.denied(
+            f.required(request.denial_identity), request.origin.session_key
+        )
         with pytest.raises(Refused, match="same-session-denied"):
             db.add_request(f.initial(2))
 
