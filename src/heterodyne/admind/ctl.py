@@ -180,6 +180,10 @@ class JsonSocketServer[Req, Rep: msgspec.Struct]:
                 if len(line.rstrip(b"\n")) > self.max_request:      # the delimiter does not count
                     raise ValueError("request too long")
                 req = msgspec.json.decode(line, type=self.request_type)
+                if self.kind == "maintenance-recovery":
+                    from heterodyne.admind import recovery
+
+                    recovery.decode(line, cast(type[recovery.Request], recovery.Request))
                 if self.kind == "ask":
                     from heterodyne.admind import fulfillment
                     if isinstance(cast(object, req), fulfillment.Request):

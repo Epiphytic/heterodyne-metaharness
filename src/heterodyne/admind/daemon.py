@@ -44,6 +44,7 @@ from heterodyne.admind import (
     guard_state,
     membership,
     notices,
+    recovery,
     summarize,
     verbs,
 )
@@ -332,7 +333,6 @@ def reconcile(count: int, confirmed: set[str] | None, pending_raw: str | None,
     return None, "unknown"
 
 
-
 class Admind:
     def __init__(self, settings: AdmindSettings, client: ControlClient, store: Store, audit: Audit,
                  agent: AdminAgent, runner: commands.CommandRunner, account: str, group: str,
@@ -349,6 +349,7 @@ class Admind:
         self.agent = agent
         self.runner = runner
         self.account = account
+        self.maintenance_recovery = recovery.Service(store, settings.state_dir / "maintenance-recovery")
         self.group = group
         self.hooks: asyncio.Queue[HookEvent | Delivery] = asyncio.Queue()
         # operator messages and reactions for worker_loop
@@ -672,10 +673,25 @@ class Admind:
         await self.check_group()
         server = self.make_server(self.s.state_dir / "hook.sock")
         control: ctl.JsonSocketServer[ctl.CtlRequest, ctl.CtlReply] | None = None
+        recovery_server: ctl.JsonSocketServer[recovery.Request, recovery.Reply] | None = None
         try:
             await server.start()
             control = ctl.CtlServer(self.s.state_dir / ctl.CTL_SOCKET, self.on_ctl, self.audit)
             await control.start()
+            recovery_server = ctl.JsonSocketServer(
+                self.s.state_dir / recovery.SOCKET,
+                self.on_recovery,
+                self.audit,
+                kind="maintenance-recovery",
+                max_request=recovery.MAX_BYTES,
+                max_reply=recovery.MAX_BYTES,
+                request_type=recovery.Request,
+                check=recovery.check,
+                refused=lambda why: recovery.Reply("refused", why),
+                failed=lambda: recovery.Reply("unavailable", "recovery unavailable"),
+                describe=lambda req: {"op": type(req).__name__},
+            )
+            await recovery_server.start()
             self.ask_server = ctl.JsonSocketServer(
                 self.s.state_dir / asks.ASK_SOCKET, self.on_ask_wire, self.audit, kind="ask",
                 max_request=asks.MAX_REQUEST, max_reply=asks.MAX_REPLY,
@@ -706,6 +722,8 @@ class Admind:
             self._backoff.clear()
             if self.ask_server is not None:
                 await self.ask_server.close()
+            if recovery_server is not None:
+                await recovery_server.close()
             if control is not None:
                 await control.close()
             await server.close()
@@ -722,6 +740,66 @@ class Admind:
             except Exception as exc:  # noqa: BLE001 - the change is settled; the worker flushes later
                 self.audit_quietly("ctl", action="flush-failed", error=type(exc).__name__)
         return ctl.CtlReply(result, redact(message))
+
+    def recovery_authority(self, sender: str | None = None) -> str | None:
+        """Actual current host policy/confirmed-set observation, never local request claims."""
+        if not self.authorised() or (sender is not None and sender not in self.operators):
+            return None
+        return recovery.sha(
+            {
+                "policy": sorted((o.hex, o.name) for o in self.policy_operators),
+                "confirmed": sorted(self.confirmed_operators() or ()),
+            }
+        )
+
+    async def on_recovery(self, req: recovery.Request, peer: ctl.Peer) -> recovery.Reply:
+        try:
+            if peer.uid != os.getuid():
+                raise recovery.Invalid("peer")
+            if why := recovery.check(req):
+                raise recovery.Invalid(why)
+            if isinstance(req, recovery.Status):
+                return recovery.Reply(
+                    "ok", "recovery status", self.maintenance_recovery.get(req.proposal_sha256)
+                )
+            async with self.work_lock:
+                if not await self.check_group() or self.recovery_authority() is None:
+                    raise recovery.Invalid("authority")
+                if isinstance(req, recovery.Register):
+                    return self.maintenance_recovery.register(
+                        req,
+                        uid=peer.uid,
+                        pid=peer.pid,
+                        chunk_chars=self.s.chunk_chars,
+                        post=lambda key, text: self.post(key, text, None, lane=2, owner=None),
+                    )
+                return self.maintenance_recovery.permit(req, uid=peer.uid, authority=self.recovery_authority)
+        except recovery.Invalid as exc:
+            return recovery.Reply("refused", str(exc))
+        except (OSError, sqlite3.Error):
+            return recovery.Reply("unavailable", "recovery store or enrollment unavailable")
+
+    async def recovery_message(self, ev: InboundMessage) -> None:
+        try:
+            if ev.account_id_hex.lower() != self.account.lower():
+                raise recovery.Invalid("account")
+            if not await self.check_group():
+                raise recovery.Invalid("authority")
+            sender = ev.message.sender.account_id_hex.lower()
+            reply = self.maintenance_recovery.message(
+                account=ev.account_id_hex.lower(),
+                group=ev.group_id_hex.lower(),
+                mid=ev.message.message_id_hex.lower(),
+                sender=sender,
+                target=None if ev.reply_to is None else ev.reply_to.message_id_hex.lower(),
+                text=ev.message.text,
+                authority=lambda: self.recovery_authority(sender),
+            )
+            self.audit.write("maintenance-recovery", action=reply.message)
+        except recovery.Invalid as exc:
+            self.audit.write("maintenance-recovery", action="refused", reason=str(exc))
+        except (OSError, sqlite3.Error):
+            self.audit.write("maintenance-recovery", action="unavailable")
 
     # --- asks (relay spec) ----------------------------------------------------------------------
     async def on_ask_wire(self, req: asks.AskRequest | fulfillment.Request,
@@ -2293,6 +2371,9 @@ class Admind:
         if not MESSAGE_ID.fullmatch(mid):
             self.audit.write("drop", operator=verdict.operator, reason="malformed message id",
                              text=own_text(ev.message.text))
+            return
+        if ev.message.text.startswith("!maintenance"):
+            await self.recovery_message(ev)
             return
         if not self.store.claim_inbound(mid, sender_key=ev.message.sender.account_id_hex.lower()):
             self.audit.write("drop", operator=verdict.operator, message_id=mid, reason="replayed message id",

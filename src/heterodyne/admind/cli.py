@@ -26,6 +26,7 @@ from heterodyne.admind import (
     fulfillment_cli,
     initialised,
     links,
+    recovery_cli,
     refs,
     unit,
 )
@@ -370,12 +371,15 @@ def _settings_only() -> AdmindSettings:
 
 
 def _with_settings(args: argparse.Namespace) -> int:
-    if args.command in ("ask", "notice"):       # a client only: it opens no database (the daemon owns it)
+    # Client-only operations never open the daemon database.
+    if args.command in ("ask", "notice", "maintenance-recovery"):
         try:
             s = _settings_only()
         except hconfig.ConfigError as exc:
             print(f"config error: {show(str(exc), False)}", file=sys.stderr)
             return EX_CONFIG
+        if args.command == "maintenance-recovery":
+            return recovery_cli.command(s, args)
         return ask_command(s, args) if args.command == "ask" else notice_command(s, args)
     try:
         s, store, audit = _load()
@@ -517,6 +521,8 @@ def build_parser() -> argparse.ArgumentParser:
                                  "(check the members in your client first)")
     _ask_parser(sub.add_parser("ask", help="post a question or merge request to the operators and read "
                                            "the answers"))
+    recovery_cli.parser(sub.add_parser(
+        "maintenance-recovery", help="register or inspect exact local recovery consent"))
     _notice_parser(sub.add_parser("notice", help="post an FYI to the operators; no reply is requested"))
     units.add_arguments(sub.add_parser("unit", help="print a systemd user unit for this install"))
     sub.add_parser("initialised", help="exit 0 if admind init has run, 1 if not, 2 if it can't tell")
