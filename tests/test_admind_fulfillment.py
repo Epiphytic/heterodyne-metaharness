@@ -517,9 +517,7 @@ def test_existing_socket_serves_both_strict_dtos_with_kernel_uid(tmp_path, monke
             max_request=asks.MAX_REQUEST,
             max_reply=asks.MAX_REPLY,
             request_type=asks.AskRequest | f.Request,
-            check=lambda req: (
-                f.check(req) if isinstance(req, f.Apply | f.Propose | f.Dispose | f.Get) else asks.check(req)
-            ),
+            check=u.daemon.check_ask_wire,
             refused=asks.refused,
             failed=asks.failed,
             describe=lambda req: {"op": type(req).__name__},
