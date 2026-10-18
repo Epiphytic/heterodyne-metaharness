@@ -1,0 +1,66 @@
+{
+  "review_rounds": 1,
+  "second_validation": false,
+  "items": [
+    {
+      "ordinal": 1,
+      "finding": "Deleted successful tmux root",
+      "author_disposition": "Replaced impossible archival requirement with conjunctive same-Guard/proc, no error/timeout, returncode0, root/summary absent receipt; retained roots archive only after watchdog ends; no invented per-selector log.",
+      "status": "incorporated-in-proposal-not-implementation-proof"
+    },
+    {
+      "ordinal": 2,
+      "finding": "Third observer plugin scope",
+      "author_disposition": "Explicit D4 plugin-list/argv amendment covers every source pytest invocation including collection-only and all named stages; human disclosure mandatory.",
+      "status": "incorporated-in-proposal-not-implementation-proof"
+    },
+    {
+      "ordinal": 3,
+      "finding": "Two overlooked negative settings tests",
+      "author_disposition": "Added exact finite unreached-permission-error registry with source-pinned pre-effect failure proof and derived path accounting, no attempted/successful socket waiver.",
+      "status": "incorporated-in-proposal-not-implementation-proof"
+    },
+    {
+      "ordinal": 4,
+      "finding": "Incomplete tmux guard/cleanup pins",
+      "author_disposition": "Added actual complete guard, lock, launcher, Sweeper/main/finish pins plus whole files, not pytest_unconfigure as a stand-in for cleanup.",
+      "status": "incorporated-in-proposal-not-implementation-proof"
+    },
+    {
+      "ordinal": 5,
+      "finding": "Helper/archive scope mismatch",
+      "author_disposition": "Explicit new observer module and admission/capture/preflight/archive changes; one combined2GiB/65536-entry budget across both roots.",
+      "status": "incorporated-in-proposal-not-implementation-proof"
+    },
+    {
+      "ordinal": 6,
+      "finding": "Relative metric weakened absolute budget",
+      "author_disposition": "Require both actual relative argument and resolved absolute endpoint<=100, including actual UID/cwd provenance.",
+      "status": "incorporated-in-proposal-not-implementation-proof"
+    },
+    {
+      "ordinal": 7,
+      "finding": "Relative fixture provenance missing",
+      "author_disposition": "Added host_fixture/make_tree/cwd components and exact bind/chdir/finally references.",
+      "status": "incorporated-in-proposal-not-implementation-proof"
+    },
+    {
+      "ordinal": 8,
+      "finding": "Abbreviated authority/helper identities",
+      "author_disposition": "Full executable commit and genuine btq-7k1bf context/approved digest, Liam/time/Marmot message and selected FRESH effect bound; prior message reference was not digest.",
+      "status": "incorporated-in-proposal-not-implementation-proof"
+    },
+    {
+      "ordinal": 9,
+      "finding": "Negative reconstruction/key/suffix ambiguous",
+      "author_disposition": "Pinned public key assignment and fixed independently encoded public NPUB literal; no runner import/encoding; exact frozen prefix count1/single allocation/suffix0 and per-stage recheck required.",
+      "status": "incorporated-in-proposal-not-implementation-proof"
+    },
+    {
+      "ordinal": 10,
+      "finding": "Historic configure hook infeasible",
+      "author_disposition": "Read verified existing sys.modules module at sessionstart; outer unconfigure wrapper after fixture cleanup; explicit synthetic ordering/late-registration/collection/abort tests before admission.",
+      "status": "incorporated-in-proposal-not-implementation-proof"
+    }
+  ]
+}

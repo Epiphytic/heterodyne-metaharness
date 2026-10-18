@@ -1,6 +1,6 @@
 {
   "schema": "scanner-socket-inventory-clarification-inputs.v1",
-  "status": "PROPOSED_UNREVIEWED_NOT_AUTHORITY",
+  "status": "SOLE_HIGH_REVISE10_INCORPORATED_ONCE_PENDING_HUMAN",
   "design_task": "btq-zckld",
   "publication_base": "878b50e55cafdfcd4bd22f2a258c3cce2863e4a8",
   "parent_designs": [
@@ -95,12 +95,37 @@
           "path": "src/heterodyne/config/secret_scan.py",
           "sha256": "abc7aa4a96acae73c2807e5fc260f7d8b9c015b99d1cdbf245d6aea358c7376a",
           "bytes": 8471
+        },
+        {
+          "path": "tests/harness_env.py",
+          "sha256": "8372cf34e18900362841d0703b10d63f63dd1728c5aa907636ce86a3c3d0af4c",
+          "bytes": 20706
+        },
+        {
+          "path": "tests/fakes/settings.py",
+          "sha256": "b613b2bf9a98e0526cdb6ae0039046a1b4be61252656643eec2a54017be93609",
+          "bytes": 1385
+        },
+        {
+          "path": "src/heterodyne/admind/cli.py",
+          "sha256": "83858ebea0b71c777f865264d80c6537902206b0f2ca9024518f11ce160b843f",
+          "bytes": 26442
+        },
+        {
+          "path": "src/heterodyne/admind/wnagent.py",
+          "sha256": "f82f18f3d20c5ca4ea9fad80043b1f783d8572de3886a9588507933655de907b",
+          "bytes": 8861
+        },
+        {
+          "path": "src/heterodyne/admind/store.py",
+          "sha256": "5ae75889f8b1c58f9f4367bd2d76c8070154cfd8caa384eb8178f6c0c68d3359",
+          "bytes": 56321
         }
       ]
     },
     "helper_snapshot": {
       "head": "48f63469519440c615653617275480b95118902c",
-      "executable_commit": "0ca2d17",
+      "executable_commit": "0ca2d17e1dff612fc986357529e175de96860df5",
       "files": [
         {
           "path": "scripts/scanner_recovery/environment.py",
@@ -180,7 +205,22 @@
       "case_prefix": "test_socket_errors_do_not_echo",
       "public_test_key_encoded_bytes": 63,
       "suffix": "missing.sock",
-      "generic_exception_rule": false
+      "generic_exception_rule": false,
+      "public_test_key_hex": "abababababababababababababababababababababababababababababababab",
+      "key_assignment": {
+        "path": "tests/test_admind_cli.py",
+        "line": 521,
+        "literal": "NPUB = hex_to_npub(\"ab\" * 32)",
+        "sha256": "e91e0446a2e4d43e198713233d34230de511ac5f261b1cc32198c1694cba496b"
+      },
+      "prefix_occurrences": 1,
+      "allocations_per_node": 1,
+      "maximum_case_suffix": 0,
+      "reconstruction": "Concatenate the two pinned ASCII public NPUB literal parts and current identity-checked fresh basetemp/single-allocation case prefix; do not import encoder, reimplement bech32 or open socket",
+      "public_test_key_npub_literal_parts": [
+        "npub",
+        "14w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w4scf6zts"
+      ]
     }
   ],
   "relative_bind_registry": [
@@ -195,7 +235,26 @@
         "end_line": 582,
         "sha256": "d55aa33ac0812e62ddc71f1d15a5470a77b1df6619c4f08643a448360f1aa334",
         "hash_convention": "Complete physical lines from first def/async def through end_lineno, inclusive; original line endings; decorators excluded"
-      }
+      },
+      "caller": {
+        "path": "tests/deploy_host.py",
+        "symbol": "host_fixture",
+        "start_line": 586,
+        "end_line": 623,
+        "sha256": "7a8efb0acfa9cc4af52fe8ad5a365c92188dee11f72dc35e5dfc9b74c3dffffe",
+        "hash_convention": "Complete physical lines from first def/async def/class through end_lineno inclusive; original line endings; decorators excluded"
+      },
+      "fixture_root": "tmp_path/root",
+      "cwd_components": [
+        "root",
+        "run",
+        "user",
+        "<actual-os.getuid()>"
+      ],
+      "bind_line": 579,
+      "chdir_line": 577,
+      "finally_restore_line": 581,
+      "maximum_resolved_absolute_bytes": 100
     },
     {
       "id": "harness-walk-socket",
@@ -208,7 +267,24 @@
         "end_line": 160,
         "sha256": "65bffd1a26cda83e8bdff1d3c1991a004313d191e0643cb80e1c9eb93daf2ec4",
         "hash_convention": "Complete physical lines from first def/async def through end_lineno, inclusive; original line endings; decorators excluded"
-      }
+      },
+      "make_tree": {
+        "path": "tests/harness_env.py",
+        "symbol": "make_tree",
+        "start_line": 31,
+        "end_line": 45,
+        "sha256": "175ab0e96bcf0a4ec148a296f82674288de9364cd118a7b8bef2cadfea62d2e7",
+        "hash_convention": "Complete physical lines from first def/async def/class through end_lineno inclusive; original line endings; decorators excluded"
+      },
+      "fixture_root": "tmp_path",
+      "cwd_components": [
+        "sock",
+        "cli"
+      ],
+      "bind_line": 142,
+      "chdir_line": 140,
+      "finally_restore_line": 144,
+      "maximum_resolved_absolute_bytes": 100
     }
   ],
   "independent_root_registry": [
@@ -242,7 +318,164 @@
       "maximum_root_bytes": 16,
       "socket_formula": "root/s/<8 hex>",
       "maximum_argument_bytes": 27,
-      "already_below_helper_root": false
+      "already_below_helper_root": false,
+      "guard_chain": [
+        {
+          "path": "tests/tmux_guard.py",
+          "symbol": "make_root",
+          "start_line": 62,
+          "end_line": 67,
+          "sha256": "c1fe4f1053f6ba62feec5e29c993066fbb84385de7c6d4f067631766df91248f",
+          "hash_convention": "Complete physical lines from first def/async def/class through end_lineno inclusive; original line endings; decorators excluded"
+        },
+        {
+          "path": "tests/tmux_guard.py",
+          "symbol": "_new_socket_path",
+          "start_line": 70,
+          "end_line": 76,
+          "sha256": "a3fffe66c6af12bea69288529396b9ee57beac1f659f2c3587021d02773b657b",
+          "hash_convention": "Complete physical lines from first def/async def/class through end_lineno inclusive; original line endings; decorators excluded"
+        },
+        {
+          "path": "tests/tmux_guard.py",
+          "symbol": "_open_parent",
+          "start_line": 79,
+          "end_line": 83,
+          "sha256": "524a91db10ec6bac8ebd8b20d1e14e9364b14246e45e5043864ab1247245a354",
+          "hash_convention": "Complete physical lines from first def/async def/class through end_lineno inclusive; original line endings; decorators excluded"
+        },
+        {
+          "path": "tests/tmux_guard.py",
+          "symbol": "_open_lock_at",
+          "start_line": 86,
+          "end_line": 92,
+          "sha256": "7ef260136eab8ea493992681e46d36295e0b0d10655d08a1061548c6d776d82d",
+          "hash_convention": "Complete physical lines from first def/async def/class through end_lineno inclusive; original line endings; decorators excluded"
+        },
+        {
+          "path": "tests/tmux_guard.py",
+          "symbol": "begin_lock_open",
+          "start_line": 95,
+          "end_line": 99,
+          "sha256": "a8d26c9e01ba2c6f53fafe8cbcf210c8cc18e6d568f787a82a2a0aa07331e7e5",
+          "hash_convention": "Complete physical lines from first def/async def/class through end_lineno inclusive; original line endings; decorators excluded"
+        },
+        {
+          "path": "tests/tmux_guard.py",
+          "symbol": "GateLauncher",
+          "start_line": 102,
+          "end_line": 118,
+          "sha256": "6d6d7c3a3b309241f512cbf82bf0e16bdf672996b7f6a35b2cc0e3e868f263c3",
+          "hash_convention": "Complete physical lines from first def/async def/class through end_lineno inclusive; original line endings; decorators excluded"
+        },
+        {
+          "path": "tests/tmux_guard.py",
+          "symbol": "GuardedTmux.__init__",
+          "start_line": 128,
+          "end_line": 132,
+          "sha256": "afd71fefe30e6d016ddd1bb352f88e7c9f2ea60a5a38b08888bfa166fb1ebe93",
+          "hash_convention": "Complete physical lines from first def/async def/class through end_lineno inclusive; original line endings; decorators excluded"
+        },
+        {
+          "path": "tests/tmux_guard.py",
+          "symbol": "GuardedTmux._exec",
+          "start_line": 134,
+          "end_line": 142,
+          "sha256": "13062fb4af4a686df2dd5ce097c3ebb87315e4c12174f83d3f59e61997389149",
+          "hash_convention": "Complete physical lines from first def/async def/class through end_lineno inclusive; original line endings; decorators excluded"
+        },
+        {
+          "path": "tests/tmux_guard.py",
+          "symbol": "new_test_tmux",
+          "start_line": 145,
+          "end_line": 149,
+          "sha256": "3fa7ff3fa0647f16b6e60a9a9398f4e14848e1b3a215e72390261ba7ad9d0ba3",
+          "hash_convention": "Complete physical lines from first def/async def/class through end_lineno inclusive; original line endings; decorators excluded"
+        },
+        {
+          "path": "tests/tmux_guard.py",
+          "symbol": "start_watchdog",
+          "start_line": 157,
+          "end_line": 179,
+          "sha256": "f918fdf2a42231d3ecf9c4fa035eb673f6fc1a1596d2be2f5bacc745265e4901",
+          "hash_convention": "Complete physical lines from first def/async def/class through end_lineno inclusive; original line endings; decorators excluded"
+        }
+      ],
+      "launcher_chain": [
+        {
+          "path": "src/heterodyne/tmux.py",
+          "symbol": "Tmux.__init__",
+          "start_line": 52,
+          "end_line": 63,
+          "sha256": "c1d3b1deed0afbef9146951e1787a5d61b381a36b4807da5b48ba952240af67c",
+          "hash_convention": "Complete physical lines from first def/async def/class through end_lineno inclusive; original line endings; decorators excluded"
+        },
+        {
+          "path": "src/heterodyne/tmux.py",
+          "symbol": "Tmux._selector",
+          "start_line": 65,
+          "end_line": 68,
+          "sha256": "d8216d70a14b2b7df0f516c47d5b9cf15ec04cf7fe4b6918db92dd320c4518c7",
+          "hash_convention": "Complete physical lines from first def/async def/class through end_lineno inclusive; original line endings; decorators excluded"
+        },
+        {
+          "path": "src/heterodyne/tmux.py",
+          "symbol": "Tmux._run",
+          "start_line": 75,
+          "end_line": 81,
+          "sha256": "847ade95e7eecc36f357590d76d83ea98b7d42064cb23df109b56d972823eece",
+          "hash_convention": "Complete physical lines from first def/async def/class through end_lineno inclusive; original line endings; decorators excluded"
+        },
+        {
+          "path": "src/heterodyne/tmux.py",
+          "symbol": "Tmux.new_session",
+          "start_line": 111,
+          "end_line": 144,
+          "sha256": "eb9ba4bd86638cb7b05bb3d01bc42d8b1e7edd096757c6b5a0ca7892428f11da",
+          "hash_convention": "Complete physical lines from first def/async def/class through end_lineno inclusive; original line endings; decorators excluded"
+        }
+      ],
+      "watchdog_chain": [
+        {
+          "path": "tests/tmux_watchdog.py",
+          "symbol": "Sweeper",
+          "start_line": 66,
+          "end_line": 534,
+          "sha256": "b8f6dbd66990a8dbada99f2fc835c0644e4dfd1fcece68c1f79be360e84d65be",
+          "hash_convention": "Complete physical lines from first def/async def/class through end_lineno inclusive; original line endings; decorators excluded"
+        },
+        {
+          "path": "tests/tmux_watchdog.py",
+          "symbol": "finish",
+          "start_line": 545,
+          "end_line": 551,
+          "sha256": "0e27a0e2a69572cdc3f1aaeb591b44fe37417d2a7c3c7824235e75783eb47bf5",
+          "hash_convention": "Complete physical lines from first def/async def/class through end_lineno inclusive; original line endings; decorators excluded"
+        },
+        {
+          "path": "tests/tmux_watchdog.py",
+          "symbol": "main",
+          "start_line": 554,
+          "end_line": 570,
+          "sha256": "e68eb3d2b02280f81aec5013b3108a9e3134dad748688d281ddc5142fd99e380",
+          "hash_convention": "Complete physical lines from first def/async def/class through end_lineno inclusive; original line endings; decorators excluded"
+        }
+      ],
+      "cleanup_success": {
+        "same_guard_and_proc": true,
+        "error": null,
+        "timed_out": false,
+        "returncode": 0,
+        "root_absent": true,
+        "summary_absent": true,
+        "individual_uuid_logs_claimed": false
+      },
+      "archive_policy": {
+        "shared_across_roots": true,
+        "combined_bytes": 2147483648,
+        "combined_entries": 65536,
+        "surviving_root_requires_same_identity_and_ended_watchdog": true
+      }
     }
   ],
   "collection_proof": {
@@ -300,7 +533,178 @@
   "implementation_scope": "Proposed repair of existing helper only; genuine native target/approval binding required before implementation; no task mutation or approval claimed",
   "spec": {
     "path": "docs/adr/2026-10-18-scanner-socket-inventory-clarification.md",
-    "sha256": "96864dff6c164dbcc028d120eda0d486120ef4c8ecb4f01bb3a1f0d7cdac20dc",
-    "bytes": 13997
+    "sha256": "87bfacecb2d05fd24dc79dfa700fb4b394fc10bc2093eea9f12a31319e115090",
+    "bytes": 19515
+  },
+  "unreached_permission_error_registry": [
+    {
+      "node": "tests/test_admind_cli.py::test_init_unwritable_marmot_home_is_a_safe_error",
+      "classification": "original-unreached-permission-error",
+      "test": {
+        "path": "tests/test_admind_cli.py",
+        "symbol": "test_init_unwritable_marmot_home_is_a_safe_error",
+        "start_line": 538,
+        "end_line": 549,
+        "sha256": "5e1011e4e3966a708cff55ddd0d74de6f944dfab6a43d8eb326169fda101b00a",
+        "hash_convention": "Complete physical lines from first def/async def/class through end_lineno inclusive; original line endings; decorators excluded"
+      },
+      "settings": {
+        "path": "tests/fakes/settings.py",
+        "symbol": "make_settings",
+        "start_line": 19,
+        "end_line": 30,
+        "sha256": "37452a91f4f4585d7803b12d0567185a9cfc72c13db57915fcd6037e45668ca3",
+        "hash_convention": "Complete physical lines from first def/async def/class through end_lineno inclusive; original line endings; decorators excluded"
+      },
+      "cli_load": {
+        "path": "src/heterodyne/admind/cli.py",
+        "symbol": "_load",
+        "start_line": 61,
+        "end_line": 67,
+        "sha256": "a8e17c6042f475cb9867cc1914d9f02a3b01f3e03ad535e61e9ee17d31412b7b",
+        "hash_convention": "Complete physical lines from first def/async def/class through end_lineno inclusive; original line endings; decorators excluded"
+      },
+      "cli_init": {
+        "path": "src/heterodyne/admind/cli.py",
+        "symbol": "init",
+        "start_line": 70,
+        "end_line": 115,
+        "sha256": "f24b5c7791367870b8a9dafed15ea843412136fc41d6cfcdf5bb13c8abf3e026",
+        "hash_convention": "Complete physical lines from first def/async def/class through end_lineno inclusive; original line endings; decorators excluded"
+      },
+      "store": {
+        "path": "src/heterodyne/admind/store.py",
+        "symbol": "Store.__init__",
+        "start_line": 306,
+        "end_line": 357,
+        "sha256": "2c85cc2db1f4b6ee4e01b176bafee1666c14a8937c624ebe642a26f55893a085",
+        "hash_convention": "Complete physical lines from first def/async def/class through end_lineno inclusive; original line endings; decorators excluded"
+      },
+      "chain": [
+        {
+          "path": "src/heterodyne/admind/wnagent.py",
+          "symbol": "WnAgent.__init__",
+          "start_line": 32,
+          "end_line": 42,
+          "sha256": "25db0da5aae58b902c3167cf868798be456518eba5a35c7ad3637f9d0b95c0a6",
+          "hash_convention": "Complete physical lines from first def/async def/class through end_lineno inclusive; original line endings; decorators excluded"
+        },
+        {
+          "path": "src/heterodyne/admind/wnagent.py",
+          "symbol": "WnAgent.prepare",
+          "start_line": 44,
+          "end_line": 63,
+          "sha256": "cfbfdf6b281ddd8e149dead19c1b9921cf2ab74391e8dd8dd74f848dd59963dc",
+          "hash_convention": "Complete physical lines from first def/async def/class through end_lineno inclusive; original line endings; decorators excluded"
+        }
+      ],
+      "relative_settings_components": [
+        "locked",
+        "<pinned-public-npub>",
+        "marmot"
+      ],
+      "must_verify_nonroot": true,
+      "syscall_reached": false,
+      "successful_endpoint": false,
+      "derive_and_record_all_socket_paths": true,
+      "changed_or_unproved_branch": "HOLD"
+    },
+    {
+      "node": "tests/test_admind_cli.py::test_unwritable_state_dir_is_a_safe_config_exit",
+      "classification": "original-unreached-permission-error",
+      "test": {
+        "path": "tests/test_admind_cli.py",
+        "symbol": "test_unwritable_state_dir_is_a_safe_config_exit",
+        "start_line": 553,
+        "end_line": 563,
+        "sha256": "328e334b3ff498645de5a84f11077880615cb0dfb669351f68b5dba2b43128f1",
+        "hash_convention": "Complete physical lines from first def/async def/class through end_lineno inclusive; original line endings; decorators excluded"
+      },
+      "settings": {
+        "path": "tests/fakes/settings.py",
+        "symbol": "make_settings",
+        "start_line": 19,
+        "end_line": 30,
+        "sha256": "37452a91f4f4585d7803b12d0567185a9cfc72c13db57915fcd6037e45668ca3",
+        "hash_convention": "Complete physical lines from first def/async def/class through end_lineno inclusive; original line endings; decorators excluded"
+      },
+      "cli_load": {
+        "path": "src/heterodyne/admind/cli.py",
+        "symbol": "_load",
+        "start_line": 61,
+        "end_line": 67,
+        "sha256": "a8e17c6042f475cb9867cc1914d9f02a3b01f3e03ad535e61e9ee17d31412b7b",
+        "hash_convention": "Complete physical lines from first def/async def/class through end_lineno inclusive; original line endings; decorators excluded"
+      },
+      "cli_init": {
+        "path": "src/heterodyne/admind/cli.py",
+        "symbol": "init",
+        "start_line": 70,
+        "end_line": 115,
+        "sha256": "f24b5c7791367870b8a9dafed15ea843412136fc41d6cfcdf5bb13c8abf3e026",
+        "hash_convention": "Complete physical lines from first def/async def/class through end_lineno inclusive; original line endings; decorators excluded"
+      },
+      "store": {
+        "path": "src/heterodyne/admind/store.py",
+        "symbol": "Store.__init__",
+        "start_line": 306,
+        "end_line": 357,
+        "sha256": "2c85cc2db1f4b6ee4e01b176bafee1666c14a8937c624ebe642a26f55893a085",
+        "hash_convention": "Complete physical lines from first def/async def/class through end_lineno inclusive; original line endings; decorators excluded"
+      },
+      "chain": [],
+      "relative_settings_components": [
+        "locked",
+        "<pinned-public-npub>",
+        "admind"
+      ],
+      "must_verify_nonroot": true,
+      "syscall_reached": false,
+      "successful_endpoint": false,
+      "derive_and_record_all_socket_paths": true,
+      "changed_or_unproved_branch": "HOLD"
+    }
+  ],
+  "fresh_disposition": {
+    "adr_revision": "f05aeb43d8b871dec2d83c5d0df8efa933b53b68",
+    "approved_at": "2026-10-18T00:26:51Z",
+    "approved_by": "Liam",
+    "approved_digest": "f4d1a9c371fe6282ce0314eb6d3849b477be7a5f1cbfb1b0f5df0640df8c7b30",
+    "context_digest": "f4d1a9c371fe6282ce0314eb6d3849b477be7a5f1cbfb1b0f5df0640df8c7b30",
+    "decision": "approve",
+    "via": "marmot",
+    "via_ref": "marmot:id:2a9d3b2de451",
+    "bead": "btq-7k1bf",
+    "selected_mode": "FRESH",
+    "ask_effect": "Authorize ONE375-node diagnostic of unexpected failures, fresh exactH92, FRESH red88/create-red6 baselines, then unchanged B1/overlap/B2/create-green/final gates. This card explicitly selects FRESH baselines; earlier rcje question is not execution authority.",
+    "native_readback_sha256": "0cfc4702bdf040c34b19494de52b03e2ea20617ae52d3e6f5063901d3ac3580d"
+  },
+  "observer_contract": {
+    "module": "new pinned run-local scanner inventory observer",
+    "plugins": [
+      "scanner_probe",
+      "_hypothesis_pytestplugin",
+      "<pinned-observer-module>"
+    ],
+    "applies_to": "Every source pytest invocation including collection-only and all named stages",
+    "sessionstart": "sys.modules tmux_guard exact file identity; never import subject plugin",
+    "unconfigure": "tryfirst outer non-historic wrapper; same module last after fixture teardown",
+    "configuration_abort": "bounded failure receipt where possible; always HOLD",
+    "tests_required_before_admission": [
+      "installed pytest hook ordering",
+      "late plugin registration",
+      "collection-only",
+      "configuration abort",
+      "durable final publication"
+    ]
+  },
+  "review": {
+    "draft": "debd0c4a1a709610a495d69ca76efec1bd2fdebb",
+    "reviewer": "claude-opus",
+    "effort": "high",
+    "rounds": 1,
+    "verdict": "10 findings; no APPROVE",
+    "raw_sha256": "e8f23e4f23a110a9c635d984124ce2f231211b39d2ab8d4ed3e0932d7fda1673",
+    "second_review_or_validation": false
   }
 }
