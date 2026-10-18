@@ -319,13 +319,22 @@ def settle_request(
             value.phase != "filed"
             or not isinstance(dispatch, Dispatch)
             or not dispatch.settled
-            or dispatch.state != "succeeded"
+            or dispatch.state not in {"succeeded", "failed"}
+            or not dispatch.cleanup_proven
+            or (dispatch.state == "succeeded" and not dispatch.claim_consumed)
+            or (dispatch.state == "failed" and not dispatch.recovery_operator_event)
             or dispatch.dispatch_kind != "initial"
             or (dispatch.approval_id, dispatch.digest, dispatch.revision)
             != (value.approval_id, value.context_digest, value.request_revision)
         ):
             raise Refused("request-completion-not-proved")
     elif phase == "cancelled":
+        if (
+            isinstance(decision, Decision)
+            and decision.phase == "committed"
+            and decision.event.value == "deny"
+        ):
+            raise Refused("committed-denial-requires-denied-settlement")
         if value.phase not in {
             "allocated",
             "blocker-pending",

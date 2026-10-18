@@ -17,11 +17,17 @@ from typing import Literal
 import msgspec
 
 from heterodyne.actions.codec import encode_record
-from heterodyne.actions.decisions import Decision
+from heterodyne.actions.decisions import Decision, begin_decision
 from heterodyne.actions.dispatch import Dispatch
 from heterodyne.actions.policy import request_denial_key
 from heterodyne.actions.requests import TERMINAL_REQUESTS, Refused, Request, request_bytes
-from heterodyne.actions.transitions import decision_transition, dispatch_transition, request_transition
+from heterodyne.actions.transitions import (
+    EMPTY_OBSERVATION,
+    TransitionObservation,
+    decision_transition,
+    dispatch_transition,
+    request_transition,
+)
 
 APPLICATION_ID = 0x50315031
 SCHEMA_VERSION = 2
@@ -215,6 +221,16 @@ class FixtureJournal:
             self._event("request", key, value.version, data)
         return key
 
+    def _request_for_approval(self, approval_id: str) -> Request:
+        matches = [
+            value
+            for row in self.db.execute("SELECT data FROM requests")
+            if (value := msgspec.json.decode(bytes(row[0]), type=Request)).approval_id == approval_id
+        ]
+        if len(matches) != 1:
+            raise Refused("unique-durable-request-required")
+        return matches[0]
+
     def add_decision(self, value: Decision) -> str:
         """Retain every inbox event. First valid native decision wins, never first invalid candidate."""
         key, data = value.approval_id, encode_record(value)
@@ -231,8 +247,20 @@ class FixtureJournal:
                 if bytes(prior[0]) != data:
                     raise Refused("decision-event-id-conflict")
                 if isinstance(old, Decision) and old.phase != "invalid":
+                    # Exact retained inbox replay acknowledges history without admitting
+                    # a new decision, even after request terminal settlement.
                     return "duplicate" if old.event == value.event else "superseded"
-            else:
+            request = self._request_for_approval(value.approval_id)
+            expected = begin_decision(
+                request,
+                value.event,
+                expected_purpose=value.purpose,
+                current_digest=request.context_digest or "",
+                heart=value.heart_proposal_pending,
+            )
+            if expected != value:
+                raise Refused("decision-not-bound-to-durable-request")
+            if prior is None:
                 self._event("decision-inbox", inbox_key, 0, data)
             if isinstance(old, Decision):
                 if old.phase != "invalid":
@@ -268,6 +296,13 @@ class FixtureJournal:
             raise Refused("dispatch-not-initial")
         with self.transaction():
             decision = self.get("decision", value.approval_id)
+            request = self._request_for_approval(value.approval_id)
+            if (
+                request.phase != "filed"
+                or request.context_digest != value.digest
+                or request.request_revision != value.revision
+            ):
+                raise Refused("dispatch-request-not-filed")
             if (
                 not isinstance(decision, Decision)
                 or decision.phase != "committed"
@@ -330,6 +365,8 @@ class FixtureJournal:
                 set(value.retired_startups) | set(value.retired_nonces)
             ):
                 raise Refused("reconcile-retired-history-required")
+        if reconciliations != parent.reconciliation_lookups:
+            raise Refused("reconcile-parent-observation-required")
         if reconciliations >= 3:
             raise Refused("reconcile-needs-authenticated-recovery")
         self.db.execute("INSERT INTO dispatches VALUES(?,?,?)", (key, value.version, data))
@@ -341,6 +378,8 @@ class FixtureJournal:
         key: str,
         expected_version: int,
         reducer: Callable[[Request | Decision | Dispatch], Request | Decision | Dispatch],
+        *,
+        observation: TransitionObservation = EMPTY_OBSERVATION,
     ) -> Request | Decision | Dispatch:
         """Read, reduce and conditional update share one transaction; no port calls inside it."""
         _, cls = TABLES[kind]
@@ -362,7 +401,7 @@ class FixtureJournal:
             if isinstance(value, Request):
                 if not isinstance(old, Request):
                     raise Refused("immutable-request-binding")
-                value = self._request_proposal(old, value)
+                value = self._request_proposal(old, value, observation)
                 data = request_bytes(value)
                 self.db.execute(
                     "UPDATE requests SET data=?,version=?,outstanding=? WHERE key=? AND version=?",
@@ -372,7 +411,20 @@ class FixtureJournal:
                 if isinstance(old, Decision) and isinstance(value, Decision):
                     decision_transition(old, value)
                 elif isinstance(old, Dispatch) and isinstance(value, Dispatch):
-                    dispatch_transition(old, value)
+                    reconciliation = None
+                    if observation.reconciliation_key is not None:
+                        reconciliation = self.get("dispatch", observation.reconciliation_key)
+                        if not isinstance(reconciliation, Dispatch):
+                            raise Refused("reconciliation-record-required")
+                    dispatch_transition(old, value, observation=observation, reconciliation=reconciliation)
+                    if value.reconciliation_lookups != old.reconciliation_lookups:
+                        if reconciliation is None:
+                            raise Refused("reconciliation-record-required")
+                        value = msgspec.structs.replace(
+                            value,
+                            reconciliation_attempts=(*old.reconciliation_attempts, reconciliation.attempt_id),
+                        )
+                        data = encode_record(value)
                 if (dispatch_key(value) if isinstance(value, Dispatch) else value.approval_id) != key:
                     raise Refused("immutable-approval-binding")
                 query = {
@@ -383,12 +435,15 @@ class FixtureJournal:
             if isinstance(value, Dispatch) and value.settled and value.dispatch_kind == "initial":
                 self.db.execute("DELETE FROM resources WHERE dispatch_key=?", (key,))
             self._event(kind, key, value.version, data)
+            if observation != EMPTY_OBSERVATION:
+                self._event(kind + "-observation", key, value.version, encode_record(observation))
         return value
 
-    def _request_proposal(self, old: Request, value: Request) -> Request:
-        decision = self.get("decision", value.approval_id or "") if value.phase == "denied" else None
+    def _request_proposal(self, old: Request, value: Request, observation: TransitionObservation) -> Request:
+        row = self.db.execute("SELECT 1 FROM decisions WHERE key=?", (value.approval_id or "",)).fetchone()
+        decision = self.get("decision", value.approval_id or "") if row else None
         dispatch = self.get("dispatch", value.approval_id or "") if value.phase == "completed" else None
-        request_transition(old, value, decision=decision, dispatch=dispatch)
+        request_transition(old, value, decision=decision, dispatch=dispatch, observation=observation)
         if value.phase == "denied":
             self._denial(value, decision)
         if value.phase in TERMINAL_REQUESTS:
@@ -433,9 +488,10 @@ class FixtureJournal:
     def record_denial(self, value: Request, decision: Decision) -> None:
         with self.transaction():
             durable = self.get("decision", decision.approval_id)
-            if durable != decision:
+            request = self.get("request", request_key(value))
+            if not isinstance(request, Request) or durable != decision or request != value:
                 raise Refused("denial-not-durable")
-            self._denial(value, durable)
+            self._denial(request, durable)
 
     def denied(self, identity: str, session_key: str) -> bool:
         return (

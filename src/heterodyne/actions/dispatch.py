@@ -49,6 +49,8 @@ class Dispatch(Record, frozen=True):
     recovery_operator_event: str | None = None
     dispatch_kind: Literal["initial", "reconcile"] = "initial"
     parent_attempt_id: str | None = None
+    reconciliation_attempts: tuple[str, ...] = ()
+    reconciliation_effect: Literal["succeeded", "absent", "unknown"] | None = None
 
 
 def _clock(value: Clock) -> None:
@@ -65,15 +67,21 @@ def _clock(value: Clock) -> None:
         raise Refused("invalid-clock")
 
 
-def _within(value: Dispatch, now: Clock) -> None:
+def elapsed_seconds(value: Dispatch, now: Clock) -> int:
     _clock(now)
     if (
         now.boot_id != value.started.boot_id
         or now.mono_ns < value.started.mono_ns
         or now.utc_ns < value.started.utc_ns
-        or now.mono_ns >= value.deadline_ns
         or abs((now.utc_ns - value.started.utc_ns) - (now.mono_ns - value.started.mono_ns)) > 1_000_000_000
     ):
+        raise Refused("dispatch-clock-or-deadline")
+    return (now.mono_ns - value.started.mono_ns) // 1_000_000_000
+
+
+def _within(value: Dispatch, now: Clock) -> None:
+    elapsed_seconds(value, now)
+    if now.mono_ns >= value.deadline_ns:
         raise Refused("dispatch-clock-or-deadline")
 
 
@@ -216,8 +224,8 @@ def retire_unconsumed(
 
 
 def uncertain(value: Dispatch) -> Dispatch:
-    if value.settled:
-        raise Refused("settled-dispatch-conflict")
+    if value.settled or value.state not in {"ready", "executing", "uncertain", "failed"}:
+        raise Refused("settled-or-unissued-dispatch-conflict")
     return changed(value, state="uncertain")
 
 
@@ -270,7 +278,13 @@ def reconcile_lookup(
     cleanup_proven: bool,
     evidence: str | None = None,
 ) -> Dispatch:
-    if value.state not in {"uncertain", "failed"} or value.reconciliation_lookups >= 3:
+    if (
+        value.dispatch_kind != "initial"
+        or (effect == "succeeded" and not value.claim_consumed)
+        or value.state not in {"uncertain", "failed"}
+        or value.settled
+        or value.reconciliation_lookups >= 3
+    ):
         raise Refused("reconciliation-needs-authenticated-recovery")
     if elapsed_seconds < (1, 5, 30)[value.reconciliation_lookups]:
         raise Refused("reconciliation-not-due")
@@ -290,6 +304,7 @@ def reconcile_lookup(
         reconciliation_lookups=value.reconciliation_lookups + 1,
         state="uncertain",
         cleanup_proven=cleanup_proven,
+        evidence=evidence,
     )
 
 
@@ -352,14 +367,13 @@ def settle_dispatch(value: Dispatch, observation: DispatchRecovery) -> Dispatch:
     )
 
 
-def settle_failed_dispatch(value: Dispatch, observation: DispatchRecovery) -> Dispatch:
-    """Compatibility entrypoint: accepts only the originally supported absent outcome."""
-    if not observation.effect_definitively_absent or observation.effect_attested_succeeded:
-        raise Refused("dispatch-recovery-not-bound")
-    return settle_dispatch(value, observation)
-
-
-def finish_reconciliation(value: Dispatch, *, evidence: str, cleanup_proven: bool) -> Dispatch:
+def finish_reconciliation(
+    value: Dispatch,
+    *,
+    evidence: str,
+    cleanup_proven: bool,
+    effect: Literal["succeeded", "absent", "unknown"] = "unknown",
+) -> Dispatch:
     """Retire a read-only invocation; its evidence does not itself settle the parent effect."""
     if (
         value.dispatch_kind != "reconcile"
@@ -369,9 +383,17 @@ def finish_reconciliation(value: Dispatch, *, evidence: str, cleanup_proven: boo
         or value.claim_hash is not None
         or not cleanup_proven
         or not digest_syntax(evidence)
+        or effect not in {"succeeded", "absent", "unknown"}
     ):
         raise Refused("reconcile-cleanup-unproved")
-    return changed(value, state="failed", settled=True, cleanup_proven=True, evidence=evidence)
+    return changed(
+        value,
+        state="failed",
+        settled=True,
+        cleanup_proven=True,
+        evidence=evidence,
+        reconciliation_effect=effect,
+    )
 
 
 def prepare_reconciliation(value: Dispatch, attempt_id: str, startup_hash: str, now: Clock) -> Dispatch:

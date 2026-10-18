@@ -19,6 +19,7 @@ from heterodyne.actions.fake_ports import FakeEffect, FakeQueue, FakeSession, Un
 from heterodyne.actions.journal import FixtureJournal, create_fixture, upgrade_fixture
 from heterodyne.actions.requests import (
     Refused,
+    Request,
     groom,
     issue_allocation,
     new_request,
@@ -29,6 +30,7 @@ from heterodyne.actions.requests import (
     pin_ask,
     settle_request,
 )
+from heterodyne.actions.transitions import TransitionObservation
 
 SHA = "a" * 40
 DIGEST = "b" * 64
@@ -102,10 +104,62 @@ def committed(value="approve"):
     return result
 
 
+def persist_filed_request(db, approval_id="btq-ab123"):
+    from heterodyne.actions.transitions import TransitionObservation
+
+    for row in db.db.execute("SELECT data FROM requests"):
+        request = msgspec.json.decode(row[0], type=Request)
+        if request.approval_id == approval_id:
+            return request
+    sequence = db.db.execute("SELECT count(*) FROM requests").fetchone()[0] + 1
+    key = db.add_request(initial(sequence))
+    value = db.transition("request", key, 0, issue_allocation)
+    value = db.transition(
+        "request",
+        key,
+        value.version,
+        lambda v: observe_allocation(v, (approval_id,), lookup_ok=True, elapsed_seconds=1),
+        observation=TransitionObservation(allocation_elapsed_seconds=1),
+    )
+    for operation in ("blocker", "park", "land"):
+        value = db.transition(
+            "request",
+            key,
+            value.version,
+            lambda v, operation=operation: observe_stage(
+                v,
+                operation,
+                key=v.key,
+                approval_id=approval_id,
+                origin=v.origin,
+                source=SHA,
+                readback_ok=True,
+            ),
+        )
+    value = db.transition(
+        "request",
+        key,
+        value.version,
+        lambda v: pin_ask(v, b'{"full":"native fixture ask"}', DIGEST, revision=1),
+    )
+    value = db.transition(
+        "request",
+        key,
+        value.version,
+        lambda v: observe_sufficient(v, digest=DIGEST, policy_revision=DIGEST, source=SHA, sufficient=True),
+    )
+    return db.transition(
+        "request",
+        key,
+        value.version,
+        lambda v: observe_filed(v, digest=DIGEST, revision=1, native_readback=True),
+    )
+
+
 def persist_decision(db, value="approve", approval_id="btq-ab123"):
     """Drive the actual journal/reducers; a constructor boolean is never durable consent."""
     observation = msgspec.structs.replace(event(value), approval_id=approval_id)
-    request = msgspec.structs.replace(filed(), approval_id=approval_id)
+    request = persist_filed_request(db, approval_id)
     result = begin_decision(request, observation, expected_purpose="execution", current_digest=DIGEST)
     outcome = db.add_decision(result)
     if outcome == "duplicate":
@@ -129,6 +183,45 @@ def persist_decision(db, value="approve", approval_id="btq-ab123"):
             ),
         )
     return result
+
+
+def persist_reconcile_observation(db, parent, elapsed, *, effect="unknown", cleanup=False):
+    import hashlib
+
+    from heterodyne.actions import dispatch as dis
+    from heterodyne.actions.journal import dispatch_key
+
+    now = dis.Clock(
+        parent.started.boot_id,
+        parent.started.mono_ns + elapsed * 10**9,
+        parent.started.utc_ns + elapsed * 10**9,
+    )
+    nonce = hashlib.sha256(f"read-{parent.reconciliation_lookups}".encode()).hexdigest()
+    child = dis.prepare_reconciliation(parent, f"read-{parent.reconciliation_lookups}", nonce, now)
+    history = set(child.retired_startups) | set(child.retired_nonces)
+    for row in db.db.execute("SELECT data FROM dispatches"):
+        previous = msgspec.json.decode(row[0], type=dis.Dispatch)
+        if previous.approval_id == parent.approval_id:
+            history.update((previous.startup_hash, *previous.retired_startups, *previous.retired_nonces))
+            if previous.claim_hash:
+                history.add(previous.claim_hash)
+    child = msgspec.structs.replace(child, retired_startups=tuple(sorted(history)))
+    db.add_dispatch(child)
+    db.transition(
+        "dispatch",
+        dispatch_key(child),
+        0,
+        lambda old: dis.finish_reconciliation(old, evidence=DIGEST, cleanup_proven=True, effect=effect),
+    )
+    return db.transition(
+        "dispatch",
+        parent.approval_id,
+        parent.version,
+        lambda old: dis.reconcile_lookup(
+            old, elapsed_seconds=elapsed, effect=effect, evidence=DIGEST, cleanup_proven=cleanup
+        ),
+        observation=TransitionObservation(now=now, reconciliation_key=dispatch_key(child)),
+    )
 
 
 def test_create_ack_loss_unique_adoption_no_second_create():
@@ -278,6 +371,7 @@ def test_decision_ack_loss_readback_and_pins_after_close_are_required():
 def test_first_decision_is_durable_and_conflicts_never_overwrite(tmp_path):
     path = tmp_path / "fixture.sqlite"
     db = FixtureJournal.create(path)
+    persist_filed_request(db)
     db.add_decision(begun())
     db.add_decision(begun())
     with pytest.raises(Refused):
@@ -340,12 +434,14 @@ def test_dispatch_claim_crash_restart_retains_lock_and_prevents_replay(tmp_path)
         value.approval_id,
         0,
         lambda v: ready(v, "d" * 64, clock, fresh_gates=True, startup_readback=True),
+        observation=TransitionObservation(now=clock),
     )
     db.transition(
         "dispatch",
         value.approval_id,
         value.version,
         lambda v: consume_claim(v, "d" * 64, clock, fresh_gates=True),
+        observation=TransitionObservation(now=clock),
     )
     db.close()  # Lost native acknowledgement after the durable claim.
     db = FixtureJournal(path)
@@ -484,7 +580,7 @@ def test_denial_blocks_allocation_before_shell_across_generation_after_restart(t
     assert retry.denial_identity == request.denial_identity
     with pytest.raises(Refused, match="same-session-denied-intent"):
         db.add_request(retry)
-    assert db.db.execute("SELECT count(*) FROM requests").fetchone() == (0,)
+    assert db.db.execute("SELECT count(*) FROM requests").fetchone() == (1,)
     db.close()
 
 
@@ -521,12 +617,14 @@ def test_two_connections_claim_retirement_race_has_only_one_transition(tmp_path)
         value.approval_id,
         0,
         lambda v: ready(v, "d" * 64, clock, fresh_gates=True, startup_readback=True),
+        observation=TransitionObservation(now=clock),
     )
     left.transition(
         "dispatch",
         value.approval_id,
         value.version,
         lambda v: consume_claim(v, "d" * 64, clock, fresh_gates=True),
+        observation=TransitionObservation(now=clock),
     )
     with pytest.raises(Refused, match="stale-fixture-version"):
         right.transition(
@@ -556,8 +654,6 @@ def test_reducer_exception_rolls_back_record_and_event(tmp_path):
 
 
 def test_reconciliation_success_is_one_cas_and_releases_only_settled_resource(tmp_path):
-    from heterodyne.actions.dispatch import reconcile_lookup
-
     db = FixtureJournal.create(tmp_path / "fixture.sqlite")
     clock = Clock("boot-one", 10**12, 10**15)
     value = prepare(
@@ -570,7 +666,13 @@ def test_reconciliation_success_is_one_cas_and_releases_only_settled_resource(tm
         lambda v: consume_claim(v, "d" * 64, clock, fresh_gates=True),
         uncertain,
     ):
-        value = db.transition("dispatch", value.approval_id, value.version, reducer)
+        value = db.transition(
+            "dispatch",
+            value.approval_id,
+            value.version,
+            reducer,
+            observation=TransitionObservation(now=clock),
+        )
     alias = prepare(
         "btq-cd456",
         1,
@@ -585,14 +687,7 @@ def test_reconciliation_success_is_one_cas_and_releases_only_settled_resource(tm
     persist_decision(db, approval_id=alias.approval_id)
     with pytest.raises(Refused, match="resource-still-held"):
         db.add_dispatch(alias)
-    value = db.transition(
-        "dispatch",
-        value.approval_id,
-        value.version,
-        lambda v: reconcile_lookup(
-            v, elapsed_seconds=1, effect="succeeded", cleanup_proven=True, evidence=DIGEST
-        ),
-    )
+    value = persist_reconcile_observation(db, value, 1, effect="succeeded", cleanup=True)
     assert value.settled
     db.add_dispatch(alias)
     assert db.db.execute("SELECT count(*) FROM resources").fetchone() == (3,)

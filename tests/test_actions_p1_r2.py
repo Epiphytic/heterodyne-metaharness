@@ -7,8 +7,9 @@ import test_actions_p1_r1 as r1
 
 from heterodyne.actions import decisions as dec
 from heterodyne.actions import dispatch as dis
-from heterodyne.actions.journal import FixtureJournal, dispatch_key
+from heterodyne.actions.journal import FixtureJournal
 from heterodyne.actions.requests import Refused, changed, issue_allocation, settle_request
+from heterodyne.actions.transitions import TransitionObservation
 
 
 def persist_request(db, sequence=1, until="filed"):
@@ -18,7 +19,10 @@ def persist_request(db, sequence=1, until="filed"):
         "request",
         key,
         value.version,
-        lambda v: f.observe_allocation(v, ("btq-ab123",), lookup_ok=True, elapsed_seconds=1),
+        lambda v: f.observe_allocation(
+            v, (("btq-ab123" if sequence == 1 else "btq-cd456"),), lookup_ok=True, elapsed_seconds=1
+        ),
+        observation=TransitionObservation(allocation_elapsed_seconds=1),
     )
     for op in ("blocker", "park", "land"):
         value = db.transition(
@@ -88,6 +92,7 @@ def test_unrelated_later_denial_does_not_freeze_existing_cleanup(tmp_path):
 
 def test_superseded_inbox_candidate_replayed_after_invalid_first(tmp_path):
     db = FixtureJournal.create(tmp_path / "journal")
+    f.persist_filed_request(db)
     first = f.begun()
     second = msgspec.structs.replace(first, event=msgspec.structs.replace(first.event, event_id="second"))
     assert db.add_decision(first) == "recorded"
@@ -207,6 +212,7 @@ def test_reconcile_cannot_issue_effect_claim_even_with_fresh_nonce(tmp_path):
 
 def test_native_conflict_adopted_without_another_native_write(tmp_path):
     db = FixtureJournal.create(tmp_path / "journal")
+    f.persist_filed_request(db)
     first = f.begun()
     native = msgspec.structs.replace(f.event("deny"), event_id="native-first")
     candidate = dec.begin_decision(f.filed(), native, expected_purpose="execution", current_digest=f.DIGEST)
@@ -258,19 +264,25 @@ def test_attested_success_after_unknown_cleanup_is_bound_and_never_replays(tmp_p
     db = FixtureJournal.create(tmp_path / "journal")
     parent, clock = held_parent(db)
     parent = db.transition(
-        "dispatch", parent.approval_id, parent.version, lambda v: dis.restart_preparation(v, "d" * 64, clock)
+        "dispatch",
+        parent.approval_id,
+        parent.version,
+        lambda v: dis.restart_preparation(v, "d" * 64, clock),
+        observation=TransitionObservation(now=clock),
     )
     parent = db.transition(
         "dispatch",
         parent.approval_id,
         parent.version,
         lambda v: dis.ready(v, "e" * 64, clock, fresh_gates=True, startup_readback=True),
+        observation=TransitionObservation(now=clock),
     )
     parent = db.transition(
         "dispatch",
         parent.approval_id,
         parent.version,
         lambda v: dis.consume_claim(v, "e" * 64, clock, fresh_gates=True),
+        observation=TransitionObservation(now=clock),
     )
     parent = db.transition(
         "dispatch",
@@ -288,14 +300,7 @@ def test_attested_success_after_unknown_cleanup_is_bound_and_never_replays(tmp_p
         ),
     )
     for elapsed in (1, 5, 30):
-        parent = db.transition(
-            "dispatch",
-            parent.approval_id,
-            parent.version,
-            lambda v, elapsed=elapsed: dis.reconcile_lookup(
-                v, elapsed_seconds=elapsed, effect="unknown", cleanup_proven=False
-            ),
-        )
+        parent = f.persist_reconcile_observation(db, parent, elapsed)
     recovery = dis.DispatchRecovery(
         parent.approval_id,
         parent.revision,
@@ -317,7 +322,11 @@ def test_attested_success_after_unknown_cleanup_is_bound_and_never_replays(tmp_p
     with pytest.raises(Refused):
         dis.settle_dispatch(parent, msgspec.structs.replace(recovery, effect_definitively_absent=True))
     done = db.transition(
-        "dispatch", parent.approval_id, parent.version, lambda v: dis.settle_dispatch(v, recovery)
+        "dispatch",
+        parent.approval_id,
+        parent.version,
+        lambda v: dis.settle_dispatch(v, recovery),
+        observation=TransitionObservation(dispatch_recovery=recovery),
     )
     assert done.state == "succeeded" and done.settled and done.claim_consumed
     assert done.recovery_operator_event == recovery.operator_event
@@ -330,26 +339,34 @@ def test_reconciliations_are_serial_and_total_three_across_reopen(tmp_path):
     path = tmp_path / "journal"
     db = FixtureJournal.create(path)
     parent, clock = held_parent(db)
-    history = ()
-    for ordinal, nonce in enumerate(("d", "e", "f"), 1):
-        value = dis.prepare_reconciliation(parent, f"read-{ordinal}", nonce * 64, clock)
-        value = msgspec.structs.replace(
-            value, retired_startups=tuple(dict.fromkeys((*value.retired_startups, *history)))
-        )
-        db.add_dispatch(value)
-        db.transition(
-            "dispatch",
-            dispatch_key(value),
-            0,
-            lambda v: dis.finish_reconciliation(v, evidence="a" * 64, cleanup_proven=True),
-        )
-        history = (*history, value.startup_hash)
+    parent = db.transition(
+        "dispatch",
+        parent.approval_id,
+        parent.version,
+        lambda old: dis.restart_preparation(old, "d" * 64, clock),
+        observation=TransitionObservation(now=clock),
+    )
+    parent = db.transition(
+        "dispatch",
+        parent.approval_id,
+        parent.version,
+        lambda old: dis.ready(old, "e" * 64, clock, fresh_gates=True, startup_readback=True),
+        observation=TransitionObservation(now=clock),
+    )
+    parent = db.transition("dispatch", parent.approval_id, parent.version, dis.uncertain)
+    for elapsed in (1, 5, 30):
+        parent = f.persist_reconcile_observation(db, parent, elapsed)
         db.close()
         db = FixtureJournal(path)
     fourth = dis.prepare_reconciliation(parent, "read-4", "a" * 64, clock)
-    fourth = msgspec.structs.replace(fourth, retired_startups=(*fourth.retired_startups, *history))
+    history = set(fourth.retired_startups) | set(fourth.retired_nonces)
+    for row in db.db.execute("SELECT data FROM dispatches"):
+        previous = msgspec.json.decode(row[0], type=dis.Dispatch)
+        history.update((previous.startup_hash, *previous.retired_startups, *previous.retired_nonces))
+    fourth = msgspec.structs.replace(fourth, retired_startups=tuple(sorted(history)))
     with pytest.raises(Refused, match="recovery"):
         db.add_dispatch(fourth)
+    assert db.get("dispatch", parent.approval_id).reconciliation_lookups == 3
     assert not db.get("dispatch", parent.approval_id).settled
     assert db.db.execute("SELECT count(*) FROM resources").fetchone()[0] == 3
 
@@ -357,6 +374,7 @@ def test_reconciliations_are_serial_and_total_three_across_reopen(tmp_path):
 @pytest.mark.parametrize("kind", ["decision", "dispatch"])
 def test_arbitrary_reducer_cannot_skip_decision_or_dispatch_gates(tmp_path, kind):
     db = FixtureJournal.create(tmp_path / "journal")
+    f.persist_filed_request(db)
     if kind == "decision":
         value = f.begun()
         db.add_decision(value)
@@ -406,6 +424,7 @@ def test_unrelated_denial_does_not_freeze_groom_and_history_is_refreshed(tmp_pat
 
 def test_invalidated_candidate_never_resurrects_from_inbox_replay(tmp_path):
     db = FixtureJournal.create(tmp_path / "journal")
+    f.persist_filed_request(db)
     first = f.begun()
     db.add_decision(first)
     invalid = db.transition(
@@ -475,6 +494,7 @@ def test_declared_cleanup_cannot_forge_abandonment_or_alter_request_fields(tmp_p
             key,
             value.version,
             lambda v, elapsed=elapsed: f.observe_allocation(v, (), lookup_ok=False, elapsed_seconds=elapsed),
+            observation=TransitionObservation(allocation_elapsed_seconds=elapsed),
         )
     for updates in (
         {"phase": "reconciled-abandoned", "cleanup_confirmed": True},

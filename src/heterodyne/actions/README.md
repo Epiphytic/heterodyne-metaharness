@@ -102,7 +102,7 @@ Unknown writes permit readback, not another write. Surface, current principal,
 purpose and current digest observations are all required. A heart's optional
 follow-up proposal has separate bookkeeping and cannot rewrite the original event.
 A revoked/stale prewrite event can be marked invalid; a write-issued event requires
-exact authenticated conflicting native readback before replacement. Every incoming
+exact authenticated conflicting native readback before replacement. Every admitted incoming
 event retains an inbox record, including duplicate/superseded decision handling.
 A previously superseded candidate can be reconsidered when the earlier candidate
 is invalidated, without duplicating its inbox row. An invalidated event cannot
@@ -132,16 +132,19 @@ distinguishes the retained initial attempt from separate read-only reconciliatio
 rows. Each reconciliation has a distinct attempt and startup/claim nonce lineage;
 settling its row cannot release the initial attempt's resources or permit an effect.
 Reconcile records cannot become ready, receive an effect nonce, or consume a claim.
-`finish_reconciliation` only records that read-only invocation's evidence/cleanup;
-parent effect observations remain separately bound. The journal permits one
-unsettled reconciliation and three total retained invocations per approval.
+`finish_reconciliation` records the read-only invocation's evidence, outcome and
+cleanup. A parent observation consumes one exact settled child identity and matches
+its evidence/outcome in the same transaction as the parent lookup counter. Child
+identities cannot be reused; the next child requires the preceding parent observation.
+The journal permits one unsettled reconciliation and three total retained invocations
+per approval. Successful parent settlement requires a previously consumed effect claim.
 
 `settle_dispatch` additionally accepts an exact authenticated, explicitly
 operator-attested success after exhausted unknown readbacks and cleanup proof.
 Its `recovery_operator_event` distinguishes that disposition from machine evidence;
 it must not be rendered as machine-verified or attributed execution. Conflicting
-absent/success attestations, stale pins and missing cleanup refuse. The compatibility
-`settle_failed_dispatch` accepts only absent outcomes. Neither can grant a claim.
+absent/success attestations, stale pins and missing cleanup refuse. This single
+settlement reducer cannot grant a claim.
 An already consumed attempt retains its consumed flag forever.
 
 `FixtureJournal` only creates/opens explicitly private temporary fixture databases,
@@ -153,7 +156,8 @@ outstanding requests per workstream/bead across sessions/generations, 128 global
 recovery; history is not silently pruned. Terminal capacity is freed only after
 all associated shells and blockers have consistent terminal readbacks. Phase-specific
 settlement additionally requires a committed deny, a settled successful initial
-dispatch, a known-unposted cancellation, or exact authenticated allocation abandonment.
+dispatch or exact operator-attested failed initial dispatch with cleanup, a
+known-unposted cancellation, or exact authenticated allocation abandonment.
 Denial settlement and the session denial row commit atomically. Dispatch insertion
 corroborates the same journal's committed execution approve and exact digest/revision
 in its transaction; constructor booleans alone cannot authorize it. Repeated exact
@@ -178,7 +182,7 @@ release an unknown/filed request via cancellation. These checks corroborate
 synthetic observations; they do not authenticate future real adapter facts.
 
 Named synthetic offline tests are `test_actions_p0.py`, `test_actions_p1.py`,
-`test_actions_p1_dispatch.py`, `test_actions_p1_hardening.py`, `test_actions_p1_r1.py`, and `test_actions_p1_r2.py`. SQLite operations
+`test_actions_p1_dispatch.py`, `test_actions_p1_hardening.py`, `test_actions_p1_r1.py`, `test_actions_p1_r2.py`, and `test_actions_p1_r3.py`. SQLite operations
 only target temporary test files. Fake ports are in-memory and cannot reach a
 queue, session socket, effect target, model, service or network. Passing them does
 not establish live adapter readiness or authorize deployment.
@@ -192,3 +196,19 @@ ZWJ/ZWNJ); denial reasons now consistently convert that failure to `Refused`.
 The exact v2 fixture schema has no session-key denial index; its bounded scan is
 not presented as constant-time. Audit capacity uses the integer-primary-key maximum
 rather than a repeated full event count. No historical fixture rows are deleted.
+
+
+Third-review integrity repair: decision insertion re-runs `begin_decision` against
+the unique durable request, including its phase, revision, context and supplied
+event authority flags. Dispatch insertion also requires that request to be filed.
+Denial recording loads the exact stored request; a committed denial must settle as
+denied, never cancelled. A filed request can finish protocol bookkeeping after
+exact operator-attested failed dispatch settlement and cleanup; the retained
+dispatch outcome remains failed and never becomes replay permission.
+
+`TransitionObservation` supplies independent synthetic clock, allocation elapsed,
+and recovery inputs to journal validation. These inputs are not inferred from a
+proposed state or authenticated by this package. A future trusted adapter must
+sample current time and authenticate exact recovery scope/readbacks. Nonempty
+observations are retained atomically alongside the state event; refused transitions
+retain neither. Explicit operator attestation is distinguished from machine proof.

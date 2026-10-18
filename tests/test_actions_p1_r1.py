@@ -8,6 +8,7 @@ from heterodyne.actions import decisions as dec
 from heterodyne.actions import dispatch as dis
 from heterodyne.actions.journal import FixtureJournal
 from heterodyne.actions.requests import Refused, groom, issue_allocation, observe_allocation, settle_request
+from heterodyne.actions.transitions import TransitionObservation
 
 
 def test_unknown_allocation_cannot_be_settled_by_cleanup_booleans():
@@ -113,6 +114,7 @@ def test_denial_settlement_and_durable_session_denial_are_atomic(tmp_path):
         key,
         value.version,
         lambda v: observe_allocation(v, ("btq-ab123",), lookup_ok=True, elapsed_seconds=1),
+        observation=TransitionObservation(allocation_elapsed_seconds=1),
     )
     for operation in ("blocker", "park", "land"):
         value = db.transition(
@@ -171,6 +173,7 @@ def test_denial_settlement_and_durable_session_denial_are_atomic(tmp_path):
 @pytest.mark.parametrize("choice", ["approve", "deny"])
 def test_dispatch_rejects_pending_and_committed_deny(tmp_path, choice):
     db = FixtureJournal.create(tmp_path / "fixture.sqlite")
+    f.persist_filed_request(db)
     value = dis.prepare(
         "btq-ab123",
         1,
@@ -194,6 +197,7 @@ def test_dispatch_rejects_pending_and_committed_deny(tmp_path, choice):
 
 def test_invalid_prewrite_replaced_but_all_inbox_events_remain(tmp_path):
     db = FixtureJournal.create(tmp_path / "fixture.sqlite")
+    f.persist_filed_request(db)
     original = f.begun()
     assert db.add_decision(original) == "recorded"
     invalid = db.transition(
@@ -277,9 +281,13 @@ def test_unconsumed_held_recovery_releases_resources_without_effect_replay(tmp_p
         True,
     )
     with pytest.raises(Refused):
-        dis.settle_failed_dispatch(value, msgspec.structs.replace(recovery, authenticated_current=False))
+        dis.settle_dispatch(value, msgspec.structs.replace(recovery, authenticated_current=False))
     value = db.transition(
-        "dispatch", value.approval_id, value.version, lambda v: dis.settle_failed_dispatch(v, recovery)
+        "dispatch",
+        value.approval_id,
+        value.version,
+        lambda v: dis.settle_dispatch(v, recovery),
+        observation=TransitionObservation(dispatch_recovery=recovery),
     )
     assert value.settled and not value.claim_consumed
     assert db.db.execute("SELECT count(*) FROM resources").fetchone()[0] == 0
@@ -356,10 +364,10 @@ def test_unconsumed_ambiguous_claim_requires_exhausted_readbacks_then_exact_reco
         )
 
     with pytest.raises(Refused):
-        dis.settle_failed_dispatch(value, observation(value))
+        dis.settle_dispatch(value, observation(value))
     for elapsed in (1, 5, 30):
         value = dis.reconcile_lookup(value, elapsed_seconds=elapsed, effect="absent", cleanup_proven=True)
-    done = dis.settle_failed_dispatch(value, observation(value))
+    done = dis.settle_dispatch(value, observation(value))
     assert done.settled and done.state == "failed" and not done.claim_consumed
     with pytest.raises(Refused):
         dis.consume_claim(done, done.claim_hash, done.started, fresh_gates=True)
@@ -386,7 +394,13 @@ def test_report_ack_loss_is_noop_after_restart_without_duplicate_events(tmp_path
         lambda v: dis.ready(v, "d" * 64, clock, fresh_gates=True, startup_readback=True),
         lambda v: dis.consume_claim(v, "d" * 64, clock, fresh_gates=True),
     ):
-        value = db.transition("dispatch", value.approval_id, value.version, reducer)
+        value = db.transition(
+            "dispatch",
+            value.approval_id,
+            value.version,
+            reducer,
+            observation=TransitionObservation(now=clock),
+        )
     old_version = value.version
 
     def success(v):
@@ -421,6 +435,7 @@ def test_new_generation_groom_journal_keeps_stable_session_and_requires_repark(t
         key,
         value.version,
         lambda v: observe_allocation(v, ("btq-ab123",), lookup_ok=True, elapsed_seconds=1),
+        observation=TransitionObservation(allocation_elapsed_seconds=1),
     )
     for operation in ("blocker", "park", "land"):
         value = db.transition(
@@ -519,6 +534,7 @@ def test_abandonment_recovery_binds_all_shells_and_exact_current_operator_scope(
 
 def test_native_conflict_replacement_must_match_observed_first_event(tmp_path):
     db = FixtureJournal.create(tmp_path / "fixture.sqlite")
+    f.persist_filed_request(db)
     first = f.begun()
     db.add_decision(first)
     value = db.transition(

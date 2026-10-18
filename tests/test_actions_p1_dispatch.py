@@ -161,7 +161,7 @@ def test_startup_window_is_thirty_seconds_inside_unchanged_deadline():
 def test_fixed_authenticated_failed_repair_never_authorizes_initial_retry():
     import msgspec
 
-    from heterodyne.actions.dispatch import DispatchRecovery, reconcile_lookup, settle_failed_dispatch
+    from heterodyne.actions.dispatch import DispatchRecovery, reconcile_lookup, settle_dispatch
 
     value = uncertain(consume_claim(claimable(), "c" * 64, START, fresh_gates=True))
     for elapsed in (1, 5, 30):
@@ -191,8 +191,8 @@ def test_fixed_authenticated_failed_repair_never_authorizes_initial_retry():
         "cleanup_proven",
     ):
         with pytest.raises(Refused):
-            settle_failed_dispatch(value, msgspec.structs.replace(observation, **{field: False}))
-    done = settle_failed_dispatch(value, observation)
+            settle_dispatch(value, msgspec.structs.replace(observation, **{field: False}))
+    done = settle_dispatch(value, observation)
     assert done.state == "failed" and done.settled and done.claim_consumed
     assert done.recovery_operator_event == observation.operator_event
     with pytest.raises(Refused):
