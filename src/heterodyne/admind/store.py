@@ -472,6 +472,12 @@ class Store:
         return None if row is None or row[0] is None else str(row[0])
 
     @_locked
+    def inbound_thread(self, message_id: str) -> str | None:
+        """Actual persisted incoming reply target; unlike reply_target(), not outbound threading."""
+        row = self.db.execute("SELECT reply_to FROM inbound WHERE message_id=?", (message_id,)).fetchone()
+        return None if row is None else _opt_str(row[0])
+
+    @_locked
     def set_inbound(self, message_id: str, status: str) -> None:
         self.db.execute("UPDATE inbound SET status = ? WHERE message_id = ?", (status, message_id))
 

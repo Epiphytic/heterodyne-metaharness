@@ -1091,7 +1091,7 @@ class Admind:
         if sub is not None:
             self.remind(mid, sub)
             return
-        from heterodyne.admind.retirement import publish_notice
+        from heterodyne.admind.retirement import display_attempt, publish_notice
         with self.store.transaction():
             for ask_id, attempt_id, _ in self.store.maintenance_pending():
                 attempt = self.store.current_attempt(ask_id)
@@ -1105,7 +1105,8 @@ class Admind:
             attempt = self.store.current_attempt(ask_id)
             proof = None if attempt is None else self.store.retirement.eligible(attempt)
             if proof is not None:
-                lines.append(f"{ask_id} attempt {attempt_id}: reply to its recovery notice with "
+                lines.append(f"{ask_id} attempt {display_attempt(attempt_id)}: "
+                             "reply to its recovery notice with "
                              f"!asks retire {proof.token}")
         self.finish(mid, "done", "\n".join(lines) or NO_ACTIVE_ASKS, "cmd")
         self.audit.write("command", message_id=mid, command="asks", asks=len(lines))
@@ -1423,7 +1424,7 @@ class Admind:
 
         code: int | None = None
         line = ""
-        audited = unauthorised = False
+        audited = unauthorised = issued = False
         authority_reason: str | None = None
         stop: tuple[str, str, str] | None = None
         r: Readout | Busy | None = None
@@ -1446,6 +1447,7 @@ class Admind:
                         self.conflict(a, "deciding")
                         self.finish(mid, "done", CONFLICT.format(ask_id=a.ask_id, bead=bead), "ask")
                         return
+                    issued = True
                     result = await ab.decide(a, bead, on_launch)        # step 7
                     if isinstance(result, approvals.MaintenanceHold):
                         proven_hold = result
@@ -1461,6 +1463,8 @@ class Admind:
                 # audit write failing, or a bug, is "error" (spec §8's table)
                 word = (exc.word if isinstance(exc, BtqError)
                         else "unavailable" if isinstance(exc, OSError) and audited else "error")
+                if maintenance_retry and issued and isinstance(exc, BtqError) and exc.word == "unavailable":
+                    self.store.retirement.record_not_spawned(a)
                 stop = ("open", PREFLIGHT_FAILED.format(bead=bead, word=word), word)
         if proven_hold is not None:
             # Outside the ambiguous-child catch. Once this small commit succeeds, overlay/notice

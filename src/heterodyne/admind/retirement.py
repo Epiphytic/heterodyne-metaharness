@@ -4,12 +4,13 @@ The daemon authenticates and serializes admission. This Store companion only che
 proof tokens select immutable observations and confer no authority of their own.
 """
 
+import asyncio
 import hashlib
 import json
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, cast
 
-from heterodyne.admind.approvals import Attempt, MaintenanceHold, maintenance_hold
+from heterodyne.admind.approvals import DIGEST, Attempt, MaintenanceHold, maintenance_hold
 
 if TYPE_CHECKING:
     from heterodyne.admind.daemon import Admind
@@ -37,6 +38,11 @@ class Proof:
         return self.sha256[:24]
 
 
+def display_attempt(message_id: str) -> str:
+    """Lossless grouped transport identity; never exempt arbitrary text from redaction."""
+    return "-".join(message_id[i : i + 8] for i in range(0, len(message_id), 8))
+
+
 class Retirement:
     def __init__(self, store: "Store") -> None:
         self.store = store
@@ -60,6 +66,16 @@ class Retirement:
                 "CREATE TABLE IF NOT EXISTS maintenance_recovery_notices ("
                 "ask_id TEXT NOT NULL, message_id TEXT NOT NULL, sha256 TEXT NOT NULL, "
                 "outbox_key TEXT NOT NULL UNIQUE, PRIMARY KEY(ask_id,message_id))"
+            )
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS maintenance_notice_history ("
+                "outbox_key TEXT PRIMARY KEY, ask_id TEXT NOT NULL, message_id TEXT NOT NULL, "
+                "sha256 TEXT NOT NULL)"
+            )
+            # Only existing exact mappings are safe to backfill. No inference from rendered text.
+            db.execute(
+                "INSERT OR IGNORE INTO maintenance_notice_history "
+                "SELECT outbox_key,ask_id,message_id,sha256 FROM maintenance_recovery_notices"
             )
             db.execute(
                 "CREATE TABLE IF NOT EXISTS maintenance_retirements ("
@@ -88,8 +104,7 @@ class Retirement:
                 or not generation[1]
                 or generation[0] < 1
                 or not maintenance_hold(75, hold.stdout)
-                or len(hold.adapter_identity) != 64
-                or any(c not in "0123456789abcdef" for c in hold.adapter_identity)
+                or DIGEST.fullmatch(hold.adapter_identity) is None
             ):
                 return False
             row = self.store.ask(a.ask_id)
@@ -106,12 +121,17 @@ class Retirement:
             # Missing any invocation is irreversible here, even if identical HOLD output returns later.
             if count != 1 and (previous is None or previous.invocations != count - 1):
                 return False
+            prior = None if previous is None else json.loads(previous.body)
+            if prior is not None and prior["adapter_identity"] != hold.adapter_identity:
+                return False
+            not_spawned = 0 if prior is None else prior.get("not_spawned", 0)
             body = canonical(
                 {
                     "version": 1,
                     "attempt": asdict(a),
                     "invocations": count,
-                    "consecutive": count,
+                    "consecutive": count - not_spawned,
+                    "not_spawned": not_spawned,
                     "exit_status": 75,
                     "envelope": json.loads(hold.stdout),
                     "stdout_sha256": hashlib.sha256(hold.stdout).hexdigest(),
@@ -123,6 +143,39 @@ class Retirement:
                 "ON CONFLICT(ask_id,message_id) DO UPDATE SET "
                 "invocations=excluded.invocations,body=excluded.body,sha256=excluded.sha256",
                 (a.ask_id, a.message_id, count, body, digest(body)),
+            )
+            return True
+
+    def record_not_spawned(self, a: Attempt) -> bool:
+        """Only the in-process pre-spawn OSError branch may cover an issued generation.
+
+        Never decrements the monotonic intent counter; missing/crashed/foreign generations remain HOLD.
+        A prior exact HOLD is required, so this does not manufacture an initial not-issued receipt.
+        """
+        with self.store.transaction():
+            previous = self._proof(a)
+            generation = self.generation(a)
+            row = self.store.ask(a.ask_id)
+            if (
+                previous is None
+                or generation is None
+                or not generation[1]
+                or generation[0] != previous.invocations + 1
+                or row is None
+                or row.status != "deciding"
+                or row.digest != a.digest
+                or row.outcome != "maintenance-issuing"
+                or self.store.current_attempt(a.ask_id) != a
+            ):
+                return False
+            value = json.loads(previous.body)
+            value["invocations"] = generation[0]
+            value["not_spawned"] = value.get("not_spawned", 0) + 1
+            body = canonical(value)
+            self.store.db.execute(
+                "UPDATE maintenance_proofs SET invocations=?,body=?,sha256=? "
+                "WHERE ask_id=? AND message_id=? AND sha256=?",
+                (generation[0], body, digest(body), a.ask_id, a.message_id, previous.sha256),
             )
             return True
 
@@ -140,9 +193,9 @@ class Retirement:
             if type(decoded) is not dict:
                 return None
             value = cast(dict[str, object], decoded)
+            not_spawned = value.get("not_spawned", 0)
             if (
-                type(value) is not dict
-                or set(value)
+                set(value) - {"not_spawned"}
                 != {
                     "version",
                     "attempt",
@@ -156,14 +209,18 @@ class Retirement:
                 or value["version"] != 1
                 or value["attempt"] != asdict(a)
                 or value["invocations"] != row[0]
-                or value["consecutive"] != row[0]
+                or type(value["consecutive"]) is not int
+                or type(not_spawned) is not int
+                or not_spawned < 0
+                or value["consecutive"] < 1
+                or value["consecutive"] + not_spawned != row[0]
                 or value["exit_status"] != 75
                 or not maintenance_hold(75, canonical(value["envelope"]).encode())
             ):
                 return None
             for name in ("stdout_sha256", "adapter_identity"):
                 text = value[name]
-                if type(text) is not str or len(text) != 64 or any(c not in "0123456789abcdef" for c in text):
+                if type(text) is not str or DIGEST.fullmatch(text) is None:
                     return None
         except (ValueError, TypeError, KeyError):
             return None
@@ -192,6 +249,10 @@ class Retirement:
 
     def bind_notice(self, proof: Proof, key: str) -> None:
         self.store.db.execute(
+            "INSERT OR IGNORE INTO maintenance_notice_history VALUES (?,?,?,?)",
+            (key, proof.ask_id, proof.message_id, proof.sha256),
+        )
+        self.store.db.execute(
             "INSERT INTO maintenance_recovery_notices VALUES (?,?,?,?) "
             "ON CONFLICT(ask_id,message_id) DO UPDATE SET "
             "sha256=excluded.sha256,outbox_key=excluded.outbox_key",
@@ -217,7 +278,10 @@ class Retirement:
     def receipt(self, token: str, target: str | None) -> str | None:
         with self.store.lock:
             rows = self.store.db.execute(
-                "SELECT body FROM maintenance_retirements WHERE token=? AND notice_id=? LIMIT 2",
+                "SELECT r.body FROM maintenance_retirements r "
+                "JOIN maintenance_notice_history h ON h.ask_id=r.ask_id AND h.message_id=r.message_id "
+                "JOIN outbox o ON o.key=h.outbox_key "
+                "WHERE substr(h.sha256,1,24)=? AND o.status='sent' AND o.message_id=? LIMIT 2",
                 (token, target),
             ).fetchall()
             return str(rows[0][0]) if len(rows) == 1 else None
@@ -234,8 +298,11 @@ class Retirement:
         native: str,
         blocked: bool,
         text: str,
+        reason: str,
     ) -> bool:
         """Caller authenticates with no await before this CAS and queues the acknowledgement atomically."""
+        from heterodyne.admind.daemon import canonical_ref
+
         with self.store.transaction():
             if self.eligible(a) != proof or self.select(proof.token, notice) != (a, proof):
                 return False
@@ -262,11 +329,11 @@ class Retirement:
                     "sender": sender,
                     "operator": operator,
                     "thread": notice,
-                    "ref": "marmot:id:" + command,
+                    "ref": "marmot:" + canonical_ref(command),
                     "before": None if before is None else before.outcome,
                     "after": status,
                     "native_sha256": digest(native),
-                    "reason": "native-conflict" if blocked else "maintenance-retired",
+                    "reason": reason,
                 }
             )
             if len(body.encode("utf-8")) > 16384:
@@ -295,21 +362,29 @@ def publish_notice(daemon: "Admind", a: Attempt, *, refresh: bool = False) -> No
             a.ask_id,
             "retirement-unavailable",
             a.message_id,
-            f"Ask {a.ask_id}, attempt {a.message_id}: retirement unavailable: "
+            f"Ask {a.ask_id}, attempt {display_attempt(a.message_id)}: retirement unavailable: "
             "complete since-begin not-issued proof is missing. History is preserved.",
         )
         return
     row = daemon.store.db.execute(
-        "SELECT sha256 FROM maintenance_recovery_notices WHERE ask_id=? AND message_id=?",
+        "SELECT n.sha256,n.outbox_key,o.seq,o.status,o.message_id "
+        "FROM maintenance_recovery_notices n LEFT JOIN outbox o ON o.key=n.outbox_key "
+        "WHERE n.ask_id=? AND n.message_id=?",
         (a.ask_id, a.message_id),
     ).fetchone()
-    if row is not None and (row[0] == proof.sha256 or not refresh):
-        return
+    if row is not None:
+        usable = row[3] == "pending" or (row[3] == "sent" and row[4] is not None)
+        if not refresh or (row[0] == proof.sha256 and usable):
+            return
     key = f"retirement:{a.ask_id}:{proof.token}"
+    if row is not None and row[0] == proof.sha256:
+        # Explicit inspection repairs delivery, never an automatic replay of ambiguous delivery.
+        # The old outbox row/history stays immutable; a new notice has its own transport identity.
+        key += f":repair:{row[2]}"
     # Single bounded notice. System provenance permits current operators to see it after the original
     # sender is removed; it grants no sender privilege and still passes the normal outbound group gate.
     text = (
-        f"Ask {a.ask_id}: held {a.action} attempt {a.message_id}. "
+        f"Ask {a.ask_id}: held {a.action} attempt {display_attempt(a.message_id)}. "
         f"Reply directly to this notice: !asks retire {proof.token}. "
         "This retires only the proven not-issued local attempt; it makes no native decision."
     )
@@ -317,7 +392,7 @@ def publish_notice(daemon: "Admind", a: Attempt, *, refresh: bool = False) -> No
     daemon.store.retirement.bind_notice(proof, key)
 
 
-async def retire(daemon: "Admind", command: str, token: str, target: str | None) -> None:
+async def retire(daemon: "Admind", command: str, token: str, target: str | None) -> str | None:
     """Authenticated command under the daemon's existing work_lock; no native mutation or child retry."""
     import msgspec
 
@@ -327,10 +402,9 @@ async def retire(daemon: "Admind", command: str, token: str, target: str | None)
     if not daemon.authorised(command):
         daemon.deny(command, "retirement")
         return
-    inbound = store.db.execute("SELECT reply_to FROM inbound WHERE message_id=?", (command,)).fetchone()
+    inbound = store.inbound_thread(command)
     if (
-        inbound is None
-        or inbound[0] != target
+        inbound != target
         or target is None
         or len(token) != 24
         or any(c not in "0123456789abcdef" for c in token)
@@ -349,10 +423,12 @@ async def retire(daemon: "Admind", command: str, token: str, target: str | None)
             daemon.finish(
                 command,
                 "done",
-                "This exact local attempt was already retired; history retained.",
+                "This exact local attempt was already retired; receipt "
+                + digest(previous)[:24]
+                + ". History retained.",
                 "retirement-existing",
             )
-        return
+        return previous
     selected = store.retirement.select(token, target)
     if selected is None:
         daemon.finish(
@@ -374,7 +450,7 @@ async def retire(daemon: "Admind", command: str, token: str, target: str | None)
     # The read uses the same captured adapter identity as the exact HOLD. A changed source must not
     # silently supply a different interpretation of the earlier not-issued proof.
     identity = json.loads(proof.body)["adapter_identity"]
-    if ab.identity() != identity:
+    if await asyncio.to_thread(ab.identity) != identity:
         daemon.finish(
             command, "done", "Retirement held: native adapter changed; original retained.", "retirement-held"
         )
@@ -383,7 +459,12 @@ async def retire(daemon: "Admind", command: str, token: str, target: str | None)
         back = await ab.read(row.bead)
     except Exception:  # noqa: BLE001 - bounded refusal; no absence is inferred from transport failure
         back = None
-    if not isinstance(back, Readout) or back.busy or back.id != row.bead or ab.identity() != identity:
+    if (
+        not isinstance(back, Readout)
+        or back.busy
+        or back.id != row.bead
+        or await asyncio.to_thread(ab.identity) != identity
+    ):
         daemon.finish(
             command, "done", "Retirement held: no current native read; original retained.", "retirement-held"
         )
@@ -408,6 +489,15 @@ async def retire(daemon: "Admind", command: str, token: str, target: str | None)
         )
         return
     blocked = result != "untouched" or not back.kind_approval
+    reason = (
+        "not-approval"
+        if not back.kind_approval
+        else "native-conflict"
+        if back.decided
+        else "not-open"
+        if back.status != "open"
+        else "maintenance-retired"
+    )
     text = (
         daemon.settlement("blocked", back, a, row.bead, "")[1]
         if blocked
@@ -431,6 +521,7 @@ async def retire(daemon: "Admind", command: str, token: str, target: str | None)
             native=native,
             blocked=blocked,
             text=text,
+            reason=reason,
         ):
             daemon.finish(
                 command, "done", "Retirement held: attempt changed; original retained.", "retirement-held"
