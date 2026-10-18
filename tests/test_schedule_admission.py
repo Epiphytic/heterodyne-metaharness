@@ -5,13 +5,17 @@ import concurrent.futures as cf
 import threading
 from dataclasses import replace
 from pathlib import Path
+from typing import Literal, cast
 from uuid import uuid4
 
 import msgspec
 import pytest
 from test_wsd_daemon import settings
 
+from heterodyne.wsd.beads import BeadsAdapter
 from heterodyne.wsd.daemon import JobFailed, Lane, Parts, Wsd
+from heterodyne.wsd.gate import ClaimGate
+from heterodyne.wsd.journal import Journal
 from heterodyne.wsd.schedule_manifest import (
     ManifestInvalid,
     ScheduleManifest,
@@ -20,26 +24,29 @@ from heterodyne.wsd.schedule_manifest import (
     validate,
 )
 from heterodyne.wsd.scheduled import ScheduledWakeRequest
-from heterodyne.wsd.scheduler import Outcome
+from heterodyne.wsd.scheduler import Outcome, Scheduler
 
 
 def installed(tmp_path: Path) -> tuple[Wsd, ScheduleManifest]:
     s = replace(settings(tmp_path), timer_owner="systemd", backstop_seconds=20, reconcile_seconds=300)
     s.state_dir.mkdir(parents=True)
     s.btq_checkout.mkdir()
+    assert s.config_dir is not None
     manifest = ScheduleManifest(1, str(uuid4()), str(uuid4()), __import__('os').geteuid(),
                                 location(s.config_dir), location(s.state_dir), location(s.btq_checkout),
                                 'a' * 64, 'b' * 64, 20, 300, ('pickup', 'reconcile'),
                                 tuple(w.name for w in s.workstreams))
     # No producer/queue methods are called: the tests supply only bounded fake jobs.
-    daemon = Wsd(s, Parts(None, None, None, {w.name: None for w in s.workstreams}))
-    daemon._arm_on = lambda *_: None
+    # Deliberately absent dependencies: this fixture must not construct native/producer ports.
+    daemon = Wsd(s, Parts(cast(Journal, None), cast(BeadsAdapter, None), cast(ClaimGate, None),
+                          {w.name: cast(Scheduler, None) for w in s.workstreams}))
+    daemon._arm_on = lambda name, fut: None
     daemon.manifest = manifest
     daemon.admission_ready = True
     return daemon, manifest
 
 
-def wake(m: ScheduleManifest, job: str = 'pickup') -> ScheduledWakeRequest:
+def wake(m: ScheduleManifest, job: Literal['pickup', 'reconcile'] = 'pickup') -> ScheduledWakeRequest:
     return ScheduledWakeRequest('scheduled-wake', 1, m.installation_id, m.generation, str(uuid4()), job)
 
 
@@ -106,7 +113,7 @@ def test_scheduled_uses_backstop_not_operator_and_observes_fatal(tmp_path):
         d.fatal = asyncio.get_running_loop().create_future()
         calls = []
         d._backstop = lambda name: calls.append(name) or Outcome.HELD
-        d._operator_pickup = lambda _: pytest.fail('scheduled operator trigger')
+        d._operator_pickup = lambda name: pytest.fail('scheduled operator trigger')
         reply = await d.scheduled(wake(m))
         assert reply.result == 'ok' and reply.data['scheduled']['targets'] == '1'
         for _ in range(30):

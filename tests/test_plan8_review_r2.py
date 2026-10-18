@@ -5,11 +5,12 @@ import hashlib
 import json
 import threading
 import time
+from pathlib import Path
 
 import msgspec
 import pytest
 
-from heterodyne.wsd.backup_cycles import Identity, copy_bundle, new_attempt, retain
+from heterodyne.wsd.backup_cycles import Identity, NativeStatus, copy_bundle, new_attempt, retain
 from heterodyne.wsd.effects import EffectStore
 
 
@@ -39,19 +40,19 @@ def test_transient_io_preserves_observer_epoch(tmp_path, monkeypatch, failure):
     original = observer.path.read_bytes()
     if failure == 'read':
         real_open = module.os.open
-        def fail(path, *args, **kwargs):
+        def fail_open(path, *args, **kwargs):
             if path == observer.path:
                 raise OSError(errno.EMFILE, 'transient descriptors')
             return real_open(path, *args, **kwargs)
-        monkeypatch.setattr(module.os, 'open', fail)
+        monkeypatch.setattr(module.os, 'open', fail_open)
     else:
         (directory / '.observer-installed').unlink()
         real_write = module.write_private
-        def fail(path, data):
+        def fail_write(path, data):
             if path.name == '.observer-installed':
                 raise OSError(errno.ENOSPC, 'transient marker')
             return real_write(path, data)
-        monkeypatch.setattr(module, 'write_private', fail)
+        monkeypatch.setattr(module, 'write_private', fail_write)
     with pytest.raises(OSError):
         observer._load(1001)
     assert observer.path.read_bytes() == original
@@ -109,13 +110,16 @@ def test_prune_failure_preserves_sealed_result(tmp_path, monkeypatch):
         owner.opened.result(3)
         result = owner.backup(1, 'succeeded', tmp_path / 'paired-backups', sources(tmp_path))
         assert result.result(3) == 'queued'
+        assert owner.copy is not None
         owner.copy.result(3)
         deadline = time.monotonic() + 3
         while owner.call(lambda s: s.pending_backup()).result(3) is not None:
             assert time.monotonic() < deadline
             time.sleep(.01)
-        row = owner.call(lambda s: s.db.execute(
-            'SELECT state,attempt,manifest_hash FROM backup_cycle').fetchone()).result(3)
+        def read_row(s: EffectStore):
+            assert s.db is not None
+            return s.db.execute('SELECT state,attempt,manifest_hash FROM backup_cycle').fetchone()
+        row = owner.call(read_row).result(3)
         assert row[0] == 'succeeded' and len(row[1]) == 32 and len(row[2]) == 64
     finally:
         owner.close()
@@ -274,8 +278,9 @@ def test_repeated_bad_result_survives_real_control_wire(tmp_path, result, reason
         daemon.effects = EffectOwner(path, manifest.installation_id, manifest.generation, 'a' * 64)
         daemon.effects.opened.result(3)
         # Typed owner result: no native or SQLite effect is synthesized by the daemon.
-        def backup(*_):
-            future = Future()
+        def backup(cycle: int, native: NativeStatus, directory: Path,
+                   sources: tuple[Path, Path]) -> Future[str]:
+            future: Future[str] = Future()
             future.set_result(result)
             return future
         daemon.effects.backup = backup
@@ -285,6 +290,7 @@ def test_repeated_bad_result_survives_real_control_wire(tmp_path, result, reason
         try:
             receipt = await request(daemon.s.socket, PairedBackup('paired-backup', 1,
                 manifest.installation_id, manifest.generation, str(uuid4()), 'a' * 64, 7, 'unknown'))
+            assert receipt is not None
             assert receipt.status == 'refused' and receipt.reason == reason
         finally:
             await server.close()

@@ -43,6 +43,7 @@ def test_systemd_has_no_internal_loops_and_heartbeat_precedes_recovery(tmp_path,
             release.set()
             await until(lambda: d.admission_ready)
             assert not timers
+            assert d.effects is not None
             assert d.effects.cache.state == "error"  # missing effects cannot prevent core listener
         finally:
             stop.set()
@@ -60,6 +61,7 @@ def test_maintenance_wire_refuses_producers_and_wrong_backup_owner(tmp_path):
         try:
             effect = EffectWake("effect-wake", 1, m.installation_id, m.generation, str(uuid4()), "digest")
             receipt = await request(d.s.socket, effect)
+            assert receipt is not None
             assert receipt.status == "refused" and receipt.reason == "producer_disabled"
             backup = PairedBackup(
                 "paired-backup",
@@ -72,6 +74,7 @@ def test_maintenance_wire_refuses_producers_and_wrong_backup_owner(tmp_path):
                 "unknown",
             )
             receipt = await request(d.s.socket, backup)
+            assert receipt is not None
             assert receipt.status == "refused" and receipt.reason == "owner_unavailable"
         finally:
             await server.close()

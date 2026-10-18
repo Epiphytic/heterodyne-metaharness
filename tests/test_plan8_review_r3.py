@@ -9,6 +9,8 @@ from dataclasses import replace
 import msgspec
 import pytest
 
+from heterodyne.wsd.backup_cycles import NativeStatus
+
 
 def test_partial_does_not_displace_last_native_success(tmp_path):
     from test_plan8_backup_recovery import sources
@@ -136,6 +138,7 @@ def test_verified_partial_repeat_is_completed_local_result(tmp_path):
                              threading.Event(), Identity('install', 'generation', 'a' * 64), attempt)
         store.finish_backup(7, result['status'], attempt, result['manifest_sha256'])
         assert store.begin_backup(7, 'unknown') == 'completed'
+        assert store.db is not None
         assert store.db.execute('SELECT native,state FROM backup_cycle').fetchone() == ('unknown', 'partial')
     finally:
         store.close()
@@ -206,8 +209,9 @@ def test_native_success_calendar_slots_survive_newer_local_partials(tmp_path):
     inputs = sources(tmp_path)
     now = time.time()
     attempts = []
-    for cycle, (age, native) in enumerate(((90000, 'succeeded'), (89999, 'unknown'),
-                                          (100, 'succeeded'), (99, 'unknown')), start=1):
+    samples: tuple[tuple[int, NativeStatus], ...] = (
+        (90000, 'succeeded'), (89999, 'unknown'), (100, 'succeeded'), (99, 'unknown'))
+    for cycle, (age, native) in enumerate(samples, start=1):
         attempt = new_attempt()
         copy_bundle(directory, inputs, cycle, native, threading.Event(), identity, attempt)
         path = directory / attempt / 'manifest.json'

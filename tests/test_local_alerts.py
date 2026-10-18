@@ -1,10 +1,11 @@
 import hashlib
 import json
+from typing import Literal
 
 from heterodyne.local_alerts import Intent, publish, settle
 
 
-def intent(episode="failure", kind="failure"):
+def intent(episode: str = "failure", kind: Literal["failure", "recovery", "retirement"] = "failure"):
     return Intent("p8", "a" * 32, 1, episode, kind, "2026-10-18T00:00:00Z", "Fixed local diagnostic.")
 
 

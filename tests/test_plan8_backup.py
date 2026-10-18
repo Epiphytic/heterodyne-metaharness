@@ -20,6 +20,8 @@ def test_wal_snapshot_is_consistent_while_writer_keeps_committing(tmp_path):
         writer.commit()
         with sqlite3.connect(target) as copy:
             assert copy.execute("SELECT n FROM records").fetchall() == [(1,)]
+        assert isinstance(result["bytes"], int)
+        assert isinstance(result["sha256"], str)
         assert result["bytes"] > 0
         assert len(result["sha256"]) == 64
         assert target.stat().st_mode & 0o777 == 0o600
