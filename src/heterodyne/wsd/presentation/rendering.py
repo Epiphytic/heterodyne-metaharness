@@ -435,7 +435,8 @@ def _card_frame_start(text: str) -> bool:
     offset = 0
     while offset < len(text):
         char = text[offset]
-        if not char.isspace() and not unicodedata.category(char).startswith(("M", "Cf")):
+        if (not char.isspace() and char not in "\u115f\u1160"
+                and not unicodedata.category(char).startswith(("M", "Cf"))):
             break
         offset += 1
     return _CARD_CONTINUATION.match(text[offset:]) is not None

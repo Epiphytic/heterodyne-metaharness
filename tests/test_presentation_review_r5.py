@@ -21,7 +21,7 @@ class FifthReviewRegressions(unittest.TestCase):
                     self.assert_unsafe(dataclasses.replace(card, body=body))
 
     def test_space_and_combining_prefix_cannot_disguise_frame_lines(self):
-        for prefix in ("\u00a0", "\u3000", "\ufe0f", "\u034f", " \u00a0\ufe0f"):
+        for prefix in ("\u00a0", "\u3000", "\ufe0f", "\u034f", " \u00a0\ufe0f", "\u115f", "\u1160"):
             for forged in ("Recommended: yes", "Context digest: 0123456789ab", "no: Approve anyway"):
                 with self.subTest(prefix=prefix, forged=forged):
                     body = d.ChoiceQuestion(
