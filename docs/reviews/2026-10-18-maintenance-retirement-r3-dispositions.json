@@ -1,0 +1,72 @@
+{
+  "reviewer": "claude-opus",
+  "skill": "/code-review",
+  "round": 3,
+  "effort": "medium",
+  "base": "597a1d4aec3d4fc081e5774ff3ffc7aa33aa16be",
+  "source": "d306f15c3dd4fd3e56b6c15640e6cf2ee72193d4",
+  "raw_sha256": "0af2c209d37e6f25aa68913df912ed2e3e21b5b45b85b265e501dde5cba78960",
+  "verdict": "APPROVE undeployed offline PoC only",
+  "findings": [
+    {
+      "ordinal": 1,
+      "summary": "Adapter content identity now narrows ordinary approval compatibility; repair before deployment.",
+      "state": "OPEN",
+      "waived": false
+    },
+    {
+      "ordinal": 2,
+      "summary": "Committed suspended HOLD may lose its failed operator notice.",
+      "state": "OPEN",
+      "waived": false
+    },
+    {
+      "ordinal": 3,
+      "summary": "Inspection can print tokens whose selected notice has not yet been refreshed.",
+      "state": "OPEN",
+      "waived": false
+    },
+    {
+      "ordinal": 4,
+      "summary": "Historical token selection may join a newer current attempt in native recorded reconciliation.",
+      "state": "OPEN",
+      "waived": false
+    },
+    {
+      "ordinal": 5,
+      "summary": "Missing mapped outbox row can strand notice refresh.",
+      "state": "OPEN",
+      "waived": false
+    },
+    {
+      "ordinal": 6,
+      "summary": "Commit ValueError can escape authenticated retirement command without a reply.",
+      "state": "OPEN",
+      "waived": false
+    },
+    {
+      "ordinal": 7,
+      "summary": "Unused undeployed notice-history table remains migration surface.",
+      "state": "OPEN",
+      "waived": false
+    },
+    {
+      "ordinal": 8,
+      "summary": "Unreleased legacy consecutive proof field remains accepted.",
+      "state": "OPEN",
+      "waived": false
+    },
+    {
+      "ordinal": 9,
+      "summary": "Writer transaction and notice publication failure can prevent !asks listing.",
+      "state": "OPEN",
+      "waived": false
+    },
+    {
+      "ordinal": 10,
+      "summary": "Adapter cache warming adds thread/stat/hash cost to ordinary readbacks.",
+      "state": "OPEN",
+      "waived": false
+    }
+  ]
+}
