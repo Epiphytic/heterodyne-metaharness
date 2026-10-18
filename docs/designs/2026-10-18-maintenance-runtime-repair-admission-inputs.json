@@ -1,0 +1,188 @@
+{
+  "schema": "maintenance-runtime-repair-admission-inputs.v1",
+  "design_task": "btq-yvfun",
+  "status": "PROPOSED_DESIGN_ONLY_NO_APPROVAL",
+  "product_base": "b4b8c75da984126344716566300fb7cad19a35b5",
+  "queue_runtime": "893931a0273ca97982fc2f25fcde2f723cd70d02",
+  "queue_filing": "46fd58a631fee0f4017d70aade2383bfc8706a81",
+  "harness": "42dc3ade35ddf18f58deff0bf81c67a666867070",
+  "prior_designs": {
+    "retirement": "aa860fe7b16cfbe452c7bae4ba18cf285c177a7c",
+    "operational_recovery": "6f1c11043bb26395c18e03ed0b5a2c2d85f5eb85"
+  },
+  "confirmed_native_approval": "btq-1yedv only6f target scope; no fabricated aa860 approval",
+  "proposed_children": [
+    {
+      "name": "product maintenance runtime preservation and proof coherence",
+      "repository": "heterodyne-metaharness-v2"
+    },
+    {
+      "name": "queue supervisor publication and bounded admission",
+      "repository": "beads-task-queue"
+    }
+  ],
+  "review_inputs": [
+    {
+      "repository": "repository-checkout:heterodyne-metaharness-v2-btq-btq-4kcjg",
+      "commit": "db96df422480bade076eb82fbebfb0c171a1fa47",
+      "path": "docs/reviews/4kcjg-r6-composition/review-medium.md",
+      "blob": "9f1a1ad9b10e78ac6d73a87d4f89dadf21c74ea2",
+      "sha256": "c7f1bc0cb84166364e57929a408f3a43c56d4b3314aa6d78b7e5138afa87f9e5"
+    },
+    {
+      "repository": "repository-checkout:heterodyne-metaharness-v2-btq-btq-4kcjg",
+      "commit": "db96df422480bade076eb82fbebfb0c171a1fa47",
+      "path": "docs/reviews/4kcjg-r6-composition/dispositions.md",
+      "blob": "be98af5c17c2d829d85e1e45c74d438e45ab0921",
+      "sha256": "39e7f748747e73418590ccf639ed30fe5252f9bfec8e73fea7d3fc271caf6a0c"
+    },
+    {
+      "repository": "repository-checkout:heterodyne-metaharness-v2-btq-btq-4kcjg",
+      "commit": "db96df422480bade076eb82fbebfb0c171a1fa47",
+      "path": "docs/reviews/4kcjg-r6-composition/dispositions.json",
+      "blob": "eacef3e01da176ea1e165d5f9cdb7e0f412e4d5e",
+      "sha256": "fd8cb46bddb78bd8b00fea7dd69ea654e86f80a0e762900453d6515bf6debf99"
+    },
+    {
+      "repository": "repository-checkout:heterodyne-metaharness-v2-btq-btq-4kcjg",
+      "commit": "db96df422480bade076eb82fbebfb0c171a1fa47",
+      "path": "docs/reviews/4kcjg-r6-composition/review-provenance.json",
+      "blob": "50f71ce161cc7858c614a16f54270b990eb368d9",
+      "sha256": "9613d7f4d323e3b526c7d50348330353d57a48bfcd1e193370187c6c665a9e18"
+    },
+    {
+      "repository": "repository-checkout:heterodyne-metaharness-v2-btq-btq-u9e24",
+      "commit": "5a34b9233bd7f5d960047091c08e86bb7e50c6a7",
+      "path": "docs/reviews/u9e24-r5-composition/review-medium.md",
+      "blob": "7a9834529f192ba554edd08e1da272d9cf18f3bd",
+      "sha256": "67e3081ca7b0eadb6709b77c408ed553edd8bff7f95095a2b5a17d64f4fda50d"
+    },
+    {
+      "repository": "repository-checkout:heterodyne-metaharness-v2-btq-btq-u9e24",
+      "commit": "5a34b9233bd7f5d960047091c08e86bb7e50c6a7",
+      "path": "docs/reviews/u9e24-r5-composition/dispositions.md",
+      "blob": "853f4141a010808d5c7f5abb44ca982d439edc1f",
+      "sha256": "c63a3e786e78d5e18885caff8761f61095897f621186018593a206a167aaf09b"
+    },
+    {
+      "repository": "repository-checkout:heterodyne-metaharness-v2-btq-btq-u9e24",
+      "commit": "5a34b9233bd7f5d960047091c08e86bb7e50c6a7",
+      "path": "docs/reviews/u9e24-r5-composition/dispositions.json",
+      "blob": "b30c572211658263d0299cb048d5a3fe6d050764",
+      "sha256": "ce869861876993066a8b044069e4d13192f7c0b773ec845062134ce7a1912f16"
+    },
+    {
+      "repository": "repository-checkout:heterodyne-metaharness-v2-btq-btq-u9e24",
+      "commit": "5a34b9233bd7f5d960047091c08e86bb7e50c6a7",
+      "path": "docs/reviews/u9e24-r5-composition/review-provenance.json",
+      "blob": "682087f0e71faf9ba2c9178c4d918101fd8edf30",
+      "sha256": "9c62478202f4c1cf594b827e632ac7067728dbaaf3cd59afbbfcc9b2177ba668"
+    },
+    {
+      "repository": "repository-checkout:heterodyne-metaharness-v2-btq-btq-4kcjg",
+      "commit": "aa860fe7b16cfbe452c7bae4ba18cf285c177a7c",
+      "path": "docs/adr/2026-10-18-admind-maintenance-recovery.md",
+      "blob": "9874b91f96e29caea40cc5734b84007a17338402",
+      "sha256": "381a5208aadcfbc3b3b7e960b7ca78b63f92e454f0ddc36e3f6cdf03ec6ba685"
+    },
+    {
+      "repository": "repository-checkout:harness-improvements-btq-btq-cyskp",
+      "commit": "6f1c11043bb26395c18e03ed0b5a2c2d85f5eb85",
+      "path": "docs/adr/2026-10-18-maintenance-operational-recovery.md",
+      "blob": "8741c8355fcaab055393f02b30e6404859666903",
+      "sha256": "6c33d7d8884a9362abcf1d6ce7b59cb024317dc639bee9037ee55aecc0d710ec"
+    }
+  ],
+  "source_inputs": {
+    "product_admind": {
+      "worktree": "repository-checkout:heterodyne-metaharness-v2-btq-btq-u9e24",
+      "commit": "5a34b9233bd7f5d960047091c08e86bb7e50c6a7",
+      "status": "",
+      "files": {
+        "src/heterodyne/admind/approvals.py": {
+          "sha256": "f92fa647bc79f47fb4bfb47268cce97bb6e0866f8ed02efefc60ec3727126a16",
+          "blob": "2ce2c3c35f1f5f75e5eef3f8c5df83d7444c71b0"
+        },
+        "src/heterodyne/admind/daemon.py": {
+          "sha256": "77746cf285556d9a680d84c3e319a55f0f7404a6b368b00fa3d266f81f63f208",
+          "blob": "3e1a2f588fced0208454d3172a2c5d9d929ba77d"
+        },
+        "src/heterodyne/admind/store.py": {
+          "sha256": "4f477fb2855175ceba02d44094d78704460b23bbf09504ca554367f8e9e7e141",
+          "blob": "a2333acfb23f9277fa47cf2062eb70ce8bd0f0b7"
+        },
+        "src/heterodyne/admind/retirement.py": {
+          "sha256": "63683cc8d55de97e850cb5ef775dcdaa24cf9fe38f58b8e624293f65fffb78b6",
+          "blob": "3eb14374fc5f9722e78fbc8070b69571a99e2629"
+        },
+        "src/heterodyne/admind/recovery.py": {
+          "sha256": "cd44d1406815d423e52ba911b0ef52758b5d15077474a33a4497f5c4a03cb111",
+          "blob": "a38d64b6b47bdda1a5150c5746fbc48dc477c03c"
+        },
+        "tests/test_admind_recovery_composition.py": {
+          "sha256": "ed0ecd73045eeef7ee1925a0576deb88f02ce140acaa0516250db2e2105eb760",
+          "blob": "4f95eb82fc54f73dd40a1e6ee6f69d477c5ac31f"
+        },
+        "tests/test_admind_operations_r1.py": {
+          "sha256": "175a85b86f28921df3eca75bbc71dc0b6a7d49608fec480a83a4cf2bf98a891d",
+          "blob": "e6a8d6ac8ca30dc0c413314c550bfb5cd8ee8994"
+        },
+        "tests/test_admind_retirement.py": {
+          "sha256": "82bbe396926382d98a493dcc0567271cc6282de55a15f34b1134e7e13ec84e39",
+          "blob": "f9782facabfab9df7ebcd24aea1b795e542ee6de"
+        },
+        "tests/test_admind_recovery.py": {
+          "sha256": "05aa280c52c2f4236e65d995f6e9791c6ac03e8df88179fc687df7d63bfd511a",
+          "blob": "798584744a37f90b3f2e426124f9ba0ff909cb20"
+        }
+      }
+    },
+    "queue": {
+      "worktree": "repository-checkout:beads-task-queue-btq-btq-y2luw",
+      "commit": "893931a0273ca97982fc2f25fcde2f723cd70d02",
+      "status": "",
+      "files": {
+        "bin/btq": {
+          "sha256": "f2bf998f9bd7a178aa530f60177a6c3ad7cef5c704f339ea2fcda839d88fabbf",
+          "blob": "a8d58c17583cf3bddd130667c8f4c91904064047"
+        },
+        "bin/btq-maintenance.py": {
+          "sha256": "e2c953efa8ff74aae1668edbda895155a032f75137f69e5dc91ee15d67f602df",
+          "blob": "2e78ec2e747ead85e79616ccb04d1c70bfff00b4"
+        },
+        "bin/btq-supervise": {
+          "sha256": "cf7e1ea9d7a98cc481d3f973ec260a21acccecb9eb8337ea456a79ec73635cab",
+          "blob": "a383c74f8835df34b13b813ba12b8c7adfc0e8c9"
+        }
+      }
+    }
+  },
+  "external_evidence": {
+    "executor-composition-current-plan.json": "a48b81cc1d7b6d7d15b6fcea64a15c1be841f638949fdf10e2847e4bb0278359",
+    "qe3gk-native-2307.json": "e79520c2d7038adf99087c1079acecae8be6eaee3beb443ed1d1d2dae43af0b6",
+    "admind-executor-boundary-prep.json": "f55fb647e38e6a903e7327ad47a48b7f69444d9f5532fd676371d9d68d1087da"
+  },
+  "limits": [
+    "no runtime or test edits",
+    "no live/native/queue/model/services/credentials",
+    "no review or human approval claimed",
+    "all prior OPEN dispositions retained"
+  ],
+  "design_sha256": "e944f5c1731fbd2df8c3eccd9def519a18a64ee6fc5b6fbd923acee3b70b3d2e",
+  "queue_review_inputs": [
+    {
+      "repo": "repository-checkout:beads-task-queue-btq-btq-y2luw",
+      "commit": "46fd58a631fee0f4017d70aade2383bfc8706a81",
+      "path": "docs/reviews/y2luw-r5/review-medium.md",
+      "sha256": "75ff0e1de7327b96829d1e1d2026a8bd292d571cc638f5b02965f635c03fa906"
+    },
+    {
+      "repo": "repository-checkout:beads-task-queue-btq-btq-y2luw",
+      "commit": "46fd58a631fee0f4017d70aade2383bfc8706a81",
+      "path": "docs/reviews/y2luw-r5/dispositions.md",
+      "sha256": "ce7b1ed5875640ccf74c1aa0705acd7faccf2777b81de5a58e2e53a67ef8bf9b"
+    }
+  ],
+  "publication_note": "Local checkout locators are repository-checkout labels. Exact original local inputs retained externally; source and evidence hashes unchanged.",
+  "local_original_sha256": "3bec3f017680768fb6b73d4f1158c9e9339693506fdfd168bada2840ad68cb33"
+}
