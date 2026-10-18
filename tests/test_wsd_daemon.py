@@ -35,7 +35,7 @@ from heterodyne.wsd.scheduler import Outcome, Trigger, TriggerKind
 from heterodyne.wsd.settings import CTL_SOCKET, WsdSettings, resolve
 from heterodyne.wsd.states import BeadState, Reason, WsState
 from heterodyne.wsd.usage import NoUsageReader
-from heterodyne.wsd.workstream import WorkstreamSettings
+from heterodyne.wsd.workstream import NoHarness, WorkstreamSettings
 
 
 @pytest.fixture(autouse=True)
@@ -206,6 +206,30 @@ def test_corrupt_journal_refuses_to_start(tmp_path: Path, capsys: pytest.Capture
     assert cli.run(s, factory(world), FakeRuntime()) == cli.EX_CONFIG
     assert s.journal.read_bytes() == b"garbage" * 200
     assert "left in place" in capsys.readouterr().err
+
+
+def test_run_gives_the_harness_every_workstream_operation_lock(tmp_path: Path,
+                                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    """Plan 4c T10: the harness is built on the opened journal, and its guard locks, read when it takes them,
+    are the schedulers' parker locks."""
+    s = settings(tmp_path)
+    built: list[tuple[Journal, Callable[[], Any]]] = []
+    served: list[Wsd] = []
+    hooks = NoHarness()
+
+    def builder(j: Journal, locks: Callable[[], Any]) -> NoHarness:
+        built.append((j, locks))
+        return hooks
+
+    async def serve(d: Wsd) -> None:
+        served.append(d)
+
+    monkeypatch.setattr(cli, "_serve", serve)
+    assert cli.run(s, factory(World(tmp_path / "btq-state")), FakeRuntime(), harness=builder) == 0
+    [(j, locks)] = built
+    [d] = served
+    assert d.parts.journal is j and d.parts.harness is hooks
+    assert list(locks()) == [d.parts.schedulers[WS].parker.lock]
 
 
 @pytest.mark.safety

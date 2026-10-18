@@ -4,17 +4,26 @@ OpenShell only. A backend it doesn't build leaves wsd on NoRuntime, so a host wh
 
 import os
 import shutil
+import subprocess
 import sys
+import time
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import AbstractContextManager
+from functools import partial
 from pathlib import Path
+from typing import Any
 
+import heterodyne
+from heterodyne.admind import asks
+from heterodyne.admind import settings as admind_settings
 from heterodyne.agents.registry import ADAPTERS
 from heterodyne.config import ConfigError, load, paths
 from heterodyne.config.layers import table_at
 from heterodyne.harness import paths as store_paths
 from heterodyne.harness import selection
 from heterodyne.harness import settings as harness_settings
+from heterodyne.harness.fetch import Fetcher, HttpsOpener
 from heterodyne.harness.store import open_store
 from heterodyne.sandbox.hostread import HostUsageReader
 from heterodyne.sandbox.openshell import OpenShellBackend, tool_env
@@ -22,7 +31,10 @@ from heterodyne.sandbox.openshell_selftest import OpenShellSelfTest
 from heterodyne.sandbox.runtime import DEFAULT_ACCOUNT, RuntimeConfig, SandboxRuntime
 from heterodyne.sandbox.settings import sandbox_settings
 from heterodyne.tmux import Tmux
+from heterodyne.wsd import btq
 from heterodyne.wsd.accounts import Accounts
+from heterodyne.wsd.harness import ADMIND_INVALID, NO_APPROVE_BEAD, HarnessOps
+from heterodyne.wsd.journal import Journal
 from heterodyne.wsd.runtime import AgentRuntime, NoRuntime
 from heterodyne.wsd.settings import WsdSettings
 from heterodyne.wsd.usage import NoUsageReader, UsageReader
@@ -32,6 +44,8 @@ TMUX_SOCKET = "heterodyne-wsd"
 TMUX_SCOPE = "heterodyne-wsd-tmux"      # prefix of the transient systemd scopes that hold the tmux server
 CANARY = ".heterodyne-canary"           # in the real home: the self-test proves it unreadable inside
 NOT_BUILT = frozenset({"bubblewrap", "seatbelt"})
+FETCH_SECONDS = 600.0                   # one install's downloads, all told
+GIT_SECONDS = 10.0
 
 
 def _stderr(text: str) -> None:
@@ -57,9 +71,7 @@ def _store_problems(h: harness_settings.HarnessSettings, accounts: Accounts,
     """The store's location problems, worked out again on every verification: what `config check` lists,
     with every adapter's default and configured login directories (plan 4c E22, `STORE_UNSAFE`)."""
     def problems() -> list[str]:
-        logins = [accounts.login_paths(a, n)[0] for a in sorted(ADAPTERS)
-                  for n in (DEFAULT_ACCOUNT, *accounts.configured(a))]
-        return store_paths.location_problems(h, logins, env)
+        return store_paths.location_problems(h, _logins(accounts), env)
     return problems
 
 
@@ -113,3 +125,84 @@ def build_usage_reader(s: WsdSettings, env: Mapping[str, str], runtime: AgentRun
     base = {"PATH": env.get("PATH", os.defpath), "HOME": env.get("HOME", ""), "LANG": "C.UTF-8"}
     return HostUsageReader(s.accounts, lambda: runtime.verified_cli(codex), s.credlock_dir,
                            s.state_dir / "hostread", settings.lock_wait_seconds, env=base)
+
+
+def _logins(accounts: Accounts) -> list[Path]:
+    return [accounts.login_paths(a, n)[0] for a in sorted(ADAPTERS)
+            for n in (DEFAULT_ACCOUNT, *accounts.configured(a))]
+
+
+def _checkout() -> Path:
+    """The harness checkout, which an install approval's commit ref names by path: btq resolves a ref's
+    repo as a local git repository."""
+    return Path(heterodyne.__file__).resolve().parents[2]
+
+
+def _commit(root: Path) -> str:
+    """Only a clean source checkout containing this actual imported package supplies provenance.
+
+    An enclosing Git repository around site-packages is not a source checkout. Git repository
+    redirection variables cannot change the repository being checked. Non-editable or dirty
+    installs remain unavailable for managed install approvals rather than asserting an unrelated HEAD.
+    """
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    def git(*args: str) -> str:
+        out = subprocess.run(["git", "-C", str(root), *args], env=env,
+                             stdin=subprocess.DEVNULL, capture_output=True, timeout=GIT_SECONDS, check=True)
+        return out.stdout.decode(errors="strict").strip()
+    try:
+        if Path(git("rev-parse", "--show-toplevel")).resolve() != root.resolve():
+            return ""
+        package = root / "src" / "heterodyne" / "__init__.py"
+        if package.resolve() != Path(heterodyne.__file__).resolve():
+            return ""
+        git("ls-files", "--error-unmatch", "src/heterodyne/__init__.py")
+        if git("status", "--porcelain", "--untracked-files=all", "--ignored", "--",
+               "src/heterodyne", ":(exclude,glob)src/heterodyne/**/__pycache__/*.pyc"):
+            return ""
+        return git("rev-parse", "--verify", "-q", "HEAD^{commit}")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return ""
+
+
+def _no_readout(why: str, bead: str) -> btq.Readout | btq.Busy:
+    raise btq.ReadoutFailed(why)
+
+
+def _approve_bead(env: Mapping[str, str]) -> tuple[Path | None, str]:
+    """`[admind] approve_bead` and "", or None and why no decision can be read: the key is unset, or
+    `[admind]` doesn't validate. `install` refuses with that before it stages or asks."""
+    try:
+        cfg = load(env=env)
+        if table_at(cfg.values, "admind", "config").get("approve_bead") is None:
+            return None, NO_APPROVE_BEAD
+        binary = admind_settings.resolve(cfg, env).approve_bead
+    except ConfigError:
+        return None, ADMIND_INVALID
+    return (binary, "") if binary is not None else (None, NO_APPROVE_BEAD)
+
+
+def build_harness(s: WsdSettings, env: Mapping[str, str], factory: btq.QueueFactory, runtime: AgentRuntime,
+                  journal: Journal,
+                  guard_locks: Callable[[], Sequence[AbstractContextManager[Any]]],
+                  notice: Callable[[str], None] = _stderr) -> HarnessOps | None:
+    """`wsctl harness`'s operations (plan 4c T10), or None without the host's accounts (the store's location
+    check needs them). The approvals go to admind's ask socket and its alerts directory. When no approval
+    could take effect, the start says so once, as every install will refuse."""
+    if s.accounts is None:
+        return None
+    harnesses = sandbox_settings(env).harnesses
+    state, root = paths.state_dir(env), _checkout()
+    binary, refusal = _approve_bead(env)
+    if refusal:
+        notice(f"wsctl harness install will refuse every install: {refusal}")
+    readout = (partial(_no_readout, refusal) if binary is None
+               else partial(btq.approval_readout, binary=binary))
+    fetcher = Fetcher(HttpsOpener(), s.state_dir / "harness-cache", time.monotonic, FETCH_SECONDS,
+                      login_dirs=_logins(s.accounts))
+    return HarnessOps(
+        settings=harnesses, store=open_store(harnesses), fetcher=fetcher, queues=factory, journal=journal,
+        readout=readout, ask_socket=state / "admind" / asks.ASK_SOCKET, config_dir=_config_dir(s, env),
+        taint_dir=s.state_dir / "harness-taint", alerts_dir=state / "alerts", runtime=runtime,
+        clock=utc_now, commit=_commit(root), repo=str(root), guard_locks=guard_locks,
+        store_problems=_store_problems(harnesses, s.accounts, env), readout_refusal=refusal)

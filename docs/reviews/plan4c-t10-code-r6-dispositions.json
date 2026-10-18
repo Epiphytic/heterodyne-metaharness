@@ -1,0 +1,80 @@
+{
+  "schema": "t10-code-r6-author-dispositions.v1",
+  "review_ordinal": 6,
+  "actual_verdict": "REVISE",
+  "raw_sha256": "9d99ea4bd80335634eff7546e27271915cbbd4e7d9d6f657280d25001ccece8f",
+  "reviewed_head": "e46d413ee06d54d620564a1208a34e57ef2fc369",
+  "author_status": "Repairs only; no subsequent review or waiver claimed.",
+  "findings": [
+    {
+      "number": 1,
+      "verbatim_finding": "1. `src/heterodyne/wsd/daemon.py:361`: `install` now joins the approval worker before replying, but it always replies `ok ... its approval is being created and posted`, even when the worker failed the row with ASK_UNPOSTABLE.\n\n   Failure scenario: The secret scan withholds the approval text, the btq digest has gaps, the read-back doesn't match, or admind refuses the post. The worker calls `_fail_open`, so the row is `failed` before the reply is sent, yet the operator gets status `ok` saying the approval is in progress. They wait for an approval card that will never arrive. Since the worker is joined anyway, run `_ask` inline (the thread does nothing now) and return its result as refused/failed.\n\n",
+      "verbatim_sha256": "c476ba1ba46a4172280062aa9fdfe8bef56055bf8ca23a4a0b1f7fa909e6b190",
+      "status": "fixed",
+      "resolution": "daemon.harness_one checks approval_result after the accounted install attempt; only a durable posted row gets an ok/posted reply. A failed or missing row refuses with ASK_UNPOSTABLE."
+    },
+    {
+      "number": 2,
+      "verbatim_finding": "2. `src/heterodyne/wsd/harness.py:253`: `wait()` calls `worker.join()` with no timeout while the HARNESS_LANE job is running, so one hung `bd`/btq call blocks every harness operation and the advance timer indefinitely.\n\n   Failure scenario: Inside `_ask`, `queue.bd('create', ...)`, `queue.show` or `ask_digest` hangs (a btq lock, a stuck dolt). `harness_one` never returns, so HARNESS_LANE never runs another job: `_harness_every` advances stop, posted approvals are never decided, and `list`/`use`/`verify`/`remove`/`prune` all wait until the client gives up. The client waits up to INSTALL_SECONDS (1200 s); the lane stays stuck. Shutdown then ends in Undrained. The fetch alone (up to 600 s) already blocks `wsctl harness list`, whose REPLY_SECONDS limit is 600 s, for that long.\n\n",
+      "verbatim_sha256": "fe67fe529f6677de08ba13e3b652b54a354e3068f360cb6f0d07eef9409515a2",
+      "status": "fixed-bounded-native-seam",
+      "resolution": "Approval composition runs inline on the already-accounted HARNESS lane; no secondary worker.join exists. Queue.bd/show already have 20 s subprocess deadlines. wsd.btq.load sets 20 s GIT_TIMEOUT on its isolated imported queue module so commit-ref digest Git reads cannot wait forever. Existing fetch 600 s, Ask socket 10 s, client install 1200 s and bounded daemon drain/Undrained remain; no live-effect thread is abandoned or uncertain write retried. Finite subprocess limits are not an overall latency guarantee for unlimited recipe content or failing kernel/storage."
+    },
+    {
+      "number": 3,
+      "verbatim_finding": "3. `src/heterodyne/wsd/harness.py:542`: `recover()` only catches HarnessRefused for each approved row, so any other exception from `_settle` aborts the whole startup recovery, and with it wsd's startup.\n\n   Failure scenario: Example: the fallback `Store._call` catches only sc.Refused, so an OSError (EIO/EACCES on the store root) escapes `store.outcome`/`publish`. Others: a JournalBusy/sqlite error in `_published`/`_end`, or KeyError from `harness_set`. Any of these propagates out of `harness_recover`, which re-raises, so `_startup` fails and wsd exits. systemd restarts it into the same row and it fails again. Every workstream is down because of one approved install. This contradicts the disposition's claim that ambiguous publications are quarantined 'while unrelated lanes can continue'.\n\n",
+      "verbatim_sha256": "96a3a4c84d302876d270fc157a883be98188dde426ac1e84967ae4f0b689397b",
+      "status": "fixed",
+      "resolution": "recover isolates every ordinary Exception from settling each approved row, logging type only and preserving the OPEN row. Unrelated rows and daemon startup continue; affected adapter protection remains. BaseException and unreadable global journal state are not swallowed."
+    },
+    {
+      "number": 4,
+      "verbatim_finding": "4. `src/heterodyne/wsd/harness.py:664`: An `approved` row that keeps hitting RECOVERY_FAILED (wrong publish name, or an outcome that never resolves) never expires and has no operator command to clear it, so the whole adapter is locked permanently.\n\n   Failure scenario: The helper publishes under a different name. The row stays `approved` for good (`_advance` only expires staged/posted rows), and every tick logs at debug and changes nothing. Meanwhile `_check` refuses `use`/`rollback` for every install of that adapter, and `in_use` returns True for all of them, so `remove`/`prune` refuse IN_USE. The 'exact subsequent readback' never comes because the store really did publish another name. The only way out is editing the journal by hand.\n\n",
+      "verbatim_sha256": "e4f2f2dcf694aba24f1f249b64e167668c3c7ad7f81aa8d7a4ce5d7d5545c96f",
+      "status": "design-required-hold",
+      "resolution": "Approved 4ac749 Task 10 gives finite positive store readback/publish/failure recovery but no quarantine abandonment/clear command. A wrong-name or ambiguous store publication must remain OPEN and adapter-protected; neither elapsed time nor a caller-provided claim proves safe clearing. Root must obtain a scoped operator-resolution design/approval before adding a supported resolution command. No manual database/journal edit is proposed. This is an unresolved operational limitation, not claimed fixed or waived."
+    },
+    {
+      "number": 5,
+      "verbatim_finding": "5. `src/heterodyne/wsd/harness.py:753`: `taint_current` and `tainted` take HarnessOps.lock from the scheduler while it holds its parker lock, but `advance` holds that same lock across approve-bead (5 s) and `bd show` (20 s) for every posted row. So workstream pickups still wait on approval I/O, which finding 3 was meant to remove.\n\n   Failure scenario: Three posted installs and a slow `bd`: an advance tick holds `self.lock` for about 75 s. Any workstream pickup that processes an InstallTainted signal blocks inside `_signal` (parker lock held) until advance finishes, delaying that workstream's launches and its other signals. `taint_current` only reads a marker file and needs no HarnessOps lock. Alternatively, `advance` could do its network reads without holding the lock.\n\n",
+      "verbatim_sha256": "7e71a6178df5d126beac25a51c52a588daf82327128a10e1f01df62becdea20e",
+      "status": "fixed",
+      "resolution": "taint_current uses only the no-follow marker read, not HarnessOps.lock. tainted takes only alerts_lock plus the existing journal primitives; it does not wait behind approval network reads while the scheduler owns its parker lock."
+    },
+    {
+      "number": 6,
+      "verbatim_finding": "6. `src/heterodyne/wsd/daemon.py:730`: `_startup` (and `startup`) awaits a full `harness_advance` (approve-bead plus `bd show` per posted row, store recovery per approved row) before any workstream's recovery or startup pickup, though the invariant only requires `recover`.\n\n   Failure scenario: With N posted installs and a slow btq, every workstream's startup recovery and pickup is delayed by up to N\u00d725 s after each restart. Startup does not need the approval decisions: the harness timer advances on its own lane. Drop the startup advance, or start it without awaiting it before the workstream recoveries.\n\n",
+      "verbatim_sha256": "89a32cd07050387b1afd365c18f29eb002ea94662c0d67e1a039b6e277ef80b6",
+      "status": "fixed",
+      "resolution": "Both synchronous and asynchronous startup run harness recovery before workstream recovery/pickup and do not advance posted approvals there. The existing independent harness timer advances approvals after startup."
+    },
+    {
+      "number": 7,
+      "verbatim_finding": "7. `src/heterodyne/wsd/harness.py:363`: A row that ends failed, expired or denied never closes its approval bead and never withdraws the admind ask, so a human can still approve an ask that wsd has abandoned.\n\n   Failure scenario: admind accepts the post, but the reply arrives after ASK_SECONDS (10 s) or isn't valid JSON. The worker's except branch fails the row while the ask is live in admind. The same happens with every `expired` row after `staging_hours`, and with a bead created before a read-back mismatch. A human later approves the card and nothing happens. Nothing in wsd closes the bead, so the approval queue fills with abandoned `kind:approval` beads.\n\n",
+      "verbatim_sha256": "8ebea6963d8946722625b71671e4a6692286d10ee51203aebd963f4a09b73a13",
+      "status": "rebutted-approved-write-boundary",
+      "resolution": "4ac749 Task 10 explicitly tests that wsd never writes to an approval bead after creating it: no update/close/reopen/set-state. Adding native close/withdraw here violates that approved boundary and cannot prove a timed-out post absent. Terminal row state does not authorize an effect if a late human approves; no publication occurs outside E13. Orphan-card withdrawal/lifecycle requires its own supported design and authority, retained as an operational limitation."
+    },
+    {
+      "number": 8,
+      "verbatim_finding": "8. `src/heterodyne/wsd/daemon.py:351`: `list` now keys its entries by `install_label` (adapter plus manifest digest prefix) and withholds the version, but `use`/`verify`/`remove` still accept only the canonical `<version>-<12hex>` name, so no wsctl output gives the operator a working selector.\n\n   Failure scenario: An operator installs from the recipe default (no version typed), then runs `wsctl harness list`. They see `codex manifest abcdef123456`, version 'withheld'. `wsctl harness use codex abcdef123456` fails with NOT_PUBLISHED, and they have to work out the version from the config or the store. Entries whose names don't match the install pattern all get the same label, `an install (malformed name)`, so later ones overwrite earlier ones in the dict.\n\n",
+      "verbatim_sha256": "68cbdea1c4f97e9a4d90d84da4bb3688653d811c7d5be2f881e5f7a8edf167d0",
+      "status": "fixed",
+      "resolution": "List exposes an opaque @12hex manifest selector without upstream version. Verify/use/remove resolve it only if exactly one published install of the adapter matches, otherwise refuse. Existing canonical selectors remain accepted. Numbered display keys retain distinct malformed-name entries without exposing their text."
+    },
+    {
+      "number": 9,
+      "verbatim_finding": "9. `src/heterodyne/wsd/harness.py:736`: `list` and `_prunable` call `in_use` once per store install. Each call re-reads the selection file, re-queries `harness_opened`/`harness_installs`, and calls `runtime.sessions(ws)` for every launched entry, all while holding HarnessOps.lock (and every parker lock for prune).\n\n   Failure scenario: With 20 installs and many past launches, a single `prune` repeats the selection read and runtime session listing installs \u00d7 launches times while holding every workstream's operation lock, so all pickups wait for it. Load the selections, open-use set, OPEN rows and per-workstream session sets once per call and pass them in.\n\n",
+      "verbatim_sha256": "8982c97ee1931bdbc29c950bd792005beee49943ddbf64be2f6f0ecdeb6d3425",
+      "status": "deferred-performance",
+      "resolution": "Repeated in_use scans still have bounded per-store/journal/runtime work but multiply under prune/list. Snapshotting runtime selections across guard locks is a separate optimization with concurrency implications; retained unchanged and UNWAIVED, no claim of constant latency."
+    },
+    {
+      "number": 10,
+      "verbatim_finding": "10. `src/heterodyne/sandbox/build.py:160`: The clean-source check uses `git status --porcelain --untracked-files=all`, which leaves out ignored files, so an ignored `.py` file under `src/heterodyne` can be imported while the approval records a clean HEAD commit.\n\n    Failure scenario: A file matching a `.gitignore` pattern (a local `*_local.py` override, a generated module) is present under `src/heterodyne` and imported by the package. `_commit` sees an empty status and returns HEAD. The approval card's `commit` ref then names code that isn't what is running. Add `--ignored` (and ignore only `__pycache__`), or compare tracked files only.\n",
+      "verbatim_sha256": "075e9dca099692c7bdd196e63d8c76fa1943bc665850c5120fccc1f0957bb0ec",
+      "status": "fixed",
+      "resolution": "Clean provenance status includes ignored source files. Only ignored __pycache__/*.pyc entries are excluded; an ignored .py even inside __pycache__ refuses provenance. Temporary Git regression proves dirty ignored Python rejects while ordinary generated bytecode preserves the pinned commit."
+    }
+  ]
+}

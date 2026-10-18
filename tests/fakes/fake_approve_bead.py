@@ -36,6 +36,8 @@ controls:
   predates it: exit 2), `"omit"` (no `gate_preview` key), `"null"` (null even when open and undecided),
   `"always"` (a preview even when closed or decided);
 - `after_decide`: fields merged into the bead once any decision run ends (to fail a read-back).
+- `override` (readout fields set last, `id` and `decided` included) and `drop` (readout fields left out):
+  a malformed readout, for a reader's strict parse.
 Each run appends its PID to `<db dir>/pids`. It touches nothing outside the files named above. The `held` and
 `descendant` grandchildren are sleepers (tests/fakes/sleeper.py) of the escapes use named by `HZ_ESCAPE_DIR`:
 they end themselves at the test's end.
@@ -120,6 +122,9 @@ def decided(bead: dict[str, Any]) -> bool:
 def readout(bead_id: str, bead: dict[str, Any]) -> dict[str, Any]:
     out = {**FIELDS, "id": bead_id, **{k: v for k, v in bead.items() if k in FIELDS}}
     out["decided"] = decided(bead)
+    out.update(bead.get("override", {}))
+    for key in bead.get("drop", []):
+        out.pop(key, None)
     return out
 
 

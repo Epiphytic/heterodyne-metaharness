@@ -1061,11 +1061,11 @@ def test_resolved_end_is_an_exact_key(journal: Journal) -> None:
     journal.close()
 
 
-def test_a_new_journal_is_version_3_and_keeps_an_entrys_install_pin(tmp_path: Path) -> None:
+def test_a_new_journal_is_version_4_and_keeps_an_entrys_install_pin(tmp_path: Path) -> None:
     """Plan 4c T7: `launches.install` and `.install_digest`, set when journaled, read back as written."""
     j = Journal(tmp_path / "state" / "wsd.db")
     try:
-        assert j.db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == ("3",)
+        assert j.db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == ("4",)
         pinned = LaunchEntry("k", 1, "w", "btq-1", "coder", "p", "default", "ck", "", False, "t",
                              install="0.160.0-0123456789ab",
                              install_digest="sha256:" + "0123456789abcdef" * 4)
