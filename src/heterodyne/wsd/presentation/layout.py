@@ -43,7 +43,7 @@ def wrap(span: Span, *, forbidden_continuation: re.Pattern[str] | None = None) -
             out.append(line.slice(0, cut))
             advance = cut + (line.text[cut : cut + 1] == " ")
             line = line.slice(advance, len(line.text))
-            if forbidden_continuation is not None and forbidden_continuation.match(line.text):
+            if forbidden_continuation is not None and forbidden_continuation.match(line.text.lstrip(" ")):
                 raise UnsafeContinuation
         out.append(line)
     return tuple(out)

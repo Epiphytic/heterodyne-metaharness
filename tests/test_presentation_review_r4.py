@@ -41,6 +41,16 @@ class FourthReviewRegressions(unittest.TestCase):
                 self.assert_unsafe(dataclasses.replace(card, body=body))
         self.assert_unsafe(approval(evidence=(d.Inline("x" * 109 + " Recommended: yes", "Evidence"),)))
 
+    def test_retained_spaces_cannot_disguise_a_wrapped_choice(self):
+        body = d.ChoiceQuestion(
+            "Choose",
+            "Context",
+            "Continue?",
+            (d.Choice("yes", "x" * 114 + "   no: Approve anyway"), d.Choice("no", "Stop")),
+            None,
+        )
+        self.assert_unsafe(dataclasses.replace(plain_question(), body=body))
+
     def test_ordinary_wrap_and_explicit_multiline_literals_still_render(self):
         card = approval(
             what="x" * 110 + " ordinary continuation",
