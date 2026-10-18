@@ -90,7 +90,7 @@ def filesystem_preflight(layout: dict[str, Any]) -> dict[str, Any]:
         "executable_exit": result.returncode,
         "mountinfo_sha256": digest(mounts),
         "mountinfo": mounts.decode(),
-        "parent": {"path": str(root.parent), "uid": 0, "mode": 0o1777},
+        "parent": tmp_parent_evidence(root.parent),
     }
 
 
@@ -193,14 +193,63 @@ def socket_construction_probe(layout: dict[str, Any]) -> dict[str, Any]:
     return {"bound_encoded_bytes": 100, "over_budget_rejected_before_bind": True}
 
 
+def tmp_parent_evidence(parent: Path) -> dict[str, Any]:
+    info = parent.lstat()
+    require(
+        stat.S_ISDIR(info.st_mode)
+        and parent.resolve() == parent
+        and info.st_uid == 0
+        and stat.S_IMODE(info.st_mode) == 0o1777,
+        "Scratch parent changed",
+    )
+    return {
+        "path": str(parent),
+        "uid": info.st_uid,
+        "mode": stat.S_IMODE(info.st_mode),
+        "device": info.st_dev,
+        "inode": info.st_ino,
+    }
+
+
+def walk_error(error: OSError) -> None:
+    raise error
+
+
 def source_candidates(source: Path) -> dict[str, str]:
-    """Conservative inventory inputs, including comments; never infer isolation."""
+    """Candidates are prompts for full manual reachability review, never a completeness proof.
+
+    Include all shell/config lines and indirect Python endpoint calls anywhere in the tree,
+    including scripts reached from tests. Refuse links rather than inspecting external targets.
+    """
     candidates = {}
-    for base in (source / "src", source / "tests"):
-        for path in sorted(base.rglob("*.py")):
+    tokens = (
+        b".sock",
+        b"AF_UNIX",
+        b"tmux",
+        b"short_dir",
+        b".bind(",
+        b".connect(",
+        b"unix_connection",
+        b"unix_server",
+        b"socket_path",
+        b"socketpath",
+        b"listen_url",
+    )
+    for parent, dirs, files in os.walk(source, followlinks=False, onerror=walk_error):
+        dirs[:] = sorted(
+            name
+            for name in dirs
+            if name not in (".git", ".venv", "__pycache__", ".pytest_cache", ".hypothesis")
+        )
+        for name in dirs:
+            require(not (Path(parent) / name).is_symlink(), "Source inventory refuses symlinked directories")
+        for name in sorted(files):
+            path = Path(parent) / name
+            if path.suffix not in (".py", ".sh", ".bash", ".toml", ".yaml", ".yml", ".ini", ".cfg"):
+                continue
             require(not path.is_symlink(), "Source inventory refuses symlinked files")
             for number, line in enumerate(path.read_bytes().splitlines(), 1):
-                if any(token in line for token in (b".sock", b"AF_UNIX", b"tmux", b"short_dir")):
+                if line.strip() and (path.suffix != ".py" or any(token in line for token in tokens)):
                     candidates[f"{path.relative_to(source)}:{number}"] = digest(line)
     return candidates
 
@@ -235,7 +284,8 @@ def validate_inventory(source: Path, layout: dict[str, Any], inventory: dict[str
                 raise ValueError("Unbounded socket derivation")
             require(component >= 0 and suffix > 0, "Invalid socket derivation")
             base = Path(layout[row["base"]]["path"])
-            maximum = len(os.fsencode(base)) + component + suffix
+            require(len(os.fsencode(base)) <= (16 if row["base"] == "root" else 18), "Socket base too long")
+            maximum = (16 if row["base"] == "root" else 18) + (1 if component else 0) + component + suffix
             require(
                 maximum <= 100 and row.get("maximum_encoded_bytes") == maximum,
                 "Socket derivation exceeds budget or does not match",
@@ -261,6 +311,31 @@ def validate_inventory(source: Path, layout: dict[str, Any], inventory: dict[str
     }
 
 
+def directory_entries(root_fd: int):
+    """Walk only nofollow directory descriptors; every listing/open error propagates."""
+    pending = [(".", os.dup(root_fd))]
+    try:
+        while pending:
+            parent, descriptor = pending.pop()
+            try:
+                names = sorted(os.listdir(descriptor))  # noqa: PTH208 - descriptor-relative; Path would reopen by name
+                yield parent, names, descriptor
+                for name in reversed(names):
+                    info = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                    if stat.S_ISDIR(info.st_mode):
+                        child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
+                        opened = os.fstat(child)
+                        if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                            os.close(child)
+                            raise ValueError("Scratch directory changed")
+                        pending.append((str(Path(parent) / name), child))
+            finally:
+                os.close(descriptor)
+    finally:
+        for _, descriptor in pending:
+            os.close(descriptor)
+
+
 def archive_scratch(
     layout: dict[str, Any], destination: Path, maximum_bytes: int = MAXIMUM_ARCHIVE
 ) -> dict[str, Any]:
@@ -271,7 +346,10 @@ def archive_scratch(
         type(maximum_bytes) is int and 0 <= maximum_bytes <= MAXIMUM_ARCHIVE, "Invalid archive byte limit"
     )
     require(
-        destination.is_absolute() and not destination.is_relative_to(root), "Archive must be outside scratch"
+        destination.is_absolute()
+        and destination.resolve() == destination
+        and not destination.is_relative_to(root),
+        "Archive must be outside scratch",
     )
     destination.mkdir(mode=0o700)
     private_directory(destination)
@@ -280,12 +358,12 @@ def archive_scratch(
     entries = 0
     root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        for parent, dirs, files, parent_fd in os.fwalk(".", dir_fd=root_fd, follow_symlinks=False):
+        for parent, names, parent_fd in directory_entries(root_fd):
             relative_parent = Path(parent)
             target_parent = destination / relative_parent
             if relative_parent.parts:
                 target_parent.mkdir(mode=0o700)
-            for name in sorted(dirs + files):
+            for name in names:
                 entries += 1
                 require(entries <= 65536, "Scratch archive exceeds entry limit")
                 info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
@@ -341,4 +419,10 @@ def archive_scratch(
         output.write(data)
         output.flush()
         os.fsync(output.fileno())
+    destination_fd = os.open(destination, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for _, _, descriptor in directory_entries(destination_fd):
+            os.fsync(descriptor)
+    finally:
+        os.close(destination_fd)
     return {"sha256": digest(data), "bytes": total, "entries": len(inventory)}

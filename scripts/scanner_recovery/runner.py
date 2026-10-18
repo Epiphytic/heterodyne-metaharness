@@ -62,11 +62,11 @@ STAGES = {
     "diagnostic": (375, None, "b1", []),
     "h92": (92, None, "baseline", ["diagnostic"]),
     "t1": (88, "t1", "baseline", ["diagnostic", "h92"]),
-    "create-red": (6, "create-alert-before-patch", "baseline", ["t1"]),
-    "b1": (3373, "t2s2", "b1", ["t1", "create-red"]),
-    "overlap": (7, "t2s5", "b1", ["t1", "create-red", "b1"]),
-    "b2": (3373, None, "b2", ["t1", "create-red", "b1", "overlap"]),
-    "create-green": (6, None, "b2", ["b2"]),
+    "create-red": (6, "create-alert-before-patch", "baseline", ["diagnostic", "h92", "t1"]),
+    "b1": (3373, "t2s2", "b1", ["diagnostic", "h92", "t1", "create-red"]),
+    "overlap": (7, "t2s5", "b1", ["diagnostic", "h92", "t1", "create-red", "b1"]),
+    "b2": (3373, None, "b2", ["diagnostic", "h92", "t1", "create-red", "b1", "overlap"]),
+    "create-green": (6, None, "b2", ["diagnostic", "h92", "t1", "create-red", "b1", "overlap", "b2"]),
 }
 
 
@@ -113,9 +113,133 @@ def snapshot(w, paths=PATHS):
     }
 
 
+def validate_supplement(supplement, manifest):
+    original = manifest["result_contract"]
+    recovery.require(
+        supplement["original_required_fields"] == original["required_fields"]
+        and supplement["original_environment_allowlist"] == original["environment_allowlist"],
+        "Original contract changed",
+    )
+    recovery.require(
+        supplement["required_fields"]
+        == original["required_fields"] + supplement["additional_required_fields"],
+        "Supplement field substitution",
+    )
+    recovery.require(
+        supplement["environment_allowlist"] == original["environment_allowlist"] + ["XDG_RUNTIME_DIR"],
+        "Supplement environment substitution",
+    )
+    recovery.require(
+        len(supplement["additional_required_fields"]) == 6 and len(set(supplement["required_fields"])) == 57,
+        "Exactly six additive fields required",
+    )
+
+
+def h92_collection_check(nodes, manifest):
+    recovery.require(
+        all(node.startswith("tests/test_sandbox_hostread.py::") for node in nodes),
+        "H92 must contain only hostread nodes",
+    )
+    delta = manifest["collection_delta"]
+    added = delta["added_node"]
+    recovery.require(added in nodes, "H92 added regression missing")
+    index = nodes.index(added)
+    recovery.require(
+        0 < index < len(nodes) - 1
+        and nodes[index - 1] == delta["immediate_predecessor"]
+        and nodes[index + 1] == delta["immediate_successor"],
+        "H92 adjacency changed",
+    )
+
+
+def hold(result, message, error):
+    result["verification_result_or_error"] = {
+        "HOLD": message,
+        "reason": type(error).__name__ + ": " + str(error),
+        "previous": result["verification_result_or_error"],
+    }
+
+
+def finish_scratch(layout, folder, result):
+    try:
+        runtime = Path(layout["r"]["path"])
+        recovery.require(recovery.private_directory(runtime) == layout["r"], "Runtime identity changed")
+        entries = sorted(runtime.iterdir())
+        result["runtime_entries_after"] = [path.name for path in entries]
+        recovery.require(
+            not any(path.name == "bus" or path.is_socket() for path in entries), "Runtime contains socket/bus"
+        )
+    except (OSError, ValueError) as error:
+        result["runtime_error"] = str(error)
+        hold(result, "Runtime check failed", error)
+    # Preserve regardless of runtime result. An archive failure retains both earlier diagnostics.
+    try:
+        archived = recovery.archive_scratch(layout, folder / "scratch-archive")
+        result["scratch_archive_inventory_sha256"] = archived["sha256"]
+        result["scratch_archive"] = archived
+    except (OSError, ValueError) as error:
+        result["archive_error"] = str(error)
+        hold(result, "Scratch preservation failed", error)
+
+
+def diagnostic_selection(result_data, collection_data, failure_data, supplement):
+    recovery.require(sha(result_data) == supplement["failed_result_sha256"], "Failed result pin changed")
+    failed = json.loads(result_data)
+    recovery.require(
+        sha(collection_data) == failed["raw_collection_file_sha256"], "Failed collection pin changed"
+    )
+    failure_map = json.loads(failure_data)
+    recovery.require(
+        failure_map["source_result_sha256"] == supplement["failed_result_sha256"],
+        "Failure map result pin changed",
+    )
+    unexpected = {
+        row["node"]
+        for row in failure_map["failures"]
+        if row["classification"] != "expected-scanner-assertion"
+    }
+    selection = [node for node in json.loads(collection_data) if node in unexpected]
+    recovery.require(
+        len(selection) == len(set(selection)) == len(unexpected) == 375,
+        "Exact375diagnostic identities required",
+    )
+    return selection
+
+
+def predecessor_check(stage, old, receipt, supplement, chain_identity):
+    recovery.require(
+        old["stage"] == stage and "PASS" in old["verification_result_or_error"], "Predecessor did not pass"
+    )
+    recovery.require(old["unavailable_fields"] == [], "Predecessor missing evidence")
+    recovery.validate_result(old, supplement)
+    recovery.require(
+        old["source_receipt_identity"]["task"] == receipt["task"]
+        and old["b1_three_file_sha256"] == receipt["b1_three_file_sha256"]
+        and old["source_receipt_identity"]["h_delivery_evidence_sha256"]
+        == receipt["h_delivery_evidence_sha256"],
+        "Predecessor source chain changed",
+    )
+    recovery.require(old["chain_identity"] == chain_identity, "Predecessor driver/environment chain changed")
+    if stage != "b2":
+        recovery.require(
+            old["b2_target_file_sha256"] == receipt["b2_before_file_sha256"], "Predecessor B2 source changed"
+        )
+    if stage == "diagnostic":
+        recovery.require(
+            old["verification_result_or_error"] == {"PASS": {"total": 375, "failed": 0, "passed": 375}},
+            "Diagnostic375PASS required",
+        )
+    # Every common predecessor reference must be byte-identical through the chain.
+    for name, ref in old["source_receipt_identity"]["predecessors"].items():
+        recovery.require(
+            receipt["predecessors"].get(name) == ref, "Predecessor reference chain changed: " + name
+        )
+
+
 def pinned_inputs(w, original, h92=False):
     m = load(MANIFEST)
     supplement = load(SUPPLEMENT)
+    validate_supplement(supplement, m)
     recovery.require(
         sha(MANIFEST.read_bytes()) == supplement["original_manifest_sha256"],
         "Runner precondition failed at original line 78",
@@ -324,8 +448,22 @@ def main():
         else PATHS
     )
     count, expected_key, phase, required = STAGES[a.stage]
-    supplement = load(SUPPLEMENT)
-    disposition = load(a.baseline_disposition)
+    supplement_data = SUPPLEMENT.read_bytes()
+    supplement = json.loads(supplement_data)
+    validate_supplement(supplement, m)
+    disposition_data = a.baseline_disposition.read_bytes()
+    disposition = json.loads(disposition_data)
+    inventory_data = a.inventory.read_bytes()
+    source_inventory = json.loads(inventory_data)
+    failure_data = FAILURE_MAP.read_bytes()
+    reservation_data = a.reservation.read_bytes()
+    chain_identity = {
+        "driver": sha(Path(__file__).read_bytes()),
+        "support": sha(Path(recovery.__file__).read_bytes()),
+        "supplement": sha(supplement_data),
+        "disposition": sha(disposition_data),
+        "failure_map": sha(failure_data),
+    }
     recovery.require(
         disposition["mode"] == "FRESH" and disposition["approval"] == "btq-7k1bf",
         "Runner precondition failed at original line 204",
@@ -344,9 +482,11 @@ def main():
             "Runner precondition failed at original line 208",
         )
     before = snapshot(w, snapshot_paths)
+    recovery.require(a.stage != "h92" or not before["porcelain"], "H92 requires clean porcelain")
     recovery.require(before["head"] == a.head, "Runner precondition failed at original line 210")
-    receipt = load(a.source_receipt)
-    receipt_sha = sha(a.source_receipt.read_bytes())
+    receipt_data = a.source_receipt.read_bytes()
+    receipt = json.loads(receipt_data)
+    receipt_sha = sha(receipt_data)
     recovery.require(
         receipt_sha == a.source_receipt_sha256, "Runner precondition failed at original line 213"
     )
@@ -397,52 +537,11 @@ def main():
         )
     for stage in required:
         ref = receipt["predecessors"][stage]
-        path = Path(ref["path"])
-        recovery.require(
-            sha(path.read_bytes()) == ref["sha256"], "Runner precondition failed at original line 232"
-        )
-        old = load(path)
-        recovery.require(
-            old["stage"] == stage and "PASS" in old["verification_result_or_error"],
-            "Runner precondition failed at original line 234",
-        )
-        recovery.require(old["unavailable_fields"] == [], "Runner precondition failed at original line 235")
-        recovery.require(
-            old["source_receipt_identity"]["task"] == receipt["task"],
-            "Runner precondition failed at original line 236",
-        )
-        recovery.require(
-            old["b1_three_file_sha256"] == receipt["b1_three_file_sha256"],
-            "Runner precondition failed at original line 237",
-        )
-        recovery.validate_result(old, supplement)
-        recovery.require(
-            old["source_receipt_identity"]["h_delivery_evidence_sha256"]
-            == receipt["h_delivery_evidence_sha256"],
-            "Runner precondition failed at original line 239",
-        )
-        if stage != "b2":
-            recovery.require(
-                old["b2_target_file_sha256"] == receipt["b2_before_file_sha256"],
-                "Runner precondition failed at original line 241",
-            )
+        predecessor_data = Path(ref["path"]).read_bytes()
+        recovery.require(sha(predecessor_data) == ref["sha256"], "Predecessor bytes changed")
+        predecessor_check(stage, json.loads(predecessor_data), receipt, supplement, chain_identity)
     diagnostic_ref = receipt.get("predecessors", {}).get("diagnostic")
-    if a.stage != "diagnostic":
-        recovery.require(diagnostic_ref, "Actual diagnostic predecessor required")
-        diagnostic_path = Path(diagnostic_ref["path"])
-        recovery.require(
-            sha(diagnostic_path.read_bytes()) == diagnostic_ref["sha256"],
-            "Runner precondition failed at original line 246",
-        )
-        diagnostic = load(diagnostic_path)
-        recovery.require(
-            diagnostic["stage"] == "diagnostic"
-            and diagnostic["verification_result_or_error"]
-            == {"PASS": {"total": 375, "failed": 0, "passed": 375}},
-            "Runner precondition failed at original line 248",
-        )
-        recovery.validate_result(diagnostic, supplement)
-    reservation = load(a.reservation)
+    reservation = json.loads(reservation_data)
     recovery.require(
         reservation["task"] == "btq-1wu2i"
         and reservation["source_head"] == a.head
@@ -467,14 +566,26 @@ def main():
         "expected_key": expected_key,
         "runner_sha256": sha(Path(__file__).read_bytes()),
         "support_sha256": sha(Path(recovery.__file__).read_bytes()),
-        "supplement_sha256": sha(SUPPLEMENT.read_bytes()),
-        "failure_map_sha256": sha(FAILURE_MAP.read_bytes()),
-        "inventory_sha256": sha(a.inventory.read_bytes()),
-        "baseline_disposition_sha256": sha(a.baseline_disposition.read_bytes()),
+        "supplement_sha256": sha(supplement_data),
+        "failure_map_sha256": sha(failure_data),
+        "inventory_sha256": sha(inventory_data),
+        "baseline_disposition_sha256": sha(disposition_data),
         "source_receipt_sha256": receipt_sha,
         "reservation": reservation,
         "no_execution_authority_inferred": True,
     }
+    planned_layout = {key: {"path": "/" + "x" * 15 + "/" + key} for key in recovery.CHILDREN}
+    planned_layout["root"] = {"path": "/" + "x" * 15}
+    recovery.validate_inventory(w, planned_layout, source_inventory)
+    recovery.construction_probes(supplement)
+    diagnostic_nodes: list[str] = []
+    if a.stage == "diagnostic":
+        if a.failed_result is None or a.failed_collection is None:
+            raise ValueError("Failed result and collection required before release")
+        diagnostic_nodes = diagnostic_selection(
+            a.failed_result.read_bytes(), a.failed_collection.read_bytes(), failure_data, supplement
+        )
+    plan["chain_identity"] = chain_identity
     if not a.execute:
         print(json.dumps(plan, indent=2))
         return 0
@@ -488,7 +599,7 @@ def main():
             "source_head": a.head,
             "source_receipt_sha256": receipt_sha,
             "driver_sha256": plan["runner_sha256"],
-            "reservation_sha256": sha(a.reservation.read_bytes()),
+            "reservation_sha256": sha(reservation_data),
             "run_directory": str(a.run_dir),
             **{
                 key: plan[key]
@@ -509,6 +620,7 @@ def main():
     folder = a.run_dir.resolve()
     result: dict[str, Any] = {k: None for k in supplement["required_fields"]}
     result.update(
+        chain_identity=chain_identity,
         run_id=folder.name,
         stage=a.stage,
         source_head=a.head,
@@ -555,7 +667,7 @@ def main():
         layout = recovery.create_layout()
         result["private_runtime_layout"] = layout
         result["environment_filesystem_preflight"] = recovery.filesystem_preflight(layout)
-        result["socket_path_budget_inventory"] = recovery.validate_inventory(w, layout, load(a.inventory))
+        result["socket_path_budget_inventory"] = recovery.validate_inventory(w, layout, source_inventory)
         result["socket_construction_probe"] = recovery.socket_construction_probe(layout)
         result["baseline_mode_disposition"] = {
             "receipt": disposition,
@@ -621,33 +733,7 @@ def main():
             "Runner precondition failed at original line 332",
         )
         if a.stage == "diagnostic":
-            recovery.require(
-                a.failed_result and a.failed_collection, "Runner precondition failed at original line 334"
-            )
-            recovery.require(
-                sha(a.failed_result.read_bytes()) == supplement["failed_result_sha256"],
-                "Runner precondition failed at original line 335",
-            )
-            old_failed = load(a.failed_result)
-            recovery.require(
-                sha(a.failed_collection.read_bytes()) == old_failed["raw_collection_file_sha256"],
-                "Runner precondition failed at original line 337",
-            )
-            failed = load(FAILURE_MAP)
-            recovery.require(
-                failed["source_result_sha256"] == supplement["failed_result_sha256"],
-                "Runner precondition failed at original line 339",
-            )
-            unexpected = {
-                row["node"]
-                for row in failed["failures"]
-                if row["classification"] != "expected-scanner-assertion"
-            }
-            selection = [node for node in load(a.failed_collection) if node in unexpected]
-            recovery.require(
-                len(selection) == len(set(selection)) == 375,
-                "Runner precondition failed at original line 342",
-            )
+            selection = diagnostic_nodes
         elif a.stage == "h92":
             selection = ["tests/test_sandbox_hostread.py"]
         elif a.stage in ["b1", "b2"]:
@@ -730,6 +816,8 @@ def main():
                 )
                 nodes = load(folder / "collected.json")
                 collection_check(nodes, count, m, a.stage in ["b1", "b2"])
+                if a.stage == "h92":
+                    h92_collection_check(nodes, m)
                 if a.stage == "diagnostic":
                     recovery.require(nodes == selection, "Diagnostic original collection order changed")
                 (folder / "collection-pinned.json").write_bytes((folder / "collected.json").read_bytes())
@@ -807,23 +895,7 @@ def main():
                 json.dumps(nodes, ensure_ascii=True, separators=(",", ":")).encode()
             )
         if layout is not None:
-            try:
-                runtime = Path(layout["r"]["path"])
-                recovery.require(
-                    recovery.private_directory(runtime) == layout["r"],
-                    "Runner precondition failed at original line 425",
-                )
-                entries = sorted(runtime.iterdir())
-                result["runtime_entries_after"] = [p.name for p in entries]
-                recovery.require(
-                    not any(p.name == "bus" or p.is_socket() for p in entries), "Runtime contains socket/bus"
-                )
-                archived = recovery.archive_scratch(layout, folder / "scratch-archive")
-                result["scratch_archive_inventory_sha256"] = archived["sha256"]
-                result["scratch_archive"] = archived
-            except (OSError, ValueError, AssertionError) as exc:
-                result["archive_or_runtime_error"] = type(exc).__name__ + ": " + str(exc)
-                result["verification_result_or_error"] = {"HOLD": "Scratch preservation/runtime check failed"}
+            finish_scratch(layout, folder, result)
         result["unavailable_fields"] = [k for k in supplement["required_fields"] if result.get(k) is None]
         try:
             slot_check(a.reservation, reservation)

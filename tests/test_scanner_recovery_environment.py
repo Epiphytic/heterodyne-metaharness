@@ -3,13 +3,15 @@
 import json
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.scanner_recovery import environment as recovery
-from scripts.scanner_recovery import runner
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+from scanner_recovery import environment as recovery
+from scanner_recovery import runner
 
 
 class PrivateRecoveryTests(unittest.TestCase):

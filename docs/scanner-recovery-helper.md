@@ -26,11 +26,20 @@ frozen whole offline suite, including final-suite modules. The inventory contain
 `reviewed_by_controller: true`, and nonempty `derivations`. Every candidate line
 must be covered by references and a concrete reason. Socket rows additionally
 bind base (`p`,`t`,`r`,`root`), case-component bytes, suffix bytes and exact maximum
-encoded bytes. Tmux rows bind fixture-owned `-S`/`-L` or actual audited guard source
+encoded bytes. Maximum calculations reserve the full16-byte root/18-byte child
+budget and include the separator before a nonempty case component; suffix_bytes
+includes every separator in the remaining suffix. Actual shorter roots never
+change a reviewed worst-case bound. Tmux rows bind fixture-owned `-S`/`-L` or actual audited guard source
 references. Non-endpoint rows need the source-backed explanation. This deliberately
 requires controller review; keyword matching alone does not prove a path bound
 or tmux isolation. Missing or changed coverage HOLDs before scanner execution.
-The helper does not ship an invented inventory for a future source snapshot.
+The enumeration includes indirect Python bind/connect/Unix calls throughout the
+tree and every shell/config line, including scripts under docs. It remains a
+review aid: the controller must trace test-reachable endpoint construction and
+external commands/configs, identify any additional reachable inputs, and refuse
+unbounded or unresolved paths. Equality to a keyword inventory is never proof
+of whole-suite reachability. The helper does not ship an invented inventory for
+a future source snapshot.
 
 Each attempt uses a new0700 `/tmp/hz*` root of at most16encoded bytes, children
 of at most18bytes, explicit basetemp, an empty14-key environment with a private
@@ -51,5 +60,18 @@ The bounded construction tests use stdlib unittest to avoid collecting scanner
 or application tests:
 
 ```sh
-python -m unittest discover -s tests -p test_scanner_recovery_environment.py -v
+python -m unittest discover -s tests -p 'test_scanner_recovery*.py' -v
 ```
+
+Plan mode also validates inventory bounds/coverage, the additive contract, four
+construction rejection checks, and exact diagnostic source hashes and375nodes
+before creating an attempt directory. All later stages bind every predecessor,
+including the diagnostic, to common driver/support/supplement/disposition/failure
+map hashes and transitive source-receipt references. H92 additionally requires
+clean porcelain, only hostread node IDs and exact added-node adjacency. Input
+JSON is parsed and hashed from the same read bytes.
+
+Runtime checks and archiving run independently; either failure preserves the
+original HOLD diagnostic and prevents PASS. Directory traversal opens only
+no-follow directory descriptors and propagates listing/open errors. It never
+opens a symlink target, and only a complete archive gets an inventory digest.
