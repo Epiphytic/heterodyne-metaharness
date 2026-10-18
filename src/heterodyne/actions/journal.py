@@ -539,6 +539,12 @@ class FixtureJournal:
                 }[kind]
                 self.db.execute(query, (data, value.version, key, expected_version))
             if isinstance(value, Dispatch) and value.settled and value.dispatch_kind == "initial":
+                for row in self.db.execute(
+                    "SELECT data FROM dispatches WHERE key LIKE ?", (value.approval_id + ":reconcile:%",)
+                ):
+                    child = msgspec.json.decode(bytes(row[0]), type=Dispatch)
+                    if not child.settled:
+                        raise Refused("reconciliation-invocation-still-held")
                 self.db.execute("DELETE FROM resources WHERE dispatch_key=?", (key,))
             self._event(kind, key, value.version, data)
             if observation != EMPTY_OBSERVATION:
@@ -568,11 +574,22 @@ class FixtureJournal:
     def _recovery_clock(
         self, old: Request | Decision | Dispatch, observation: TransitionObservation
     ) -> TransitionObservation:
-        recovery = (
-            observation.dispatch_recovery
-            or observation.allocation_recovery
-            or observation.abandonment_recovery
+        recoveries = tuple(
+            item
+            for item in (
+                observation.dispatch_recovery,
+                observation.allocation_recovery,
+                observation.abandonment_recovery,
+            )
+            if item is not None
         )
+        if len(recoveries) > 1:
+            raise Refused("multiple-recovery-observations")
+        recovery = recoveries[0] if recoveries else None
+        if recovery is not None and (
+            isinstance(old, Dispatch) != isinstance(recovery, DispatchRecovery) or isinstance(old, Decision)
+        ):
+            raise Refused("clock-recovery-record-mismatch")
         if recovery is None or not recovery.clock_discontinuity:
             return observation
         if self.clock is None:
