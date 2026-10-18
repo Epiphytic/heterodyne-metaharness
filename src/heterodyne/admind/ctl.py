@@ -179,11 +179,12 @@ class JsonSocketServer[Req, Rep: msgspec.Struct]:
                 line = await asyncio.wait_for(reader.readline(), READ_SECONDS)
                 if len(line.rstrip(b"\n")) > self.max_request:      # the delimiter does not count
                     raise ValueError("request too long")
-                req = msgspec.json.decode(line, type=self.request_type)
                 if self.kind == "maintenance-recovery":
                     from heterodyne.admind import recovery
 
-                    recovery.decode(line, cast(type[recovery.Request], recovery.Request))
+                    req = cast(Req, recovery.decode(line, cast(type[recovery.Request], recovery.Request)))
+                else:
+                    req = msgspec.json.decode(line, type=self.request_type)
                 if self.kind == "ask":
                     from heterodyne.admind import fulfillment
                     if isinstance(cast(object, req), fulfillment.Request):
@@ -260,18 +261,22 @@ def CtlServer(path: Path, handler: Handler, audit: Audit) -> JsonSocketServer[Ct
 
 @overload
 async def request(path: Path, req: msgspec.Struct, timeout: float = ..., *,
-                  max_reply: int = ...) -> CtlReply: ...
+                  max_reply: int = ..., require_uid: int | None = ...) -> CtlReply: ...
 @overload
 async def request[R](path: Path, req: msgspec.Struct, timeout: float = ..., *, reply_type: type[R],
-                     max_reply: int = ...) -> R: ...
+                     max_reply: int = ..., require_uid: int | None = ...) -> R: ...
 async def request(path: Path, req: msgspec.Struct, timeout: float = 300.0, *, reply_type: Any = CtlReply,
-                  max_reply: int = CTL_MAX_REPLY) -> Any:
+                  max_reply: int = CTL_MAX_REPLY, require_uid: int | None = None) -> Any:
     try:
         reader, writer = await asyncio.wait_for(
             asyncio.open_unix_connection(str(path), limit=max_reply + 2), 5)
     except (OSError, TimeoutError) as exc:
         raise CtlUnavailable(type(exc).__name__) from None
     try:
+        if require_uid is not None:
+            sock = writer.get_extra_info("socket")
+            if sock is None or platform.peer_credentials_checked(sock)[1] != require_uid:
+                raise CtlUnavailable("server-peer")
         writer.write(msgspec.json.encode(req) + b"\n")
         await writer.drain()
         line = await asyncio.wait_for(reader.readline(), timeout)

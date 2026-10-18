@@ -16,7 +16,7 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal, TypedDict, cast
 
 import msgspec
 
@@ -218,7 +218,7 @@ def private_read(path: Path) -> bytes:
 
 def publish(path: Path, data: bytes) -> None:
     """Atomic no-replace immutable publication; a crash never exposes a partial file."""
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    private_parents(path.parent)
     parent = path.parent.lstat()
     if (
         not stat.S_ISDIR(parent.st_mode)
@@ -236,6 +236,7 @@ def publish(path: Path, data: bytes) -> None:
         try:
             os.link(temporary, path, follow_symlinks=False)
         except FileExistsError:
+            repair_alias(path, data)
             if private_read(path) != data:
                 raise Invalid("publication-conflict") from None
         directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -247,6 +248,74 @@ def publish(path: Path, data: bytes) -> None:
     finally:
         os.close(fd)
         temporary.unlink(missing_ok=True)
+
+
+def private_parents(path: Path) -> None:
+    """Create every missing ancestor privately without changing an existing ancestor."""
+    missing: list[Path] = []
+    current = path
+    while not os.path.lexists(current):
+        missing.append(current)
+        current = current.parent
+    for directory in reversed(missing):
+        directory.mkdir(mode=0o700, exist_ok=True)
+    # The publication parent must itself be private, even when it already existed.
+    for directory in [path, *missing]:
+        info = directory.lstat()
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o700
+        ):
+            raise Invalid("unsafe-directory")
+
+
+def repair_alias(path: Path, data: bytes) -> None:
+    """Repair only the exact link-before-unlink crash of our immutable publisher.
+
+    An arbitrary extra link is never accepted. A bounded private-directory scan
+    must find exactly one own temporary alias to this exact inode and byte value.
+    """
+    info = path.lstat()
+    if info.st_nlink == 1:
+        return
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) != 0o600
+        or info.st_nlink != 2
+    ):
+        raise Invalid("unsafe-file")
+    alias = None
+    with os.scandir(path.parent) as entries:
+        for count, entry in enumerate(entries):
+            if count >= 256:
+                raise Invalid("publication-directory-bound")
+            if not re.fullmatch(r"\.recovery-[0-9a-f]{32}", entry.name):
+                continue
+            other = entry.stat(follow_symlinks=False)
+            if (other.st_dev, other.st_ino) == (info.st_dev, info.st_ino):
+                if alias is not None:
+                    raise Invalid("unsafe-file")
+                alias = Path(entry.path)
+    if alias is None:
+        raise Invalid("unsafe-file")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        now = os.fstat(fd)
+        if (now.st_dev, now.st_ino, now.st_nlink) != (info.st_dev, info.st_ino, 2):
+            raise Invalid("unsafe-file")
+        with os.fdopen(fd, "rb", closefd=False) as stream:
+            if stream.read(MAX_BYTES + 1) != data:
+                raise Invalid("publication-conflict")
+        alias.unlink()
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        os.close(fd)
 
 
 class Enrollment(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -270,7 +339,25 @@ CREATE TABLE IF NOT EXISTS maintenance_recovery_messages (
  account TEXT NOT NULL, group_id TEXT NOT NULL, message_id TEXT NOT NULL,
  payload_sha256 TEXT NOT NULL, proposal TEXT NOT NULL, provenance BLOB NOT NULL,
  outcome TEXT NOT NULL, PRIMARY KEY(account,group_id,message_id));
+CREATE TABLE IF NOT EXISTS maintenance_recovery_revocations (
+ account TEXT NOT NULL, group_id TEXT NOT NULL, message_id TEXT NOT NULL,
+ payload_sha256 TEXT NOT NULL, proposal TEXT NOT NULL UNIQUE, provenance BLOB NOT NULL,
+ outcome TEXT NOT NULL, PRIMARY KEY(account,group_id,message_id));
+CREATE TABLE IF NOT EXISTS maintenance_recovery_refusals (
+ account TEXT NOT NULL, group_id TEXT NOT NULL, message_id TEXT NOT NULL,
+ payload_sha256 TEXT NOT NULL, provenance BLOB NOT NULL, reason TEXT NOT NULL,
+ PRIMARY KEY(account,group_id,message_id));
 """
+
+
+class MessageFields(TypedDict):
+    account: str
+    group: str
+    mid: str
+    sender: str
+    target: str | None
+    text: str
+    authority: Callable[[], str | None]
 
 
 class Service:
@@ -449,6 +536,7 @@ class Service:
         target: str | None,
         text: str,
         authority: Callable[[], str | None],
+        post: Callable[[str], None] | None = None,
     ) -> Reply:
         if len(text.encode("utf-8")) > 1024:
             raise Invalid("command-bound")
@@ -457,9 +545,6 @@ class Service:
             raise Invalid("command-auth")
         if not re.fullmatch(r"(?:[0-9a-f]{2}){1,128}", group):
             raise Invalid("group")
-        policy = authority()
-        if policy is None:
-            raise Invalid("authority")
         provenance = dict(
             account=account,
             group=group,
@@ -467,21 +552,37 @@ class Service:
             sender=sender,
             reply_to=target,
             text=text,
-            policy_sha256=policy,
         )
         payload = sha({k: v for k, v in provenance.items() if k != "policy_sha256"})
         with self.store.transaction():
-            if authority() != policy:
-                raise Invalid("authority-drift")
             duplicate = self.store.db.execute(
-                "SELECT payload_sha256,outcome,proposal FROM "
-                "maintenance_recovery_messages WHERE account=? AND group_id=? AND message_id=?",
-                (account, group, mid),
+                "SELECT payload_sha256,outcome,proposal FROM maintenance_recovery_messages "
+                "WHERE account=? AND group_id=? AND message_id=? UNION ALL "
+                "SELECT payload_sha256,outcome,proposal FROM maintenance_recovery_revocations "
+                "WHERE account=? AND group_id=? AND message_id=?",
+                (account, group, mid, account, group, mid),
             ).fetchone()
             if duplicate is not None:
                 if duplicate[0] != payload:
                     raise Invalid("replay-mismatch")
+                if post is not None:
+                    post("Maintenance recovery: " + duplicate[1] + ".")
                 return Reply("duplicate", duplicate[1], self.get(duplicate[2]))
+            refused = self.store.db.execute(
+                "SELECT payload_sha256,reason FROM maintenance_recovery_refusals "
+                "WHERE account=? AND group_id=? AND message_id=?",
+                (account, group, mid),
+            ).fetchone()
+            if refused is not None:
+                if refused[0] != payload:
+                    raise Invalid("replay-mismatch")
+                if post is not None:
+                    post("Maintenance recovery refused: " + refused[1] + ".")
+                return Reply("duplicate", refused[1])
+            policy = authority()
+            if policy is None:
+                raise Invalid("authority")
+            provenance["policy_sha256"] = policy
             rows = self.store.db.execute(
                 "SELECT hash,descriptor,notice_key,state,created_at FROM "
                 "maintenance_recovery_proposals WHERE substr(hash,1,24)=?",
@@ -490,9 +591,11 @@ class Service:
             if len(rows) != 1:
                 raise Invalid("token")
             key, raw, notice_key, state, created = rows[0]
-            delivery = self.store.db.execute(
-                "SELECT message_id,text,status FROM outbox WHERE key=?", (notice_key + ":0",)
-            ).fetchone()
+            deliveries = self.store.db.execute(
+                "SELECT message_id,text,status FROM outbox WHERE key IN (?,?) AND status='sent'",
+                (notice_key + ":0", notice_key + ":r0"),
+            ).fetchall()
+            delivery = deliveries[0] if len(deliveries) == 1 else None
             if (
                 delivery is None
                 or delivery[2] != "sent"
@@ -509,13 +612,17 @@ class Service:
                 live = True
             except Invalid:
                 live = False
+            revoking = live and command[1] == "revoke" and state in ("awaiting-consent", "consented")
             if (
-                self.store.db.execute(
+                not revoking
+                and self.store.db.execute(
                     "SELECT count(*) FROM maintenance_recovery_messages WHERE proposal=?", (key,)
                 ).fetchone()[0]
                 >= 128
             ):
                 raise Invalid("message-capacity")
+            if authority() != policy:
+                raise Invalid("authority-drift")
             outcome = "history-only"
             if live and command[1] == "revoke" and state in ("awaiting-consent", "consented"):
                 self.store.db.execute(
@@ -531,11 +638,58 @@ class Service:
                 outcome = "consented"
             elif live and command[1] == "settle" and state == "consented":
                 outcome = "duplicate-decision"
+            table = "maintenance_recovery_revocations" if revoking else "maintenance_recovery_messages"
             self.store.db.execute(
-                "INSERT INTO maintenance_recovery_messages VALUES(?,?,?,?,?,?,?)",
+                f"INSERT INTO {table} VALUES(?,?,?,?,?,?,?)",
                 (account, group, mid, payload, key, canonical(provenance), outcome),
             )
+            if post is not None:
+                post("Maintenance recovery: " + outcome + ".")
         return Reply("recorded", outcome, self.get(key))
+
+    def refusal(
+        self,
+        *,
+        account: str,
+        group: str,
+        mid: str,
+        sender: str,
+        target: str | None,
+        text: str,
+        reason: str,
+        authority: Callable[[], str | None],
+        post: Callable[[str], None],
+    ) -> None:
+        """Bounded authenticated refusal receipt; never a recovery decision."""
+        provenance = dict(
+            account=account, group=group, message_id=mid, sender=sender, reply_to=target, text=text
+        )
+        payload = sha(provenance)
+        with self.store.transaction():
+            old = self.store.db.execute(
+                "SELECT payload_sha256,reason FROM maintenance_recovery_refusals "
+                "WHERE account=? AND group_id=? AND message_id=?",
+                (account, group, mid),
+            ).fetchone()
+            if old is not None:
+                if old[0] != payload:
+                    raise Invalid("replay-mismatch")
+                post("Maintenance recovery refused: " + old[1] + ".")
+                return
+            policy = authority()
+            if policy is None:
+                return
+            if (
+                self.store.db.execute("SELECT count(*) FROM maintenance_recovery_refusals").fetchone()[0]
+                >= 128
+            ):
+                raise Invalid("refusal-capacity")
+            provenance["policy_sha256"] = policy
+            self.store.db.execute(
+                "INSERT INTO maintenance_recovery_refusals VALUES(?,?,?,?,?,?)",
+                (account, group, mid, payload, canonical(provenance), reason),
+            )
+            post("Maintenance recovery refused: " + reason + ".")
 
     def permit(self, req: Permit, *, uid: int | None, authority: Callable[[str], str | None]) -> Reply:
         if uid != os.getuid():
@@ -554,6 +708,8 @@ class Service:
             current_policy = authority(row[3])
             if current_policy is None:
                 raise Invalid("authority")
+            if current_policy != row[4]:
+                raise Invalid("policy-drift")
             generation = row[5]
             previous = None if row[6] is None else bytes(row[6])
             if previous is not None and req.certificate_sha256 is None:
@@ -681,6 +837,7 @@ def render(obj: Descriptor, actor: str, link: str | None, budget: int) -> str:
         f"Expires: {obj.expires_at}",
         f"Reply: !maintenance settle {token}",
         f"Revoke: !maintenance revoke {token}",
+        "An already issued permit may start recovery for 30 seconds after revoke.",
     ]
     if link is not None:
         if not re.fullmatch(
@@ -699,7 +856,7 @@ def render(obj: Descriptor, actor: str, link: str | None, budget: int) -> str:
 
 def replace_current(path: Path, data: bytes) -> None:
     """Atomic current pointer; immutable generation was fsynced before this call."""
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    private_parents(path.parent)
     directory = path.parent.lstat()
     if (
         not stat.S_ISDIR(directory.st_mode)

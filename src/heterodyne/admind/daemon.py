@@ -765,39 +765,67 @@ class Admind:
             async with self.work_lock:
                 if not await self.check_group() or self.recovery_authority() is None:
                     raise recovery.Invalid("authority")
-                if isinstance(req, recovery.Register):
-                    return self.maintenance_recovery.register(
-                        req,
-                        uid=peer.uid,
-                        pid=peer.pid,
-                        chunk_chars=self.s.chunk_chars,
-                        post=lambda key, text: self.post(key, text, None, lane=2, owner=None),
+                # Hash the bounded source closure off the subscription event loop. Keep
+                # work_lock until the worker has actually stopped, including cancellation.
+                loop = asyncio.get_running_loop()
+
+                def perform() -> recovery.Reply:
+                    if isinstance(req, recovery.Register):
+                        def post(key: str, text: str) -> None:
+                            self.store.enqueue(key, text, None, lane=2, ownership_kind="system")
+                            loop.call_soon_threadsafe(self.wake.set)
+                        return self.maintenance_recovery.register(
+                            req, uid=peer.uid, pid=peer.pid,
+                            chunk_chars=self.s.chunk_chars, post=post,
+                        )
+                    return self.maintenance_recovery.permit(
+                        req, uid=peer.uid, authority=self.recovery_authority,
                     )
-                return self.maintenance_recovery.permit(req, uid=peer.uid, authority=self.recovery_authority)
+
+                task = asyncio.create_task(asyncio.to_thread(perform))
+                try:
+                    return await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    while not task.done():
+                        try:
+                            await asyncio.shield(task)
+                        except asyncio.CancelledError:
+                            continue
+                    task.result()
+                    raise
         except recovery.Invalid as exc:
             return recovery.Reply("refused", str(exc))
         except (OSError, sqlite3.Error):
             return recovery.Reply("unavailable", "recovery store or enrollment unavailable")
 
     async def recovery_message(self, ev: InboundMessage) -> None:
+        if (ev.account_id_hex.lower() != self.account.lower()
+                or ev.group_id_hex.lower() != self.group.lower()):
+            return
+        await self.check_group()
+        sender = ev.message.sender.account_id_hex.lower()
+        mid = ev.message.message_id_hex.lower()
+        fields = recovery.MessageFields(
+                      account=ev.account_id_hex.lower(), group=ev.group_id_hex.lower(),
+                      mid=mid, sender=sender,
+                      target=None if ev.reply_to is None else ev.reply_to.message_id_hex.lower(),
+                      text=ev.message.text, authority=lambda: self.recovery_authority(sender))
+        response_key = "maintenance-response:" + recovery.sha(
+            [fields["account"], fields["group"], mid]
+        )
+
+        def post(text: str) -> None:
+            self.post(response_key, text, mid, owner=(sender,))
+
         try:
-            if ev.account_id_hex.lower() != self.account.lower():
-                raise recovery.Invalid("account")
-            if not await self.check_group():
-                raise recovery.Invalid("authority")
-            sender = ev.message.sender.account_id_hex.lower()
-            reply = self.maintenance_recovery.message(
-                account=ev.account_id_hex.lower(),
-                group=ev.group_id_hex.lower(),
-                mid=ev.message.message_id_hex.lower(),
-                sender=sender,
-                target=None if ev.reply_to is None else ev.reply_to.message_id_hex.lower(),
-                text=ev.message.text,
-                authority=lambda: self.recovery_authority(sender),
-            )
+            reply = self.maintenance_recovery.message(**fields, post=post)
             self.audit.write("maintenance-recovery", action=reply.message)
         except recovery.Invalid as exc:
             self.audit.write("maintenance-recovery", action="refused", reason=str(exc))
+            try:
+                self.maintenance_recovery.refusal(**fields, reason=str(exc), post=post)
+            except (recovery.Invalid, OSError, sqlite3.Error):
+                self.audit.write("maintenance-recovery", action="refusal-unavailable")
         except (OSError, sqlite3.Error):
             self.audit.write("maintenance-recovery", action="unavailable")
 
@@ -2356,6 +2384,10 @@ class Admind:
         verdict = guard.judge_message(ev, group_id=self.group, operators=self.operators,
                                       latched=self.latched())
         mid = ev.message.message_id_hex.lower()
+        if (recovery.COMMAND.fullmatch(ev.message.text) is not None
+                and MESSAGE_ID.fullmatch(mid)):
+            await self.recovery_message(ev)
+            return
         if verdict.action == "ignore":
             return
         if verdict.action == "drop":
@@ -2371,9 +2403,6 @@ class Admind:
         if not MESSAGE_ID.fullmatch(mid):
             self.audit.write("drop", operator=verdict.operator, reason="malformed message id",
                              text=own_text(ev.message.text))
-            return
-        if ev.message.text.startswith("!maintenance"):
-            await self.recovery_message(ev)
             return
         if not self.store.claim_inbound(mid, sender_key=ev.message.sender.account_id_hex.lower()):
             self.audit.write("drop", operator=verdict.operator, message_id=mid, reason="replayed message id",

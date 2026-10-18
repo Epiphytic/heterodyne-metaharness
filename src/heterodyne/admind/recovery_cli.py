@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -43,6 +44,7 @@ def command(settings: AdmindSettings, args: argparse.Namespace) -> int:
                 10,
                 reply_type=recovery.Reply,
                 max_reply=recovery.MAX_BYTES,
+                require_uid=os.getuid(),
             )
         )
         print(msgspec.json.encode(result).decode())
