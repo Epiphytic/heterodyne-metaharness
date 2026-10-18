@@ -1,0 +1,67 @@
+{
+  "source": "ab5400bb294e759300e260ad9423fe908945d5b6",
+  "raw_sha256": "81a9e74cbcf4574816fea873dfc1f802bf55ff4ec493acf6ebb27c655ec9b659",
+  "verdict": "Actual THIRD MEDIUM accepts offline-core PoC, no critical in-scope blocker; whole Plan9 collector/evaluator task incomplete",
+  "findings": [
+    {
+      "ordinal": 1,
+      "finding_verbatim": "1. `src/heterodyne/acceptance/ledger.py:261`: Spool files are named only by content digest, so a later arrival with the same bytes as an already-retired spool ID is deduplicated onto the retired file and silently left out of the active set.\n\n   Failure scenario: Source re-delivers an identical envelope after release() wrote spool-retired/<digest>: spool() sees path.exists(), _atomic returns idempotently, spool() returns the digest as if it were kept, but _spool_ids() filters it as retired. The next commit/release proof snapshot never sees this late arrival, which breaks the 'late arrivals remain' claim in R2 finding 5.",
+      "status": "OPEN_UNWAIVED",
+      "disposition": "Repeated content-identical spool arrival after retirement can be coalesced; no lossless per-arrival ingestion claim. Must resolve duplicate/cursor semantics before live collector admission."
+    },
+    {
+      "ordinal": 2,
+      "finding_verbatim": "2. `src/heterodyne/acceptance/ledger.py:543`: commit() saves intent-<fence>.json before the terminal_fence proof (line 546) runs, so a refused proof leaves an immutable intent that blocks any corrected commit; this is the same problem R2 finding 2 fixed only for abort().\n\n   Failure scenario: The proof adapter refuses the commit bundle (e.g. the assessment needs correcting, which changes intent.evaluation). A retry with the corrected intent hits immutable_file_conflict on the intent path forever, and abort() then has to adopt the stale retained intent. The only way out is aborting the attempt.",
+      "status": "OPEN_UNWAIVED",
+      "disposition": "Commit intent may persist before final proof refusal; correcting requires abort/new attempt. Availability debt, not replay permission."
+    },
+    {
+      "ordinal": 3,
+      "finding_verbatim": "3. `src/heterodyne/acceptance/ledger.py:657`: abort() writes the intent object and intent file before writing the abort file, so a second abort() on an already-aborted fence persists a new intent and only then fails with immutable_file_conflict.\n\n   Failure scenario: abort('x') with no intent succeeds; then abort('x', intent) passes validation and proof, writes intent-<fence>.json plus the object, then fails on abort-<fence>.json. An intent that was never part of the abort is now retained for that fence, which contradicts 'validate before persisting'.",
+      "status": "OPEN_UNWAIVED",
+      "disposition": "Repeated abort with changed intent can leave additional retained intent before immutable conflict; no mutation of terminal abort allowed."
+    },
+    {
+      "ordinal": 4,
+      "finding_verbatim": "4. `src/heterodyne/acceptance/evaluator.py:518`: The archive tail now requires exactly one qualification event after the Stop, but release() appends reconciled outside-segment events right after the qualification in the same ledger chain.\n\n   Failure scenario: Commit seals the segment (stop + qualification), then release() appends reconciled events. If the archive is evaluated over the ledger's actual post-release chain (or any snapshot taken after release), the tail has more than one event and archive returns not_qualified/archive_terminal_tail for a legitimately sealed segment. Nothing slices the chain at the qualification.",
+      "status": "OPEN_UNWAIVED",
+      "disposition": "Post-release outside-segment tail requires an explicit archived qualification prefix; current evaluator does not infer that cut. Production collector must retain exact prefix."
+    },
+    {
+      "ordinal": 5,
+      "finding_verbatim": "5. `src/heterodyne/acceptance/ledger.py:178`: Typed IOHold is incomplete: OSError from _lock's os.open/flock and from _atomic's mkdir/open/write/fsync/rename/_sync still escapes as a raw OSError instead of Hold.\n\n   Failure scenario: A missing or symlinked spool.lock/publisher.lock, ENOSPC, or EACCES while preparing a write raises FileNotFoundError/OSError. Callers that expect only Hold/InvalidEvidence get no fixed diagnostic code, so the 'missing/unavailable originals produce typed diagnostic Hold' claim (R2 finding 7) only covers reads.",
+      "status": "OPEN_UNWAIVED",
+      "disposition": "Typed IO diagnostics cover original reads and directory enumeration; lock/write/fsync OSError can still escape and must be contained by future operational adapter."
+    },
+    {
+      "ordinal": 6,
+      "finding_verbatim": "6. `src/heterodyne/acceptance/ledger.py:34`: Fence gains a required attempt_id but keeps the schema literal 'acceptance-fence.v1', and __init__ now requires a spool-retired directory, so ledgers written before this change cannot be opened or recovered.\n\n   Failure scenario: An existing ledger with an in-flight fence.json (no attempt_id) fails to decode in _fence()/recover(), and any pre-existing ledger without spool-retired/ fails Ledger() with ledger_directory_unavailable. There is no version distinction or migration path, and the same schema string now describes two incompatible shapes.",
+      "status": "OPEN_UNWAIVED",
+      "disposition": "Private undeployed fence/directory shape changed without live migration. Do not open or reinterpret historical live ledgers; operational migration not implemented."
+    },
+    {
+      "ordinal": 7,
+      "finding_verbatim": "7. `src/heterodyne/acceptance/ledger.py:404`: _validate_events checks monotonic_ns only between adjacent events with the same boot, so a regression across an interleaved boot change is not detected.\n\n   Failure scenario: Events on boot A with monotonic 100, then boot B with 5, then boot A with 50: no adjacent pair shares a boot, so 'event_monotonic' passes even though boot A's clock went backwards. Tracking the last monotonic_ns per boot_id would catch it.",
+      "status": "OPEN_UNWAIVED",
+      "disposition": "Interleaved boot monotonic regression is not caught by adjacent-only check; no full boot continuity claim."
+    },
+    {
+      "ordinal": 8,
+      "finding_verbatim": "8. `src/heterodyne/acceptance/ledger.py:679`: The release-retry.json path (written at 728, read at 679, deleted in begin at 295) is effectively dead: the fence is unlinked only after the receipt and all retirement markers are durable, so the no-fence retry path can only re-run work that already finished.\n\n   Failure scenario: Extra persistent state, plus the only delete operation in begin(), adds a non-idempotent branch and another file to audit for no recovery benefit. Any crash before the fence unlink already resumes through the active-fence + release-program path.",
+      "status": "OPEN_UNWAIVED",
+      "disposition": "Extra post-fence retry state remains cleanup debt."
+    },
+    {
+      "ordinal": 9,
+      "finding_verbatim": "9. `src/heterodyne/acceptance/ledger.py:717`: On the first-run path, release() replays the full chain (rebuilding inventory and verifying every event proof) twice, at line 695 and again at 717 over the same bytes, and compares the program against requested twice (686 and 713).\n\n   Failure scenario: Each release does two full O(chain x proof) replays plus extra inventory rebuilds and hashes under both locks, doubling lock hold time on the path that blocks spooling. Skip the second replay when proven is True, and keep a single program comparison.",
+      "status": "OPEN_UNWAIVED",
+      "disposition": "Duplicate proof/inventory replay remains F9 performance debt, no short-lock or72hourthroughput claim."
+    },
+    {
+      "ordinal": 10,
+      "finding_verbatim": "10. `src/heterodyne/acceptance/ledger.py:354`: _spool_ids(), which runs on every spool() call, reads and decodes every retirement marker and does linear tuple membership against the receipt's spool_ids, so spool cost grows with the total history of retired IDs (up to MAX_OBJECTS).\n\n    Failure scenario: After many release cycles, with tens of thousands of retired markers, each incoming spool() under the spool lock does tens of thousands of file reads plus O(n*m) membership checks, stalling ingestion. Caching the receipt spool_ids as a set, or keeping an active index, would avoid it.",
+      "status": "OPEN_UNWAIVED",
+      "disposition": "Retirement-history scans grow per spool call; bounded capacity is not production ingestion performance."
+    }
+  ]
+}

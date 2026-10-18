@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-18T21:32:48.340454+00:00",
+  "exit": 0,
+  "head": "ab5400bb294e759300e260ad9423fe908945d5b6",
+  "source_unchanged": true,
+  "stream_sha256": "17fc6a6af2088cf89f2b7d3c86ecc4fbbc26b83b7b3df1392212b224ec7745d2",
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "events": 41,
+  "malformed_line_numbers": [],
+  "terminal_results": 1,
+  "terminal_success": true,
+  "log_sha256": "81a9e74cbcf4574816fea873dfc1f802bf55ff4ec493acf6ebb27c655ec9b659",
+  "public_presentation": "one absolute checkout path replaced with ${WORKTREE}; observed raw original retained externally and raw hash unchanged",
+  "public_markdown_sha256": "1054191829f539c6554ba8f30ba2fe87e1d61c2b339b5f72f76ba55825bb624d"
+}

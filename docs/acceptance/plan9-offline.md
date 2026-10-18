@@ -148,3 +148,9 @@ through receipt-before-cleanup crashes. Only receipt-proven spool IDs retire fro
 active capacity; original bytes and unrelated late arrivals remain retained.
 Original retention has a separate finite bound. Repeated proof and history scans
 remain open performance debt; offline checks establish no 72-hour throughput.
+
+Actual third MEDIUM review accepts this offline core as a PoC. All ten findings
+are retained in docs/reviews/plan9-r3; source ingestion, duplicate cursor semantics,
+archive prefix selection, diagnostic containment and operational migration are
+not complete. Publishing this core does not close the collector/evaluator task
+or admit an operational proof adapter or release corpus.
