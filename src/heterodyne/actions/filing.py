@@ -10,6 +10,7 @@ import fcntl
 import hashlib
 import os
 import sqlite3
+import stat
 import threading
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
@@ -201,10 +202,11 @@ class FilingJournal:
         self._lease_depth = 0
         self._lease_mutex = threading.Lock()
         self._live: set[str] = set()
+        self._lock_identity: tuple[int, int] | None = None
 
     @contextmanager
     def ownership(self) -> Generator[None]:
-        """Nonblocking same-inode owner lease; never a SQLite writer over a port call."""
+        """Nonblocking stable sidecar lease; never close a raw SQLite file descriptor."""
         try:
             task = asyncio.current_task()
         except RuntimeError:
@@ -215,9 +217,10 @@ class FilingJournal:
             if self._lease_owner is not None and self._lease_owner != token:
                 raise Held("journal-owner-busy")
             if self._lease_owner is None:
-                fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW)
+                fd = self._open_lock()
                 try:
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    self._check_lock(fd)
                 except BaseException as exc:
                     os.close(fd)
                     raise Held("journal-owner-busy") from exc
@@ -233,6 +236,34 @@ class FilingJournal:
                     if fd is not None:
                         fcntl.flock(fd, fcntl.LOCK_UN)
                         os.close(fd)
+
+    def _check_lock(self, fd: int) -> None:
+        observed = os.fstat(fd)
+        path = Path(str(self.path) + ".owner.lock")
+        named = path.lstat()
+        identity = (observed.st_dev, observed.st_ino)
+        if (
+            not stat.S_ISREG(observed.st_mode)
+            or observed.st_uid != os.getuid()
+            or observed.st_mode & 0o777 != 0o600
+            or observed.st_nlink != 1
+            or identity != (named.st_dev, named.st_ino)
+            or (self._lock_identity is not None and identity != self._lock_identity)
+        ):
+            raise Held("journal-lock-refused")
+        self._lock_identity = identity
+
+    def _open_lock(self) -> int:
+        path = Path(str(self.path) + ".owner.lock")
+        fd: int | None = None
+        try:
+            fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, 0o600)
+            self._check_lock(fd)
+        except (OSError, Held) as exc:
+            if fd is not None:
+                os.close(fd)
+            raise Held("journal-lock-refused") from exc
+        return fd
 
     @classmethod
     def create(
@@ -265,7 +296,7 @@ class FilingJournal:
             or st.st_nlink != 1
         ):
             raise Held("journal-file-refused")
-        db = sqlite3.connect(f"file:{path}?mode=rw", uri=True, isolation_level=None, timeout=1)
+        db = sqlite3.connect(path.resolve().as_uri() + "?mode=rw", uri=True, isolation_level=None, timeout=1)
         db.execute("PRAGMA synchronous=FULL")
         reference = sqlite3.connect(":memory:")
         try:
@@ -391,8 +422,6 @@ class FilingJournal:
             or len(payload) > 131072
         ):
             raise Held("command-input-refused")
-        if operation == "withdraw":
-            self._cleanup(payload)
         with self.transaction():
             request = self.request(request_key)
             pending = self._pending(request_key)
@@ -428,6 +457,8 @@ class FilingJournal:
             }
             if request.phase not in phases[operation]:
                 raise Held("command-phase-refused")
+            if operation == "withdraw":
+                self._preflight_cleanup(request, payload)
             used = self.db.execute("SELECT lifecycle FROM requests WHERE k=?", (request_key,)).fetchone()[0]
             if used > (
                 LIFECYCLE_EVENTS - 1 if operation == "withdraw" else ORDINARY_EVENTS - COMMAND_HEADROOM
@@ -497,7 +528,24 @@ class FilingJournal:
             raise Held("cleanup-recovery-shape-refused")
         return cleanup
 
+    def _preflight_cleanup(self, request: r.Request, payload: bytes) -> None:
+        """Reducer eligibility only; actual readback is still required after withdrawal."""
+        cleanup = self._cleanup(payload)
+        r.settle_request(
+            request,
+            cleanup.phase,
+            key=request.key,
+            origin=request.origin,
+            cleaned_shells=request.shell_ids,
+            blockers_clear=True,
+            native_terminal=True,
+            decision=cleanup.decision,
+            dispatch=cleanup.dispatch,
+            recovery=cleanup.cancellation or cleanup.abandonment,
+        )
+
     def issue(self, command_id: str, current: Current) -> Command:
+        """Offline intent simulation only; supported dispatch must use execute/assess."""
         if self.command(command_id)[0].operation == "provider":
             raise Held("provider-owner-required")
         return self._issue(command_id, current)
@@ -520,7 +568,7 @@ class FilingJournal:
             ):
                 raise Held("current-observation-held")
             if command.operation == "withdraw":
-                self._cleanup(command.payload)
+                self._preflight_cleanup(command.request, command.payload)
             if command.operation == "land":
                 self._landing(command)
             if command.operation == "groom":
@@ -550,6 +598,13 @@ class FilingJournal:
         return command
 
     def mark_unknown(self, command: Command) -> None:
+        """Offline recovery helper; a port callback cannot conclude a live call."""
+        with self.ownership():
+            if command.command_id in self._live or self._lease_depth > 1:
+                raise Held("command-live-held")
+            self._mark_unknown(command)
+
+    def _mark_unknown(self, command: Command) -> None:
         with self.transaction():
             self.db.execute(
                 "UPDATE commands SET state='uncertain' WHERE id=? AND state='issuing'", (command.command_id,)
@@ -598,16 +653,16 @@ class FilingJournal:
                             terminal=command.operation == "withdraw",
                         )
             except BaseException:
-                self.mark_unknown(command)
+                self._mark_unknown(command)
                 raise
             return result
         except BaseException:
-            self.mark_unknown(command)
+            self._mark_unknown(command)
             raise
         try:
             self._observe(command_id, result)
         except BaseException:
-            self.mark_unknown(command)
+            self._mark_unknown(command)
             raise
         return result
 
@@ -662,7 +717,7 @@ class FilingJournal:
             self.observe(command_id, result)
             return result
         except BaseException:
-            self.mark_unknown(command)
+            self._mark_unknown(command)
             raise
 
     def _correlated(self, command: Command, observation: Observation) -> None:
@@ -959,7 +1014,7 @@ class FilingJournal:
             # Bind/validate before allocating a nonce or starting a command.
             j.bind(before, request, privacy, model)
             command = self.prepare(request_key, "provider", policy_revision)
-            owned = DurableProvider(self, command, provider, self._issue)
+            owned = DurableProvider(self, command, provider, self._issue, self._mark_unknown)
             receipt = await j.assess(
                 before,
                 request,
@@ -1107,9 +1162,11 @@ class DurableProvider:
         command: Command,
         provider: Provider,
         issue: Callable[[str, Current], Command],
+        mark_unknown: Callable[[Command], None],
     ) -> None:
         self.journal, self.command, self.provider = journal, command, provider
         self.issue_owned = issue
+        self.mark_unknown_owned = mark_unknown
         self.started = False
         self.result: ProviderResult | None = None
 
@@ -1171,7 +1228,7 @@ class DurableProvider:
             if type(reply) is not Reply or type(reply.output) is not bytes or len(reply.output) > 32768:
                 raise Held("provider-reply-refused")
         except BaseException:
-            self.journal.mark_unknown(issued)
+            self.mark_unknown_owned(issued)
             raise
         # Persist the original end observation with the exact issued input before
         # P2 can construct a receipt. Missing receipt after a crash stays HOLD.
@@ -1192,6 +1249,6 @@ class DurableProvider:
                 self.journal.append_event(key(issued.request), "provider-reply", encoded(result))
             self.result = result
         except BaseException:
-            self.journal.mark_unknown(issued)
+            self.mark_unknown_owned(issued)
             raise
         return reply

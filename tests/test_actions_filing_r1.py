@@ -35,7 +35,19 @@ def test_prepared_can_be_abandoned_without_port_call(owner):
     journal.abandon_prepared(command.command_id)
     assert journal.command(command.command_id)[1] == "refused-unissued"
     assert len(ports.calls) == calls
-    journal.prepare_cleanup(key(value), DIGEST, Cleanup("cancelled"))
+    recovery = r.CancellationRecovery(
+        value.key,
+        value.origin,
+        value.version,
+        value.shell_ids,
+        DIGEST,
+        "fixture-event",
+        authenticated_current=True,
+        exact_repair_scope=True,
+        native_withdrawal_readback=True,
+        cleanup_proven=True,
+    )
+    journal.prepare_cleanup(key(value), DIGEST, Cleanup("cancelled", cancellation=recovery))
 
 
 def test_before_issue_allocation_is_terminal_without_recreate(owner):
@@ -151,7 +163,19 @@ def test_lint_refusal_is_owned_no_call_receipt_not_pending(owner):
     assert receipt.attempt is None
     assert journal.command(command_id)[1] == "refused-unissued"
     assert isinstance(journal.projection(command_id, request, privacy(), SPEC), g.NeedsGrooming)
-    journal.prepare_cleanup(key(value), DIGEST, Cleanup("cancelled"))
+    recovery = r.CancellationRecovery(
+        value.key,
+        value.origin,
+        value.version,
+        value.shell_ids,
+        DIGEST,
+        "fixture-event",
+        authenticated_current=True,
+        exact_repair_scope=True,
+        native_withdrawal_readback=True,
+        cleanup_proven=True,
+    )
+    journal.prepare_cleanup(key(value), DIGEST, Cleanup("cancelled", cancellation=recovery))
 
 
 def test_three_failed_restart_reads_still_allow_authenticated_abandonment(owner):

@@ -105,7 +105,19 @@ def test_orphan_provider_reply_allows_cleanup_without_overwrite(owner):
     journal.db.execute(
         "UPDATE commands SET state='observed',result=? WHERE id=?", (original_reply, command.command_id)
     )
-    journal.prepare_cleanup(key(value), DIGEST, Cleanup("cancelled"))
+    recovery = r.CancellationRecovery(
+        value.key,
+        value.origin,
+        value.version,
+        value.shell_ids,
+        DIGEST,
+        "fixture-event",
+        authenticated_current=True,
+        exact_repair_scope=True,
+        native_withdrawal_readback=True,
+        cleanup_proven=True,
+    )
+    journal.prepare_cleanup(key(value), DIGEST, Cleanup("cancelled", cancellation=recovery))
     assert (
         journal.db.execute("SELECT result FROM commands WHERE id=?", (command.command_id,)).fetchone()[0]
         == original_reply

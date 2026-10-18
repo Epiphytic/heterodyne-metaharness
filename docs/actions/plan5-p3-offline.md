@@ -21,8 +21,12 @@ its issued-history bit, never enabling another create. Exact-schema reopen
 normalizes interrupted issuing commands to uncertain only after acquiring the same
 nonblocking owner lease used across the actual invocation/assessment and result
 commit. Another connection or asynchronous owner cannot open-normalize an active
-call. This is a same-inode process/thread/task lease, not a SQLite writer lock
-held across external work. Generic readback APIs reject provider commands.
+call. This lease uses a separate persistent private single-link `.owner.lock` inode,
+never a raw descriptor to the SQLite database: closing any database descriptor
+can drop another same-process SQLite connection's POSIX locks. Symlink, hardlink,
+public-mode and replaced sidecars are refused. The sidecar is never unlinked on
+release. The lease is process/thread/task ownership, not a SQLite writer lock
+held across external work. Journal reopen percent-encodes URI paths. Generic readback APIs reject provider commands.
 
 Allocation lookups consume the durable P1 lookup count before each read and are
 spaced 1/5/30 seconds from the actual issued call, then preceding owned lookup.
@@ -52,9 +56,10 @@ per-event deduplication or authority.
 
 Blocker/park/landing observations include the exact bead, approval dependency,
 stopped logical session, retained claim, repository/source/tree. Filing also
-requires the exact whole ask, digest and revision. Withdrawal uses the actual
-P1 `settle_request` result and typed Q1-style cleanup observations, including the
-returned terminal Request. Unsupported nonexecution cleanup remains held; a
+requires the exact whole ask, digest and revision. Withdrawal preflights actual P1 `settle_request` eligibility against the current
+request both in preparation and immediately before issuance. This eligibility
+check does not establish native terminal facts: actual observed cleanup still
+requires the typed Q1-style readback and returned terminal Request. Unsupported nonexecution cleanup remains held; a
 synthetic terminal projection cannot release capacity.
 
 P2 receives the exact precommitted command nonce through a source-compatible
@@ -100,3 +105,20 @@ is claimed. Quality findings remain unwaived in the external task evidence. The 
 configured typing check uses the explicit Python3.12 environment and all required
 test import roots; earlier missing-import diagnostics are retained as an
 environment failure, not an accepted baseline.
+
+## Round 3 retained offline boundaries
+
+`execute` and `assess` own the supported port/provider dispatch and result commit.
+Public `issue` remains an offline intent-simulation API; callers must not use it
+as a live dispatch ownership API. Public `mark_unknown` refuses supported live
+port/provider callbacks; owned internal failure handling uses a private path.
+Existing fixture-only cancellation from allocated through landed can still rely
+on P1 booleans without typed cancellation recovery. Ask-pinned and later cleanup
+requires P1's typed authenticated recovery; fixture booleans are not production
+authentication. `prepare_groom` retains its concurrency/two-commit crash HOLD gap.
+The global nonblocking owner lease can hold unrelated work busy across an await;
+callers yield rather than busy-poll. The operation catalogue remains duplicated;
+strict cleanup decoding at each durable boundary intentionally revalidates bytes.
+These are disclosed OPEN offline surfaces, not approvals for production use.
+The [eight round 3 dispositions](../reviews/plan5-p3-r3-dispositions.md) retain the
+actual reviewer report and distinguish repairs from deferred findings.
