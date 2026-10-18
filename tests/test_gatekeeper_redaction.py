@@ -1,7 +1,8 @@
 """Pure explicit contexts keep legacy redaction behavior and global callers independent."""
 
-import subprocess
+import hashlib
 import types
+from pathlib import Path
 
 import pytest
 
@@ -10,15 +11,13 @@ from heterodyne.admind import redact as current
 
 @pytest.fixture
 def baseline():
-    # Exact approved source, not a second hand-maintained redaction implementation.
-    source = subprocess.check_output(
-        [
-            "git",
-            "show",
-            "07637745fe75dc614109a0b8ba72d3489f262a97:src/heterodyne/admind/redact.py",
-        ],
-        text=True,
+    # Exact approved source copied from07637745:src/heterodyne/admind/redact.py.
+    # Keep the oracle independent of runtime code and available in shallow checkouts.
+    data = (Path(__file__).parent / "fixtures/gatekeeper-approved-redact-07637745.txt").read_bytes()
+    assert (
+        hashlib.sha256(data).hexdigest() == "533ecbb089b57e643c1edf8745eb13dd908b5dc1cbd14f74f48e3a59883a0d8c"
     )
+    source = data.decode("utf-8")
     module = types.ModuleType("approved_redaction_baseline")
     exec(compile(source, "<approved-redaction-baseline>", "exec"), module.__dict__)  # noqa: S102 - exact pinned source
     return module
