@@ -48,7 +48,13 @@ def test_decision_issue_requires_separate_observation(tmp_path):
 def test_readonly_child_cannot_self_attest_result(tmp_path):
     with closing(FixtureJournal.create(tmp_path / "fixture")) as db:
         parent, clock = r3.ready_parent(db)
-        parent = db.transition("dispatch", parent.approval_id, parent.version, dis.uncertain)
+        parent = db.transition(
+            "dispatch",
+            parent.approval_id,
+            parent.version,
+            dis.uncertain,
+            observation=TransitionObservation(dispatch_operation="uncertain"),
+        )
         child = dis.prepare_reconciliation(parent, "read-child", "f" * 64, clock)
         db.add_dispatch(child)
         with pytest.raises(Refused, match="observation"):
@@ -59,6 +65,7 @@ def test_readonly_child_cannot_self_attest_result(tmp_path):
                 lambda old: dis.finish_reconciliation(
                     old, evidence=f.DIGEST, cleanup_proven=True, effect="succeeded"
                 ),
+                observation=TransitionObservation(dispatch_operation="finish-reconciliation"),
             )
 
 
@@ -72,9 +79,15 @@ def test_held_parent_cannot_allocate_readonly_child(tmp_path):
 
 @pytest.mark.parametrize("now", [dis.Clock("new-boot", 1, 100), dis.Clock("boot", 10**9, 10**12)])
 def test_discontinuous_clock_has_exact_authenticated_no_replay_exit(tmp_path, now):
-    with closing(FixtureJournal.create(tmp_path / "fixture")) as db:
+    with closing(FixtureJournal.create(tmp_path / "fixture", clock=lambda: now)) as db:
         parent, _ = r3.ready_parent(db)
-        parent = db.transition("dispatch", parent.approval_id, parent.version, dis.uncertain)
+        parent = db.transition(
+            "dispatch",
+            parent.approval_id,
+            parent.version,
+            dis.uncertain,
+            observation=TransitionObservation(dispatch_operation="uncertain"),
+        )
         recovery = dis.DispatchRecovery(
             parent.approval_id,
             parent.revision,
@@ -103,14 +116,14 @@ def test_discontinuous_clock_has_exact_authenticated_no_replay_exit(tmp_path, no
                     parent.approval_id,
                     parent.version,
                     lambda old, bad=bad: dis.settle_dispatch(old, bad),
-                    observation=TransitionObservation(dispatch_recovery=bad),
+                    observation=TransitionObservation(dispatch_operation="settle", dispatch_recovery=bad),
                 )
         done = db.transition(
             "dispatch",
             parent.approval_id,
             parent.version,
             lambda old: dis.settle_dispatch(old, recovery),
-            observation=TransitionObservation(dispatch_recovery=recovery),
+            observation=TransitionObservation(dispatch_operation="settle", dispatch_recovery=recovery),
         )
         assert done.settled and done.state == "failed" and done.claim_consumed
         assert db.db.execute("SELECT count(*) FROM resources").fetchone()[0] == 0
@@ -137,7 +150,11 @@ def test_allocation_ignores_unanchored_integer_and_caller_start(tmp_path):
                 observation=forged,
             )
         for elapsed in (1, 5, 30):
-            now = dis.Clock(start.boot_id, start.mono_ns + elapsed * 10**9, start.utc_ns + elapsed * 10**9)
+            now = dis.Clock(
+                start.boot_id,
+                start.mono_ns + {1: 1, 5: 6, 30: 36}[elapsed] * 10**9,
+                start.utc_ns + {1: 1, 5: 6, 30: 36}[elapsed] * 10**9,
+            )
             value = db.transition(
                 "request",
                 key,
@@ -192,7 +209,7 @@ def test_filed_withdrawal_requires_independent_native_cleanup(tmp_path, invalida
             key,
             request.version,
             proposal,
-            observation=TransitionObservation(cancellation_recovery=recovery),
+            observation=f.cleanup_observation(request, cancellation_recovery=recovery),
         )
         assert done.phase == "cancelled" and done.cleanup_confirmed
         assert done.recovery_operator_event == recovery.operator_event
@@ -285,6 +302,7 @@ def test_committed_deny_records_history_before_request_settlement(tmp_path):
             request_key(request),
             request.version,
             lambda old: settle_request(old, "denied", decision=decision, **r1.cleanup(old)),
+            observation=f.cleanup_observation(request),
         )
         assert done.phase == "denied"
         assert db.db.execute("SELECT count(*) FROM denials").fetchone() == (1,)
@@ -306,7 +324,8 @@ def test_pending_deny_cannot_be_cancelled_to_evade_history(tmp_path):
                 "request",
                 key,
                 request.version,
-                lambda old: settle_request(old, "cancelled", **r1.cleanup(old)),
+                lambda old: settle_request(old, "cancelled", recovery=f.withdrawal(old), **r1.cleanup(old)),
+                observation=f.cleanup_observation(request, cancellation_recovery=f.withdrawal(request)),
             )
 
 
@@ -324,7 +343,13 @@ def test_pending_deny_cannot_be_cancelled_to_evade_history(tmp_path):
 def test_readonly_child_requires_exact_separate_finished_read(tmp_path, change):
     with closing(FixtureJournal.create(tmp_path / "fixture")) as db:
         parent, clock = r3.ready_parent(db)
-        parent = db.transition("dispatch", parent.approval_id, parent.version, dis.uncertain)
+        parent = db.transition(
+            "dispatch",
+            parent.approval_id,
+            parent.version,
+            dis.uncertain,
+            observation=TransitionObservation(dispatch_operation="uncertain"),
+        )
         child = dis.prepare_reconciliation(parent, "read-child", "f" * 64, clock)
         db.add_dispatch(child)
         independent = f.reconciliation_observation(child, effect="succeeded", effect_cleanup=True)

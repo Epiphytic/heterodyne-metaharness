@@ -9,18 +9,12 @@ from typing import Literal
 import msgspec
 
 from heterodyne.actions.codec import BEAD_ID, safe_label
-from heterodyne.actions.contracts import Record
+from heterodyne.actions.contracts import Clock, Record
 from heterodyne.actions.requests import Refused, changed, digest_syntax
 
 DispatchState = Literal[
     "preparing", "ready", "held", "executing", "uncertain", "succeeded", "failed", "denied"
 ]
-
-
-class Clock(Record, frozen=True):
-    boot_id: str
-    mono_ns: int
-    utc_ns: int
 
 
 class Dispatch(Record, frozen=True):
@@ -231,7 +225,9 @@ def retire_unconsumed(
 
 
 def uncertain(value: Dispatch) -> Dispatch:
-    if value.settled or value.state not in {"ready", "executing", "uncertain", "failed"}:
+    if value.state == "uncertain" and not value.settled:
+        return value
+    if value.settled or value.state not in {"ready", "executing", "uncertain"}:
         raise Refused("settled-or-unissued-dispatch-conflict")
     return changed(value, state="uncertain")
 
@@ -269,6 +265,8 @@ def report(
         raise Refused("settled-report-conflict")
     if value.state not in {"executing", "uncertain"}:
         raise Refused("report-outside-execution")
+    if value.evidence is not None and evidence != value.evidence:
+        raise Refused("retained-report-evidence-conflict")
     if effect == "succeeded" and evidence is not None and cleanup_proven:
         return changed(value, state="succeeded", evidence=evidence, cleanup_proven=True, settled=True)
     # An absent effect after consumption is NOT permission to perform it again.
@@ -338,6 +336,7 @@ class DispatchRecovery(Record, frozen=True):
     # Explicit recovery of a discontinuous clock; never permits initial-effect replay.
     clock_discontinuity: bool = False
     observed_now: Clock | None = None
+    clock_anchor: Clock | None = None
 
 
 def settle_dispatch(value: Dispatch, observation: DispatchRecovery) -> Dispatch:
@@ -346,7 +345,7 @@ def settle_dispatch(value: Dispatch, observation: DispatchRecovery) -> Dispatch:
     if observation.clock_discontinuity and observation.observed_now is not None:
         _clock(observation.observed_now)
         try:
-            elapsed_seconds(value, observation.observed_now)
+            clock_elapsed(observation.clock_anchor or value.started, observation.observed_now)
         except Refused:
             discontinuous = True
     if (

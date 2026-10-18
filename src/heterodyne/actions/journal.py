@@ -12,13 +12,13 @@ import sqlite3
 import stat
 from collections.abc import Callable, Generator
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, overload
 
 import msgspec
 
 from heterodyne.actions.codec import encode_record
 from heterodyne.actions.decisions import Decision, begin_decision
-from heterodyne.actions.dispatch import Dispatch
+from heterodyne.actions.dispatch import Clock, Dispatch, DispatchRecovery, clock_elapsed
 from heterodyne.actions.policy import request_denial_key
 from heterodyne.actions.requests import TERMINAL_REQUESTS, Refused, Request, request_bytes
 from heterodyne.actions.transitions import (
@@ -34,6 +34,7 @@ SCHEMA_VERSION = 2
 MAX_OUTSTANDING = 128
 MAX_RECORDS = 4096
 MAX_EVENTS = 16_384
+TERMINAL_RESERVE = 96
 _BASE = (
     "CREATE TABLE meta (version INTEGER NOT NULL)",
     "CREATE TABLE requests (key TEXT PRIMARY KEY, ws TEXT NOT NULL, bead TEXT NOT NULL, "
@@ -120,7 +121,10 @@ def _open_fixture(path: Path) -> sqlite3.Connection:
 class FixtureJournal:
     """Tests may open/reopen ONLY private journals created by create(); never an installed journal."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, clock: Callable[[], Clock] | None = None):
+        self.clock = clock
+        self._capacity_owner: str | None = None
+        self._capacity_spent = 0
         self.path = path
         self.db = _open_fixture(path)
         try:
@@ -132,9 +136,9 @@ class FixtureJournal:
             raise
 
     @classmethod
-    def create(cls, path: Path) -> "FixtureJournal":
+    def create(cls, path: Path, *, clock: Callable[[], Clock] | None = None) -> "FixtureJournal":
         create_fixture(path)
-        return cls(path)
+        return cls(path, clock=clock)
 
     def close(self) -> None:
         self.db.close()
@@ -142,19 +146,77 @@ class FixtureJournal:
     @contextlib.contextmanager
     def transaction(self) -> Generator[None]:
         self.db.execute("BEGIN IMMEDIATE")
+        self._capacity_owner = None
+        self._capacity_spent = 0
         try:
             yield
+            if self._capacity_spent:
+                owner = self._capacity_owner
+                if owner is None:
+                    raise Refused("fixture-capacity-owner-required")
+                version = self.db.execute(
+                    "SELECT coalesce(max(version),0)+1 FROM events WHERE kind='capacity-recovery' AND key=?",
+                    (owner,),
+                ).fetchone()[0]
+                self._event("capacity-recovery", owner, version, encode_record(self._capacity_spent + 1))
             self.db.commit()
         except BaseException:
             self.db.rollback()
             raise
+        finally:
+            self._capacity_owner = None
+            self._capacity_spent = 0
+
+    def _reserve_used(self, key: str) -> int:
+        return sum(
+            msgspec.json.decode(row[0], type=int)
+            for row in self.db.execute(
+                "SELECT data FROM events WHERE kind='capacity-recovery' AND key=?", (key,)
+            )
+        )
+
+    def _reserved(self) -> int:
+        return sum(
+            max(0, TERMINAL_RESERVE - self._reserve_used(row[0]))
+            for row in self.db.execute("SELECT key FROM requests WHERE outstanding=1")
+        )
+
+    def _terminal_budget(self, request: Request) -> None:
+        if request.phase not in TERMINAL_REQUESTS:
+            self._capacity_owner = request_key(request)
 
     def _event(self, kind: str, key: str, version: int, data: bytes) -> None:
-        if self.db.execute("SELECT coalesce(max(seq), 0) FROM events").fetchone()[0] >= MAX_EVENTS:
+        next_seq = self.db.execute("SELECT coalesce(max(seq),0)+1 FROM events").fetchone()[0]
+        reserved = self._reserved()
+        if next_seq > MAX_EVENTS - reserved or self._capacity_spent:
+            owner = self._capacity_owner
+            if owner is None:
+                raise Refused("fixture-event-capacity-needs-recovery")
+            remaining = TERMINAL_RESERVE - self._reserve_used(owner)
+            pending = self.db.execute("SELECT outstanding FROM requests WHERE key=?", (owner,)).fetchone()
+            other_reserves = reserved - (remaining if pending and pending[0] else 0)
+            # Leave room for the durable budget-usage event as well as this event.
+            required = self._capacity_spent + 1 + int(kind != "capacity-recovery")
+            if (
+                required > remaining
+                or next_seq + int(kind != "capacity-recovery") > MAX_EVENTS - other_reserves
+            ):
+                raise Refused("fixture-terminal-capacity-budget-exhausted")
+            self._capacity_spent += 1
+        if next_seq > MAX_EVENTS:
             raise Refused("fixture-event-capacity-needs-recovery")
         self.db.execute(
             "INSERT INTO events(kind,key,version,data) VALUES(?,?,?,?)", (kind, key, version, data)
         )
+
+    @overload
+    def get(self, kind: Literal["request"], key: str) -> Request: ...
+
+    @overload
+    def get(self, kind: Literal["decision"], key: str) -> Decision: ...
+
+    @overload
+    def get(self, kind: Literal["dispatch"], key: str) -> Dispatch: ...
 
     def get(
         self, kind: Literal["request", "decision", "dispatch"], key: str
@@ -260,6 +322,8 @@ class FixtureJournal:
             )
             if expected != value:
                 raise Refused("decision-not-bound-to-durable-request")
+            if old is None and value.event.value == "deny":
+                self._terminal_budget(request)
             if prior is None:
                 self._event("decision-inbox", inbox_key, 0, data)
             if isinstance(old, Decision):
@@ -297,6 +361,7 @@ class FixtureJournal:
         with self.transaction():
             decision = self.get("decision", value.approval_id)
             request = self._request_for_approval(value.approval_id)
+            self._terminal_budget(request)
             if (
                 request.phase != "filed"
                 or request.context_digest != value.digest
@@ -304,8 +369,7 @@ class FixtureJournal:
             ):
                 raise Refused("dispatch-request-not-filed")
             if (
-                not isinstance(decision, Decision)
-                or decision.phase != "committed"
+                decision.phase != "committed"
                 or decision.event.value != "approve"
                 or decision.purpose != "execution"
                 or (decision.digest, decision.request_revision) != (value.digest, value.revision)
@@ -331,8 +395,7 @@ class FixtureJournal:
     def _add_reconciliation(self, value: Dispatch, key: str, data: bytes) -> None:
         parent = self.get("dispatch", value.approval_id)
         if (
-            not isinstance(parent, Dispatch)
-            or parent.dispatch_kind != "initial"
+            parent.dispatch_kind != "initial"
             or parent.settled
             or parent.state not in {"uncertain", "failed"}
             or (parent.attempt_id, parent.revision, parent.digest, parent.target, parent.resource)
@@ -369,22 +432,57 @@ class FixtureJournal:
             raise Refused("reconcile-parent-observation-required")
         if reconciliations >= 3:
             raise Refused("reconcile-needs-authenticated-recovery")
+        self._terminal_budget(self._request_for_approval(value.approval_id))
         self.db.execute("INSERT INTO dispatches VALUES(?,?,?)", (key, value.version, data))
         self._event("dispatch", key, value.version, data)
+
+    @overload
+    def transition(
+        self,
+        kind: Literal["request"],
+        key: str,
+        expected_version: int,
+        reducer: Callable[[Request], Request],
+        *,
+        observation: TransitionObservation = EMPTY_OBSERVATION,
+    ) -> Request: ...
+
+    @overload
+    def transition(
+        self,
+        kind: Literal["decision"],
+        key: str,
+        expected_version: int,
+        reducer: Callable[[Decision], Decision],
+        *,
+        observation: TransitionObservation = EMPTY_OBSERVATION,
+    ) -> Decision: ...
+
+    @overload
+    def transition(
+        self,
+        kind: Literal["dispatch"],
+        key: str,
+        expected_version: int,
+        reducer: Callable[[Dispatch], Dispatch],
+        *,
+        observation: TransitionObservation = EMPTY_OBSERVATION,
+    ) -> Dispatch: ...
 
     def transition(
         self,
         kind: Literal["request", "decision", "dispatch"],
         key: str,
         expected_version: int,
-        reducer: Callable[[Request | Decision | Dispatch], Request | Decision | Dispatch],
+        reducer: Callable[[Any], Request | Decision | Dispatch],
         *,
         observation: TransitionObservation = EMPTY_OBSERVATION,
     ) -> Request | Decision | Dispatch:
-        """Read, reduce and conditional update share one transaction; no port calls inside it."""
+        """Read, sample the injected fixture clock, reduce and update in one transaction."""
         _, cls = TABLES[kind]
         with self.transaction():
             old = self.get(kind, key)
+            observation = self._recovery_clock(old, observation)
             try:
                 value = reducer(old)
             except Refused:
@@ -398,6 +496,9 @@ class FixtureJournal:
             if type(value) is not cls or value.version != old.version + 1:
                 raise Refused("invalid-fixture-transition")
             data = request_bytes(value) if isinstance(value, Request) else encode_record(value)
+            if self._recovery_progress(old, value):
+                request = old if isinstance(old, Request) else self._request_for_approval(old.approval_id)
+                self._terminal_budget(request)
             if isinstance(value, Request):
                 if not isinstance(old, Request):
                     raise Refused("immutable-request-binding")
@@ -417,8 +518,10 @@ class FixtureJournal:
                     reconciliation = None
                     if observation.reconciliation_key is not None:
                         reconciliation = self.get("dispatch", observation.reconciliation_key)
-                        if not isinstance(reconciliation, Dispatch):
-                            raise Refused("reconciliation-record-required")
+                    if value.reconciliation_lookups != old.reconciliation_lookups:
+                        observation = msgspec.structs.replace(
+                            observation, reconciliation_started=self._dispatch_lookup_clock(old)
+                        )
                     dispatch_transition(old, value, observation=observation, reconciliation=reconciliation)
                     if value.reconciliation_lookups != old.reconciliation_lookups:
                         if reconciliation is None:
@@ -442,6 +545,88 @@ class FixtureJournal:
                 self._event(kind + "-observation", key, value.version, encode_record(observation))
         return value
 
+    @staticmethod
+    def _recovery_progress(old: Request | Decision | Dispatch, value: Request | Decision | Dispatch) -> bool:
+        if isinstance(old, Request) and isinstance(value, Request):
+            return value.phase in TERMINAL_REQUESTS or old.phase in {
+                "allocation-intent",
+                "allocation-unknown",
+            }
+        if isinstance(old, Decision) and isinstance(value, Decision):
+            # Every phase is finite; invalidation/substitution loops cannot spend this reserve.
+            return value.phase != old.phase
+        if isinstance(old, Dispatch) and isinstance(value, Dispatch):
+            return (
+                value.settled
+                or value.reconciliation_lookups > old.reconciliation_lookups
+                or (value.state == "held" and old.state in {"preparing", "ready"})
+                or (value.state == "uncertain" and old.state in {"ready", "executing"})
+                or (value.state == "failed" and old.state in {"executing", "uncertain"})
+            )
+        return False
+
+    def _recovery_clock(
+        self, old: Request | Decision | Dispatch, observation: TransitionObservation
+    ) -> TransitionObservation:
+        recovery = (
+            observation.dispatch_recovery
+            or observation.allocation_recovery
+            or observation.abandonment_recovery
+        )
+        if recovery is None or not recovery.clock_discontinuity:
+            return observation
+        if self.clock is None:
+            raise Refused("journal-clock-sampler-required")
+        now = self.clock()
+        clock_elapsed(now, now)
+        if recovery.observed_now != now or (observation.now is not None and observation.now != now):
+            raise Refused("recovery-clock-sample-mismatch")
+        if isinstance(old, Dispatch):
+            started = self._dispatch_lookup_clock(old)
+            if not isinstance(recovery, DispatchRecovery):
+                raise Refused("clock-recovery-record-mismatch")
+            if recovery.clock_anchor is not None and recovery.clock_anchor != started:
+                raise Refused("recovery-clock-anchor-mismatch")
+        elif isinstance(old, Request):
+            row = self.db.execute(
+                "SELECT data FROM events WHERE kind='request-observation' AND key=? AND version=?",
+                (request_key(old), old.version),
+            ).fetchone()
+            started = msgspec.json.decode(row[0], type=TransitionObservation).now if row else None
+        else:
+            raise Refused("clock-recovery-record-mismatch")
+        if started is None:
+            raise Refused("clock-recovery-history-required")
+        try:
+            clock_elapsed(started, now)
+        except Refused:
+            return msgspec.structs.replace(observation, now=now)
+        raise Refused("clock-recovery-not-discontinuous")
+
+    def _dispatch_lookup_clock(self, old: Dispatch) -> Clock:
+        if old.reconciliation_lookups == 0:
+            return old.started
+        # Find the first retained state with the current lookup count, not a later
+        # worker/hold event or a caller-supplied timestamp. Storage is bounded.
+        rows = self.db.execute(
+            "SELECT version,data FROM events WHERE kind='dispatch' AND key=? ORDER BY version",
+            (dispatch_key(old),),
+        )
+        for version, data in rows:
+            record = msgspec.json.decode(data, type=Dispatch)
+            if record.reconciliation_lookups == old.reconciliation_lookups:
+                row = self.db.execute(
+                    "SELECT data FROM events WHERE kind='dispatch-observation' AND key=? AND version=?",
+                    (dispatch_key(old), version),
+                ).fetchone()
+                observed = (
+                    msgspec.json.decode(row[0], type=TransitionObservation) if row else EMPTY_OBSERVATION
+                )
+                if observed.now is not None:
+                    return observed.now
+                break
+        raise Refused("reconciliation-clock-history-required")
+
     def _request_proposal(self, old: Request, value: Request, observation: TransitionObservation) -> Request:
         row = self.db.execute("SELECT 1 FROM decisions WHERE key=?", (value.approval_id or "",)).fetchone()
         decision = self.get("decision", value.approval_id or "") if row else None
@@ -450,10 +635,10 @@ class FixtureJournal:
         ).fetchone()
         dispatch = self.get("dispatch", value.approval_id or "") if dispatch_row else None
         # The issuance clock is write-ahead journal history, never caller-supplied elapsed time.
-        if old.phase == "allocation-unknown" and value.recovery_operator_event is None:
+        if old.phase == "allocation-unknown":
             row = self.db.execute(
-                "SELECT data FROM events WHERE kind='request-observation' AND key=? AND version=1",
-                (request_key(old),),
+                "SELECT data FROM events WHERE kind='request-observation' AND key=? AND version=?",
+                (request_key(old), old.version),
             ).fetchone()
             issued = msgspec.json.decode(row[0], type=TransitionObservation) if row else EMPTY_OBSERVATION
             observation = msgspec.structs.replace(observation, allocation_started=issued.now)
@@ -503,7 +688,7 @@ class FixtureJournal:
         with self.transaction():
             durable = self.get("decision", decision.approval_id)
             request = self.get("request", request_key(value))
-            if not isinstance(request, Request) or durable != decision or request != value:
+            if durable != decision or request != value:
                 raise Refused("denial-not-durable")
             self._denial(request, durable)
 

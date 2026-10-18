@@ -45,6 +45,32 @@ class ReconciliationReadback(Record, frozen=True):
     cleanup_proven: bool = False
 
 
+class DispatchReadback(Record, frozen=True):
+    """Independent synthetic result from the exact consumed worker invocation."""
+
+    approval_id: str
+    revision: int
+    digest: str
+    target: str
+    attempt_id: str
+    claim_hash: str
+    expected_version: int
+    effect: Literal["succeeded", "absent", "unknown"]
+    evidence: str | None
+    cleanup_proven: bool = False
+
+
+class CleanupReadback(Record, frozen=True):
+    """Native terminal shell/blocker observations, never the proposed terminal state."""
+
+    key: req.CreationKey
+    origin: req.Origin
+    expected_version: int
+    cleaned_shells: tuple[str, ...]
+    blockers_clear: bool = False
+    native_terminal: bool = False
+
+
 class TransitionObservation(Record, frozen=True):
     """Independent synthetic port input, never recovered from a proposed state.
 
@@ -63,6 +89,24 @@ class TransitionObservation(Record, frozen=True):
     # Supplied only from the journal's retained issuance observation, never caller time.
     allocation_started: Clock | None = None
     cancellation_recovery: req.CancellationRecovery | None = None
+    dispatch_operation: (
+        Literal[
+            "report",
+            "settle",
+            "lookup",
+            "finish-reconciliation",
+            "ready",
+            "consume-claim",
+            "restart-preparation",
+            "preparation-failed",
+            "retire-unconsumed",
+            "uncertain",
+        ]
+        | None
+    ) = None
+    dispatch_readback: DispatchReadback | None = None
+    cleanup_readback: CleanupReadback | None = None
+    reconciliation_started: Clock | None = None
 
 
 EMPTY_OBSERVATION = TransitionObservation()
@@ -80,6 +124,13 @@ def request_transition(
         raise req.Refused("denial-identity-not-derived")
     candidate = None
     if value.phase in req.TERMINAL_REQUESTS:
+        cleanup = observation.cleanup_readback
+        if cleanup is None or (cleanup.key, cleanup.origin, cleanup.expected_version) != (
+            old.key,
+            old.origin,
+            old.version,
+        ):
+            raise req.Refused("request-cleanup-observation-required")
         recovery = (
             observation.cancellation_recovery
             if value.phase == "cancelled"
@@ -90,9 +141,9 @@ def request_transition(
             cast(Literal["completed", "denied", "cancelled", "reconciled-abandoned"], value.phase),
             key=old.key,
             origin=old.origin,
-            cleaned_shells=old.shell_ids,
-            blockers_clear=True,
-            native_terminal=True,
+            cleaned_shells=cleanup.cleaned_shells,
+            blockers_clear=cleanup.blockers_clear,
+            native_terminal=cleanup.native_terminal,
             decision=decision,
             dispatch=dispatch,
             recovery=recovery,
@@ -231,10 +282,12 @@ def dispatch_transition(
     observation: TransitionObservation = EMPTY_OBSERVATION,
     reconciliation: Dispatch | None = None,
 ) -> None:
-    """Select a closed operation by its recorded delta, then require its exact result."""
+    """Require an explicit closed operation and its independently observed exact result."""
     from heterodyne.actions import dispatch as dis
 
-    if old.dispatch_kind == "reconcile":
+    candidate = None
+    operation = observation.dispatch_operation
+    if operation == "finish-reconciliation" and old.dispatch_kind == "reconcile":
         read = observation.reconciliation_readback
         if (
             read is None
@@ -267,16 +320,18 @@ def dispatch_transition(
             effect=read.effect,
             effect_cleanup_proven=read.effect_cleanup_proven,
         )
-    elif value.recovery_operator_event is not None:
+    elif operation == "settle":
         recovery = observation.dispatch_recovery
         if recovery is None:
             raise req.Refused("dispatch-recovery-observation-required")
         candidate = dis.settle_dispatch(old, recovery)
-    elif value.reconciliation_lookups != old.reconciliation_lookups:
+    elif operation == "lookup":
         if old.reconciliation_lookups >= 3:
             raise req.Refused("dispatch-readback-exhausted")
         now = _observed_clock(observation)
-        elapsed = dis.elapsed_seconds(old, now)
+        if observation.reconciliation_started is None:
+            raise req.Refused("reconciliation-clock-history-required")
+        elapsed = dis.clock_elapsed(observation.reconciliation_started, now)
         if (
             reconciliation is None
             or not reconciliation.settled
@@ -302,39 +357,51 @@ def dispatch_transition(
             evidence=reconciliation.evidence,
             cleanup_proven=reconciliation.reconciliation_cleanup_proven,
         )
-    elif value.state == "ready" and value.claim_deadline_ns is not None:
+    elif operation == "ready":
         candidate = dis.ready(
             old, value.claim_hash or "", _observed_clock(observation), fresh_gates=True, startup_readback=True
         )
-    elif value.state == "executing":
+    elif operation == "consume-claim":
         candidate = dis.consume_claim(
             old, old.claim_hash or "", _observed_clock(observation), fresh_gates=True
         )
-    elif value.state == "preparing":
+    elif operation == "restart-preparation":
         candidate = dis.restart_preparation(old, value.startup_hash, _observed_clock(observation))
-    elif value.state == "held" and old.state == "preparing":
+    elif operation == "preparation-failed":
         candidate = dis.preparation_failed(old, launcher_exited=True, no_children=True)
-    elif value.state == "held":
+    elif operation == "retire-unconsumed":
         candidate = dis.retire_unconsumed(old, old.claim_hash or "", launcher_exited=True, no_children=True)
-    elif (
-        value.state == "uncertain"
-        and value.evidence == old.evidence
-        and value.cleanup_proven == old.cleanup_proven
-    ):
+    elif operation == "uncertain":
         candidate = dis.uncertain(old)
-    else:
+    elif operation == "report":
+        read = observation.dispatch_readback
+        if read is None or (
+            read.approval_id,
+            read.revision,
+            read.digest,
+            read.target,
+            read.attempt_id,
+            read.claim_hash,
+            read.expected_version,
+        ) != (
+            old.approval_id,
+            old.revision,
+            old.digest,
+            old.target,
+            old.attempt_id,
+            old.claim_hash,
+            old.version,
+        ):
+            raise req.Refused("dispatch-report-observation-required")
         candidate = dis.report(
             old,
-            attempt_id=old.attempt_id,
-            claim_hash=old.claim_hash or "",
-            digest=old.digest,
-            target=old.target,
-            effect=cast(
-                Literal["succeeded", "absent", "unknown"],
-                {"succeeded": "succeeded", "failed": "absent"}.get(value.state, "unknown"),
-            ),
-            evidence=value.evidence,
-            cleanup_proven=value.cleanup_proven,
+            attempt_id=read.attempt_id,
+            claim_hash=read.claim_hash,
+            digest=read.digest,
+            target=read.target,
+            effect=read.effect,
+            evidence=read.evidence,
+            cleanup_proven=read.cleanup_proven,
         )
     if candidate != value:
         raise req.Refused("dispatch-transition-not-closed")

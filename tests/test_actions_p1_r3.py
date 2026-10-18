@@ -130,16 +130,20 @@ def test_insert_revalidates_whole_request_binding(tmp_path, field, value):
 
 def ready_parent(db, *, consumed=True):
     parent, clock = r2.held_parent(db)
-    for reducer in (
-        lambda old: dis.restart_preparation(old, "d" * 64, clock),
-        lambda old: dis.ready(old, "e" * 64, clock, fresh_gates=True, startup_readback=True),
+    for operation, reducer in zip(
+        ("restart-preparation", "ready"),
+        (
+            lambda old: dis.restart_preparation(old, "d" * 64, clock),
+            lambda old: dis.ready(old, "e" * 64, clock, fresh_gates=True, startup_readback=True),
+        ),
+        strict=True,
     ):
         parent = db.transition(
             "dispatch",
             parent.approval_id,
             parent.version,
             reducer,
-            observation=TransitionObservation(now=clock),
+            observation=TransitionObservation(dispatch_operation=operation, now=clock),
         )
     if consumed:
         parent = db.transition(
@@ -147,7 +151,7 @@ def ready_parent(db, *, consumed=True):
             parent.approval_id,
             parent.version,
             lambda old: dis.consume_claim(old, "e" * 64, clock, fresh_gates=True),
-            observation=TransitionObservation(now=clock),
+            observation=TransitionObservation(dispatch_operation="consume-claim", now=clock),
         )
     return parent, clock
 
@@ -163,7 +167,7 @@ def test_journal_checks_independent_actual_clock_not_reducer_clock(tmp_path, sec
                 parent.approval_id,
                 parent.version,
                 lambda old: dis.consume_claim(old, "e" * 64, clock, fresh_gates=True),
-                observation=TransitionObservation(now=now),
+                observation=TransitionObservation(dispatch_operation="consume-claim", now=now),
             )
         assert not db.get("dispatch", parent.approval_id).claim_consumed
         with pytest.raises(Refused, match="clock-observation-required"):
@@ -172,6 +176,7 @@ def test_journal_checks_independent_actual_clock_not_reducer_clock(tmp_path, sec
                 parent.approval_id,
                 parent.version,
                 lambda old: dis.consume_claim(old, "e" * 64, clock, fresh_gates=True),
+                observation=TransitionObservation(dispatch_operation="consume-claim"),
             )
 
 
@@ -203,7 +208,13 @@ def test_allocation_backoff_requires_independent_elapsed_observation(tmp_path):
 def test_parent_readback_requires_settled_child_and_joins_exact_outcome(tmp_path):
     with closing(FixtureJournal.create(tmp_path / "fixture")) as db:
         parent, clock = ready_parent(db)
-        parent = db.transition("dispatch", parent.approval_id, parent.version, dis.uncertain)
+        parent = db.transition(
+            "dispatch",
+            parent.approval_id,
+            parent.version,
+            dis.uncertain,
+            observation=TransitionObservation(dispatch_operation="uncertain"),
+        )
         now = dis.Clock(clock.boot_id, clock.mono_ns + 10**9, clock.utc_ns + 10**9)
 
         def proposal(old):
@@ -221,7 +232,9 @@ def test_parent_readback_requires_settled_child_and_joins_exact_outcome(tmp_path
             )
         child = dis.prepare_reconciliation(parent, "read", "f" * 64, now)
         db.add_dispatch(child)
-        observation = TransitionObservation(now=now, reconciliation_key=dispatch_key(child))
+        observation = TransitionObservation(
+            dispatch_operation="lookup", now=now, reconciliation_key=dispatch_key(child)
+        )
         with pytest.raises(Refused):
             db.transition("dispatch", parent.approval_id, parent.version, proposal, observation=observation)
         db.transition(
@@ -255,6 +268,7 @@ def test_parent_readback_requires_settled_child_and_joins_exact_outcome(tmp_path
                     old, elapsed_seconds=5, effect="unknown", evidence=f.DIGEST, cleanup_proven=False
                 ),
                 observation=TransitionObservation(
+                    dispatch_operation="lookup",
                     now=dis.Clock(clock.boot_id, clock.mono_ns + 5 * 10**9, clock.utc_ns + 5 * 10**9),
                     reconciliation_key=dispatch_key(child),
                 ),
@@ -264,7 +278,13 @@ def test_parent_readback_requires_settled_child_and_joins_exact_outcome(tmp_path
 def test_parent_backoff_uses_observed_clock_not_proposal_elapsed(tmp_path):
     with closing(FixtureJournal.create(tmp_path / "fixture")) as db:
         parent, clock = ready_parent(db)
-        parent = db.transition("dispatch", parent.approval_id, parent.version, dis.uncertain)
+        parent = db.transition(
+            "dispatch",
+            parent.approval_id,
+            parent.version,
+            dis.uncertain,
+            observation=TransitionObservation(dispatch_operation="uncertain"),
+        )
         child = dis.prepare_reconciliation(parent, "read", "f" * 64, clock)
         db.add_dispatch(child)
         db.transition(
@@ -282,7 +302,9 @@ def test_parent_backoff_uses_observed_clock_not_proposal_elapsed(tmp_path):
                 lambda old: dis.reconcile_lookup(
                     old, elapsed_seconds=1, effect="unknown", evidence=f.DIGEST, cleanup_proven=False
                 ),
-                observation=TransitionObservation(now=clock, reconciliation_key=dispatch_key(child)),
+                observation=TransitionObservation(
+                    dispatch_operation="lookup", now=clock, reconciliation_key=dispatch_key(child)
+                ),
             )
 
 
@@ -316,7 +338,8 @@ def test_journal_recovery_requires_supplied_current_scope_observation(tmp_path, 
                 parent.version,
                 proposal,
                 observation=TransitionObservation(
-                    dispatch_recovery=msgspec.structs.replace(good, **{field: False})
+                    dispatch_operation="settle",
+                    dispatch_recovery=msgspec.structs.replace(good, **{field: False}),
                 ),
             )
         assert db.db.execute("SELECT count(*) FROM resources").fetchone()[0] == 3
@@ -325,7 +348,7 @@ def test_journal_recovery_requires_supplied_current_scope_observation(tmp_path, 
             parent.approval_id,
             parent.version,
             proposal,
-            observation=TransitionObservation(dispatch_recovery=good),
+            observation=TransitionObservation(dispatch_operation="settle", dispatch_recovery=good),
         )
         assert done.settled and not done.claim_consumed
 
@@ -357,7 +380,7 @@ def test_failed_durable_dispatch_completes_request_and_frees_capacity(tmp_path):
             parent.approval_id,
             parent.version,
             lambda old: dis.settle_dispatch(old, recovery),
-            observation=TransitionObservation(dispatch_recovery=recovery),
+            observation=TransitionObservation(dispatch_operation="settle", dispatch_recovery=recovery),
         )
 
         done = db.transition(
@@ -365,6 +388,7 @@ def test_failed_durable_dispatch_completes_request_and_frees_capacity(tmp_path):
             request_key(request),
             request.version,
             lambda old: settle_request(old, "completed", dispatch=parent, **r1.cleanup(old)),
+            observation=f.cleanup_observation(request),
         )
         assert done.phase == "completed"
         assert db.db.execute("SELECT outstanding FROM requests").fetchone()[0] == 0
@@ -390,6 +414,7 @@ def test_journal_cancel_after_deny_refuses_and_preserves_atomic_denial_route(tmp
             key,
             request.version,
             lambda old: settle_request(old, "denied", decision=decision, **r1.cleanup(old)),
+            observation=f.cleanup_observation(request),
         )
         assert done.phase == "denied" and db.denied(request.denial_identity, request.origin.session_key)
         with pytest.raises(Refused, match="same-session-denied"):
@@ -448,6 +473,7 @@ def test_exact_decision_duplicate_remains_idempotent_after_request_settlement(tm
             request_key(f.initial()),
             value.version,
             lambda old: settle_request(old, "denied", decision=decision, **r1.cleanup(old)),
+            observation=f.cleanup_observation(value),
         )
         events = db.db.execute("SELECT count(*) FROM events").fetchone()[0]
         assert db.add_decision(f.begun("deny")) == "duplicate"

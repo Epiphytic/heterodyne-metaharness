@@ -1,5 +1,7 @@
 """Review R1 regression scenarios; fake facts and disposable SQLite only."""
 
+from typing import TypedDict
+
 import msgspec
 import pytest
 import test_actions_p1 as f
@@ -7,7 +9,16 @@ import test_actions_p1 as f
 from heterodyne.actions import decisions as dec
 from heterodyne.actions import dispatch as dis
 from heterodyne.actions.journal import FixtureJournal
-from heterodyne.actions.requests import Refused, groom, issue_allocation, observe_allocation, settle_request
+from heterodyne.actions.requests import (
+    CreationKey,
+    Origin,
+    Refused,
+    Request,
+    groom,
+    issue_allocation,
+    observe_allocation,
+    settle_request,
+)
 from heterodyne.actions.transitions import TransitionObservation
 
 
@@ -93,7 +104,15 @@ def test_dispatch_persists_initial_kind():
     assert prepared().dispatch_kind == "initial"
 
 
-def cleanup(value):
+class CleanupFacts(TypedDict):
+    key: CreationKey
+    origin: Origin
+    cleaned_shells: tuple[str, ...]
+    blockers_clear: bool
+    native_terminal: bool
+
+
+def cleanup(value: Request) -> CleanupFacts:
     return dict(
         key=value.key,
         origin=value.origin,
@@ -168,17 +187,28 @@ def test_denial_settlement_and_durable_session_denial_are_atomic(tmp_path):
             key,
             value.version,
             lambda v: settle_request(v, "denied", decision=f.committed("deny"), **cleanup(v)),
+            observation=f.cleanup_observation(value),
         )
     assert not db.denied(value.denial_identity, value.origin.session_key)
     assert db.get("request", key) == value
     decision = f.persist_decision(db, "deny")
     done = db.transition(
-        "request", key, value.version, lambda v: settle_request(v, "denied", decision=decision, **cleanup(v))
+        "request",
+        key,
+        value.version,
+        lambda v: settle_request(v, "denied", decision=decision, **cleanup(v)),
+        observation=f.cleanup_observation(value),
     )
     assert done.phase == "denied" and db.denied(value.denial_identity, value.origin.session_key)
     assert db.db.execute("SELECT outstanding FROM requests WHERE key=?", (key,)).fetchone()[0] == 0
     assert (
-        db.transition("request", key, value.version, lambda v: settle_request(v, "denied", **cleanup(v)))
+        db.transition(
+            "request",
+            key,
+            value.version,
+            lambda v: settle_request(v, "denied", **cleanup(v)),
+            observation=f.cleanup_observation(value),
+        )
         == done
     )
     db.close()
@@ -279,6 +309,7 @@ def test_unconsumed_held_recovery_releases_resources_without_effect_replay(tmp_p
         value.approval_id,
         0,
         lambda v: dis.preparation_failed(v, launcher_exited=True, no_children=True),
+        observation=TransitionObservation(dispatch_operation="preparation-failed"),
     )
     recovery = dis.DispatchRecovery(
         value.approval_id,
@@ -302,7 +333,7 @@ def test_unconsumed_held_recovery_releases_resources_without_effect_replay(tmp_p
         value.approval_id,
         value.version,
         lambda v: dis.settle_dispatch(v, recovery),
-        observation=TransitionObservation(dispatch_recovery=recovery),
+        observation=TransitionObservation(dispatch_operation="settle", dispatch_recovery=recovery),
     )
     assert value.settled and not value.claim_consumed
     assert db.db.execute("SELECT count(*) FROM resources").fetchone()[0] == 0
@@ -320,7 +351,13 @@ def test_reconciliation_has_separate_persisted_kind_identity_and_no_initial_effe
     from test_actions_p1_r3 import ready_parent
 
     parent, clock = ready_parent(db, consumed=False)
-    parent = db.transition("dispatch", parent.approval_id, parent.version, dis.uncertain)
+    parent = db.transition(
+        "dispatch",
+        parent.approval_id,
+        parent.version,
+        dis.uncertain,
+        observation=TransitionObservation(dispatch_operation="uncertain"),
+    )
     reconciler = dis.prepare_reconciliation(parent, "read-only-1", "f" * 64, clock)
     db.add_dispatch(reconciler)
     key = dispatch_key(reconciler)
@@ -389,16 +426,20 @@ def test_report_ack_loss_is_noop_after_restart_without_duplicate_events(tmp_path
         fake_finalized_approval=True,
     )
     db.add_dispatch(value)
-    for reducer in (
-        lambda v: dis.ready(v, "d" * 64, clock, fresh_gates=True, startup_readback=True),
-        lambda v: dis.consume_claim(v, "d" * 64, clock, fresh_gates=True),
+    for operation, reducer in zip(
+        ("ready", "consume-claim"),
+        (
+            lambda v: dis.ready(v, "d" * 64, clock, fresh_gates=True, startup_readback=True),
+            lambda v: dis.consume_claim(v, "d" * 64, clock, fresh_gates=True),
+        ),
+        strict=True,
     ):
         value = db.transition(
             "dispatch",
             value.approval_id,
             value.version,
             reducer,
-            observation=TransitionObservation(now=clock),
+            observation=TransitionObservation(dispatch_operation=operation, now=clock),
         )
     old_version = value.version
 
@@ -414,7 +455,13 @@ def test_report_ack_loss_is_noop_after_restart_without_duplicate_events(tmp_path
             cleanup_proven=True,
         )
 
-    done = db.transition("dispatch", value.approval_id, old_version, success)
+    done = db.transition(
+        "dispatch",
+        value.approval_id,
+        old_version,
+        success,
+        observation=f.report_observation(value, effect="succeeded", evidence="e" * 64, cleanup=True),
+    )
     db.close()
     db = FixtureJournal(path)
     count = db.db.execute("SELECT count(*) FROM events").fetchone()[0]
@@ -577,9 +624,9 @@ def test_native_conflict_replacement_must_match_observed_first_event(tmp_path):
 def test_full_audit_store_still_acknowledges_duplicates_without_mutation(tmp_path, monkeypatch):
     from heterodyne.actions import journal
 
-    monkeypatch.setattr(journal, "MAX_EVENTS", 1)
     db = FixtureJournal.create(tmp_path / "fixture.sqlite")
     key = db.add_request(f.initial())
+    monkeypatch.setattr(journal, "MAX_EVENTS", 1)
     assert db.add_request(f.initial()) == key
     assert db.transition("request", key, 0, lambda v: v) == f.initial()
     with pytest.raises(Refused, match="capacity"):

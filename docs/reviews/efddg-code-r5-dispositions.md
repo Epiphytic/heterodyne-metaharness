@@ -1,0 +1,69 @@
+# P1 fifth-review author dispositions
+
+Actual review: **REVISE**, ordinal5. Raw report SHA256 `44e1afc059764e3e28a2a96bda0ee4a38baf5b51ee05101238bca18cf522f182`.
+
+Author repairs below are not reviewer clearance. All five live adapters remain unavailable. Prior five reviews remain retained; no author-launched follow-up review.
+
+## Finding 1
+
+1. `src/heterodyne/actions/transitions.py:325`: The fallthrough report() branch takes effect, evidence and cleanup_proven straight from the caller's proposed Dispatch with no TransitionObservation, and dis.report accepts old.state=='uncertain'. A consumed uncertain dispatch can therefore be settled 'succeeded' (or 'failed') with no reconciliation child, no lookups and no DispatchRecovery, undoing the R4#2 and R4#3 repairs.
+
+   Failure scenario: Claim consumed, then executing goes to uncertain (for example after a reboot). The caller calls journal.transition('dispatch', id, v, lambda d: dis.report(d, attempt_id=d.attempt_id, claim_hash=d.claim_hash, digest=d.digest, target=d.target, effect='succeeded', evidence=<any 64-hex>, cleanup_proven=True)). dispatch_transition routes this to report(), the candidate equals the value, the dispatch becomes settled 'succeeded', the resource/effect/approval locks are deleted, and settle_request('completed') records completion_effect 'succeeded'. No read-only invocation or operator attestation ever happened, and the same path can also overwrite an uncertain row's retained evidence with caller evidence.
+
+**Author disposition:** Fixed within the approved synthetic-port boundary. Explicit report operation requires a separate DispatchReadback bound to exact approval/revision/digest/target/attempt/claim/version. Proposal fields cannot establish effect or cleanup. Missing/mismatched observations refuse atomically; retained non-null evidence cannot be overwritten. Late exact worker reports remain separate synthetic observations, not authenticated machine proof or a new effect capability. All live adapters remain unavailable.
+
+## Finding 2
+
+2. `src/heterodyne/actions/transitions.py:155`: Allocation lookups require clock_elapsed(issuance clock, now), but the allocation path has no clock-discontinuity exit. recover_allocation and reconciled-abandoned both require allocation_lookups == 3, and allocation-unknown is not cancellable, so a reboot during allocation strands the request permanently. This is the R4#2 deadlock repaired only for dispatch.
+
+   Failure scenario: Request issued (version 1, issuance Clock boot_id=A), then the host reboots before the first lookup. Every observe_allocation call gets now.boot_id=B, so clock_elapsed raises 'dispatch-clock-or-deadline'. recover_allocation fails on allocation_lookups != 3, abandonment fails the same check, and cancellation refuses 'request-cancellation-not-unposted'. The request holds a per-bead slot and a global slot forever, and two of them lock the bead. The README's claim that 'missing historical issuance clocks hold for explicit recovery' has no reachable recovery.
+
+**Author disposition:** Fixed. Exact AllocationRecovery or AbandonmentRecovery can attest a clock discontinuity with authenticated current scope and canonical/orphan or full abandonment cleanup readbacks. The journal independently samples its explicitly injected fixture clock and verifies discontinuity against retained issuance/lookup history. Recovery never permits another create. Missing historical anchors still HOLD rather than inventing proof.
+
+## Finding 3
+
+3. `src/heterodyne/actions/dispatch.py:346`: Clock discontinuity in settle_dispatch is self-attested. Any DispatchRecovery with clock_discontinuity=True and a fabricated observed_now (a different boot_id, or mono_ns earlier than started) sets discontinuous=True and skips the reconciliation_lookups == 3 requirement for consumed claims. Nothing compares observed_now with a journal-sampled clock or with a previous failed lookup.
+
+   Failure scenario: Consumed dispatch, uncertain, 0 lookups, continuous clock (an ordinary unknown outcome). The caller passes a DispatchRecovery(..., clock_discontinuity=True, observed_now=Clock('x', 0, 0), effect_attested_succeeded=True, all booleans True). elapsed_seconds raises, discontinuous becomes True, and the dispatch settles 'succeeded' immediately. That contradicts the README's 'ordinary continuous-clock uncertainty still exhausts the three read-only observations before operator settlement'.
+
+**Author disposition:** Fixed at the durable boundary. Clock-discontinuity recovery requires the journal clock callback; its actual sample must equal observed_now and any simultaneous observation clock. The journal supplies the retained lookup/start anchor. Forged boot/anchor observations, continuous clocks, and missing samplers refuse with no retained transition. Pure reducers validate synthetic inputs but do not authenticate providers.
+
+## Finding 4
+
+4. `src/heterodyne/actions/transitions.py:93`: Terminal request settlement hardcodes cleaned_shells=old.shell_ids, blockers_clear=True and native_terminal=True, so those settle_request checks are always satisfied. Cancellation from allocated through sufficient also needs no observation at all, even at ask-pinned/sufficient, where the ask is already visible to the operator (begin_decision accepts a deny there).
+
+   Failure scenario: The request is at ask-pinned and the operator is about to deny. The caller cancels with no observation (no decision exists yet, so the 'decision unresolved' check passes). outstanding drops to 0 while native blocker/park/shell state is never proven cleaned. The operator's deny then arrives, add_decision's begin_decision refuses because the request is cancelled, and no denial row is written. The same session can re-request the identical intent, so the denial is effectively bypassed. Separately, the README's 'terminal capacity is freed only after all associated shells and blockers have consistent terminal readbacks' is not enforced.
+
+**Author disposition:** Fixed. Terminal transitions require a separate CleanupReadback bound to exact key/origin/version/all shells with actual synthetic native-terminal and blocker-clear facts. Ask-pinned/sufficient cancellation additionally requires exact authenticated native withdrawal, as filed cancellation does. Pending decisions/retained dispatches continue to refuse cancellation; native cleanup is not inferred from the candidate.
+
+## Finding 5
+
+5. `src/heterodyne/actions/dispatch.py:234`: uncertain() still accepts state 'failed', and dispatch_transition routes any same-evidence 'uncertain' proposal to it. A definitive absent-effect result can be downgraded to 'uncertain', and the next reconcile_lookup then overwrites its evidence and cleanup_proven, so R4#8 is still reachable through a different transition.
+
+   Failure scenario: report(effect='absent', evidence=E1, cleanup_proven=True) gives state 'failed'. The caller then transitions with dis.uncertain, which is accepted, giving state 'uncertain' with evidence E1. reconcile_lookup with a child effect of 'unknown' and evidence E2 takes the non-'failed' branch, so evidence becomes E2 and cleanup_proven comes from the child. The durable absent proof E1 is lost from the current row.
+
+**Author disposition:** Fixed. uncertain accepts only ready/executing/already-uncertain unsettled states. Definitive failed/absent records cannot downgrade through it; existing absent evidence survives subsequent read-only observations. Repeated exact already-uncertain no-op does not create new event capacity consumption.
+
+## Finding 6
+
+6. `src/heterodyne/actions/requests.py:133`: Allocation backoff (and reconcile_lookup at dispatch.py:296) compares cumulative elapsed time since issuance/start against 1/5/30, and no last-lookup clock is stored. Lookups are never spaced from each other, and a lookup's `now` may equal or even precede the previous lookup's `now`.
+
+   Failure scenario: Allocation issued at t0. The first lookup is attempted at t0+30s, or with any observed now of t0+30s. All three observe_allocation transitions commit back-to-back in milliseconds with the same `now`, because each check is elapsed >= 1, 5, 30 since issuance. The request reaches 3 lookups and abandonment/recovery without real backoff, which is the R4#5 outcome. The same applies to a dispatch whose started time is more than 30s in the past.
+
+**Author disposition:** Fixed. The journal derives each allocation/dispatch lookup anchor from the previous retained lookup observation, or issuance/start for the first. Caller elapsed/start assertions do not replace that anchor. Fixture clocks and tests now use cumulative times 1/6/36 to implement actual intervals 1/5/30; same-time repeated reads refuse.
+
+## Finding 7
+
+7. `src/heterodyne/actions/journal.py:153`: MAX_EVENTS is a hard stop on max(seq) for every write, including terminal settlement, denial recording and recovery transitions. Each transition writes one or two events, so the 16384 cap is hit after only a few hundred request lifecycles, long before MAX_RECORDS, and no recovery or compaction path exists.
+
+   Failure scenario: About 10 to 16 transitions per request, each writing a state event and an observation event, means around 1000 completed requests exhaust 16384 events. After that, every _event call raises 'fixture-event-capacity-needs-recovery', so in-flight uncertain dispatches can't settle, locks can't be released, denials can't be recorded, and outstanding requests can't be cancelled. No 'explicit recovery' API exists.
+
+**Author disposition:** Fixed for admitted in-flight records within the existing fixed bound. Reserve96 events per outstanding owner before admitting ordinary work; finite terminal/recovery/first-denial progress may spend only its own durably tracked reserve. Actual16384-cap tests complete three readbacks plus authenticated settlement/native cleanup, and prove isolation between two owners. No archive/prune/limit increase. Terminal-history saturation still HOLDs new admission; old already-full journals require separate retention design. Indefinite availability is not claimed.
+
+## Finding 8
+
+8. `src/heterodyne/actions/transitions.py:305`: dispatch_transition picks the operation by pattern-matching the proposed value's fields (state, evidence equality, lookup delta) in an order-sensitive elif chain instead of taking an explicit operation tag. That makes it easy to reach unintended reducers, which is how findings 1 and 5 arise.
+
+   Failure scenario: A proposal of state 'uncertain' with changed evidence goes to report(), while one with the same evidence goes to uncertain(). A proposal of 'succeeded' or 'failed' without a recovery event goes to report(). Each new reducer requires re-auditing this inference chain. An explicit operation enum plus a required observation per operation would close these routes structurally.
+
+**Author disposition:** Fixed. TransitionObservation.dispatch_operation is a closed explicit operation tag; the journal selects the reducer only from that tag and validates the resulting candidate. Missing/unknown tags and report proposals under unrelated tags refuse. Operation-specific independent observations remain required. Existing positive fixtures now explicitly name their intended operation.

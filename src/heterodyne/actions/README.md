@@ -246,3 +246,44 @@ most 4096 request rows. Indexed persistence and its migration/rollback proof are
 deferred noncritical performance work; no production contention guarantee is
 claimed. All new observations are explicit synthetic attestations, not verified
 credentials or proof a real worker ran. All five live adapters remain unavailable.
+
+
+### Fifth-review independent observations and bounded recovery
+
+Journal dispatch transitions require a closed `dispatch_operation` tag. Worker
+reports require a separate `DispatchReadback` bound to approval, revision, digest,
+target, attempt, claim and expected version; callback proposals cannot supply
+their own effect evidence. Existing non-null evidence cannot be overwritten, and
+definitive absence cannot be downgraded through `uncertain`. These readbacks are
+synthetic test-port facts, not authenticated real worker observations.
+
+Every terminal request requires independent `CleanupReadback` for its exact key,
+origin, version and complete shell set, including native terminal/blocker facts.
+Visible ask-pinned/sufficient requests require the same authenticated withdrawal
+observation as filed requests; silence or an arbitrary cancellation proposal does
+not discard a visible decision opportunity.
+
+Allocation and dispatch lookup backoffs are measured from the previous retained
+lookup clock (or issuance/start for the first read), so their intervals are truly
+1, 5 and 30 seconds. Clock-discontinuity recovery on either path requires an
+explicit fixture clock callback. The journal samples it inside the transaction,
+compares the supplied observation exactly, and independently verifies discontinuity
+against its retained anchor. A caller-selected boot ID alone cannot bypass reads.
+The exact authenticated recovery may adopt a canonical allocation with closed
+orphans, abandon the cleaned allocation, or settle the dispatch; it never recreates
+a shell or grants another effect claim. Historical missing anchors remain HOLD.
+
+The fixed 16384-event limit reserves 96 recovery events per admitted outstanding
+request. New admission and ordinary progress stop before consuming those reserves.
+Only finite denial/terminal/recovery progress can consume its owner's reserve;
+usage is durably retained in the same transaction, including its own usage marker.
+One owner's repeated operations cannot consume another owner's reserve. Three
+serial reconciliation invocations, their observations and final authenticated
+settlement/cleanup are covered by actual-capacity regressions. No history is pruned,
+no event limit is raised, and no archival mechanism is introduced. A fully retained
+terminal journal can still HOLD new work; archival/retention requires a separately
+admitted design. An already-full historical journal without headroom also holds.
+
+Review R5 and all eight author dispositions are retained in `docs/reviews/`. The
+new named offline module is `tests/test_actions_p1_r5.py`; previous R1–R4 modules
+remain part of the regression command. No live adapter readiness is claimed.

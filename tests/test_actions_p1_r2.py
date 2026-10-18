@@ -82,6 +82,7 @@ def held_parent(db):
         value.approval_id,
         0,
         lambda v: dis.preparation_failed(v, launcher_exited=True, no_children=True),
+        observation=TransitionObservation(dispatch_operation="preparation-failed"),
     )
     return value, clock
 
@@ -93,7 +94,11 @@ def test_unrelated_later_denial_does_not_freeze_existing_cleanup(tmp_path):
     decision = f.persist_decision(db, "deny")
     db.record_denial(denied, decision)
     done = db.transition(
-        "request", key, other.version, lambda v: settle_request(v, "cancelled", **r1.cleanup(v))
+        "request",
+        key,
+        other.version,
+        lambda v: settle_request(v, "cancelled", recovery=f.withdrawal(v), **r1.cleanup(v)),
+        observation=f.cleanup_observation(other, cancellation_recovery=f.withdrawal(other)),
     )
     assert done.cleanup_confirmed
 
@@ -182,6 +187,7 @@ def test_groom_failure_authenticated_deny_is_durable(tmp_path):
         key,
         value.version,
         lambda v: settle_request(v, "denied", decision=decision, **r1.cleanup(v)),
+        observation=f.cleanup_observation(value),
     )
     assert done.phase == "denied" and db.denied(value.denial_identity, value.origin.session_key)
     with pytest.raises(Refused):
@@ -220,7 +226,13 @@ def test_reconcile_cannot_issue_effect_claim_even_with_fresh_nonce(tmp_path):
     from test_actions_p1_r3 import ready_parent
 
     parent, clock = ready_parent(db, consumed=False)
-    parent = db.transition("dispatch", parent.approval_id, parent.version, dis.uncertain)
+    parent = db.transition(
+        "dispatch",
+        parent.approval_id,
+        parent.version,
+        dis.uncertain,
+        observation=TransitionObservation(dispatch_operation="uncertain"),
+    )
     value = dis.prepare_reconciliation(parent, "read-1", "f" * 64, clock)
     with pytest.raises(Refused):
         dis.ready(value, "e" * 64, clock, fresh_gates=True, startup_readback=True)
@@ -267,7 +279,13 @@ def test_only_one_reconcile_invocation_may_be_unsettled(tmp_path):
     from test_actions_p1_r3 import ready_parent
 
     parent, clock = ready_parent(db, consumed=False)
-    parent = db.transition("dispatch", parent.approval_id, parent.version, dis.uncertain)
+    parent = db.transition(
+        "dispatch",
+        parent.approval_id,
+        parent.version,
+        dis.uncertain,
+        observation=TransitionObservation(dispatch_operation="uncertain"),
+    )
     first = dis.prepare_reconciliation(parent, "read-1", "f" * 64, clock)
     db.add_dispatch(first)
     second = msgspec.structs.replace(
@@ -294,21 +312,21 @@ def test_attested_success_after_unknown_cleanup_is_bound_and_never_replays(tmp_p
         parent.approval_id,
         parent.version,
         lambda v: dis.restart_preparation(v, "d" * 64, clock),
-        observation=TransitionObservation(now=clock),
+        observation=TransitionObservation(dispatch_operation="restart-preparation", now=clock),
     )
     parent = db.transition(
         "dispatch",
         parent.approval_id,
         parent.version,
         lambda v: dis.ready(v, "e" * 64, clock, fresh_gates=True, startup_readback=True),
-        observation=TransitionObservation(now=clock),
+        observation=TransitionObservation(dispatch_operation="ready", now=clock),
     )
     parent = db.transition(
         "dispatch",
         parent.approval_id,
         parent.version,
         lambda v: dis.consume_claim(v, "e" * 64, clock, fresh_gates=True),
-        observation=TransitionObservation(now=clock),
+        observation=TransitionObservation(dispatch_operation="consume-claim", now=clock),
     )
     parent = db.transition(
         "dispatch",
@@ -324,6 +342,7 @@ def test_attested_success_after_unknown_cleanup_is_bound_and_never_replays(tmp_p
             evidence="f" * 64,
             cleanup_proven=False,
         ),
+        observation=f.report_observation(parent, effect="succeeded", evidence="f" * 64, cleanup=False),
     )
     for elapsed in (1, 5, 30):
         parent = f.persist_reconcile_observation(db, parent, elapsed)
@@ -352,7 +371,7 @@ def test_attested_success_after_unknown_cleanup_is_bound_and_never_replays(tmp_p
         parent.approval_id,
         parent.version,
         lambda v: dis.settle_dispatch(v, recovery),
-        observation=TransitionObservation(dispatch_recovery=recovery),
+        observation=TransitionObservation(dispatch_operation="settle", dispatch_recovery=recovery),
     )
     assert done.state == "succeeded" and done.settled and done.claim_consumed
     assert done.recovery_operator_event == recovery.operator_event
@@ -370,16 +389,22 @@ def test_reconciliations_are_serial_and_total_three_across_reopen(tmp_path):
         parent.approval_id,
         parent.version,
         lambda old: dis.restart_preparation(old, "d" * 64, clock),
-        observation=TransitionObservation(now=clock),
+        observation=TransitionObservation(dispatch_operation="restart-preparation", now=clock),
     )
     parent = db.transition(
         "dispatch",
         parent.approval_id,
         parent.version,
         lambda old: dis.ready(old, "e" * 64, clock, fresh_gates=True, startup_readback=True),
-        observation=TransitionObservation(now=clock),
+        observation=TransitionObservation(dispatch_operation="ready", now=clock),
     )
-    parent = db.transition("dispatch", parent.approval_id, parent.version, dis.uncertain)
+    parent = db.transition(
+        "dispatch",
+        parent.approval_id,
+        parent.version,
+        dis.uncertain,
+        observation=TransitionObservation(dispatch_operation="uncertain"),
+    )
     for elapsed in (1, 5, 30):
         parent = f.persist_reconcile_observation(db, parent, elapsed)
         db.close()
@@ -529,7 +554,11 @@ def test_declared_cleanup_cannot_forge_abandonment_or_alter_request_fields(tmp_p
             lambda v, elapsed=elapsed: f.observe_allocation(v, (), lookup_ok=False, elapsed_seconds=elapsed),
             observation=TransitionObservation(
                 allocation_elapsed_seconds=elapsed,
-                now=f.Clock("allocation", 1 + (elapsed) * 10**9, 1 + (elapsed) * 10**9),
+                now=f.Clock(
+                    "allocation",
+                    1 + ({1: 1, 5: 6, 30: 36}[elapsed]) * 10**9,
+                    1 + ({1: 1, 5: 6, 30: 36}[elapsed]) * 10**9,
+                ),
             ),
         )
     for updates in (

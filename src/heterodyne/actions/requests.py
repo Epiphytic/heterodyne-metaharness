@@ -16,7 +16,7 @@ from heterodyne.actions.codec import (
     safe_label,
     validate_request_inputs,
 )
-from heterodyne.actions.contracts import ActionConfig, Envelope, Intent, Origin, Record, Resolved
+from heterodyne.actions.contracts import ActionConfig, Clock, Envelope, Intent, Origin, Record, Resolved
 from heterodyne.actions.policy import denial_key, request_denial_key
 
 RequestPhase = Literal[
@@ -351,7 +351,7 @@ def settle_request(
             "filed",
         }:
             raise Refused("request-cancellation-not-unposted")
-        if value.phase == "filed":
+        if value.phase in {"ask-pinned", "sufficient", "filed"}:
             if (
                 not isinstance(recovery, CancellationRecovery)
                 or (recovery.key, recovery.origin, recovery.expected_version, recovery.shell_ids)
@@ -372,8 +372,8 @@ def settle_request(
     else:
         if (
             value.phase != "allocation-unknown"
-            or value.allocation_lookups != 3
             or not isinstance(recovery, AbandonmentRecovery)
+            or (value.allocation_lookups != 3 and not recovery.clock_discontinuity)
             or (recovery.key, recovery.origin, recovery.expected_version, recovery.shell_ids)
             != (value.key, value.origin, value.version, value.shell_ids)
             or not recovery.authenticated_current
@@ -413,6 +413,8 @@ class AbandonmentRecovery(Record, frozen=True):
     authenticated_current: bool = False
     exact_repair_scope: bool = False
     native_readback: bool = False
+    clock_discontinuity: bool = False
+    observed_now: Clock | None = None
 
 
 def request_bytes(value: Request) -> bytes:
@@ -436,6 +438,8 @@ class AllocationRecovery(Record, frozen=True):
     authenticated_current: bool = False
     exact_repair_scope: bool = False
     native_readback: bool = False
+    clock_discontinuity: bool = False
+    observed_now: Clock | None = None
 
 
 def recover_allocation(value: Request, observation: AllocationRecovery) -> Request:
@@ -443,7 +447,7 @@ def recover_allocation(value: Request, observation: AllocationRecovery) -> Reque
     ids = observation.associated_ids
     if (
         value.phase != "allocation-unknown"
-        or value.allocation_lookups != 3
+        or (value.allocation_lookups != 3 and not observation.clock_discontinuity)
         or observation.key != value.key
         or observation.origin != value.origin
         or observation.expected_version != value.version

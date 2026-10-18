@@ -203,8 +203,8 @@ def persist_reconcile_observation(db, parent, elapsed, *, effect="unknown", clea
 
     now = dis.Clock(
         parent.started.boot_id,
-        parent.started.mono_ns + elapsed * 10**9,
-        parent.started.utc_ns + elapsed * 10**9,
+        parent.started.mono_ns + {1: 1, 5: 6, 30: 36}[elapsed] * 10**9,
+        parent.started.utc_ns + {1: 1, 5: 6, 30: 36}[elapsed] * 10**9,
     )
     nonce = hashlib.sha256(f"read-{parent.reconciliation_lookups}".encode()).hexdigest()
     child = dis.prepare_reconciliation(parent, f"read-{parent.reconciliation_lookups}", nonce, now)
@@ -233,7 +233,9 @@ def persist_reconcile_observation(db, parent, elapsed, *, effect="unknown", clea
         lambda old: dis.reconcile_lookup(
             old, elapsed_seconds=elapsed, effect=effect, evidence=DIGEST, cleanup_proven=cleanup
         ),
-        observation=TransitionObservation(now=now, reconciliation_key=dispatch_key(child)),
+        observation=TransitionObservation(
+            dispatch_operation="lookup", now=now, reconciliation_key=dispatch_key(child)
+        ),
     )
 
 
@@ -455,20 +457,26 @@ def test_dispatch_claim_crash_restart_retains_lock_and_prevents_replay(tmp_path)
         value.approval_id,
         0,
         lambda v: ready(v, "d" * 64, clock, fresh_gates=True, startup_readback=True),
-        observation=TransitionObservation(now=clock),
+        observation=TransitionObservation(dispatch_operation="ready", now=clock),
     )
     db.transition(
         "dispatch",
         value.approval_id,
         value.version,
         lambda v: consume_claim(v, "d" * 64, clock, fresh_gates=True),
-        observation=TransitionObservation(now=clock),
+        observation=TransitionObservation(dispatch_operation="consume-claim", now=clock),
     )
     db.close()  # Lost native acknowledgement after the durable claim.
     db = FixtureJournal(path)
     value = db.get("dispatch", "btq-ab123")
     assert value.claim_consumed and value.state == "executing"
-    db.transition("dispatch", value.approval_id, value.version, uncertain)
+    db.transition(
+        "dispatch",
+        value.approval_id,
+        value.version,
+        uncertain,
+        observation=TransitionObservation(dispatch_operation="uncertain"),
+    )
     with pytest.raises(Refused):
         db.add_dispatch(msgspec.structs.replace(value, version=0, state="preparing"))
     other = prepare(
@@ -638,14 +646,14 @@ def test_two_connections_claim_retirement_race_has_only_one_transition(tmp_path)
         value.approval_id,
         0,
         lambda v: ready(v, "d" * 64, clock, fresh_gates=True, startup_readback=True),
-        observation=TransitionObservation(now=clock),
+        observation=TransitionObservation(dispatch_operation="ready", now=clock),
     )
     left.transition(
         "dispatch",
         value.approval_id,
         value.version,
         lambda v: consume_claim(v, "d" * 64, clock, fresh_gates=True),
-        observation=TransitionObservation(now=clock),
+        observation=TransitionObservation(dispatch_operation="consume-claim", now=clock),
     )
     with pytest.raises(Refused, match="stale-fixture-version"):
         right.transition(
@@ -653,6 +661,7 @@ def test_two_connections_claim_retirement_race_has_only_one_transition(tmp_path)
             value.approval_id,
             value.version,
             lambda v: retire_unconsumed(v, "d" * 64, launcher_exited=True, no_children=True),
+            observation=TransitionObservation(dispatch_operation="retire-unconsumed"),
         )
     assert right.get("dispatch", value.approval_id).claim_consumed
     left.close()
@@ -682,17 +691,21 @@ def test_reconciliation_success_is_one_cas_and_releases_only_settled_resource(tm
     )
     persist_decision(db)
     db.add_dispatch(value)
-    for reducer in (
-        lambda v: ready(v, "d" * 64, clock, fresh_gates=True, startup_readback=True),
-        lambda v: consume_claim(v, "d" * 64, clock, fresh_gates=True),
-        uncertain,
+    for operation, reducer in zip(
+        ("ready", "consume-claim", "uncertain"),
+        (
+            lambda v: ready(v, "d" * 64, clock, fresh_gates=True, startup_readback=True),
+            lambda v: consume_claim(v, "d" * 64, clock, fresh_gates=True),
+            uncertain,
+        ),
+        strict=True,
     ):
         value = db.transition(
             "dispatch",
             value.approval_id,
             value.version,
             reducer,
-            observation=TransitionObservation(now=clock),
+            observation=TransitionObservation(dispatch_operation=operation, now=clock),
         )
     alias = prepare(
         "btq-cd456",
@@ -748,6 +761,7 @@ def reconciliation_observation(value, *, effect="unknown", effect_cleanup=False)
     from heterodyne.actions.transitions import ReconciliationReadback
 
     return TransitionObservation(
+        dispatch_operation="finish-reconciliation",
         reconciliation_readback=ReconciliationReadback(
             value.approval_id,
             value.revision,
@@ -762,5 +776,54 @@ def reconciliation_observation(value, *, effect="unknown", effect_cleanup=False)
             invocation_finished=True,
             cleanup_proven=True,
             effect_cleanup_proven=effect_cleanup,
-        )
+        ),
+    )
+
+
+def cleanup_observation(value, **kwargs):
+    """Explicit independent synthetic native terminal readback for positive fixtures."""
+    from heterodyne.actions.transitions import CleanupReadback
+
+    return TransitionObservation(
+        cleanup_readback=CleanupReadback(
+            value.key, value.origin, value.version, value.shell_ids, blockers_clear=True, native_terminal=True
+        ),
+        **kwargs,
+    )
+
+
+def withdrawal(value):
+    from heterodyne.actions.requests import CancellationRecovery
+
+    return CancellationRecovery(
+        value.key,
+        value.origin,
+        value.version,
+        value.shell_ids,
+        DIGEST,
+        "fixture-withdrawal",
+        authenticated_current=True,
+        exact_repair_scope=True,
+        native_withdrawal_readback=True,
+        cleanup_proven=True,
+    )
+
+
+def report_observation(value, *, effect, evidence, cleanup):
+    from heterodyne.actions.transitions import DispatchReadback
+
+    return TransitionObservation(
+        dispatch_operation="report",
+        dispatch_readback=DispatchReadback(
+            value.approval_id,
+            value.revision,
+            value.digest,
+            value.target,
+            value.attempt_id,
+            value.claim_hash,
+            value.version,
+            effect,
+            evidence,
+            cleanup,
+        ),
     )

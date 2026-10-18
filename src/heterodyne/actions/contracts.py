@@ -13,6 +13,12 @@ class Record(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     pass
 
 
+class Clock(Record, frozen=True):
+    boot_id: str
+    mono_ns: int
+    utc_ns: int
+
+
 class BodyRef(Record, frozen=True):
     commit: str
     path: str
