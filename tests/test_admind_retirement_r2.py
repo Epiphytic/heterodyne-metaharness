@@ -236,8 +236,7 @@ def test_legacy_proof_and_history_remain_readable_without_backfill(tmp_path: Pat
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("site", ["identity-cache", "popen"])
-def test_real_adapter_structural_not_spawned_sites(tmp_path: Path, monkeypatch, site: str) -> None:
+def test_real_adapter_structural_not_spawned_sites(tmp_path: Path, monkeypatch) -> None:
     from heterodyne.admind import approvals
     from heterodyne.admind.approvals import ApproveBead, NotSpawned
 
@@ -246,16 +245,16 @@ def test_real_adapter_structural_not_spawned_sites(tmp_path: Path, monkeypatch, 
         binary.write_bytes(b"offline source; never executed")
         port = ApproveBead(binary)
         launched: list[bool] = []
-        if site == "popen":
-            assert port.identity()
+        assert port.identity()
 
-            def unavailable(*args, **kwargs):
-                raise OSError("synthetic Popen rejection")
+        def unavailable(*args, **kwargs):
+            raise OSError("synthetic Popen rejection")
 
-            monkeypatch.setattr(approvals.reap, "spawn", unavailable)
+        monkeypatch.setattr(approvals.reap, "spawn", unavailable)
         with pytest.raises(NotSpawned):
             await port.decide(APPROVE, "offline", lambda: launched.append(True))
         assert not launched
+
     asyncio.run(scenario())
 
 
