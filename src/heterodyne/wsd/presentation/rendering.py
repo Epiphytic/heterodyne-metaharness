@@ -9,7 +9,7 @@ from heterodyne.marmot.nip19 import Nip19Error, npub_to_hex
 
 from . import dto as d
 from .evidence import effect, evidence
-from .layout import TooWide, paginate, wrap
+from .layout import TooWide, UnsafeContinuation, paginate, wrap
 from .safety import Span, generated, join, literal, safe
 from .sources import footer, rows_in, source_failure, validate_view, warnings
 from .validation import BadInput, instant, validate
@@ -27,6 +27,10 @@ _REASON_LABELS = {
     "content-too-wide": "complete content exceeds line limit",
     "required-source": "source unavailable",
 }
+_CARD_CONTINUATION = re.compile(
+    r"^(?:Approval(?: |$)|Question:|What:|Effect:|Excludes:|Why:|Context:|"
+    r"Evidence:|Recommended:|Context digest:|[a-z][a-z0-9-]{0,15}:)"
+)
 _TERMINAL = {
     "busy": "Read service busy; try again later.",
     "usage": "Use /workstreams, /status [bead], /approvals, or /queue [workstream].",
@@ -494,7 +498,11 @@ def _protected_layout(lines: tuple[Span, ...], mention: Span | None, policy: d.R
         else:
             lines = (lines[0], mention, *lines[1:])
     try:
-        physical = tuple(line for span in lines for line in wrap(span))
+        physical = tuple(
+            line for span in lines for line in wrap(span, forbidden_continuation=_CARD_CONTINUATION)
+        )
+    except UnsafeContinuation:
+        return "unsafe-content"
     except TooWide:
         return "content-too-wide"
     document = join(physical)
