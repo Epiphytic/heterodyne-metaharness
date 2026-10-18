@@ -4,6 +4,7 @@ No native queue/session/ask API is installed here. In particular FILED is an off
 state, never a credential or consent token. Production adapters remain unavailable.
 """
 
+import hashlib
 from typing import Literal
 
 import msgspec
@@ -76,6 +77,9 @@ class Request(Record, frozen=True):
     recovery_closed_orphans: tuple[str, ...] = ()
     # "completed" means terminal lifecycle, never an implicit business-success assertion.
     completion_effect: Literal["succeeded", "absent"] | None = None
+    enrichment_base_ask: str | None = None
+    enrichment_base_context: str | None = None
+    enrichment_candidate: str | None = None
 
 
 def changed[T: Record](value: T, **updates: object) -> T:
@@ -204,6 +208,45 @@ def pin_ask(value: Request, whole_ask: bytes, context_digest: str, *, revision: 
     return changed(value, phase="ask-pinned", ask_bytes=whole_ask, context_digest=context_digest)
 
 
+def repin_enriched_ask(
+    value: Request, whole_ask: bytes, context_digest: str, candidate_digest: str
+) -> Request:
+    """Pure host-observed enrichment repin; no native ask update or semantic proof.
+
+    P2 checks the enrichment proposal before using this transition. Like pin_ask,
+    caller-supplied opaque bytes are not authenticated by this reducer.
+    """
+    if (
+        value.phase != "ask-pinned"
+        or value.ask_bytes is None
+        or value.context_digest is None
+        or value.approval_id is None
+        or value.enrichment_candidate is not None
+        or type(whole_ask) is not bytes
+        or not 1 <= len(whole_ask) <= 65536
+        or whole_ask == value.ask_bytes
+        or not digest_syntax(context_digest)
+        or context_digest == value.context_digest
+        or not digest_syntax(candidate_digest)
+    ):
+        raise Refused("enrichment-repin-refused")
+    revision = value.request_revision + 1
+    return changed(
+        value,
+        request_revision=revision,
+        ask_bytes=whole_ask,
+        context_digest=context_digest,
+        envelope=assemble_envelope(
+            value.intent, value.origin, value.resolved, value.approval_id, revision, value.config
+        ),
+        policy_revision=None,
+        sufficiency_source=None,
+        enrichment_base_ask=hashlib.sha256(value.ask_bytes).hexdigest(),
+        enrichment_base_context=value.context_digest,
+        enrichment_candidate=candidate_digest,
+    )
+
+
 def observe_sufficient(
     value: Request, *, digest: str, policy_revision: str, source: str, sufficient: bool
 ) -> Request:
@@ -271,6 +314,9 @@ def groom(value: Request, intent: Intent, resolved: Resolved, source: str, *, or
         context_digest=None,
         policy_revision=None,
         sufficiency_source=None,
+        enrichment_base_ask=None,
+        enrichment_base_context=None,
+        enrichment_candidate=None,
     )
 
 
