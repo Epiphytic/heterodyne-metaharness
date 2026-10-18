@@ -1,6 +1,7 @@
 """Pure rendering. No calls to source owners, no clocks, no output effects."""
 
 import re
+import unicodedata
 from dataclasses import fields, is_dataclass
 from datetime import datetime
 from typing import Any, cast
@@ -429,6 +430,17 @@ def _required(card: d.Approval | d.Question) -> bool:
     )
 
 
+def _card_frame_start(text: str) -> bool:
+    """Compare visible framing after Unicode space and leading mark prefixes."""
+    offset = 0
+    while offset < len(text):
+        char = text[offset]
+        if not char.isspace() and not unicodedata.category(char).startswith(("M", "Cf")):
+            break
+        offset += 1
+    return _CARD_CONTINUATION.match(text[offset:]) is not None
+
+
 def _protected_line_fields(value: Any) -> bool:
     """LF belongs only to D4's explicit multiline literals, never card framing."""
     if isinstance(value, str):
@@ -499,7 +511,7 @@ def _protected_layout(lines: tuple[Span, ...], mention: Span | None, policy: d.R
             lines = (lines[0], mention, *lines[1:])
     try:
         physical = tuple(
-            line for span in lines for line in wrap(span, forbidden_continuation=_CARD_CONTINUATION)
+            line for span in lines for line in wrap(span, forbidden_continuation=_card_frame_start)
         )
     except UnsafeContinuation:
         return "unsafe-content"
@@ -539,7 +551,10 @@ def render_card_pair(view: d.PresentationView, policy: d.RenderPolicy = _DEFAULT
         return withheld(view.kind, "missing-mention")
     if not _required(card):
         return withheld(view.kind, "missing-required")
-    if not _protected_line_fields(card):
+    unprefixed = ((card.body.question, card.body.answer_instruction)
+                  if isinstance(card, d.Question) and isinstance(card.body, d.PlainQuestion)
+                  else (card.body.question,) if isinstance(card, d.Question) else ())
+    if any(_card_frame_start(value) for value in unprefixed) or not _protected_line_fields(card):
         return withheld(view.kind, "unsafe-content")
     refs: list[Span] = []
     if isinstance(card, d.Approval):

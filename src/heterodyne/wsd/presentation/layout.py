@@ -1,6 +1,6 @@
 """Deterministic bounded physical-line layout; overflow returns no partial pages."""
 
-import re
+from collections.abc import Callable
 
 from . import dto as d
 from .safety import Span, generated, join
@@ -14,7 +14,7 @@ class UnsafeContinuation(ValueError):
     """Wrapping would turn content into protected document framing."""
 
 
-def wrap(span: Span, *, forbidden_continuation: re.Pattern[str] | None = None) -> tuple[Span, ...]:
+def wrap(span: Span, *, forbidden_continuation: Callable[[str], bool] | None = None) -> tuple[Span, ...]:
     if span.url:
         if len(span.text) > 512 or "\n" in span.text:
             raise TooWide
@@ -43,7 +43,7 @@ def wrap(span: Span, *, forbidden_continuation: re.Pattern[str] | None = None) -
             out.append(line.slice(0, cut))
             advance = cut + (line.text[cut : cut + 1] == " ")
             line = line.slice(advance, len(line.text))
-            if forbidden_continuation is not None and forbidden_continuation.match(line.text.lstrip(" ")):
+            if forbidden_continuation is not None and forbidden_continuation(line.text):
                 raise UnsafeContinuation
         out.append(line)
     return tuple(out)
