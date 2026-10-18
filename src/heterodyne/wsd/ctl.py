@@ -1,5 +1,6 @@
 """wsd's host control socket (ADR 0001 §4.3, §9): `wsd tick <job>` from the timers, and `wsctl pause`,
-`resume`, `status` and `reload` (AU-4 §5.2), `unlanded` and `resolve` (btq-xb56t, docs/wsd.md §5).
+`resume`, `status` and `reload` (AU-4 §5.2), `unlanded` and `resolve` (btq-xb56t, docs/wsd.md §5), and
+`harness` (plan 4c Task 10).
 
 One JSON request per connection, one JSON reply, each a single newline-terminated line. A request is at
 most MAX_REQUEST bytes and a reply at most MAX_REPLY bytes; the client reads up to MAX_REPLY, and a reply
@@ -30,6 +31,7 @@ MAX_REQUEST = 4096
 MAX_REPLY = 1 << 20         # 1 MiB; status leaves finished beads out unless asked, to stay well inside it
 READ_SECONDS = 5.0
 CLOSE_SECONDS = 2.0
+REPLY_SECONDS = 600.0       # how long a client waits for its reply
 WRITE_SECONDS = 30.0        # a client that doesn't read its reply in this time is dropped
 TOO_LARGE = "reply too large"
 
@@ -38,8 +40,44 @@ def _no_data() -> dict[str, dict[str, str]]:
     return {}
 
 
+HarnessAction = Literal["list", "install", "verify", "use", "rollback", "remove", "prune"]
+
+
+class HarnessRequest(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    """`wsctl harness <action>`: which fields each action takes is `refusal`'s."""
+    action: HarnessAction
+    adapter: str | None = None
+    install: str | None = None
+    version: str | None = None      # install only
+    confirm: str | None = None      # prune only: the code a first prune gave
+
+
+# The fields each harness action takes: (required, optional).
+HARNESS_FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
+    "list": (frozenset(), frozenset({"adapter"})),
+    "install": (frozenset({"adapter"}), frozenset({"version"})),
+    "verify": (frozenset({"adapter", "install"}), frozenset()),
+    "use": (frozenset({"adapter", "install"}), frozenset()),
+    "rollback": (frozenset({"adapter"}), frozenset()),
+    "remove": (frozenset({"adapter", "install"}), frozenset()),
+    "prune": (frozenset(), frozenset({"confirm"})),
+}
+
+
+def _harness_refusal(h: HarnessRequest) -> str:
+    given = {name for name in ("adapter", "install", "version", "confirm") if getattr(h, name) is not None}
+    required, optional = HARNESS_FIELDS[h.action]
+    if not required <= given:
+        return f"harness {h.action} needs {' and '.join(sorted(required - given))}"
+    if given - required - optional:
+        return f"harness {h.action} takes no {' or '.join(sorted(given - required - optional))}"
+    return ""
+
+
 class CtlRequest(msgspec.Struct, frozen=True):
-    op: Literal["tick", "status", "pause", "resume", "reload", "unlanded", "resolve", "sandbox-settle"]
+    op: Literal[
+        "tick", "status", "pause", "resume", "reload", "unlanded", "resolve", "sandbox-settle", "harness"
+    ]
     job: Literal["pickup", "reconcile"] | None = None      # tick only
     ws: str | None = None       # None: every workstream (tick and status); pause, resume, unlanded and
     #                             resolve need one, and reload takes none
@@ -48,6 +86,7 @@ class CtlRequest(msgspec.Struct, frozen=True):
     generation: int | None = None                           # resolve only
     tip: str | None = None                                  # resolve only: the confirmation
     action: Literal["land", "keep", "discard"] | None = None    # resolve only
+    harness: HarnessRequest | None = None                   # harness only
 
 
 class CtlReply(msgspec.Struct, frozen=True):
@@ -58,6 +97,10 @@ class CtlReply(msgspec.Struct, frozen=True):
 
 class CtlUnavailable(Exception):
     """No wsd is listening (or it did not answer)."""
+
+
+class CtlNoReply(CtlUnavailable):
+    """wsd took the request but no reply came: it may still be working on it."""
 
 
 Handler = Callable[[CtlRequest], Awaitable[CtlReply]]
@@ -88,6 +131,12 @@ def refusal(req: CtlRequest) -> str:
         return "reload takes no workstream; it reloads them all"
     if req.all and req.op != "status":
         return "only status takes all"
+    if (req.op == "harness") != (req.harness is not None):
+        return "harness needs a harness request; nothing else takes one"
+    if req.harness is not None:
+        if req.ws is not None:
+            return "harness takes no workstream"
+        return _harness_refusal(req.harness)
     return ""
 
 
@@ -202,7 +251,7 @@ def frame(reply: CtlReply) -> bytes:
     return line
 
 
-async def request(path: Path, req: CtlRequest, timeout: float = 600.0) -> CtlReply:
+async def request(path: Path, req: CtlRequest, timeout: float = REPLY_SECONDS) -> CtlReply:
     try:
         reader, writer = await asyncio.wait_for(
             asyncio.open_unix_connection(str(path), limit=MAX_REPLY + 1), 5)
@@ -214,7 +263,7 @@ async def request(path: Path, req: CtlRequest, timeout: float = 600.0) -> CtlRep
         line = await asyncio.wait_for(reader.readline(), timeout)
         return msgspec.json.decode(line, type=CtlReply)
     except (OSError, TimeoutError, ValueError, msgspec.DecodeError) as exc:
-        raise CtlUnavailable(type(exc).__name__) from None
+        raise CtlNoReply(type(exc).__name__) from None
     finally:
         writer.close()
         with contextlib.suppress(Exception):

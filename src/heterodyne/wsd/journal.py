@@ -20,6 +20,7 @@ as `fresh`.
 """
 
 import contextlib
+import dataclasses
 import functools
 import os
 import sqlite3
@@ -40,7 +41,8 @@ from heterodyne.wsd.headroom import Mark, UsageCache, Window, epoch
 from heterodyne.wsd.launches import LAUNCHED, SET_ONCE, LaunchEntry, Receipt
 from heterodyne.wsd.states import BeadState, Reason, WsState, check
 
-SCHEMA_VERSION = "3"
+SCHEMA_VERSION = "4"
+V3_VERSION = "3"
 V2_VERSION = "2"
 V1_VERSION = "1"
 # Plan 3's schema, frozen: a version 1 journal must match it exactly to be upgraded (`upgrade.py`).
@@ -135,7 +137,19 @@ V3_COLUMNS = (
     "ALTER TABLE launches ADD COLUMN install TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE launches ADD COLUMN install_digest TEXT NOT NULL DEFAULT ''",
 )
-SCHEMA = V2_SCHEMA + "".join(f"{stmt};\n" for stmt in V3_COLUMNS)
+V3_SCHEMA = V2_SCHEMA + "".join(f"{stmt};\n" for stmt in V3_COLUMNS)
+# Version 4 (plan 4c T10): the managed installs `wsd` stages and their approvals, and the harness ops' log.
+HARNESS_STATES = ("staged", "posted", "approved", "published", "denied", "expired", "failed")
+V4_TABLES = (
+    f"""CREATE TABLE harness_installs (staging_id TEXT PRIMARY KEY, adapter TEXT NOT NULL,
+    digest TEXT NOT NULL, version TEXT NOT NULL, approval_bead TEXT NOT NULL, context_digest TEXT NOT NULL,
+    ask_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ({", ".join(f"'{s}'" for s in HARNESS_STATES)})),
+    install TEXT NOT NULL, failure TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""",
+    """CREATE TABLE harness_events (id INTEGER PRIMARY KEY, at TEXT NOT NULL, actor TEXT NOT NULL,
+    action TEXT NOT NULL, adapter TEXT NOT NULL, install TEXT NOT NULL, detail TEXT NOT NULL)""",
+)
+SCHEMA = V3_SCHEMA + "".join(f"{stmt};\n" for stmt in V4_TABLES)
 BUSY_TIMEOUT = 5.0  # seconds a connection waits on another's lock before SQLITE_BUSY
 
 
@@ -295,6 +309,39 @@ class Adoption:
         return self.verdict == "held" and self.resolution is None
 
 
+@dataclass(frozen=True)
+class HarnessInstall:
+    """One staging and its approval (plan 4c T10): `state` is one of HARNESS_STATES; `install` is set once
+    published, and `failure` holds the constant a `failed` row ended with."""
+    staging_id: str
+    adapter: str
+    digest: str
+    version: str
+    approval_bead: str
+    context_digest: str
+    ask_id: str
+    state: str
+    install: str
+    failure: str
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class HarnessEvent:
+    id: int
+    at: str
+    actor: str              # "wsctl" for an op a request ran, "wsd" for what wsd did on its own
+    action: str
+    adapter: str
+    install: str
+    detail: str
+
+
+_HARNESS_COLS = ", ".join(f.name for f in dataclasses.fields(HarnessInstall))
+_HARNESS_SET = frozenset({"approval_bead", "context_digest", "ask_id", "state", "install", "failure"})
+HARNESS_OPEN = "harness_open:"      # a `use` op on an install, open until it ends: `<adapter>:<install>`
+HARNESS_TAINTS = "harness_taints:"  # how many times an install's taint was cleared: `<adapter>:<install>`
 _DATA = msgspec.json.Decoder(dict[str, str])
 _LAUNCH_COLS = ("session_key", "generation", "ws", "bead", "role", "profile", "account", "credential_key",
                 "model_passed", "dispatched_at", "native_id", "model_reported", "outcome", "adopted",
@@ -493,6 +540,7 @@ def _expected(schema: str) -> set[tuple[str, str, str, str]]:
 
 
 EXPECTED_SCHEMA = _expected(SCHEMA)
+EXPECTED_V3 = _expected(V3_SCHEMA)
 EXPECTED_V2 = _expected(V2_SCHEMA)
 EXPECTED_V1 = _expected(V1_SCHEMA)
 
@@ -512,13 +560,18 @@ def check_v2(db: sqlite3.Connection) -> bool:
     return _schema(db) == EXPECTED_V2 and _version(db) == V2_VERSION
 
 
+def check_v3(db: sqlite3.Connection) -> bool:
+    """Whether the file is plan 4c T7's journal exactly: the version 3 schema and version 3."""
+    return _schema(db) == EXPECTED_V3 and _version(db) == V3_VERSION
+
+
 def check_current(db: sqlite3.Connection) -> bool:
     """Whether the file is this version's journal exactly: the current schema and version."""
     return _schema(db) == EXPECTED_SCHEMA and _version(db) == SCHEMA_VERSION
 
 
 def _check(db: sqlite3.Connection) -> None:
-    """Version 3 opens; version 1 or 2, exactly, needs its upgrade; anything else is refused."""
+    """Version 4 opens; version 1, 2 or 3, exactly, needs its upgrade; anything else is refused."""
     rows = db.execute("PRAGMA integrity_check").fetchall()
     if [tuple(r) for r in rows] != [("ok",)]:
         raise JournalCorrupt("integrity_check failed")
@@ -527,7 +580,8 @@ def _check(db: sqlite3.Connection) -> None:
         if _version(db) != SCHEMA_VERSION:
             raise JournalCorrupt("unknown schema version")
         return
-    for expected, version in ((EXPECTED_V2, V2_VERSION), (EXPECTED_V1, V1_VERSION)):
+    older = ((EXPECTED_V3, V3_VERSION), (EXPECTED_V2, V2_VERSION), (EXPECTED_V1, V1_VERSION))
+    for expected, version in older:
         if schema == expected:
             if _version(db) != version:
                 raise JournalCorrupt("unknown schema version")
@@ -1245,6 +1299,98 @@ class Journal:
                                "ORDER BY seq LIMIT ?", (seq, limit)).fetchall()
         return [Event(int(cast(int, r[0])), str(r[1]), str(r[2]), _opt(r[3]), str(r[4]), str(r[5]),
                       _opt(r[6])) for r in rows]
+
+    # --- the managed installs (plan 4c T10) ---
+
+    @_locked
+    def harness_insert(self, row: HarnessInstall) -> None:
+        self.db.execute(f"INSERT INTO harness_installs ({_HARNESS_COLS}) "  # noqa: S608
+                        f"VALUES ({', '.join('?' * len(dataclasses.fields(HarnessInstall)))})",
+                        dataclasses.astuple(row))
+
+    @_locked
+    def harness_set(self, staging_id: str, at: str, **fields: str) -> HarnessInstall:
+        """Set `fields` (of `_HARNESS_SET`) and `updated_at` on the row, which must exist."""
+        if not fields or not set(fields) <= _HARNESS_SET:
+            raise ValueError("harness_set: no such field")
+        names = ", ".join(f"{k} = ?" for k in fields)
+        cur = self.db.execute(f"UPDATE harness_installs SET {names}, updated_at = ? "  # noqa: S608
+                              "WHERE staging_id = ?", (*fields.values(), at, staging_id))
+        if cur.rowcount != 1:
+            raise KeyError("harness_set: no such staging")
+        row = self.harness_install(staging_id)
+        if row is None:
+            raise KeyError("harness_set: no such staging")
+        return row
+
+    @_locked
+    def harness_install(self, staging_id: str) -> HarnessInstall | None:
+        row = self.db.execute(f"SELECT {_HARNESS_COLS} FROM harness_installs "  # noqa: S608
+                              "WHERE staging_id = ?", (staging_id,)).fetchone()
+        return None if row is None else HarnessInstall(*(str(v) for v in row))
+
+    @_locked
+    def harness_installs(self, *states: str) -> list[HarnessInstall]:
+        """The rows in `states` (every row if none), oldest first."""
+        where = f" WHERE state IN ({', '.join('?' * len(states))})" if states else ""
+        rows = self.db.execute(f"SELECT {_HARNESS_COLS} FROM harness_installs{where} "  # noqa: S608
+                               "ORDER BY created_at, staging_id", states).fetchall()
+        return [HarnessInstall(*(str(v) for v in r)) for r in rows]
+
+    @_locked
+    def harness_event(self, at: str, actor: str, action: str, adapter: str, install: str,
+                      detail: str = "") -> None:
+        self.db.execute("INSERT INTO harness_events (at, actor, action, adapter, install, detail) "
+                        "VALUES (?, ?, ?, ?, ?, ?)", (at, actor, action, adapter, install, detail))
+
+    @_locked
+    def harness_events(self) -> list[HarnessEvent]:
+        rows = self.db.execute("SELECT id, at, actor, action, adapter, install, detail FROM harness_events "
+                               "ORDER BY id").fetchall()
+        return [HarnessEvent(int(cast(int, r[0])), *(str(v) for v in r[1:])) for r in rows]
+
+    @_locked
+    def harness_open(self, adapter: str, install: str, at: str) -> None:
+        """Journal a `use` op on the install as open (E16: in use until it ends, or until start-up's
+        `harness_close_all` after a crash)."""
+        self.db.execute("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET "
+                        "value = excluded.value", (f"{HARNESS_OPEN}{adapter}:{install}", at))
+
+    @_locked
+    def harness_close(self, adapter: str, install: str) -> None:
+        self.db.execute("DELETE FROM meta WHERE key = ?", (f"{HARNESS_OPEN}{adapter}:{install}",))
+
+    @_locked
+    def harness_taints(self, adapter: str, install: str) -> int:
+        """How many times the install's taint was cleared (by `verify` or a removal): its taint alert's
+        sequence, so a taint after a clear alerts again."""
+        row = self.db.execute("SELECT value FROM meta WHERE key = ?",
+                              (f"{HARNESS_TAINTS}{adapter}:{install}",)).fetchone()
+        return 0 if row is None else int(row[0])
+
+    @_locked
+    def harness_taint_cleared(self, adapter: str, install: str) -> None:
+        self.db.execute("INSERT INTO meta (key, value) VALUES (?, '1') ON CONFLICT (key) DO UPDATE SET "
+                        "value = CAST(value AS INTEGER) + 1", (f"{HARNESS_TAINTS}{adapter}:{install}",))
+
+    @_locked
+    def harness_close_all(self) -> int:
+        cur = self.db.execute("DELETE FROM meta WHERE key GLOB ?", (f"{HARNESS_OPEN}*",))
+        return cur.rowcount
+
+    @_locked
+    def harness_opened(self) -> set[tuple[str, str]]:
+        """The (adapter, install) of every open `use` op."""
+        rows = self.db.execute("SELECT key FROM meta WHERE key GLOB ?", (f"{HARNESS_OPEN}*",)).fetchall()
+        pairs = (str(r[0]).removeprefix(HARNESS_OPEN).split(":", 1) for r in rows)
+        return {(p[0], p[1]) for p in pairs if len(p) == 2}
+
+    @_locked
+    def launches_naming(self, install: str) -> list[LaunchEntry]:
+        """Every launch entry, of any workstream, whose pin names `install`."""
+        rows = self.db.execute(f"SELECT {LAUNCH_SQL} FROM launches WHERE install = ? "  # noqa: S608
+                               "ORDER BY session_key, generation", (install,)).fetchall()
+        return [_launch(r) for r in rows]
 
     @_locked
     def snapshot(self, ws: str) -> Snapshot:
