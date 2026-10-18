@@ -14,7 +14,10 @@ Plans 5–8 and genuine deployment authority remain execution entry gates.
   uses integer arithmetic. Original artifact bytes are hashed before decoding.
 - `Evaluator.entry` checks the eighteen gate names, governing amendment chain,
   three migration repositories, two preclock coverage categories and seventeen
-  distinct required drills. `interval` evaluates one ordered segment, seven
+  distinct required drills. Projected drill components must match both kind
+  and content digest in the release identity. Native authority timestamps use
+  explicit RFC3339 forms with at most six fractional digits; unsupported
+  precision holds rather than being silently truncated. `interval` evaluates one ordered segment, seven
   coverage categories, continuous audit cursors, same-boot checkpoint endpoints,
   the 600-second full-audit limit and consecutive/total one-second error limits.
   It never transfers elapsed time across segments or treats publication time as
@@ -23,7 +26,11 @@ Plans 5–8 and genuine deployment authority remain execution entry gates.
   be an approval. Prepared reserve activation requires typed bound evidence.
 - `Evaluator.archive` validates the noncircular prearchive assessment → archive
   → final assessment graph, sealed interval, three repositories, second migration
-  delta and unchanged release identity. It performs no archival effects.
+  delta and unchanged release identity. Its explicit `event_bytes` input must
+  contain the full authenticated event prefix through the unique matching Stop;
+  missing events HOLD. It replays checkpoints, gaps, interventions and all seven
+  coverage rows, binding the actual start/end and duration to the sealed Segment.
+  It performs no archival effects.
 
 Every source-dependent predicate invokes `Proofs.verify(ProofRequest, Inventory)`.
 The immutable request carries a finite role, original Entry SHA256 and canonical
@@ -50,11 +57,16 @@ proof. This is a trusted-code integration seam, not a sandbox against host owner
 must be owned, non-symlink directories with mode 0700; files are mode 0600,
 owned, single-link, regular files. No native database or product Store is opened.
 Terminal/event publication uses one retained lock inode; independent source
-spooling uses a second retained inode and never waits for terminal publication.
+spooling uses a second retained inode. Terminal publication and release acquire
+that lock after the publisher lock to bind an exact spool snapshot; ordinary
+source spooling does not acquire the publisher lock.
 Artifact IDs are mapped by
 hash to exact immutable bindings; they are never used as filesystem paths.
 Objects are bounded to 100,000, the independent spool to 1,024 envelopes, each
-JSON object to 8 MiB and each in-memory inventory to 128 MiB. Exhaustion holds;
+JSON object to 8 MiB and each in-memory inventory to 128 MiB. Failed
+preparations retain original bytes in separate private `.prepared` /
+`.prepared-{namespace}` quarantine directories, each limited to 1,024 records.
+They do not count as envelopes or objects. Exhaustion holds;
 there is no deletion, pruning or inference that missing evidence means success.
 
 1. Retain original artifacts and append the ordered event prefix.
@@ -64,7 +76,8 @@ there is no deletion, pruning or inference that missing evidence means success.
 3. Retain that capture and call `heartbeat` with its exact post-fence event.
    Evaluate the complete prefix outside the publisher lock. Nothing in these
    APIs samples a real clock or proves capture order by itself.
-4. `commit` checks the exact endpoint-derived duration and artifact/event graph,
+4. `commit` replays the fenced event prefix with the evaluator for sealed results
+   and checks the exact endpoint-derived duration and artifact/event graph,
    persists an immutable intent, asks the bounded terminal-fence proof adapter
    to establish source completeness, then atomically publishes one immutable
    terminal manifest. That manifest is the commit point. The proof adapter
@@ -77,7 +90,10 @@ there is no deletion, pruning or inference that missing evidence means success.
 6. `release` requires explicit proof of complete independent-spool/cursor drain
    and exact outside-segment reconciliation events. It retains original spool,
    abort, intent, terminal and release receipts, then removes only the active
-   fence. There is no automatic uncertainty clearing or automatic replay.
+   fence. The typed manifest/release receipts retain the exact verified spool
+   IDs. Reusing an already-terminal segment ID refuses before fencing. Abort
+   binds the exact retained prepared intent; missing active fences give typed
+   HOLD. There is no automatic uncertainty clearing or automatic replay.
 
 A crash between initial directory creation and complete ledger initialization,
 foreign permissions, missing originals, damaged manifests or capacity exhaustion
@@ -107,3 +123,7 @@ authenticated deployment approval, independent clock/collector/spool ownership,
 and final genuine archive authority. This package supplies no production CLI or
 activation wiring. Its tests, type checks and code review cannot satisfy those
 execution requirements. The observation clock remains null.
+
+Full-chain validation and repeated inventory reads remain bounded but expensive.
+Quadratic append work and long terminal lock holds are unwaived performance debt;
+these offline tests do not establish production collector latency or capacity.

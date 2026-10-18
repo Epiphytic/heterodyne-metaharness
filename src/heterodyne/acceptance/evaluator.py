@@ -303,6 +303,12 @@ class Evaluator:
             _identity(drill.identity)
             self._projection(drill.projection_ids, entry.release.identity)
             self._projection(drill.projection_ids, drill.identity)
+            release_components = {c.id: c for c in entry.release.identity.components}
+            drill_components = {c.id: c for c in drill.identity.components}
+            require(
+                all(release_components[cid] == drill_components[cid] for cid in drill.projection_ids),
+                "drill_projection_mismatch",
+            )
             self.authority(drill.authority, digest)
             self._prove("drill", digest, drill)
         require(entry.observation.source_inventory == entry.release.source_inventory, "observation_registry")
@@ -460,6 +466,68 @@ class Evaluator:
         require(event.event not in fixed, fixed.get(event.event, "invariant_failure"))
         require(event.actor.kind != "operator" or event.event == "approval", "manual_intervention")
 
+    def _archive_interval(
+        self, entry_raw: bytes, raws: Sequence[bytes], segment: m.Segment, before: m.Assessment
+    ) -> None:
+        require(bool(raws), "archive_interval_missing")
+        entry = codec.decode(entry_raw, m.Entry)
+        events = self._events(entry, codec.digest(entry_raw), raws)
+        matches = [i for i in range(len(events)) if codec.digest(raws[i]) == segment.end_event_sha256]
+        require(len(matches) == 1, "archive_stop_missing")
+        index = matches[0]
+        stop_event = events[index]
+        stop = stop_event.stop
+        require(
+            stop_event.segment_id == segment.segment_id
+            and stop is not None
+            and stop_event.event == "segment_stop"
+            and stop.reason == "none",
+            "archive_stop",
+        )
+        if stop is None:
+            raise Hold("archive_stop")
+        require(
+            index > 0 and codec.digest(raws[index - 1]) == stop.checkpoint_event_sha256,
+            "archive_stop_checkpoint",
+        )
+        endpoint = events[index - 1]
+        require(endpoint.checkpoint == stop.checkpoint, "archive_stop_checkpoint")
+        last = codec.decode(self.inventory.read(stop.checkpoint), m.Checkpoint)
+        starts = [
+            event
+            for event, raw in zip(events[:index], raws[:index], strict=True)
+            if codec.digest(raw) == segment.start_event_sha256
+        ]
+        require(
+            len(starts) == 1
+            and starts[0].event == "segment_start"
+            and starts[0].segment_id == segment.segment_id
+            and starts[0].checkpoint is not None,
+            "archive_start",
+        )
+        if starts[0].checkpoint is None:
+            raise Hold("archive_start")
+        first = codec.decode(self.inventory.read(starts[0].checkpoint), m.Checkpoint)
+        require(segment.start == first.at and segment.end == last.at, "archive_endpoint")
+        require(
+            all(
+                event.event == "qualification" and event.segment_id == segment.segment_id
+                for event in events[index + 1 :]
+            )
+            and len(events[index + 1 :]) <= 1,
+            "archive_terminal_tail",
+        )
+        result = self.interval(
+            entry_raw,
+            raws[:index],
+            segment.segment_id,
+            before.coverage,
+            before.supplemental_corpus,
+            before.unresolved,
+        )
+        require(result.result == "qualified_pending_archive", result.reason)
+        require(result.duration_ns == segment.duration_ns, "archive_duration")
+
     def archive(
         self,
         entry_raw: bytes,
@@ -467,6 +535,8 @@ class Evaluator:
         archive_raw: bytes,
         final_raw: bytes,
         segment_raw: bytes,
+        *,
+        event_bytes: Sequence[bytes] = (),
     ) -> Evaluation:
         """Validate the noncircular postqualification graph, never execute archival."""
         digest = codec.digest(entry_raw)
@@ -483,6 +553,8 @@ class Evaluator:
                 segment.status == "sealed"
                 and segment.reason == "none"
                 and segment.entry_sha256 == digest
+                and segment.end is not None
+                and segment.end_event_sha256 is not None
                 and segment.duration_ns is not None
                 and int(segment.duration_ns) >= DURATION_NS,
                 "archive_segment",
@@ -529,6 +601,7 @@ class Evaluator:
                 raise Hold("final_assessment")
             require(final.current_release.identity == entry.release.identity, "release_change")
             self._release(final.current_release, digest)
+            self._archive_interval(entry_raw, event_bytes, segment, before)
             self.authority(archive.authority, digest)
             self._prove("terminal_fence", digest, (segment, before))
             self._prove("final_migration", digest, archive.final_migration)

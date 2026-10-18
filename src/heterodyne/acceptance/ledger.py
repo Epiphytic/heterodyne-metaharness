@@ -17,10 +17,11 @@ import msgspec
 
 from . import codec
 from . import models as m
-from .evaluator import DURATION_NS, Hold, Inventory, ProofRequest, Proofs, Unavailable, require
+from .evaluator import DURATION_NS, Evaluator, Hold, Inventory, ProofRequest, Proofs, Unavailable, require
 
 MAX_OBJECTS = 100_000
 MAX_SPOOL = 1024
+MAX_PREPARED = 1024
 
 
 class Binding(m.Record, frozen=True):
@@ -40,6 +41,14 @@ class Manifest(m.Record, frozen=True):
     intent_sha256: m.Digest
     fence_sha256: m.Digest
     objects: tuple[m.Digest, ...]
+    events: tuple[m.Digest, ...]
+    spool_ids: tuple[m.Digest, ...]
+
+
+class Release(m.Record, frozen=True):
+    schema: Literal["acceptance-release.v1"]
+    fence_sha256: m.Digest
+    spool_ids: tuple[m.Digest, ...]
     events: tuple[m.Digest, ...]
 
 
@@ -122,17 +131,30 @@ class Ledger:
         if path.exists() or path.is_symlink():
             require(Ledger._read(path) == raw, "immutable_file_conflict")
             return
-        temporary = path.parent / (".prepare-" + uuid.uuid4().hex)
+        namespace = path.parent
+        if (
+            namespace.name in ("objects", "events", "spool", "inventory")
+            and (namespace.parent / "entry.json").is_file()
+        ):
+            prepared = namespace.parent / (".prepared-" + namespace.name)
+        else:
+            prepared = namespace / ".prepared"
+        prepared.mkdir(mode=0o700, exist_ok=True)
+        Ledger._directory(prepared)
+        require(sum(1 for _ in prepared.iterdir()) < MAX_PREPARED, "prepared_capacity")
+        temporary = prepared / uuid.uuid4().hex
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         try:
             with os.fdopen(fd, "wb") as stream:
                 stream.write(raw)
                 stream.flush()
                 os.fsync(stream.fileno())
+            Ledger._sync(prepared)
             # The namespace is private and publisher-locked. Never overwrite an existing record.
             require(not path.exists() and not path.is_symlink(), "immutable_file_conflict")
             temporary.rename(path)
             Ledger._sync(path.parent)
+            Ledger._sync(prepared)
         except BaseException:
             # Retain original prepared bytes for diagnosis; never delete evidence on failure.
             raise
@@ -161,7 +183,7 @@ class Ledger:
         digest = codec.digest(raw)
         directory = self.root / "objects"
         require(
-            (directory / digest).exists() or sum(1 for _ in directory.iterdir()) < MAX_OBJECTS,
+            (directory / digest).exists() or len(self._record_names(directory)) < MAX_OBJECTS,
             "object_capacity",
         )
         self._atomic(directory / digest, raw)
@@ -174,7 +196,7 @@ class Ledger:
         return raw
 
     def _events(self) -> tuple[bytes, ...]:
-        names = sorted(p.name for p in (self.root / "events").iterdir() if not p.name.startswith(".prepare-"))
+        names = self._record_names(self.root / "events")
         require(len(names) <= 2147483647, "event_capacity")
         result: list[bytes] = []
         head = None
@@ -221,7 +243,7 @@ class Ledger:
             directory = self.root / "spool"
             digest = codec.digest(raw)
             path = directory / digest
-            require(path.exists() or sum(1 for _ in directory.iterdir()) < MAX_SPOOL, "spool_overflow")
+            require(path.exists() or len(self._record_names(directory)) < MAX_SPOOL, "spool_overflow")
             self._atomic(path, raw)
             return digest
 
@@ -233,6 +255,11 @@ class Ledger:
         """
         with self._lock():
             require(not (self.root / "fence.json").exists(), "terminal_fenced")
+            codec.decode(codec.canonical(segment_id), m.ID)
+            require(
+                not (self.root / ("terminal-" + codec.digest(segment_id.encode()) + ".json")).exists(),
+                "segment_already_terminal",
+            )
             events = self._events()
             fence = Fence(
                 schema="acceptance-fence.v1",
@@ -249,7 +276,7 @@ class Ledger:
         """Attach the exact post-fence capture without replacing the fence bytes."""
         heartbeat = codec.decode(heartbeat_raw, m.Event)
         with self._lock():
-            raw = self._read(self.root / "fence.json")
+            raw = self._active_fence()
             fence = codec.decode(raw, Fence)
             require(
                 heartbeat.event == "heartbeat"
@@ -266,7 +293,7 @@ class Ledger:
             self._append(heartbeat_raw)
 
     def _fence(self) -> tuple[bytes, Fence]:
-        raw = self._read(self.root / "fence.json")
+        raw = self._active_fence()
         fence = codec.decode(raw, Fence)
         heartbeat_path = self.root / ("heartbeat-" + codec.digest(raw) + ".json")
         if heartbeat_path.exists():
@@ -274,6 +301,31 @@ class Ledger:
             self._append(heartbeat)
             fence = msgspec.structs.replace(fence, heartbeat_sha256=codec.digest(heartbeat))
         return raw, fence
+
+    def _active_fence(self) -> bytes:
+        try:
+            return self._read(self.root / "fence.json")
+        except FileNotFoundError as exc:
+            raise Hold("no_active_fence") from exc
+
+    @staticmethod
+    def _record_names(directory: Path) -> tuple[str, ...]:
+        # Legacy failed prepares and the separately bounded quarantine are not records.
+        return tuple(
+            sorted(
+                p.name
+                for p in directory.iterdir()
+                if p.name != ".prepared" and not p.name.startswith(".prepare-")
+            )
+        )
+
+    def _spool_ids(self) -> tuple[str, ...]:
+        ids = self._record_names(self.root / "spool")
+        require(len(ids) <= MAX_SPOOL, "spool_overflow")
+        for digest in ids:
+            codec.decode(codec.canonical(digest), m.Digest)
+            require(codec.digest(self._read(self.root / "spool" / digest)) == digest, "spool_hash_mismatch")
+        return ids
 
     def _heartbeat(self, fence: Fence) -> bytes:
         if fence.heartbeat_sha256 is None:
@@ -294,7 +346,7 @@ class Ledger:
     def _inventory(self) -> Inventory:
         values: dict[str, bytes] = {}
         for path in (self.root / "inventory").iterdir():
-            if path.name.startswith(".prepare-"):
+            if path.name == ".prepared" or path.name.startswith(".prepare-"):
                 continue
             binding = codec.decode(self._read(path), Binding)
             require(path.name == codec.digest(binding.artifact.id.encode()), "inventory_binding")
@@ -405,6 +457,16 @@ class Ledger:
                     and not assessment.unresolved,
                     "terminal_qualification",
                 )
+                evaluated = Evaluator(inventory, self.proofs).interval(
+                    self.entry_raw,
+                    self._events(),
+                    segment.segment_id,
+                    assessment.coverage,
+                    assessment.supplemental_corpus,
+                    assessment.unresolved,
+                )
+                require(evaluated.result == "qualified_pending_archive", evaluated.reason)
+                require(evaluated.duration_ns == segment.duration_ns, "terminal_evaluated_duration")
                 qualification = codec.decode(terminal_events[1], m.Event)
                 require(
                     qualification.event == "qualification"
@@ -420,29 +482,32 @@ class Ledger:
                     intent.reason != "none" and assessment.result == "not_qualified", "terminal_interrupt"
                 )
             self._atomic(self.root / ("intent-" + codec.digest(fence_raw) + ".json"), codec.canonical(intent))
-            self._proof(
-                "terminal_fence",
-                (
-                    fence,
-                    intent,
-                    segment,
-                    assessment,
-                    tuple(terminal_events),
-                    tuple(sorted(p.name for p in (self.root / "spool").iterdir())),
-                ),
-            )
-            manifest = Manifest(
-                schema="acceptance-terminal.v1",
-                intent_sha256=self._object(codec.canonical(intent)),
-                fence_sha256=codec.digest(fence_raw),
-                objects=tuple(self._object(codec.canonical(v)) for v in (segment, assessment)),
-                events=tuple(self._object(raw) for raw in terminal_events),
-            )
-            self._object(codec.canonical(manifest))
-            target = self.root / ("terminal-" + codec.digest(intent.segment_id.encode()) + ".json")
-            self._atomic(target, codec.canonical(manifest))
-            self._complete(manifest, fence)
-            return codec.digest(codec.canonical(manifest))
+            with self._lock(spooling=True):
+                spool_ids = self._spool_ids()
+                self._proof(
+                    "terminal_fence",
+                    (
+                        fence,
+                        intent,
+                        segment,
+                        assessment,
+                        tuple(terminal_events),
+                        spool_ids,
+                    ),
+                )
+                manifest = Manifest(
+                    schema="acceptance-terminal.v1",
+                    intent_sha256=self._object(codec.canonical(intent)),
+                    fence_sha256=codec.digest(fence_raw),
+                    objects=tuple(self._object(codec.canonical(v)) for v in (segment, assessment)),
+                    events=tuple(self._object(raw) for raw in terminal_events),
+                    spool_ids=spool_ids,
+                )
+                self._object(codec.canonical(manifest))
+                target = self.root / ("terminal-" + codec.digest(intent.segment_id.encode()) + ".json")
+                self._atomic(target, codec.canonical(manifest))
+                self._complete(manifest, fence)
+                return codec.digest(codec.canonical(manifest))
 
     def _complete(self, manifest: Manifest, fence: Fence) -> None:
         require(manifest.fence_sha256 == codec.digest(self._read(self.root / "fence.json")), "fence_changed")
@@ -481,9 +546,26 @@ class Ledger:
                 not (self.root / ("terminal-" + codec.digest(fence.segment_id.encode()) + ".json")).exists(),
                 "committed_cannot_abort",
             )
-            intent_digest = (
-                self._object(codec.canonical(codec.validate(intent))) if intent is not None else None
-            )
+            intent_path = self.root / ("intent-" + codec.digest(raw) + ".json")
+            if intent_path.exists():
+                retained = self._read(intent_path)
+                codec.decode(retained, m.SealIntent)
+                require(
+                    intent is None or codec.canonical(codec.validate(intent)) == retained,
+                    "prepared_intent_conflict",
+                )
+                intent_digest = self._object(retained)
+            else:
+                if intent is None:
+                    intent_digest = None
+                else:
+                    retained = codec.canonical(codec.validate(intent))
+                    require(
+                        intent.segment_id == fence.segment_id and intent.entry_sha256 == self.entry_digest,
+                        "terminal_binding",
+                    )
+                    self._atomic(intent_path, retained)
+                    intent_digest = self._object(retained)
             abort = Abort(
                 schema="acceptance-abort.v1",
                 fence_sha256=codec.digest(raw),
@@ -511,19 +593,29 @@ class Ledger:
             )
             for event_raw in reconciled_events:
                 require(codec.decode(event_raw, m.Event).segment_id is None, "spooled_segment")
-            self._proof(
-                "terminal_fence",
-                (
-                    "release",
-                    digest,
-                    tuple(reconciled_events),
-                    tuple(sorted(p.name for p in (self.root / "spool").iterdir())),
-                ),
-            )
-            for event_raw in reconciled_events:
-                self._append(event_raw)
-            self._atomic(
-                self.root / ("released-" + digest + ".json"), codec.canonical(tuple(reconciled_events))
-            )
-            (self.root / "fence.json").unlink()
-            self._sync(self.root)
+            with self._lock(spooling=True):
+                spool_ids = self._spool_ids()
+                self._proof(
+                    "terminal_fence",
+                    (
+                        "release",
+                        digest,
+                        tuple(reconciled_events),
+                        spool_ids,
+                    ),
+                )
+                for event_raw in reconciled_events:
+                    self._append(event_raw)
+                self._atomic(
+                    self.root / ("released-" + digest + ".json"),
+                    codec.canonical(
+                        Release(
+                            schema="acceptance-release.v1",
+                            fence_sha256=digest,
+                            spool_ids=spool_ids,
+                            events=tuple(codec.digest(event) for event in reconciled_events),
+                        )
+                    ),
+                )
+                (self.root / "fence.json").unlink()
+                self._sync(self.root)

@@ -3,22 +3,35 @@
 from typing import cast
 
 import pytest
-from acceptance_fixtures import NATIVE, A, SyntheticProofs, at, entry, replace, rows
+from acceptance_fixtures import NATIVE, A, SyntheticProofs, at, entry, event, replace, rows, timeline
 
 from heterodyne.acceptance import codec
 from heterodyne.acceptance import models as m
 from heterodyne.acceptance.evaluator import REPOSITORIES, Evaluator, Inventory
 
 
-def graph():
-    entry_raw = codec.canonical(entry())
+def graph(*, period=600):
+    entry_raw, chain, inventory = timeline(period=period)
+    last = codec.decode(chain[-1], m.Event)
+    assert last.checkpoint is not None
+    stop = replace(
+        event(len(chain), codec.digest(chain[-1]), 259200, "segment_stop"),
+        stop=m.Stop(
+            reason="none",
+            checkpoint=last.checkpoint,
+            checkpoint_event_sha256=codec.digest(chain[-1]),
+            transaction_id="tx",
+        ),
+    )
+    chain.append(codec.canonical(stop))
+    inventory["archive-event-chain"] = codec.canonical([codec.load(raw) for raw in chain])
     segment = m.Segment(
         format=1,
         run_id="synthetic",
         segment_id="segment",
         entry_sha256=codec.digest(entry_raw),
-        start_event_sha256="a" * 64,
-        end_event_sha256="b" * 64,
+        start_event_sha256=codec.digest(chain[0]),
+        end_event_sha256=codec.digest(chain[-1]),
         start=at(),
         end=at(259200),
         duration_ns="259200000000000",
@@ -75,13 +88,15 @@ def graph():
         archive_receipt=receipt,
         current_release=entry().release,
     )
-    inventory = {A.id: b"synthetic fixture only", receipt.id: archive_raw}
+    inventory[receipt.id] = archive_raw
     return entry_raw, before_raw, archive_raw, codec.canonical(final), segment_raw, inventory
 
 
 def test_complete_non_circular_synthetic_graph():
     *raws, inventory = graph()
-    result = Evaluator(Inventory(inventory), SyntheticProofs()).archive(*raws)
+    result = Evaluator(Inventory(inventory), SyntheticProofs()).archive(
+        *raws, event_bytes=archive_events(inventory)
+    )
     assert result.result == "release_complete"
 
 
@@ -90,14 +105,19 @@ def test_complete_non_circular_synthetic_graph():
 )
 def test_every_source_specific_archive_proof_is_mandatory(role):
     *raws, inventory = graph()
-    result = Evaluator(Inventory(inventory), SyntheticProofs(role)).archive(*raws)
+    result = Evaluator(Inventory(inventory), SyntheticProofs(role)).archive(
+        *raws, event_bytes=archive_events(inventory)
+    )
     assert result.result == "not_qualified"
     assert result.reason == "synthetic_source_refused"
 
 
 def test_archive_default_unavailable_never_releases():
     *raws, inventory = graph()
-    assert Evaluator(Inventory(inventory)).archive(*raws).result == "not_qualified"
+    assert (
+        Evaluator(Inventory(inventory)).archive(*raws, event_bytes=archive_events(inventory)).result
+        == "not_qualified"
+    )
 
 
 def test_archive_time_identity_change_cannot_be_waived_by_consent():
@@ -110,7 +130,7 @@ def test_archive_time_identity_change_cannot_be_waived_by_consent():
     )
     value = replace(value, current_release=replace(value.current_release, identity=identity))
     result = Evaluator(Inventory(inventory), SyntheticProofs()).archive(
-        raw, before, archive, codec.canonical(value), segment
+        raw, before, archive, codec.canonical(value), segment, event_bytes=archive_events(inventory)
     )
     assert result.reason == "release_change"
 
@@ -119,7 +139,7 @@ def test_final_cannot_replace_interval_coverage():
     raw, before, archive, final, segment, inventory = graph()
     value = replace(codec.decode(final, m.Assessment), coverage=())
     result = Evaluator(Inventory(inventory), SyntheticProofs()).archive(
-        raw, before, archive, codec.canonical(value), segment
+        raw, before, archive, codec.canonical(value), segment, event_bytes=archive_events(inventory)
     )
     assert result.reason == "final_interval_changed"
 
@@ -132,3 +152,9 @@ def test_second_delta_missing_is_schema_refusal():
     del value["final_migration"]["second_delta_audit"]
     with pytest.raises(codec.InvalidEvidence):
         codec.decode(codec.canonical(value), m.Archive)
+
+
+def archive_events(inventory):
+    return tuple(
+        codec.canonical(value) for value in cast(list[object], codec.load(inventory["archive-event-chain"]))
+    )

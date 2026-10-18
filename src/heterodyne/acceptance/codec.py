@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 from datetime import UTC, datetime
 from typing import Any, cast, get_args, overload
 
@@ -97,7 +98,14 @@ def utc_ns(value: str) -> int:
 
 def native_utc(value: str) -> str:
     try:
-        if len(value.encode("ascii")) > 64:
+        if (
+            re.fullmatch(
+                r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
+                r"(?:\.[0-9]{1,6})?(?:Z|[+-][0-9]{2}:[0-9]{2})",
+                value,
+            )
+            is None
+        ):
             raise ValueError
         parsed = datetime.fromisoformat(value)
         if parsed.tzinfo is None or parsed.utcoffset() is None:
