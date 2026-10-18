@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from test_admind_approvals import APPROVE, MID, card_row, readout
 from test_admind_maintenance import setup
+from test_admind_retirement import ProvenPort
 
 from heterodyne.admind.approvals import BtqError, Busy, Readout
 from heterodyne.admind.store import Store
@@ -41,6 +42,10 @@ def test_hold_persistence_failure_restart_never_consumes_or_replays(
 ) -> None:
     async def scenario() -> None:
         u, port = setup(tmp_path)
+        if failure == "notice":
+            # Only this branch has actual closed HOLD bytes + captured adapter identity.
+            port = ProvenPort()
+            u.daemon.approve_bead = port
         try:
             if retry:
                 await u.daemon.run_attempt(APPROVE, card_row())
@@ -50,20 +55,32 @@ def test_hold_persistence_failure_restart_never_consumes_or_replays(
                     raise sqlite3.OperationalError("offline injected failure")
                 patch.setattr(u.store if failure == "store" else u.daemon,
                               "defer_maintenance" if failure == "store" else "ask_notice", broken)
-                with pytest.raises(sqlite3.OperationalError):
+                if failure == "store":
+                    with pytest.raises(sqlite3.OperationalError):
+                        await u.daemon.run_attempt(APPROVE, card_row(), maintenance_retry=retry)
+                else:
                     await u.daemon.run_attempt(APPROVE, card_row(), maintenance_retry=retry)
             assert u.store.current_attempt(APPROVE.ask_id) == APPROVE
             assert u.store.inbound_status(MID) == "executing"
             calls = port.calls
+            if failure == "notice":
+                assert u.store.retirement.eligible(APPROVE) is not None
             u.store.close()
             u.store = Store(u.settings.state_dir / "admind.db")
             u.build()
             u.daemon.approve_bead = port
+            u.daemon.wallclock = lambda: 200.0
             await u.daemon.reconcile_asks(u.store.recovery_snapshot())
             assert u.store.current_attempt(APPROVE.ask_id) == APPROVE
             assert u.store.inbound_status(MID) == "executing"
             await u.daemon.retry_maintenance(APPROVE.ask_id, MID)
-            assert port.calls == calls
+            if failure == "notice":
+                # R2: delivery failure cannot erase committed proof/overlay. Fresh admission may retry;
+                # a failed overlay commit remains unknown and never regains replay entitlement.
+                assert port.calls == calls + 1
+                calls = port.calls
+            else:
+                assert port.calls == calls
             # A different decision/ref cannot dispose of stranded issuance either.
             port.current = readout(status="closed", decided=True, decision="approve",
                                    approved_by=APPROVE.operator, approved_digest=APPROVE.digest,
@@ -75,7 +92,11 @@ def test_hold_persistence_failure_restart_never_consumes_or_replays(
             port.current = readout(status="closed", decided=True, decision="approve",
                                    approved_by=APPROVE.operator, approved_digest=APPROVE.digest,
                                    via_ref=APPROVE.ref, gate_valid=True, gate_preview=None)
-            await u.daemon.reconcile_asks(u.store.recovery_snapshot())
+            if failure == "notice":
+                u.daemon.wallclock = lambda: 230.0
+                await u.daemon.retry_maintenance(APPROVE.ask_id, MID)
+            else:
+                await u.daemon.reconcile_asks(u.store.recovery_snapshot())
             assert u.store.current_attempt(APPROVE.ask_id) is None
             assert port.calls == calls
         finally:

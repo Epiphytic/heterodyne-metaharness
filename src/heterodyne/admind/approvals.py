@@ -97,6 +97,13 @@ class BtqError(Exception):
         self.word = word
 
 
+class NotSpawned(BtqError):
+    """Structural proof that the decision adapter did not create a child."""
+
+    def __init__(self) -> None:
+        super().__init__("unavailable")
+
+
 @dataclass(frozen=True)
 class Attempt:
     ask_id: str
@@ -222,7 +229,7 @@ class ApproveBead:
         try:
             child = reap.spawn(argv)
         except OSError:
-            raise BtqError("unavailable") from None
+            raise NotSpawned() from None
         except BaseException:
             if on_launch is not None:
                 on_launch()
@@ -270,7 +277,7 @@ class ApproveBead:
         else:
             identity = self.cached_identity()
             if not identity:
-                raise BtqError("unavailable")
+                raise NotSpawned()
         code, out, err = await self._run(decision_argv(self.binary, a, bead), DECIDE_SECONDS, MAX_OUTPUT,
                                        on_launch)
         if maintenance_hold(code, out):

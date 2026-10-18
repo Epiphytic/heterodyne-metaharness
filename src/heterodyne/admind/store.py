@@ -1104,6 +1104,8 @@ class Store:
                 raise ValueError("already fulfilled; original answer retained")
             self.db.execute("DELETE FROM ask_maintenance WHERE ask_id = ? AND message_id = ?",
                             (ask_id, message_id))
+            if settled != "uncertain":
+                self.retirement.clear_active(ask_id, message_id)
             self.db.execute("UPDATE ask_attempts SET settled = ?, exit_status = COALESCE(?, exit_status) "
                             "WHERE ask_id = ? AND message_id = ?", (settled, exit_status, ask_id, message_id))
             self.db.execute("UPDATE asks SET status = ?, outcome = ?, decided_by = ?, attempt = ?, "

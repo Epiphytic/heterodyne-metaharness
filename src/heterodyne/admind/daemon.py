@@ -1092,19 +1092,21 @@ class Admind:
             self.remind(mid, sub)
             return
         from heterodyne.admind.retirement import display_attempt, publish_notice
-        with self.store.transaction():
-            for ask_id, attempt_id, _ in self.store.maintenance_pending():
-                attempt = self.store.current_attempt(ask_id)
-                if attempt is not None and attempt.message_id == attempt_id:
-                    publish_notice(self, attempt, refresh=True)
         at = asks.now()
         lines = [asks.list_line(r, at) for r in self.store.capacity_asks()]
         lines += [f"{r.ask_id} fulfilled (lifecycle); original answer retained"
                   for r in self.store.fulfilled_asks(20)]
-        for ask_id, attempt_id, _ in self.store.maintenance_pending():
-            attempt = self.store.current_attempt(ask_id)
-            proof = None if attempt is None else self.store.retirement.eligible(attempt)
-            if proof is not None:
+        # One bounded eligibility snapshot, at most one new selector per inspection. No retry
+        # history is allocated; later inspections can offer other current notices without fan-out.
+        with self.store.transaction():
+            published = False
+            for ask_id, attempt_id, _ in self.store.maintenance_pending():
+                attempt = self.store.current_attempt(ask_id)
+                proof = None if attempt is None else self.store.retirement.eligible(attempt)
+                if proof is None:
+                    continue
+                if not published and attempt is not None:
+                    published = publish_notice(self, attempt, refresh=True, proof=proof)
                 lines.append(f"{ask_id} attempt {display_attempt(attempt_id)}: "
                              "reply to its recovery notice with "
                              f"!asks retire {proof.token}")
@@ -1381,9 +1383,15 @@ class Admind:
         self.audit_quietly("ask", action="conflict", ask_id=a.ask_id, message_id=a.message_id,
                            expected=expected)
 
-    def hold_maintenance(self, a: Attempt, reason: str) -> None:
-        """Retain provenance and publish one durable, threaded notice per fixed hold reason."""
+    def hold_maintenance(self, a: Attempt, reason: str, *,
+                         hold: approvals.MaintenanceHold | None = None,
+                         not_spawned: bool = False) -> None:
+        """Commit proof and overlay together; notice delivery cannot erase observed evidence."""
         with self.store.transaction():
+            if hold is not None:
+                self.store.retirement.record_hold(a, hold)
+            elif not_spawned:
+                self.store.retirement.record_not_spawned(a)
             deferred = self.store.defer_maintenance(
                 a, self.wallclock() + MAINTENANCE_RETRY_SECONDS, reason=reason)
             if not deferred:
@@ -1392,16 +1400,24 @@ class Admind:
                 self.finish(a.message_id, "done",
                             CONFLICT.format(ask_id=a.ask_id, bead=row.bead if row else ""), "ask")
                 return
-            decision = "denial" if a.action == "deny" else "approval"
-            next_step = ("Automatic retry is suspended. See the separate recovery notice for eligibility. "
-                         if reason in MAINTENANCE_SUSPENDED else
-                         "It will retry after fresh card and operator-authority checks. ")
-            self.ask_notice(a.ask_id, "maintenance-" + reason, a.message_id,
-                            f"Ask {a.ask_id}: {decision} received and held ({reason}). "
-                            "No decision was issued by the invocation that returned maintenance HOLD. "
-                            + next_step + "The original reply is preserved.", a.message_id)
-            from heterodyne.admind.retirement import publish_notice
-            publish_notice(self, a, refresh=reason in MAINTENANCE_SUSPENDED)
+        # A separate transaction retains an all-or-nothing notice/mapping pair. Expected local
+        # delivery/storage failures leave the durable proof+overlay eligible for later inspection.
+        try:
+            with self.store.transaction():
+                decision = "denial" if a.action == "deny" else "approval"
+                next_step = ("Automatic retry is suspended. "
+                             "See the separate recovery notice for eligibility. "
+                             if reason in MAINTENANCE_SUSPENDED else
+                             "It will retry after fresh card and operator-authority checks. ")
+                self.ask_notice(a.ask_id, "maintenance-" + reason, a.message_id,
+                                f"Ask {a.ask_id}: {decision} received and held ({reason}). "
+                                "No decision was issued by the invocation that returned maintenance HOLD. "
+                                + next_step + "The original reply is preserved.", a.message_id)
+                from heterodyne.admind.retirement import publish_notice
+                publish_notice(self, a, refresh=reason in MAINTENANCE_SUSPENDED)
+        except (OSError, sqlite3.Error, RuntimeError, ValueError) as exc:
+            self.audit_quietly("ask", action="maintenance-notice-unavailable", ask_id=a.ask_id,
+                               error=type(exc).__name__)
         self.audit_quietly("ask", action="maintenance-held", ask_id=a.ask_id,
                            message_id=a.message_id, reason=reason)
 
@@ -1429,6 +1445,7 @@ class Admind:
         stop: tuple[str, str, str] | None = None
         r: Readout | Busy | None = None
         proven_hold: approvals.MaintenanceHold | None = None
+        not_spawned = False
         latch_token = self.store.get("maintenance_latch_token")
         try:
             self.audit.write("ask", action="deciding", message_id=mid, ask_id=a.ask_id, bead=bead,
@@ -1463,22 +1480,17 @@ class Admind:
                 # audit write failing, or a bug, is "error" (spec §8's table)
                 word = (exc.word if isinstance(exc, BtqError)
                         else "unavailable" if isinstance(exc, OSError) and audited else "error")
-                if maintenance_retry and issued and isinstance(exc, BtqError) and exc.word == "unavailable":
-                    self.store.retirement.record_not_spawned(a)
+                not_spawned = maintenance_retry and issued and isinstance(exc, approvals.NotSpawned)
                 stop = ("open", PREFLIGHT_FAILED.format(bead=bead, word=word), word)
         if proven_hold is not None:
-            # Outside the ambiguous-child catch. Once this small commit succeeds, overlay/notice
-            # publication failure cannot turn a proven HOLD into an ordinary restart settlement.
-            # A process/storage failure before this commit is still ordinary R26 unknown issuance;
-            # it grants no automatic retry and is not manufactured proof for recovery/retirement.
+            # Retain the conservative issuance distinction even if the subsequent durable proof +
+            # overlay commit fails. This marker alone never grants retry/retirement entitlement.
             if not self.store.mark_maintenance_issuing(a):
                 self.conflict(a, "deciding")
                 self.finish(mid, "done", CONFLICT.format(ask_id=a.ask_id, bead=bead), "ask")
                 return
             revoked = self.latched() or self.store.get("maintenance_latch_token") != latch_token
-            with self.store.transaction():
-                self.store.retirement.record_hold(a, proven_hold)
-                self.hold_maintenance(a, "latched" if revoked else "maintenance")
+            self.hold_maintenance(a, "latched" if revoked else "maintenance", hold=proven_hold)
             return
         if unauthorised:
             if maintenance_retry:
@@ -1497,7 +1509,7 @@ class Admind:
             return
         if stop is not None:
             if maintenance_retry:
-                self.hold_maintenance(a, self.maintenance_stop_reason(stop))
+                self.hold_maintenance(a, self.maintenance_stop_reason(stop), not_spawned=not_spawned)
                 return
             if stop[0] == "stale" and isinstance(r, Readout):
                 await self.refresh(a, row, r, "refused", None, "")

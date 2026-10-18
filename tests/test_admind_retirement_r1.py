@@ -9,7 +9,7 @@ from test_admind_approvals import APPROVE, readout
 from test_admind_maintenance import HOLD
 from test_admind_retirement import ProvenPort, command, eligible, snapshot
 
-from heterodyne.admind.approvals import BtqError, MaintenanceHold
+from heterodyne.admind.approvals import BtqError, MaintenanceHold, NotSpawned
 from heterodyne.admind.daemon import canonical_ref
 from heterodyne.admind.retirement import publish_notice, retire
 
@@ -60,7 +60,7 @@ def test_proven_spawn_failure_retains_monotonic_covered_generation(tmp_path: Pat
         try:
 
             async def unavailable(*args, **kwargs):
-                raise BtqError("unavailable")
+                raise NotSpawned()
 
             port.decide = unavailable
             row = u.store.ask(APPROVE.ask_id)
@@ -70,14 +70,15 @@ def test_proven_spawn_failure_retains_monotonic_covered_generation(tmp_path: Pat
             proof = u.store.retirement.eligible(APPROVE)
             assert proof is not None and proof.invocations == 2
             body = json.loads(proof.body)
-            assert body["not_spawned"] == 1 and body["consecutive"] == 1
+            assert body["not_spawned"] == 1 and body["invocations"] - body["not_spawned"] == 1
             port.decide = ProvenPort.decide.__get__(port)
             row = u.store.ask(APPROVE.ask_id)
             assert row is not None
             await u.daemon.run_attempt(APPROVE, row, maintenance_retry=True, prechecked=port.current)
             proof = u.store.retirement.eligible(APPROVE)
             assert proof is not None and proof.invocations == 3
-            assert json.loads(proof.body)["consecutive"] == 2
+            body = json.loads(proof.body)
+            assert body["invocations"] - body["not_spawned"] == 2
         finally:
             u.store.close()
 
@@ -98,7 +99,10 @@ def test_unknown_postlaunch_failure_never_becomes_not_spawned(tmp_path: Path) ->
             row = u.store.ask(APPROVE.ask_id)
             assert row is not None
             await u.daemon.run_attempt(APPROVE, row, maintenance_retry=True, prechecked=port.current)
-            assert u.store.retirement._proof(APPROVE) == proof
+            assert u.store.retirement._proof(APPROVE) is None
+            assert u.store.retirement.generation(APPROVE) == (2, True)
+            closed = u.store.ask(APPROVE.ask_id)
+            assert closed is not None and closed.status == "open"
             assert u.store.retirement.eligible(APPROVE) is None
         finally:
             u.store.close()

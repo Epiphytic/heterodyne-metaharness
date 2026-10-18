@@ -35,8 +35,10 @@ must retain that existing source-admission contract.
 Each attempt has one active proof and one current notice mapping. Automatic
 30-second retries update proof coverage without allocating per-generation
 notices. `!asks` inspection or transition to a suspended hold can publish the
-current selector; earlier tokens then refuse. A completed retirement has one
-final receipt. Notices and acknowledgements use ordinary durable outbox
+current selector; earlier tokens then refuse. One inspection publishes at most
+one selector across the bounded pending snapshot. Delayed, quarantined and
+suppressed transport intents retain their mapping and are never treated as failed.
+A completed retirement has one final receipt. Notices and acknowledgements use ordinary durable outbox
 history, not new ask slots. Unproven historical attempts can still occupy the
 existing capacity; this feature does not abandon them or fabricate absence.
 
@@ -46,10 +48,15 @@ ordinary maintenance reconciliation behavior is retained. No sibling worker's
 unreviewed implementation was imported.
 
 Explicit `!asks` inspection repairs a failed or sent-without-message-ID notice
-by publishing a new transport notice. Original rows and exact selector bindings
-remain in history. Once an attempt is retired, an authenticated reply to any of
-its retained delivered notices reports its existing receipt; redelivery of the
-same command returns that receipt without another read or effect.
+by publishing a new transport notice. Original outbox rows remain immutable;
+there are no new per-retry history rows. The legacy notice-history table, if
+present, is retained without backfill or append. Its old rows confer no current
+selector authority. Previously delivered selectors are recognized from the
+original structured outbox keys when reporting an existing final receipt. An older
+selector reports that receipt only if the ask has a single historical attempt;
+otherwise its attempt association is ambiguous and refuses. The exact selected
+token remains usable. Redelivery of the same authenticated command returns its
+receipt without another read or effect.
 
 Two usability limits remain unwaived under the approved authority contract.
 Retryable overlays change generation roughly every 30 seconds, so an operator's
@@ -68,3 +75,19 @@ cold or changed entry at that fence refuses before spawning; it never adds an
 await or a synchronous content read. File stat and open operations still depend
 on the trusted local filesystem; this is not kernel confinement or proof of the
 transitive import closure.
+
+Proof and overlay restoration commit in one transaction. Notice publication is a
+separate transaction: a delivery/storage error cannot erase a successfully
+committed HOLD observation. Failure to commit the proof/overlay still leaves
+issuance conservatively held with no manufactured coverage or replay authority.
+Only the adapter's dedicated pre-spawn exception (cache miss or Popen OSError)
+can extend coverage without a child. A generic unavailable error cannot do so.
+
+Ordinary terminal settlement removes only the exact attempt's active proof and
+notice mapping; immutable attempt/outbox history and final receipts remain.
+Exact same-command receipt replay checks persisted sender, thread and token
+before current authorization, and creates no fresh effects even after revocation.
+A different command still requires current operator authority. Newly generated
+proofs derive HOLD count as invocations minus not_spawned; legacy hashed proofs
+with the redundant consecutive field remain readable without rewriting their
+bytes or granting missing coverage.
