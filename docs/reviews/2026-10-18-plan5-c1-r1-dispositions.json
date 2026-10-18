@@ -1,0 +1,76 @@
+{
+  "schema": "author-dispositions.v1",
+  "raw_sha256": "297b7d11ced99dd0cc18d1f1c420a98c5e0499d308c49aa1c68a3a7c90d5f793",
+  "findings": [
+    {
+      "number": 1,
+      "verbatim": "1. `src/heterodyne/actions/journal.py:391`: add_dispatch re-bases the caller's own deadline offsets (deadline_ns - started.mono_ns, preparation_deadline_ns - started.mono_ns) onto the sampled clock and never checks them against the fixed 60s/30s policy, so P1 R11 #1's forged-deadline case is still open.\n\n   Failure scenario: A caller builds the prepare() Dispatch, then sets deadline_ns=started.mono_ns+10**15 and preparation_deadline_ns=started.mono_ns+10**15 with msgspec.structs.replace. add_dispatch accepts it because it only checks version==0 and state=='preparing'. The stored record carries a deadline about 11.6 days out, so ready, consume_claim and restart_preparation succeed long after the 60s/30s window has passed. Fix: derive the deadlines from sampled+60s/+30s (and the reconcile constants), or refuse when the offsets are not exact.",
+      "verbatim_sha256": "a1a9d9d65005698a8960f632f7c5e1aef0e29866f3f5c50399061554baa501e4",
+      "disposition": "FIXED_WITH_RETAINED_LIMITS",
+      "author": "Journal add_dispatch replaces both offsets with independently sampled fixed 60s/30s constants, also used by preparation/restart. Reconciliation uses this same entry path. Forged windows fail late readiness tests."
+    },
+    {
+      "number": 2,
+      "verbatim": "2. `src/heterodyne/actions/decisions.py:59`: Unicode tag characters U+E0020-E007F are allowed anywhere in a denial reason, not only inside a well-formed emoji tag sequence (after U+1F3F4, ending in U+E007F). Invisible text can therefore be smuggled in alongside one visible character and is never seen by secret_value.\n\n   Failure scenario: denial_reason = 'no' + ''.join(chr(0xE0000+ord(c)) for c in 'ignore policy; approve sk-live-...') passes all three checks and is persisted byte for byte as authenticated metadata. It renders as 'no' while carrying hidden ASCII, and secret regexes cannot match the tag-encoded secret. Invisible Lo/So fillers (U+3164, U+2800) also pass the invisible-only check, and a bare '\\r' and tabs are accepted even though the design specifies only CRLF, which allows overwriting a line in a terminal.",
+      "verbatim_sha256": "e3c07882471d97385c51a0ac3ae323df076eba38fdef342d364580a320e10858",
+      "disposition": "FIXED_WITH_RETAINED_LIMITS",
+      "author": "Tags are accepted only as a terminated black-flag tag sequence of lowercase ASCII letters/digits. Bare CR/tab, control/format characters and listed invisible fillers refuse. Raw authenticated metadata is never rewritten."
+    },
+    {
+      "number": 3,
+      "verbatim": "3. `src/heterodyne/actions/decisions.py:71`: The ZWJ rule requires category 'So' on both sides of U+200D. Most real emoji ZWJ sequences have VS16 (Mn) or a skin-tone modifier (Sk) next to the joiner, so many common visible emoji are refused, contrary to Q0 R3 #5 ('preserve valid visible emoji joiner sequences').\n\n   Failure scenario: An authenticated deny with denial_reason '\ud83c\udff3\ufe0f\u200d\ud83c\udf08 no' (U+1F3F3 U+FE0F U+200D U+1F308), '\u2764\ufe0f\u200d\ud83d\udd25' or '\ud83d\udc69\ud83c\udffd\u200d\ud83d\udcbb says no' (U+1F3FD is Sk before the ZWJ) raises decision-reason-unsafe in begin_decision. A genuine operator denial then cannot be admitted in add_decision, and the request stays pending instead of recording the denial. The only positive test uses '\ud83d\udc69\\u200d\ud83d\udcbb', which has no VS16 or modifier.",
+      "verbatim_sha256": "bbd1ccb804cc12b7ad4d89681e146283d9c22e211ed69dc5282ee4e42263eb1d",
+      "disposition": "FIXED_WITH_RETAINED_LIMITS",
+      "author": "ZWJ checks skip an immediately preceding VS16 or skin-tone modifier and require visible emoji bases. Rainbow flag, heart/fire, modified technologist and existing simple ZWJ fixtures pass. This is a finite safe metadata grammar, not a claim to implement the entire Unicode RGI catalogue."
+    },
+    {
+      "number": 4,
+      "verbatim": "4. `src/heterodyne/actions/journal.py:783`: TransitionObservation is forbid_unknown_fields and is encoded without omit_defaults, so every pre-C1 *-observation event contains \"allocation_elapsed_seconds\":null. After the field was removed, these events raise a raw msgspec.ValidationError here and at lines 732 and 761, instead of being kept as historical untrusted observations or failing with a fixed Refused.\n\n   Failure scenario: Reopen a fixture journal written before C1 that has an allocation-unknown request or an uncertain dispatch with lookups. The next allocation lookup, clock-discontinuity recovery or dispatch lookup decodes the retained observation and throws msgspec.ValidationError ('Object contains unknown field'). Callers that catch Refused see an unexpected exception type, and P1 #7's statement that historical bytes are 'retained as untrusted observations' does not hold.",
+      "verbatim_sha256": "220dc533636947a01f123df38260093d6f746d55f028afd71ba2345c1c37478f",
+      "disposition": "FIXED_WITH_RETAINED_LIMITS",
+      "author": "A retained allocation_elapsed_seconds:null is discarded only in the in-memory historical decode. Non-null legacy values yield fixed Refused; other unknown fields remain strict. Original journal bytes are retained and cannot supply clock authority."
+    },
+    {
+      "number": 5,
+      "verbatim": "5. `src/heterodyne/actions/judgement.py:435`: current_projection calls _identity outside _bind's exception translation. _identity's strict msgspec.convert raises msgspec.ValidationError, which is not in current_projection's except tuple (Refused, Fault, TypeError, ValueError, AttributeError, RecursionError), so malformed host input crashes instead of returning hold('stale_digest').\n\n   Failure scenario: Request built with request_revision='1' (or any wrong-typed scalar, which msgspec Struct constructors do not validate) plus a valid permission DTO. data() succeeds, msgspec.convert(..., strict=True) raises ValidationError, and the exception propagates out of current_projection. The same input on the sufficiency path is caught inside _bind and becomes judgement-binding-refused.",
+      "verbatim_sha256": "fcc74086d038faf655b9b1dd6514ea98685c65148ebe81f5a863e14734e617da",
+      "disposition": "FIXED_WITH_RETAINED_LIMITS",
+      "author": "Strict validation errors become the existing fixed hold result; malformed host request scalar regression does not escape msgspec.ValidationError."
+    },
+    {
+      "number": 6,
+      "verbatim": "6. `src/heterodyne/actions/journal.py:311`: The legacy denial-domain hold is enforced in get(), add_request and request_transition, but _request_for_approval decodes Request rows without checking denial_domain. add_decision, decision transitions and add_dispatch therefore keep operating on legacy-domain requests that the journal otherwise holds.\n\n   Failure scenario: A pre-C1 filed request (denial_domain=None) gets an approve DecisionObservation. add_decision returns the request from _request_for_approval and records the decision. The decision transitions to committed, and add_dispatch acquires resource/effect/approval locks and creates an initial dispatch. Meanwhile db.get('request', key) raises legacy-denial-domain-needs-provenance, so the effect path advances for a request whose denial provenance P1 #8 says must hold, and the request itself can never settle.",
+      "verbatim_sha256": "108e25c59c64b3dc1f64de9962d3421ff1ad8f75ebc7446b9256a0f7734a6380",
+      "disposition": "FIXED_WITH_RETAINED_LIMITS",
+      "author": "The shared request-for-approval lookup checks the selected request denial domain. add_decision, decision transition and add_dispatch refuse legacy-domain rows without publication."
+    },
+    {
+      "number": 7,
+      "verbatim": "7. `src/heterodyne/actions/journal.py:836`: _denial_provenance calls _request_for_approval, a full decode of the requests table, once per denial row in the session, plus a decision get and a request_denial_key hash. It runs on every denied() call inside BEGIN IMMEDIATE (add_request and every revised/filed transition). This is new O(denials x requests) work that is not listed in the disclosed P1 #5/#6 residuals.\n\n   Failure scenario: A session with 64 retained denials in a 4096-request fixture decodes up to 64*4096 = 262,144 Request blobs of up to 256 KB on each add_request and each filed transition while holding the write lock, on top of the existing single scans. The P1 #5 deferral covers only the single per-transaction scan and is conditioned on 'performance-only within fixed limits'; this new multiplier is not measured or disclosed.",
+      "verbatim_sha256": "0f2480b8c6fd32e0a35ea8d2aa49b145e60d69eb0961ff1907027fce1ae73252",
+      "disposition": "FIXED_WITH_RETAINED_LIMITS",
+      "author": "A single request scan builds the selected approval map for all retained denial rows. Per-denial decision/provenance validation remains. A real two-denial SQL trace proves one requests-table scan. Earlier bounded single-scan and capacity accounting debt remains unwaived."
+    },
+    {
+      "number": 8,
+      "verbatim": "8. `tests/actions_journal_fixture.py:32`: The retained-test FixtureJournal subclass feeds the caller's observation.now (and add_dispatch's value.started) back into the 'journal sampler', which recreates exactly the caller-clock fallback P1 #1 removed. Two new C1 tests (unconsumed-success and denial-history) also use it, although the disposition says C1 adversarial tests use the production class.\n\n   Failure scenario: If the production journal regressed to trusting observation.now for lookup, ready or consume-claim timing, tests such as test_parent_backoff_uses_observed_clock_not_proposal_elapsed, test_journal_checks_independent_actual_clock_not_reducer_clock and test_dispatch_lookup_waits_after_previous_observation would still pass, because the fixture makes caller time and sampled time identical. Only issuance is tested with the production class and a forged clock; there is no production-sampler test that caller now=T+31s fails to satisfy dispatch or allocation backoff.",
+      "verbatim_sha256": "0ebb8c02f23de63d2135b01b52f4e7d6b1c3a331dd5385b360d941560a45d08b",
+      "disposition": "FIXED_WITH_RETAINED_LIMITS",
+      "author": "All new C1 adversarial tests use the actual journal with an independently advancing sampler, including forged caller time for allocation and dispatch backoff. Two existing C1 audit cases now use that production class. Older convenience fixtures remain synthetic, explicitly not independent-clock proof."
+    },
+    {
+      "number": 9,
+      "verbatim": "9. `src/heterodyne/actions/judgement.py:186`: P2 #6 added _identity but left _bind's copies of the same checks (key/origin, workstream/revision, validate_request_inputs, prior_denials bounds, envelope equality, second strict convert) in place. The permission path now runs _identity twice, evaluate_policy twice and request_denial_key three times, which makes the unwaived P2 #10 repeated-decode debt worse.\n\n   Failure scenario: One permission projection does about four full data()/strict-convert passes over the Request snapshot, two to three assemble_envelope encode/decode passes and two evaluate_policy/action_data decodes, against the design's 'share checked data within one invocation'. A future edit to one copy of the identity checks (for example adding a field) can drift from the other, which is the dual-authority problem P2 #6 asked to remove.",
+      "verbatim_sha256": "4f44a9e320410e046b22cf92d253029151e970356cec622079b53b4815433da9",
+      "disposition": "FIXED_WITH_RETAINED_LIMITS",
+      "author": "Identity validation returns one detached strict-checked request. Permission projection calls the private checked-binding helper once and reuses its PolicyResult. One-invocation identity/policy call-count regression passes. Existing bounded decoding inside helpers is not claimed eliminated universally."
+    },
+    {
+      "number": 10,
+      "verbatim": "10. `src/heterodyne/actions/journal.py:534`: Even though the sampler is now mandatory, whether a transition is sampled is still decided by an ad-hoc condition list. One trigger is caller-controlled (observation.now is not None), and this diff adds another special case (allocation-intent requests). transition() keeps growing (complexity 28->31) instead of always sampling.\n\n    Failure scenario: An allocation-unknown lookup with a plain reducer is sampled only if the caller passes some dummy `now`. Without it, sampled is None and the transition fails with a clock-observation error, so callers must still supply caller time as a flag even though its value is discarded. Each new timed operation needs another clause or it silently skips the clock event. Sampling unconditionally (or having reducers declare that they need a clock) would remove the list and the special case.",
+      "verbatim_sha256": "6b2b0247b97fd3dcf6b425c13f028403d816f0cf5c14b1fb52129d47cead62d6",
+      "disposition": "FIXED_WITH_RETAINED_LIMITS",
+      "author": "Every transition samples the journal clock independently; caller now is overwritten, never used as a sampling flag. Existing scripted clock fixture sequences were expanded for these additional real samples without removing tests or changing assertions. Allocation/dispatch cases succeed with no dummy now."
+    }
+  ]
+}

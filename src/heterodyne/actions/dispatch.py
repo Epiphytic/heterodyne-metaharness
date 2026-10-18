@@ -12,6 +12,9 @@ from heterodyne.actions.codec import BEAD_ID, safe_label
 from heterodyne.actions.contracts import Clock, Record
 from heterodyne.actions.requests import Refused, changed, digest_syntax
 
+DISPATCH_WINDOW_NS = 60_000_000_000
+PREPARATION_WINDOW_NS = 30_000_000_000
+
 DispatchState = Literal[
     "preparing", "ready", "held", "executing", "uncertain", "succeeded", "failed", "denied"
 ]
@@ -126,8 +129,8 @@ def prepare(
         resource,
         startup_hash,
         now,
-        now.mono_ns + 60_000_000_000,
-        now.mono_ns + 30_000_000_000,
+        now.mono_ns + DISPATCH_WINDOW_NS,
+        now.mono_ns + PREPARATION_WINDOW_NS,
     )
 
 
@@ -175,7 +178,7 @@ def restart_preparation(value: Dispatch, startup_hash: str, now: Clock) -> Dispa
         state="preparing",
         startup_hash=startup_hash,
         retired_startups=(*value.retired_startups, value.startup_hash),
-        preparation_deadline_ns=min(now.mono_ns + 30_000_000_000, value.deadline_ns),
+        preparation_deadline_ns=min(now.mono_ns + PREPARATION_WINDOW_NS, value.deadline_ns),
         launch_attempts=value.launch_attempts + 1,
     )
 
@@ -286,7 +289,6 @@ def reconcile_lookup(
 ) -> Dispatch:
     if (
         value.dispatch_kind != "initial"
-        or (effect == "succeeded" and not value.claim_consumed)
         or value.state not in {"uncertain", "failed"}
         or value.settled
         or value.reconciliation_lookups >= 3
@@ -296,6 +298,9 @@ def reconcile_lookup(
         raise Refused("reconciliation-not-due")
     if effect not in {"succeeded", "absent", "unknown"}:
         raise Refused("invalid-reconciliation")
+    if effect == "succeeded" and not value.claim_consumed:
+        # Count the actual read without attributing another actor's effect to this claim.
+        return changed(value, reconciliation_lookups=value.reconciliation_lookups + 1)
     if value.state == "failed" and effect == "succeeded":
         raise Refused("reconciliation-outcome-conflict-needs-authenticated-recovery")
     if effect == "succeeded" and cleanup_proven and digest_syntax(evidence or ""):
@@ -433,6 +438,7 @@ def settle_dispatch(value: Dispatch, observation: DispatchRecovery) -> Dispatch:
             )
         )
         or observation.effect_definitively_absent == observation.effect_attested_succeeded
+        or (observation.effect_definitively_absent and any(item.effect == "succeeded" for item in facts))
         or (observation.effect_attested_succeeded and not value.claim_consumed)
         or not digest_syntax(observation.evidence)
         or not safe_label(observation.operator_event)

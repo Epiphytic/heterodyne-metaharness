@@ -14,9 +14,9 @@ from typing import Literal, Protocol, cast
 
 import msgspec
 
-from heterodyne.actions.codec import assemble_envelope, safe_label, validate_request_inputs
-from heterodyne.actions.contracts import Intent, Origin, PolicyFacts, Record, Resolved
-from heterodyne.actions.policy import denial_key, evaluate_policy
+from heterodyne.actions.codec import assemble_envelope, safe_label
+from heterodyne.actions.contracts import Intent, Origin, PolicyFacts, PolicyResult, Record, Resolved
+from heterodyne.actions.policy import DENIAL_DOMAIN, evaluate_policy, request_denial_key
 from heterodyne.actions.requests import (
     CreationKey,
     Refused,
@@ -32,6 +32,7 @@ from heterodyne.gatekeeper.project import disposition, groom_disposition
 from heterodyne.gatekeeper.validate import Fault, canonical, data, decode_result, digest, egress, prepare
 
 DEADLINE_NS = 60_000_000_000
+FAKE_BOOT_ID = "fake-provider-unattested-boot"
 
 
 class ModelSpec(Record, frozen=True):
@@ -122,6 +123,56 @@ def bind(
     )
 
 
+def _identity(action: Request, selected: c.SufficiencyRequest | c.PermissionRequest) -> Request:
+    """Shared detached identity checks, usable before native shell allocation.
+
+    Typed objects are caller data, not authenticated host attestations. Never let a
+    policy floor or retained denial certify a different subject or cached envelope.
+    """
+    if type(action) is not Request:
+        raise Refused("judgement-binding-refused")
+    # Bytes are not JSON builtins; validate the entire remaining typed snapshot.
+    checked = msgspec.convert(
+        data(msgspec.structs.replace(action, ask_bytes=None)), type=Request, strict=True
+    )
+    if (
+        checked.denial_domain != DENIAL_DOMAIN
+        or checked.phase in {"completed", "cancelled", "reconciled-abandoned", "blocker-pending"}
+        or checked.key.workstream != checked.origin.workstream
+        or checked.key.bead != checked.origin.bead
+        or checked.key.session_key != checked.origin.session_key
+        or selected.workstream_id != checked.origin.workstream
+        or selected.revision != checked.request_revision
+        or checked.denial_identity
+        != request_denial_key(checked.intent, checked.origin, checked.resolved, checked.config)
+        or len(checked.prior_denials) > 64
+        or any(not digest_syntax(item) for item in checked.prior_denials)
+    ):
+        raise Refused("judgement-binding-refused")
+    if isinstance(selected, c.PermissionRequest):
+        if (selected.subject.task_id, selected.subject.session_ref) != (
+            checked.origin.bead,
+            checked.origin.session_key,
+        ):
+            raise Refused("judgement-binding-refused")
+    elif selected.origin.session_ref != checked.origin.session_key:
+        raise Refused("judgement-binding-refused")
+    if checked.approval_id is None:
+        if checked.envelope is not None:
+            raise Refused("judgement-binding-refused")
+    elif checked.envelope != assemble_envelope(
+        checked.intent,
+        checked.origin,
+        checked.resolved,
+        checked.approval_id,
+        checked.request_revision,
+        checked.config,
+    ):
+        raise Refused("judgement-binding-refused")
+
+    return msgspec.structs.replace(checked, ask_bytes=action.ask_bytes)
+
+
 def _bind(
     action: Request,
     selected: c.SufficiencyRequest | c.PermissionRequest,
@@ -133,17 +184,37 @@ def _bind(
     restrict: Mapping[str, list[str]] | None = None,
 ) -> str:
     try:
-        if (
-            type(action) is not Request
-            or type(action.ask_bytes) is not bytes
-            or not 1 <= len(action.ask_bytes) <= 65536
-        ):
+        checked = _identity(action, selected)
+        return _bind_checked(
+            checked,
+            selected,
+            privacy,
+            model,
+            policy=policy,
+            host_overrides=host_overrides,
+            restrict=restrict,
+        )[0]
+    except Refused:
+        raise
+    except (Fault, msgspec.ValidationError, TypeError, ValueError, AttributeError, RecursionError) as exc:
+        raise Refused("judgement-binding-refused") from exc
+
+
+def _bind_checked(
+    action: Request,
+    selected: c.SufficiencyRequest | c.PermissionRequest,
+    privacy: c.PrivacyContext,
+    model: ModelSpec,
+    *,
+    policy: PolicyFacts | None = None,
+    host_overrides: Mapping[str, str] | None = None,
+    restrict: Mapping[str, list[str]] | None = None,
+) -> tuple[str, PolicyResult | None]:
+    # Only _identity's detached validated snapshot reaches this helper.
+    try:
+        if type(action.ask_bytes) is not bytes or not 1 <= len(action.ask_bytes) <= 65536:
             raise Refused("judgement-binding-refused")
         ask_bytes = action.ask_bytes
-        action = msgspec.structs.replace(
-            msgspec.convert(data(msgspec.structs.replace(action, ask_bytes=None)), type=Request, strict=True),
-            ask_bytes=ask_bytes,
-        )
         model = msgspec.convert(data(model), type=ModelSpec, strict=True)
         for label in (model.requested, model.schema, model.release):
             if not safe_label(label, 128):
@@ -153,32 +224,12 @@ def _bind(
             or action.context_digest is None
             or not digest_syntax(action.context_digest)
             or not source_syntax(action.requested_source)
-            or action.key.workstream != action.origin.workstream
-            or action.key.bead != action.origin.bead
-            or action.key.session_key != action.origin.session_key
-            or selected.workstream_id != action.origin.workstream
-            or selected.revision != action.request_revision
         ):
             raise Refused("judgement-binding-refused")
-        validate_request_inputs(action.intent, action.origin, action.resolved, action.config)
-        if (
-            len(action.prior_denials) > 64
-            or any(not digest_syntax(item) for item in action.prior_denials)
-            or action.envelope is None
-            or denial_key(action.envelope, action.config) in action.prior_denials
-        ):
+        if action.envelope is None or action.denial_identity in action.prior_denials:
             raise Refused("judgement-denied-intent")
         if (
             action.approval_id is None
-            or action.envelope
-            != assemble_envelope(
-                action.intent,
-                action.origin,
-                action.resolved,
-                action.approval_id,
-                action.request_revision,
-                action.config,
-            )
             or (
                 action.policy_revision is not None
                 and action.policy_revision != selected.policy_revision.sha256
@@ -192,7 +243,6 @@ def _bind(
             if (
                 selected.approval_id != action.approval_id
                 or selected.native_context_digest != action.context_digest
-                or selected.origin.session_ref != action.origin.session_key
             ):
                 raise Refused("judgement-binding-refused")
             if isinstance(selected.enrichment, c.Used):
@@ -206,11 +256,7 @@ def _bind(
                     raise Refused("enrichment-repin-required")
             elif action.enrichment_candidate is not None:
                 raise Refused("enrichment-repin-required")
-        elif (
-            selected.subject.task_id != action.origin.bead
-            or selected.subject.session_ref != action.origin.session_key
-        ):
-            raise Refused("judgement-binding-refused")
+        floor = None
         if isinstance(selected, c.PermissionRequest):
             if (
                 type(policy) is not PolicyFacts
@@ -218,7 +264,7 @@ def _bind(
                 or type(policy.widens_permissions) is not bool
             ):
                 raise Refused("judgement-policy-refused")
-            evaluate_policy(
+            floor = evaluate_policy(
                 action.envelope,
                 action.config,
                 policy,
@@ -251,7 +297,7 @@ def _bind(
             enrichment_base_context=action.enrichment_base_context,
             enrichment_candidate=action.enrichment_candidate,
         )
-        return digest(
+        binding = digest(
             dict(
                 domain="plan5-p2-v1",
                 state=state,
@@ -264,6 +310,9 @@ def _bind(
                 restrict={} if restrict is None else restrict,
             )
         )
+        return binding, floor
+    except Refused:
+        raise
     except (Fault, msgspec.ValidationError, TypeError, ValueError, AttributeError, RecursionError) as exc:
         raise Refused("judgement-binding-refused") from exc
 
@@ -288,7 +337,7 @@ async def assess(
     provider: Provider,
     *,
     clock: Callable[[], int] = _boottime,
-    boot_id: str = "fake-provider-unattested-boot",
+    boot_id: str = FAKE_BOOT_ID,
     policy: PolicyFacts | None = None,
     host_overrides: Mapping[str, str] | None = None,
     restrict: Mapping[str, list[str]] | None = None,
@@ -369,44 +418,35 @@ def current_projection(
     model: ModelSpec,
     *,
     policy: PolicyFacts | None = None,
-    boot_id: str = "fake-provider-unattested-boot",
+    boot_id: str = FAKE_BOOT_ID,
     host_overrides: Mapping[str, str] | None = None,
     restrict: Mapping[str, list[str]] | None = None,
 ) -> c.Projection:
-    """Fresh deterministic hard denial/floor precedes every receipt failure."""
+    """Bind the current subject/policy before deriving any durable denial proposal."""
     permission = _permission_input(request)
     hold = c.EscalateProposal if permission else c.HoldUnavailable
     try:
         if permission:
-            # Denial is determined from the P0 action before any judgement input or
-            # receipt is interpreted. An absent cached envelope is reconstructed
-            # through the same strict P0 codec, never treated as permission.
-            if type(action) is not Request:
+            selected = _prepared(request, privacy)
+            if not isinstance(selected, c.PermissionRequest):
                 return c.EscalateProposal("invalid_host")
-            if action.phase == "denied":
+            action = _identity(action, selected)
+            canonical_denial = action.denial_identity
+            if action.phase == "denied" or canonical_denial in action.prior_denials:
                 return c.DenyProposal()
-            if action.approval_id is None:
-                return c.EscalateProposal("invalid_host")
-            envelope = assemble_envelope(
-                action.intent,
-                action.origin,
-                action.resolved,
-                action.approval_id,
-                action.request_revision,
-                action.config,
-            )
             if (
-                type(action.prior_denials) is not tuple
-                or len(action.prior_denials) > 64
-                or any(not digest_syntax(item) for item in action.prior_denials)
+                type(policy) is not PolicyFacts
+                or policy.revision != selected.policy_revision.sha256
+                or (action.policy_revision is not None and action.policy_revision != policy.revision)
             ):
-                return c.EscalateProposal("invalid_host")
-            if denial_key(envelope, action.config) in action.prior_denials:
-                return c.DenyProposal()
-            if type(policy) is not PolicyFacts:
-                return c.EscalateProposal("invalid_host")
+                return c.EscalateProposal("stale_digest")
+            precheck = disposition("permission", c.Ready(selected), None, privacy)
+            if precheck == c.EscalateProposal("deadline"):
+                return precheck
+            if action.approval_id is None or action.envelope is None:
+                return c.EscalateProposal("input_profile")
             floor = evaluate_policy(
-                envelope,
+                action.envelope,
                 action.config,
                 policy,
                 {} if host_overrides is None else host_overrides,
@@ -414,21 +454,6 @@ def current_projection(
             )
             if floor.tier == "hard_deny":
                 return c.DenyProposal()
-            # The hard floor above is about this P0 action, not proof that a
-            # permission DTO describes it. Bind the subject and current policy
-            # before projecting any other outcome; the semantic bridge stays off.
-            selected = _prepared(request, privacy)
-            if (
-                not isinstance(selected, c.PermissionRequest)
-                or action.phase not in {"ask-pinned", "sufficient", "filed"}
-                or selected.subject.task_id != action.origin.bead
-                or selected.subject.session_ref != action.origin.session_key
-                or selected.workstream_id != action.origin.workstream
-                or selected.revision != action.request_revision
-                or policy.revision != selected.policy_revision.sha256
-                or (action.policy_revision is not None and action.policy_revision != policy.revision)
-            ):
-                return c.EscalateProposal("stale_digest")
             return c.EscalateProposal("input_profile")
         selected = _prepared(request, privacy)
         binding = _bind(
@@ -441,7 +466,7 @@ def current_projection(
             restrict=restrict,
         )
         return _sufficiency_projection(receipt, selected, privacy, model, binding, boot_id)
-    except (Refused, Fault, TypeError, ValueError, AttributeError, RecursionError):
+    except (Refused, Fault, msgspec.ValidationError, TypeError, ValueError, AttributeError, RecursionError):
         return hold("stale_digest")
 
 
@@ -451,7 +476,7 @@ def _sufficiency_projection(
     privacy: c.PrivacyContext,
     model: ModelSpec,
     binding: str,
-    boot_id: str = "fake-provider-unattested-boot",
+    boot_id: str = FAKE_BOOT_ID,
 ) -> c.Projection:
     """Reuse a binding computed by the caller; this grants no authority or freshness."""
     hold = c.HoldUnavailable
@@ -497,7 +522,7 @@ def _sufficiency_projection(
             return hold("stale_digest")
         checked = decode_result(reply.output, selected, privacy)
         return disposition("sufficiency", c.Ready(selected), c.Completed(checked), privacy)
-    except (Refused, Fault, TypeError, ValueError, AttributeError, RecursionError):
+    except (Refused, Fault, msgspec.ValidationError, TypeError, ValueError, AttributeError, RecursionError):
         return hold("stale_digest")
 
 
@@ -568,7 +593,7 @@ def record_groom(
     privacy: c.PrivacyContext,
     model: ModelSpec,
     *,
-    boot_id: str = "fake-provider-unattested-boot",
+    boot_id: str = FAKE_BOOT_ID,
 ) -> GroomState:
     """Record advice, reconciling already consumed P1 revisions without another groom.
 
@@ -576,7 +601,7 @@ def record_groom(
     elsewhere. A later negative assessment at revision two has a fixed concern exit.
     New callers use groom_request to require current negative advice before advancing.
     """
-    if not _valid_groom_state(state, action):
+    if type(action) is not Request or not _valid_groom_state(state, action):
         raise Refused("groom-origin-refused")
     binding, proposal = _groom_projection(receipt, action, request, privacy, model, boot_id)
     if not isinstance(proposal, c.NeedsGrooming):
@@ -604,14 +629,14 @@ def groom_request(
     privacy: c.PrivacyContext,
     model: ModelSpec,
     *,
-    boot_id: str = "fake-provider-unattested-boot",
+    boot_id: str = FAKE_BOOT_ID,
     intent: Intent,
     resolved: Resolved,
     source: str,
     origin: Origin,
 ) -> Request:
     """No session effect: only current recorded negative advice can spend a P1 groom."""
-    if not _valid_groom_state(state, action):
+    if type(action) is not Request or not _valid_groom_state(state, action):
         raise Refused("groom-advice-required")
     binding, proposal = _groom_projection(receipt, action, request, privacy, model, boot_id)
     if (
@@ -642,7 +667,7 @@ def repin_enrichment(
     *,
     whole_ask: bytes,
     context_digest: str,
-    boot_id: str = "fake-provider-unattested-boot",
+    boot_id: str = FAKE_BOOT_ID,
 ) -> Request:
     """Rebuild opaque host-observed ask from a current validated enrichment proposal.
 
@@ -675,10 +700,10 @@ def concern(
     model: ModelSpec,
     reason: ConcernCode,
     *,
-    boot_id: str = "fake-provider-unattested-boot",
+    boot_id: str = FAKE_BOOT_ID,
 ) -> Concern:
     """After two P1 revisions and current negative advice, expose only fixed labels."""
-    if not _valid_groom_state(state, action) or not state.receipts:
+    if type(action) is not Request or not _valid_groom_state(state, action) or not state.receipts:
         raise Refused("concern-refused")
     binding, proposal = _groom_projection(state.receipts[-1], action, request, privacy, model, boot_id)
     if (
@@ -716,8 +741,19 @@ def _concern_reason(gaps: tuple[c.Gap, ...]) -> ConcernCode:
     """Fixed deterministic labels; never copy model prose to the public concern."""
     if any(gap.code == "native_lint" for gap in gaps):
         return "lint-failed"
-    if any(gap.field in {"/context", "/candidate/title", "/candidate/description"} for gap in gaps):
+    if any(
+        gap.field
+        in {
+            "/context",
+            "/candidate/title",
+            "/candidate/description",
+            "/candidate/ask/why",
+            "/candidate/ask/excludes",
+            "/candidate/ask/risks",
+        }
+        for gap in gaps
+    ):
         return "missing-context"
-    if any(gap.field.startswith("/candidate/ask/target") for gap in gaps):
+    if any(gap.field in {"/candidate/ask/refs"} for gap in gaps):
         return "ambiguous-target"
     return "unsupported-effect"

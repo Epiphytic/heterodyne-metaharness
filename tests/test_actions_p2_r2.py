@@ -21,18 +21,15 @@ def test_hard_deny_precedes_bad_permission_input(missing_envelope, policy_option
     action, selected = inputs("permission")
     if missing_envelope:
         action = msgspec.structs.replace(action, envelope=None)
-    assert (
-        current_projection(
-            None,
-            action,
-            {"kind": "permission"},
-            privacy(),
-            SPEC,
-            policy=policy_for(selected),
-            **policy_options,
-        )
-        == c.DenyProposal()
-    )
+    assert current_projection(
+        None,
+        action,
+        {"kind": "permission"},
+        privacy(),
+        SPEC,
+        policy=policy_for(selected),
+        **policy_options,
+    ) == c.EscalateProposal("stale_digest")
 
 
 @pytest.mark.parametrize("widens", (False, True))

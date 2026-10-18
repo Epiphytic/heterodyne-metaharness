@@ -18,7 +18,7 @@ from heterodyne.actions.codec import (
     validate_request_inputs,
 )
 from heterodyne.actions.contracts import ActionConfig, Clock, Envelope, Intent, Origin, Record, Resolved
-from heterodyne.actions.policy import denial_key, request_denial_key
+from heterodyne.actions.policy import DENIAL_DOMAIN, denial_key, request_denial_key
 
 RequestPhase = Literal[
     "allocation-intent",
@@ -56,6 +56,7 @@ class Request(Record, frozen=True):
     resolved: Resolved
     config: ActionConfig
     requested_source: str
+    denial_domain: str | None = None
     denial_identity: str | None = None
     prior_denials: tuple[str, ...] = ()
     phase: RequestPhase = "allocation-intent"
@@ -116,6 +117,7 @@ def new_request(
         resolved,
         config,
         source,
+        denial_domain=DENIAL_DOMAIN,
         denial_identity=request_denial_key(intent, origin, resolved, config),
         prior_denials=prior_denials,
     )

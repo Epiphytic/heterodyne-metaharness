@@ -1,13 +1,15 @@
 """Second HIGH regressions; synthetic facts and private disposable SQLite only."""
 
+from typing import Literal, cast
+
 import msgspec
 import pytest
 import test_actions_p1 as f
 import test_actions_p1_r1 as r1
+from actions_journal_fixture import FixtureJournal
 
 from heterodyne.actions import decisions as dec
 from heterodyne.actions import dispatch as dis
-from heterodyne.actions.journal import FixtureJournal
 from heterodyne.actions.requests import Refused, changed, issue_allocation, settle_request
 from heterodyne.actions.transitions import TransitionObservation
 
@@ -28,9 +30,7 @@ def persist_request(db, sequence=1, until="filed"):
         lambda v: f.observe_allocation(
             v, (("btq-ab123" if sequence == 1 else "btq-cd456"),), lookup_ok=True, elapsed_seconds=1
         ),
-        observation=TransitionObservation(
-            allocation_elapsed_seconds=1, now=f.Clock("allocation", 1 + (1) * 10**9, 1 + (1) * 10**9)
-        ),
+        observation=TransitionObservation(now=f.Clock("allocation", 1 + (1) * 10**9, 1 + (1) * 10**9)),
     )
     for op in f.STAGES:
 
@@ -134,14 +134,15 @@ def test_groom_failure_authenticated_deny_is_durable(tmp_path):
         value = db.transition(
             "request", key, value.version, lambda v: f.groom(v, v.intent, v.resolved, f.SHA, origin=v.origin)
         )
-        for op in ("park", "land"):
+        stages: tuple[Literal["park", "land"], ...] = ("park", "land")
+        for op in stages:
             value = db.transition(
                 "request",
                 key,
                 value.version,
                 lambda v, op=op: f.observe_stage(
                     v,
-                    op,
+                    cast(Literal["blocker", "park", "land"], op),
                     key=v.key,
                     approval_id=f.required(v.approval_id),
                     origin=v.origin,
@@ -177,13 +178,18 @@ def test_groom_failure_authenticated_deny_is_durable(tmp_path):
             lambda v: dec.read_decision(v, v.event, read_ok=True),
             observation=f.decision_observation(decision),
         )
-        for op in ("close", "pins", "finish"):
+        operations: tuple[Literal["close", "pins", "finish"], ...] = ("close", "pins", "finish")
+        for op in operations:
             decision = db.transition(
                 "decision",
                 decision.approval_id,
                 decision.version,
                 lambda v, op=op: dec.finalize_decision(
-                    v, op, readback=v.event, current_digest=f.DIGEST, native_readback=True
+                    v,
+                    cast(Literal["close", "pins", "finish"], op),
+                    readback=v.event,
+                    current_digest=f.DIGEST,
+                    native_readback=True,
                 ),
                 observation=f.decision_observation(decision),
             )
@@ -558,7 +564,6 @@ def test_declared_cleanup_cannot_forge_abandonment_or_alter_request_fields(tmp_p
             value.version,
             lambda v, elapsed=elapsed: f.observe_allocation(v, (), lookup_ok=False, elapsed_seconds=elapsed),
             observation=TransitionObservation(
-                allocation_elapsed_seconds=elapsed,
                 now=f.Clock(
                     "allocation",
                     1 + ({1: 1, 5: 6, 30: 36}[elapsed]) * 10**9,

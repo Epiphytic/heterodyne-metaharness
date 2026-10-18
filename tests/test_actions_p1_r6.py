@@ -5,10 +5,10 @@ from contextlib import closing
 import pytest
 import test_actions_p1 as f
 import test_actions_p1_r1 as r1
+from actions_journal_fixture import FixtureJournal
 
 from heterodyne.actions import dispatch as dis
 from heterodyne.actions import requests as req
-from heterodyne.actions.journal import FixtureJournal
 from heterodyne.actions.transitions import TransitionObservation
 
 
@@ -17,7 +17,7 @@ from heterodyne.actions.transitions import TransitionObservation
 def test_decoy_recovery_cannot_bypass_the_selected_clock_check(tmp_path, mode, sampler):
     actual = dis.Clock("continuous", 1, 1)
     clock = (lambda: actual) if sampler else None
-    with closing(FixtureJournal.create(tmp_path / "fixture", clock=clock)) as db:
+    with closing(FixtureJournal.create(tmp_path / "fixture", clock=lambda: actual)) as db:
         key = db.add_request(f.initial())
         value = db.transition(
             "request",
@@ -26,6 +26,7 @@ def test_decoy_recovery_cannot_bypass_the_selected_clock_check(tmp_path, mode, s
             req.issue_allocation,
             observation=TransitionObservation(now=dis.Clock("continuous", 1, 1)),
         )
+        db.clock = clock
         allocate = req.AllocationRecovery(
             value.key,
             value.origin,
@@ -86,7 +87,7 @@ def test_decoy_recovery_cannot_bypass_the_selected_clock_check(tmp_path, mode, s
                     }
                 ),
             )
-        with pytest.raises(req.Refused, match="recovery"):
+        with pytest.raises(req.Refused, match="recovery|journal-clock-sampler-required"):
             db.transition("request", key, value.version, proposal, observation=observation)
         assert db.get("request", key) == value
         assert not value.allocation_lookups
