@@ -24,7 +24,7 @@ import stat
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from types import UnionType
-from typing import Any, Literal, NamedTuple, overload
+from typing import Any, Literal, NamedTuple, cast, overload
 
 import msgspec
 
@@ -68,6 +68,8 @@ class CtlResponseTimeout(CtlUnavailable):
 class Peer(NamedTuple):
     """The connecting process, as far as the kernel says (audit only; R16)."""
     pid: int | None
+    uid: int | None = None
+    gid: int | None = None
 
 
 Handler = Callable[[CtlRequest], Awaitable[CtlReply]]
@@ -177,7 +179,11 @@ class JsonSocketServer[Req, Rep: msgspec.Struct]:
                 line = await asyncio.wait_for(reader.readline(), READ_SECONDS)
                 if len(line.rstrip(b"\n")) > self.max_request:      # the delimiter does not count
                     raise ValueError("request too long")
-                req: Req = msgspec.json.decode(line, type=self.request_type)
+                req = msgspec.json.decode(line, type=self.request_type)
+                if self.kind == "ask":
+                    from heterodyne.admind import fulfillment
+                    if isinstance(cast(object, req), fulfillment.Request):
+                        fulfillment.strict_json(line, limit=self.max_request)
             except (TimeoutError, ValueError, msgspec.DecodeError):
                 reply = self.refused("malformed request")
             else:
@@ -188,7 +194,11 @@ class JsonSocketServer[Req, Rep: msgspec.Struct]:
                     fields = self.describe(req)
                     self.audit.write(self.kind, **fields)     # redacted centrally (B16)
                     try:
-                        peer = Peer(platform.peer_pid(writer.get_extra_info("socket")))
+                        sock = writer.get_extra_info("socket")
+                        try:
+                            peer = Peer(*platform.peer_credentials_checked(sock))
+                        except OSError:
+                            peer = Peer(platform.peer_pid(sock))
                         reply = await self.handler(req, peer)
                     except Exception as exc:  # noqa: BLE001 - fixed wording; the type goes to the audit
                         self.audit.write(self.kind, action="handler-failed", op=fields.get("op"),

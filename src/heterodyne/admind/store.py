@@ -34,6 +34,12 @@ from heterodyne.admind.approvals import Attempt
 from heterodyne.admind.redact import redact, redact_continuation
 from heterodyne.fsutil import private_dir
 
+CAPACITY_ACTIVE_SQL = (
+    "(status IN ('open','answered','deciding','uncertain') AND NOT EXISTS "
+    "(SELECT 1 FROM ask_fulfillments f WHERE f.ask_id=asks.ask_id AND f.valid=1)) OR EXISTS "
+    "(SELECT 1 FROM ask_fulfillments f WHERE f.ask_id=asks.ask_id AND f.valid=0)"
+)
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS inbound (
@@ -367,6 +373,14 @@ class Store:
             self.db.close()
             raise
 
+        from heterodyne.admind.fulfillment import Lifecycle
+        self.fulfillment = Lifecycle(self)
+        try:
+            self.fulfillment.migrate()
+        except BaseException:
+            self.db.close()
+            raise
+
     def migrate_guard(self) -> None:
         from heterodyne.admind.guard_state import migrate
         with self.transaction():
@@ -410,6 +424,7 @@ class Store:
         raw = db.execute(f"SELECT {_ASK}, attempt FROM asks WHERE ask_id = ?",  # noqa: S608
                          (ask_id,)).fetchone()
         return _ask(raw[:-1]), raw[-1]
+
 
     @_locked
     def close(self) -> None:
@@ -825,6 +840,38 @@ class Store:
         return [_ask(r) for r in rows]
 
     @_locked
+    def capacity_asks(self) -> list[AskRow]:
+        """Separate capacity projection; raw status selectors retain their original meaning."""
+        rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE {CAPACITY_ACTIVE_SQL} "  # noqa: S608
+                               "ORDER BY created_at,rowid").fetchall()
+        return [_ask(r) for r in rows]
+
+    @_locked
+    def fulfilled_asks(self, limit: int = 20) -> list[AskRow]:
+        rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE EXISTS "  # noqa: S608
+            "(SELECT 1 FROM ask_fulfillments f WHERE f.ask_id=asks.ask_id AND f.valid=1) "
+            "ORDER BY created_at DESC,rowid DESC LIMIT ?", (limit,)).fetchall()
+        return [_ask(r) for r in rows]
+
+    @_locked
+    def remindable_asks(self) -> list[AskRow]:
+        rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE status='open' AND NOT EXISTS "  # noqa: S608
+            "(SELECT 1 FROM ask_fulfillments f WHERE f.ask_id=asks.ask_id) "
+            "ORDER BY created_at,rowid").fetchall()
+        return [_ask(r) for r in rows]
+
+    @_locked
+    def capacity_count(self) -> int:
+        return int(self.db.execute(f"SELECT COUNT(*) FROM asks WHERE {CAPACITY_ACTIVE_SQL}"  # noqa: S608
+                                   ).fetchone()[0])
+
+    @_locked
+    def inactive_asks(self, limit: int = 20) -> list[AskRow]:
+        rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE NOT ({CAPACITY_ACTIVE_SQL}) "  # noqa: S608
+                               "ORDER BY created_at DESC,rowid DESC LIMIT ?", (limit,)).fetchall()
+        return [_ask(r) for r in rows]
+
+    @_locked
     def recent_asks(self, limit: int) -> list[AskRow]:
         """The `limit` newest asks that are no longer active (R24)."""
         marks = ", ".join("?" * len(ASK_ACTIVE))
@@ -840,16 +887,26 @@ class Store:
     @_locked
     def set_ask(self, ask_id: str, status: str, *, outcome: str | None = None,
                 decided_by: str | None = None) -> None:
-        self.db.execute("UPDATE asks SET status = ?, outcome = ?, decided_by = ?, updated_at = ? "
-                        "WHERE ask_id = ?", (status, outcome, decided_by, now(), ask_id))
+        with self.transaction():
+            if self.fulfillment.protected(ask_id):
+                raise ValueError("already fulfilled; original answer retained")
+            self.db.execute("UPDATE asks SET status = ?, outcome = ?, decided_by = ?, updated_at = ? "
+                            "WHERE ask_id = ?", (status, outcome, decided_by, now(), ask_id))
+            self.fulfillment.retire_pending(ask_id, "status-changed")
 
     @_locked
     def add_answer(self, ask_id: str, kind: str, operator: str, message_id: str, text: str,
                    choice: str | None = None) -> None:
-        self.db.execute("INSERT INTO ask_answers(ask_id, seq, kind, operator, message_id, text, at, choice) "
-                        "VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM ask_answers WHERE ask_id = ?), "
-                        "?, ?, ?, ?, ?, ?)",
-                        (ask_id, ask_id, kind, operator, message_id, text, now(), choice))
+        with self.transaction():
+            if self.fulfillment.protected(ask_id):
+                raise ValueError("already fulfilled; original answer retained")
+            self.db.execute("INSERT INTO ask_answers(ask_id, seq, kind, operator, message_id, "
+                            "text, at, choice) "
+                            "VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM ask_answers "
+                            "WHERE ask_id = ?), "
+                            "?, ?, ?, ?, ?, ?)",
+                            (ask_id, ask_id, kind, operator, message_id, text, now(), choice))
+            self.fulfillment.retire_pending(ask_id, "stale-answers")
 
     @_locked
     def answers(self, ask_id: str) -> list[AnswerRow]:
@@ -993,6 +1050,8 @@ class Store:
         """In one transaction: the ask `open -> deciding` with `attempt` set, the attempt row, and the
         inbound message `executing`. False, changing nothing, if the ask is not `open`."""
         with self.transaction():
+            if self.fulfillment.protected(a.ask_id):
+                return False
             cur = self.db.execute("UPDATE asks SET status = 'deciding', attempt = ?, updated_at = ? "
                                   "WHERE ask_id = ? AND status = 'open'", (a.message_id, now(), a.ask_id))
             if cur.rowcount != 1:
@@ -1027,6 +1086,8 @@ class Store:
             r = self.db.execute("SELECT status, attempt FROM asks WHERE ask_id = ?", (ask_id,)).fetchone()
             if r is None or r[0] != expect_status or r[1] != message_id:
                 return False
+            if self.fulfillment.protected(ask_id):
+                raise ValueError("already fulfilled; original answer retained")
             self.db.execute("DELETE FROM ask_maintenance WHERE ask_id = ? AND message_id = ?",
                             (ask_id, message_id))
             self.db.execute("UPDATE ask_attempts SET settled = ?, exit_status = COALESCE(?, exit_status) "
@@ -1165,10 +1226,12 @@ class Store:
         return cur.rowcount
 
     @contextlib.contextmanager
-    def transaction(self) -> Generator[None]:
+    def transaction(self, *, read_only: bool = False) -> Generator[None]:
         """Run the block's store calls as one SQLite transaction: all of them commit, or (on any
         exception, a simulated crash included) none do. Re-entrant: a nested block joins the outer one.
-        The store lock is held throughout, so keep the block short and free of awaits."""
+        The store lock is held throughout, so keep the block short and free of awaits.
+        read_only uses a deferred snapshot without reserving the SQLite writer lock; its caller
+        must perform reads only. A nested block joins the already established snapshot."""
         with self.lock:
             if self._depth:
                 self._depth += 1
@@ -1177,7 +1240,7 @@ class Store:
                 finally:
                     self._depth -= 1
                 return
-            self.db.execute("BEGIN IMMEDIATE")
+            self.db.execute("BEGIN" if read_only else "BEGIN IMMEDIATE")
             self._depth = 1
             try:
                 yield

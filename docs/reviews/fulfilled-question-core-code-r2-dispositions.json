@@ -1,0 +1,97 @@
+{
+  "schema": "author-review-dispositions-v1",
+  "review_sha256": "c462efb29ce68a0d65232f475495020da34726fc63e377026cb0512b018261b6",
+  "actual_result": "REVISE",
+  "actual_round": 2,
+  "effort": "HIGH",
+  "reviewed_source": "af8deafb97a82df75cf30ac9cf12a52ebf047f63",
+  "approved_design": "e8b5db3fb3e506ff909540dfb298b2c873446448",
+  "findings": [
+    {
+      "number": 1,
+      "original": "1. `src/heterodyne/admind/fulfillment.py:567`: propose() builds the confirmation notice from the whole ask title and body plus raw consumed-answer text, then refuses if it exceeds 3,500 chars / 40 LF or if redaction would change it. The declaration cannot narrow any of that material, so many real asks can never use the operator route.\n\n   Failure scenario: A question whose body is about 3,200 characters, or mentions a configured login directory or token-shaped text that redact() rewrites, is answered and the work is completed. Every propose, with any short declaration, raises 'notice-redaction-or-bounds'. The refusal tells the controller to narrow its declaration, but the size and redaction come from immutable ask/answer bytes. With no machine receipt, the ask holds a MAX_OPEN slot until it is cancelled, which the design says not to substitute for fulfillment.\n\n",
+      "original_sha256": "2cbc9032622d2aacde831b79b5d54608d08b584a013391bb595f1f4f540f83fe",
+      "status": "retained-approved-limit",
+      "disposition": "Approved \u00a73 requires complete request and consumed-answer context and refusal if changed by redaction or over bounds. No authority to narrow immutable context; fix misleading diagnostic. Large or sensitive asks remain unavailable on the operator route; no fake fulfillment or cancellation.",
+      "regressions": "complete-context bound and redaction tests"
+    },
+    {
+      "number": 2,
+      "original": "2. `src/heterodyne/admind/fulfillment.py:591`: The intent notice quotes operator answer text (response_context) but is queued with owner=None, i.e. system ownership. Under the integrated guard model, operator-derived content must carry its requester owners so a revoked requester's material is suppressed.\n\n   Failure scenario: Operator B answers a question. A controller proposes, and the notice quoting B's answer text is queued with ownership_kind='system'. B is then revoked before delivery. prepare_delivery suppresses only request-owned rows whose owners are no longer operators, so B's quoted answer is still sent to the group. Reply and !details paths would fence the same content with request_owners.\n\n",
+      "original_sha256": "6ab35bd88197ee96e00aaf3e14727fe5d3c4ccf8fb608791a2f3873ebd5f8e2f",
+      "status": "fixed",
+      "disposition": "Persist authenticated durable consumed-answer owners on the quoted proposal notice. Missing provenance quarantines as unknown; completion notices contain no quoted input and remain system owned.",
+      "regressions": "durable-owner, unknown-owner and actual daemon revocation regressions"
+    },
+    {
+      "number": 3,
+      "original": "3. `src/heterodyne/admind/fulfillment.py:676`: confirm() calls commit(), and commit() calls retire_pending(ask_id,'fulfilled') while the intent being confirmed is still 'pending'. The confirmed intent is therefore first retired, with an audit tombstone saying it was retired by fulfillment, and only then set to 'consumed', keeping reason='fulfilled'.\n\n   Failure scenario: The operator replies !fulfill to a valid notice. ask_fulfillment_audit gets both (ask, intent_digest, 'applied') and (ask, intent_digest, 'fulfilled'), and the intent row ends status='consumed', reason='fulfilled'. An auditor cannot tell a consumed confirmation from an intent retired because something else fulfilled the ask. This contradicts the disposition 'Operator confirmation explicitly consumes its own intent atomically'.\n\n",
+      "original_sha256": "e564a23a4a3cc474a0e6312aa7cba1cf332c9848429185e4a3ec669f5ff21971",
+      "status": "fixed",
+      "disposition": "Consume the confirmed intent and clear its retirement reason in the same transaction before committing fulfillment, rolling back on failure.",
+      "regressions": "test_consumption_has_no_false_retirement_tombstone"
+    },
+    {
+      "number": 4,
+      "original": "4. `src/heterodyne/admind/fulfillment.py:371`: view(), the read-only 'get', runs inside store.transaction(), which issues BEGIN IMMEDIATE. That takes SQLite's write lock for a pure read, contradicting disposition #8 ('Pure reads do not open a writer transaction'), and it blocks the event loop on busy waits.\n\n   Failure scenario: A CLI or other process holds a write transaction. A `fulfillment get`, or reconcile's per-entry pre-apply Get, waits up to the 5s busy timeout on the event loop, stalling the outbox and inbound worker. It then returns 'unavailable', so a reconcile plan stops at that entry even though a plain read would have succeeded.\n\n",
+      "original_sha256": "3f93342cc4e2614d05e4bb6681779bf8da03ae340d9d41bcdd556c72404ec699",
+      "status": "fixed",
+      "disposition": "Use a deferred read snapshot while retaining the Store lock; mutation transactions remain immediate.",
+      "regressions": "test_read_only_view_succeeds_during_foreign_writer"
+    },
+    {
+      "number": 5,
+      "original": "5. `src/heterodyne/admind/daemon.py:2420`: In the !fulfill handler, the fulfillment.Invalid branch calls finish() with no sqlite3.Error guard. The catch-all `except Exception` labels every non-Invalid error, including programming errors like KeyError or TypeError, as 'store unavailable'.\n\n   Failure scenario: confirm() raises Invalid('stale-intent'), then the database becomes busy or locked before the refusal reply's finish(). OperationalError escapes handle() to the worker's generic handler, so the operator gets no reply and only 'handler failed' is audited. The path the r1 #3 fix was meant to make deterministic still fails silently. Separately, a code bug inside confirm is reported to the operator as a store outage.\n\n",
+      "original_sha256": "e3ac06fe9debbb9a6a7b39b5b7a87084161979458f41b0f2ccef46c844e108d8",
+      "status": "fixed-with-outage-limit",
+      "disposition": "Catch SQLite faults from confirmation and refusal reply writes; distinguish programming exceptions with fixed internal-error diagnostics. Persistent DB failure leaves inbound recoverable and cannot guarantee a reply.",
+      "regressions": "test_fulfill_refusal_store_fault_is_recoverable_and_bug_not_called_store_outage"
+    },
+    {
+      "number": 6,
+      "original": "6. `src/heterodyne/admind/ctl.py:182`: strict_json (rejects duplicate keys and NaN, and does a second full json.loads) now runs on every ask.sock request, including legacy post/get/list/cancel/binding. That changes the old protocol's input acceptance, although the design requires explicit client opt-in and unchanged legacy behavior.\n\n   Failure scenario: An existing client sends an AskPost whose JSON repeats a key, which the msgspec decoder previously accepted. After this change it gets 'malformed request' even with fulfillment ENABLED=False. Every legacy request of up to 256KiB is also parsed twice on the event loop.\n\n",
+      "original_sha256": "0a268f61de97d539bc7e33ddb478dd25512aa79089e28e5a4d665c9e75d4835b",
+      "status": "fixed",
+      "disposition": "Apply strict duplicate/nonfinite JSON checks only to the opted-in fulfillment request union, preserving legacy decoder acceptance.",
+      "regressions": "test_legacy_socket_duplicate_keys_unchanged_but_new_union_strict"
+    },
+    {
+      "number": 7,
+      "original": "7. `src/heterodyne/admind/store.py:371`: Lifecycle.migrate() runs inside every Store() construction, including every CLI _load. It takes BEGIN IMMEDIATE and re-hashes every retained fulfillment's full answer set (refresh) on each open. Its Invalid (ValueError) failures are not caught by cli._load, which only catches OSError and sqlite3.Error.\n\n   Failure scenario: With many retained fulfillments (never pruned), every admind CLI invocation and daemon start rewrites the valid flags and hashes up to 64KB of answers per ask under the write lock, while the daemon is serving. An 'incompatible-schema' or 'missing-store-identity' failure shows the operator a raw Python traceback instead of the fixed StateDirError message.\n\n",
+      "original_sha256": "b04e07469ba1c1f9ca4aba80a6165754df3c8638aff45befdb72fc1e81371ba3",
+      "status": "fixed",
+      "disposition": "Routine current-schema open validates without rebuilding retained history; explicit daemon recovery rebuilds before workers. CLI converts schema Invalid into fixed StateDirError.",
+      "regressions": "schema fast-path, explicit rebuild and CLI failure regressions"
+    },
+    {
+      "number": 8,
+      "original": "8. `src/heterodyne/admind/fulfillment_cli.py:118`: In reconcile --apply, a fresh successful application (result 'applied') is reported as outcome 'already-applied', the same label as a receipt that was committed earlier.\n\n   Failure scenario: Reconciling 5 eligible receipts in apply mode reports all 5 as 'already-applied'. The controller cannot tell which entries this run actually committed and which were committed before an earlier lost response, which is exactly the distinction the design's response-loss recovery relies on.\n\n",
+      "original_sha256": "8511ff8b3ca8b1653940e885a61886fe66d5e0bbc71446e68841892367d02709",
+      "status": "fixed",
+      "disposition": "Preserve the actual fresh applied versus existing already-applied response in reconcile.",
+      "regressions": "test_reconcile_reports_new_commit_then_existing_receipt"
+    },
+    {
+      "number": 9,
+      "original": "9. `src/heterodyne/admind/store.py:836`: The fulfillment-aware capacity predicate is written out three times: in capacity_asks, in capacity_count, and as a hand-written complement in inactive_asks. One shared SQL fragment, or a single view, would do.\n\n   Failure scenario: A later change to what counts as capacity-active (for example a new conflict rule) edited in one copy but not the others makes the MAX_OPEN cap count, the list's active section and its inactive section disagree. An ask could then be listed twice or omitted, or count toward the cap while showing as inactive.\n\n",
+      "original_sha256": "c8c6c5ada1052ae8453f4d92f7536a3958387742c1714bec27af38b062e98c16",
+      "status": "fixed",
+      "disposition": "Share one capacity-active SQL predicate and use its exact complement for inactive projection. Existing joined count and indexed queries retained.",
+      "regressions": "affected membership/capacity tests"
+    },
+    {
+      "number": 10,
+      "original": "10. `src/heterodyne/admind/fulfillment.py:194`: check_id re-implements the ask-ID grammar with a literal alphabet and length 4, instead of reusing asks.ID_ALPHABET / asks.ID_LENGTH (or asks.normalise_id with an exact-case comparison).\n\n    Failure scenario: If the ask-ID alphabet or length in asks.py changes, fulfillment keeps validating against the stale copy. Every apply, propose, dispose or get for new-format asks then fails with 'identity', while ordinary ask commands accept them.\n",
+      "original_sha256": "8fb60ca30dc2683afa6efa923d4025d69aa8c76ec4da14d8a572678b628830a5",
+      "status": "fixed",
+      "disposition": "Use the existing asks ID_ALPHABET and ID_LENGTH with exact-case validation.",
+      "regressions": "test_id_validation_uses_shared_grammar"
+    }
+  ],
+  "limits": [
+    "Author repairs await actual controller code review; no inferred pass.",
+    "ENABLED=False unchanged; no live/native/transport/queue/deployment effects.",
+    "Complete-context refusal remains an approved availability limit.",
+    "Quality delta exit 2, 27 gating findings, UNWAIVED."
+  ]
+}

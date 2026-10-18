@@ -17,7 +17,18 @@ import msgspec
 
 from heterodyne import config as hconfig
 from heterodyne import units
-from heterodyne.admind import approvals, asks, binding, ctl, initialised, links, refs, unit
+from heterodyne.admind import (
+    approvals,
+    asks,
+    binding,
+    ctl,
+    fulfillment,
+    fulfillment_cli,
+    initialised,
+    links,
+    refs,
+    unit,
+)
 from heterodyne.admind.agent import TMUX_SOCKET, AdminAgent, tmux_launcher
 from heterodyne.admind.audit import Audit
 from heterodyne.admind.commands import CommandRunner
@@ -62,7 +73,7 @@ def _load() -> tuple[AdmindSettings, Store, Audit]:
     s = _resolve()
     try:
         return s, Store(s.state_dir / "admind.db"), Audit(s.state_dir / "audit.jsonl")
-    except (OSError, sqlite3.Error) as exc:  # the path may hold an npub; name only the kind of failure
+    except (OSError, sqlite3.Error, fulfillment.Invalid) as exc:  # no private path in errors
         raise StateDirError(
             f"admind: cannot prepare the admind state directory ({type(exc).__name__})") from None
 
@@ -247,6 +258,8 @@ def notice_command(s: AdmindSettings, args: argparse.Namespace) -> int:
 def ask_command(s: AdmindSettings, args: argparse.Namespace) -> int:
     """`admind ask post|get|wait|list|cancel`. Exit 0 on success, 1 when refused or failed (the reason on
     stderr), 69 when no daemon answers, 3 when `wait` times out."""
+    if args.ask_command == "fulfillment":
+        return fulfillment_cli.command(s, args)
     if args.ask_command == "binding":
         return ask_binding_command(s, args.ask_id)
     req: asks.AskRequest
@@ -514,6 +527,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _ask_parser(ask: argparse.ArgumentParser) -> None:
     sub = ask.add_subparsers(dest="ask_command", required=True, parser_class=_QuietParser)
+    fulfillment_cli.parser(sub.add_parser(
+        "fulfillment", help="opt-in lifecycle; old get retains answered status"))
     post = sub.add_parser("post", help="post an ask; prints `ask <id> posted`")
     post.add_argument("--kind", required=True, choices=["question", "merge", "approval"])
     post.add_argument("--title", default="")

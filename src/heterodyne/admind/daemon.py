@@ -18,6 +18,7 @@ import hmac
 import json
 import os
 import re
+import sqlite3
 import threading
 import time
 import uuid
@@ -38,6 +39,7 @@ from heterodyne.admind import (
     chunk,
     commands,
     ctl,
+    fulfillment,
     guard,
     guard_state,
     membership,
@@ -386,6 +388,8 @@ class Admind:
         self.acked = False          # the current subscription was acknowledged; check_group may then observe
         self.sub_gen = 0            # bumped at the start and end of every subscription attempt
         self.wake = asyncio.Event()
+        self.store.fulfillment.post = lambda key, text, target, thread, owners: self.post(
+            key, text, target, thread_key=thread, owner=owners)
         self.send_lock = asyncio.Lock()     # held across each send; a membership transition drains it (B7)
         self.count_lock = asyncio.Lock()        # never acquire transition/send while held
         self.check_requested = False
@@ -410,7 +414,8 @@ class Admind:
         self._sleep: Callable[[float], Awaitable[None]] = asyncio.sleep     # replaced in tests
         self.posts_in_flight = 0                # ask posts on ask.sock being handled (R15)
         self.ask_post_lock = asyncio.Lock()     # posts run one at a time (R22)
-        self.ask_server: ctl.JsonSocketServer[asks.AskRequest, asks.AskReply] | None = None
+        self.ask_server: ctl.JsonSocketServer[
+            asks.AskRequest | fulfillment.Request, asks.AskReply | fulfillment.Reply] | None = None
         self.approve_bead = None if settings.approve_bead is None else ApproveBead(settings.approve_bead)
 
     # --- state helpers -------------------------------------------------------------------------
@@ -614,6 +619,7 @@ class Admind:
     # --- lifecycle -----------------------------------------------------------------------------
     def recover(self) -> None:
         """Settle what a previous run left half done (D6). Idempotent."""
+        self.store.fulfillment.rebuild()  # roll-forward index before serving any socket or worker
         # A turn in flight when admind stopped can't be tied to its Stop any more (it may have been
         # lost, or arrive later). Close it out; a late Stop then has no anchor and posts top-level.
         self.abandon_in_flight("admind restarted during this turn; a late reply may appear unthreaded")
@@ -671,9 +677,14 @@ class Admind:
             control = ctl.CtlServer(self.s.state_dir / ctl.CTL_SOCKET, self.on_ctl, self.audit)
             await control.start()
             self.ask_server = ctl.JsonSocketServer(
-                self.s.state_dir / asks.ASK_SOCKET, self.on_ask, self.audit, kind="ask",
-                max_request=asks.MAX_REQUEST, max_reply=asks.MAX_REPLY, request_type=asks.AskRequest,
-                check=asks.check, refused=asks.refused, failed=asks.failed, describe=asks.describe)
+                self.s.state_dir / asks.ASK_SOCKET, self.on_ask_wire, self.audit, kind="ask",
+                max_request=asks.MAX_REQUEST, max_reply=asks.MAX_REPLY,
+                request_type=asks.AskRequest | fulfillment.Request,
+                check=lambda req: (fulfillment.check(req) if isinstance(req,
+                    fulfillment.Request) else asks.check(req)),
+                refused=asks.refused, failed=asks.failed,
+                describe=lambda req: ({"op": type(req).__name__} if isinstance(req,
+                    fulfillment.Request) else asks.describe(req)))
             await self.ask_server.start()
             await self.start_agent(startup=True)
             async with asyncio.TaskGroup() as tg:
@@ -713,6 +724,40 @@ class Admind:
         return ctl.CtlReply(result, redact(message))
 
     # --- asks (relay spec) ----------------------------------------------------------------------
+    async def on_ask_wire(self, req: asks.AskRequest | fulfillment.Request,
+                          peer: ctl.Peer) -> asks.AskReply | fulfillment.Reply:
+        if isinstance(req, fulfillment.Request):
+            reply = await self.on_fulfillment(req, peer)
+            if len(msgspec.json.encode(reply)) > fulfillment.MAX_REPLY:
+                return fulfillment.Reply("unavailable", "lifecycle reply exceeds bound")
+            return reply
+        return await self.on_ask(req, peer)
+
+    async def on_fulfillment(self, req: fulfillment.Request, peer: ctl.Peer) -> fulfillment.Reply:
+        """Separate opt-in protocol. No long-lived daemon lock or external operation is involved."""
+        if not fulfillment.ENABLED:
+            return fulfillment.Reply("unavailable", "capability disabled")
+        try:
+            fulfillment.Lifecycle.require_uid(peer.uid)
+            why = fulfillment.check(req)
+            if why:
+                return fulfillment.Reply("refused", why)
+            lifecycle = self.store.fulfillment
+            if isinstance(req, fulfillment.Get):
+                return fulfillment.Reply("ok", "lifecycle", lifecycle.view(req.ask_id))
+            if isinstance(req, fulfillment.Apply):
+                return lifecycle.apply(req.receipt, uid=peer.uid if peer.uid is not None else -1,
+                                       pid=peer.pid)
+            if isinstance(req, fulfillment.Propose):
+                return lifecycle.propose(req, uid=peer.uid if peer.uid is not None else -1,
+                                         chunk_chars=self.s.chunk_chars)
+            with self.store.transaction():
+                return lifecycle.retire(req.ask_id, req.expect_intent, req.reason)
+        except fulfillment.Invalid as exc:
+            return fulfillment.Reply("refused", str(exc))
+        except sqlite3.Error:
+            return fulfillment.Reply("unavailable", "store unavailable")
+
     async def on_ask(self, req: asks.AskRequest, peer: ctl.Peer) -> asks.AskReply:
         """A request on ask.sock, already checked by `asks.check`. Get, list and cancel work while
         latched (R17); a post does not."""
@@ -729,7 +774,7 @@ class Admind:
             async with self.ask_post_lock:
                 return self.post_notice(req, peer)
         if isinstance(req, asks.AskList):
-            rows = self.store.asks_with_status(*asks.ACTIVE) + self.store.recent_asks(20)
+            rows = self.store.capacity_asks() + self.store.inactive_asks(20)
             return asks.AskReply("ok", f"{len(rows)} asks", asks=[self.ask_summary(r) for r in rows])
         ask_id = asks.normalise_id(req.ask_id)
         row = None if ask_id is None else self.store.ask(ask_id)
@@ -757,7 +802,7 @@ class Admind:
         queue its card in one transaction."""
         if self.latched():
             return asks.refused(ASK_LATCHED)
-        if len(self.store.asks_with_status(*asks.ACTIVE)) >= asks.MAX_OPEN:
+        if len(self.store.capacity_asks()) >= asks.MAX_OPEN:
             return asks.refused(ASK_TOO_MANY)
         if self.store.ask_posted_since(asks.hour_ago()) >= asks.MAX_PER_HOUR:
             return asks.refused(ASK_TOO_OFTEN)
@@ -832,7 +877,7 @@ class Admind:
             return ASK_LATCHED
         if self.approve_bead is None:
             return ASK_NO_APPROVALS
-        if len(self.store.asks_with_status(*asks.ACTIVE)) >= asks.MAX_OPEN:
+        if len(self.store.capacity_asks()) >= asks.MAX_OPEN:
             return ASK_TOO_MANY
         if self.store.ask_posted_since(asks.hour_ago()) >= asks.MAX_PER_HOUR:
             return ASK_TOO_OFTEN
@@ -886,7 +931,7 @@ class Admind:
         row = AskRow(asks.new_id(lambda i: self.store.ask(i) is not None), "approval", poster,
                      asks.approval_title(r, bead), "", None, None, bead, r.digest, False, 0, "open", None,
                      None, at, at, None if retiring is None else retiring[0])
-        others = asks.count_others(o for o in self.store.asks_with_status(*asks.ACTIVE)
+        others = asks.count_others(o for o in self.store.capacity_asks()
                                    if o.bead != bead and (retiring is None or o.ask_id != retiring[0]))
         card = asks.approval_card(row, r, self.s.chunk_chars, others)
         if isinstance(card, str):
@@ -905,7 +950,7 @@ class Admind:
         superseded: list[str] = []
         with self.store.transaction():
             for old in self.store.asks_with_status("open", "answered"):
-                if old.bead == bead:
+                if old.bead == bead and not self.store.fulfillment.protected(old.ask_id):
                     superseded.append(old.ask_id)
                     self.store.set_ask(old.ask_id, "superseded")
                     self.ask_notice(old.ask_id, "superseded", row.ask_id, ASK_SUPERSEDED_NOTICE.format(
@@ -926,6 +971,11 @@ class Admind:
             return asks.refused(f"ask {row.ask_id} is {row.status}; only an open or answered ask can be "
                                 "cancelled")
         with self.store.transaction():
+            if self.store.fulfillment.protected(row.ask_id):
+                return asks.refused("already fulfilled; original answer retained; see fulfillment get")
+            current = self.store.ask(row.ask_id)
+            if current is None or current.status not in ("open", "answered"):
+                return asks.refused("ask state changed; read it again")
             self.store.set_ask(row.ask_id, "cancelled")
             self.ask_notice(row.ask_id, "cancelled", "0", ASK_CANCELLED_NOTICE.format(ask_id=row.ask_id))
         self.audit.write("ask", action="cancelled", ask_id=row.ask_id)
@@ -980,42 +1030,41 @@ class Admind:
         """Store an operator's answer to a question or merge ask and reply in thread, as one step. On a
         question with a form, the reaction or reply is mapped to a choice (K17q, K18q) and the reply says so
         (K19); the answer text is stored verbatim either way."""
-        row = self.store.ask(ask_id)
-        if row is None:
-            self.finish(mid, "done", f"No ask {ask_id}.", "ask")
-            return
-        refusal = self.answer_refusal(row, text)
-        if refusal is not None:
-            with self.store.transaction():
+        choice: str | None = None
+        with self.store.transaction():
+            row = self.store.ask(ask_id)
+            if row is None:
+                self.finish(mid, "done", f"No ask {ask_id}.", "ask")
+                return
+            refusal = self.answer_refusal(row, text)
+            if refusal is not None:
+                action = "answer-refused"
                 self.touch(ask_id)
                 self.finish(mid, "done", refusal, "ask")
-            self.audit.write("ask", action="answer-refused", message_id=mid, ask_id=ask_id, chars=len(text))
-            return
-        if row.kind == "approval":      # a note the poster sees; never a decision (R13)
-            with self.store.transaction():
+            elif row.kind == "approval":
+                action = "noted"
                 self.store.add_answer(ask_id, "note", self.operator_name(mid), mid, text)
                 self.touch(ask_id)
                 self.finish(mid, "done", NOTED.format(ask_id=ask_id), "ask")
-            self.audit.write("ask", action="noted", message_id=mid, ask_id=ask_id, chars=len(text))
-            return
-        again = row.status == "answered"
-        choice = asks.map_reaction(row, text) if reaction else asks.map_reply(row, text)
-        if choice is not None:
-            said = asks.recorded(row, choice, text)
-        elif again:
-            said = f"Added to ask {ask_id}; it was already answered, and the poster sees both."
-        else:
-            said = f"Answer recorded for ask {ask_id}."
-        with self.store.transaction():
-            self.store.add_answer(ask_id, "answer", self.operator_name(mid), mid, text, choice)
-            self.store.set_ask(ask_id, "answered")
-            self.touch(ask_id)
-            self.finish(mid, "done", said, "ask")
-        self.audit.write("ask", action="answered", message_id=mid, ask_id=ask_id, chars=len(text),
-                         choice=choice)
+            else:
+                action = "answered"
+                choice = asks.map_reaction(row, text) if reaction else asks.map_reply(row, text)
+                if choice is not None:
+                    said = asks.recorded(row, choice, text)
+                elif row.status == "answered":
+                    said = f"Added to ask {ask_id}; it was already answered, and the poster sees both."
+                else:
+                    said = f"Answer recorded for ask {ask_id}."
+                self.store.add_answer(ask_id, "answer", self.operator_name(mid), mid, text, choice)
+                self.store.set_ask(ask_id, "answered")
+                self.touch(ask_id)
+                self.finish(mid, "done", said, "ask")
+        self.audit.write("ask", action=action, message_id=mid, ask_id=ask_id, chars=len(text), choice=choice)
 
     def answer_refusal(self, row: AskRow, text: str) -> str | None:
         """Why an answer is not stored (R15): fixed wording, or None."""
+        if self.store.fulfillment.protected(row.ask_id):
+            return "Already fulfilled; original answer retained."
         if row.status not in ("open", "answered"):
             return self.not_open(row)
         if not text.strip():
@@ -1043,7 +1092,9 @@ class Admind:
             self.remind(mid, sub)
             return
         at = asks.now()
-        lines = [asks.list_line(r, at) for r in self.store.asks_with_status(*asks.ACTIVE)]
+        lines = [asks.list_line(r, at) for r in self.store.capacity_asks()]
+        lines += [f"{r.ask_id} fulfilled (lifecycle); original answer retained"
+                  for r in self.store.fulfilled_asks(20)]
         self.finish(mid, "done", "\n".join(lines) or NO_ACTIVE_ASKS, "cmd")
         self.audit.write("command", message_id=mid, command="asks", asks=len(lines))
 
@@ -1055,7 +1106,7 @@ class Admind:
         done: list[str] = []
         skipped: list[tuple[str, str]] = []
         with self.store.transaction():
-            for row in self.store.asks_with_status(*asks.ACTIVE):
+            for row in self.store.capacity_asks():
                 if row.status != "open":
                     skipped.append((row.ask_id, row.status))
                     continue
@@ -1097,7 +1148,7 @@ class Admind:
         due = at - timedelta(hours=hours)
         bumped: list[str] = []
         skipped: list[tuple[str, str]] = []
-        for row in self.store.asks_with_status("open"):
+        for row in self.store.remindable_asks():
             if row.last_activity_at is None or datetime.fromisoformat(row.last_activity_at) > due:
                 continue
             if self.store.reminder_pending(row.ask_id):
@@ -1126,7 +1177,11 @@ class Admind:
         """The ask's whole card again, top-level (B11): an approval's stored checked chunks as they are
         (R21), a question's or merge's whole text split; recorded with its own part count (B12). Raises
         chunk.TooWide, with nothing queued, if a link no longer fits a chunk."""
-        if row.kind == "approval":
+        if self.store.fulfillment.protected(row.ask_id):
+            # Explicit history resend, never an active card or new answer authority.
+            text = "Fulfilled; no new answer or authority.\n" + asks.full_text(row)
+            parts = chunk.split(text, self.s.chunk_chars)
+        elif row.kind == "approval":
             parts = asks.stored_details(row)
         else:
             parts = asks.full_chunks(row, self.s.chunk_chars)
@@ -1188,6 +1243,10 @@ class Admind:
                 self.audit.write("ask", action="details-refused", message_id=mid, ask_id=ask_id,
                                  reason="link too long")
                 return
+        if self.store.fulfillment.protected(ask_id):
+            receipt = self.store.fulfillment.stored(ask_id)
+            label = f"Fulfilled lifecycle; receipt {receipt['receipt_id'] if receipt else 'unavailable'}. "
+            parts = [label + "Original card and answer authority retained.", *parts]
         with self.store.transaction():
             for i, part in enumerate(parts):
                 self.post(f"askd:{ask_id}:{mid}:{i}", part, mid, lane=2, owner=self.request_owners(mid))
@@ -1522,7 +1581,7 @@ class Admind:
             return "blocked", BLOCKED.format(bead=bead, quoted=f' ("{line}")' if line else "")
         said = f'\napprove-bead said: "{line}"' if line else ""
         if settled == "recorded" and back is not None:
-            others = asks.count_others(o for o in self.store.asks_with_status(*asks.ACTIVE)
+            others = asks.count_others(o for o in self.store.capacity_asks()
                                        if o.ask_id != a.ask_id)
             said = "\n" + asks.in_flight(*others) + said
             if a.action == "deny":
@@ -2349,6 +2408,32 @@ class Admind:
             with self.store.transaction():      # refused, yet accepted activity on a card it replies to (B14)
                 self.touch_card(target)
                 self.finish(mid, "dropped", CONTROL_REFUSED, "refused")
+            return
+        if text.strip() == "!fulfill":
+            try:
+                if not fulfillment.ENABLED or not self.authorised(mid):
+                    self.finish(mid, "done", "Fulfillment unavailable under current authorization.", "cmd")
+                    return
+                try:
+                    with self.store.transaction():
+                        result = self.store.fulfillment.confirm(
+                            target, principal=self.senders.get(mid, ""), message_id=mid)
+                        self.finish(mid, "done", result.message, "cmd")
+                except fulfillment.Invalid as exc:
+                    self.finish(mid, "done", "Fulfillment refused: " + str(exc), "cmd")
+                return
+            except sqlite3.Error as exc:
+                reason = "store unavailable"
+                self.audit_quietly("fulfillment", action="store-unavailable", error=type(exc).__name__)
+            except Exception as exc:  # noqa: BLE001 - rollback; fixed public text, audit error type only
+                reason = "internal error"
+                self.audit_quietly("fulfillment", action="handler-failed", error=type(exc).__name__)
+            # A persistent outage leaves the original inbound recoverable. Refusal delivery and
+            # successful confirmation settlement both receive the same bounded database protection.
+            try:
+                self.finish(mid, "done", "Fulfillment unavailable: " + reason + ".", "cmd")
+            except sqlite3.Error:
+                self.audit_quietly("fulfillment", action="store-unavailable")
             return
         bump = self.store.bump_for_message(target)
         if bump is not None and (not text.startswith("!") or text[1:].split(maxsplit=1)[:1] in CARD_COMMANDS):
