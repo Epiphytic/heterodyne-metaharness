@@ -2,7 +2,7 @@
   "schema": "t10-recovery-design-inputs.v1",
   "task": "btq-7wvub",
   "author": "Codex",
-  "status": "unreviewed-not-approved",
+  "status": "single-high-REVISE-incorporated-once-human-approval-pending",
   "base": "2c0c5b5b775ee652d2ce32c192091aa2314e5b32",
   "source_commit": "167b1b9783b760b25f8180485bcb7482b7deef59",
   "original_plan_commit": "4ac749bd5722be8c1baa96e38cadbf9bbb2687e1",
@@ -76,20 +76,38 @@
   ],
   "design": {
     "path": "docs/designs/2026-10-18-t10-operational-recovery.md",
-    "sha256": "1bb42f7be385ec550220162a3fb6d62faa45791e8176e97980747ce4c08b738b"
+    "sha256": "e4bd3b4fe970ab982d368b95c5dc160956d7e33615ddf8b6938676e9d59e7ff2"
   },
   "adr": {
     "path": "docs/adr/2026-10-18-t10-operational-recovery.md",
-    "byte_identical_to": "docs/designs/2026-10-18-t10-operational-recovery.md"
+    "sha256": "5c02d979974a7ec96d935a8df256134d155d776c34d8310edf7be1938fd7e809",
+    "role": "proposed-only pointer to canonical design; not enacted authority"
   },
   "research_provenance": {
     "path": "autonomous-resume/t10-recovery-research/research.md",
     "scope": "secondary research; its older working-tree snapshot is not the immutable implementation pin"
   },
   "review": {
-    "new_design_reviews": 0,
-    "t10_actual_r7_result": "REVISE",
-    "source_review_history_preserved": true
+    "new_design_reviews": 1,
+    "actual_result": "REVISE",
+    "effort": "HIGH",
+    "findings": 10,
+    "incorporation": "once; no second review or validation",
+    "raw": {
+      "path": "docs/reviews/7wvub-design-r1-high.md",
+      "sha256": "483c7ff136353191c9446e3d4eb2719a3e6d1c022488c449f5cf296e069fee16"
+    },
+    "dispositions_json": {
+      "path": "docs/reviews/7wvub-design-r1-dispositions.json",
+      "sha256": "23fed436d41b631a4bd271c4d7f9131e66d3ec29d203e2bea7684515e7088fbf"
+    },
+    "dispositions_markdown": {
+      "path": "docs/reviews/7wvub-design-r1-dispositions.md",
+      "sha256": "202b1f41d2f29ed7bd5c166c80400d3bc584df3ee3f1b67574e511c602352901"
+    },
+    "source_review_history_preserved": true,
+    "t10_actual_r7_result": "REVISE"
   },
-  "effects": "documentation only; no runtime, queue, approval or deployment action"
+  "effects": "documentation only; no runtime, queue, approval or deployment action",
+  "historical_draft_commit": "3cd6bd1fc2a620969e952e09d17bc27ee5cf5af6"
 }
