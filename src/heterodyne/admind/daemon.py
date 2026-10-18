@@ -1377,6 +1377,9 @@ class Admind:
     def close_refused(self, a: Attempt, new_status: str, text: str, why: str) -> None:
         """Close the attempt before anything was launched, with its reply, in one compare-and-set."""
         with self.store.transaction():
+            if new_status == "open" and self.store.operation_withdrawn(a.ask_id):
+                new_status, text, why = ("cancelled", "Source withdrew this approval request; "
+                                         "no native decision was issued.", "source-withdrawn")
             closed = self.store.close_attempt(a.ask_id, a.message_id, expect_status="deciding",
                                               settled="refused", exit_status=None, new_status=new_status,
                                               outcome=text, decided_by=None)
@@ -1385,7 +1388,7 @@ class Admind:
         if not closed:
             self.conflict(a, "deciding")
             return
-        self.audit.write("ask", action="refused", message_id=a.message_id, ask_id=a.ask_id, reason=why,
+        self.audit_quietly("ask", action="refused", message_id=a.message_id, ask_id=a.ask_id, reason=why,
                          status=new_status)
 
     def conflict(self, a: Attempt, expected: str) -> None:
@@ -1455,11 +1458,10 @@ class Admind:
                     unauthorised = not self.authorised(mid)
                 if not unauthorised:
                     if not self.store.issue_decision(a, maintenance_retry=maintenance_retry):
-                        with self.store.transaction():
-                            if not operations.decision_allowed(self.store, a.ask_id):
-                                self.close_refused(a, "cancelled", "Source withdrew this approval request; "
-                                                   "no native decision was issued.", "source-withdrawn")
-                                return
+                        if self.store.operation_withdrawn(a.ask_id):
+                            self.close_refused(a, "cancelled", "Source withdrew this approval request; "
+                                               "no native decision was issued.", "source-withdrawn")
+                            return
                         self.conflict(a, "deciding")
                         self.finish(mid, "done", CONFLICT.format(ask_id=a.ask_id, bead=bead), "ask")
                         return
@@ -1562,6 +1564,7 @@ class Admind:
                 text += f'\napprove-bead said: "{line}"'
             thread = self.attempt_thread(a.ask_id, mid)        # the updated content goes where the reply goes
             superseded: list[str] = []
+            closed = False
             with self.store.transaction():
                 binding = operations.bead_binding(self.store, bead)
                 if binding is not None and binding[1]:
@@ -1573,18 +1576,21 @@ class Admind:
                         new_status="cancelled", outcome=text, decided_by=None)
                     if closed:
                         self.finish(mid, "done", text, "ask")
-                    return
-                if isinstance(fresh, FreshCard):
+                    withdrawn = True
+                else:
+                    withdrawn = False
+                if not withdrawn and isinstance(fresh, FreshCard):
                     try:
                         operations.before_commit(self.store, bead, None if binding is None else binding[0])
                     except operations.Invalid as error:
                         fresh = ("Source lineage cannot accept a replacement card.", str(error))
                         text = STALE_NOT_REFRESHED.format(bead=bead, shown=shown, now=now_,
                                                           why=fresh[0].rstrip("."))
-                closed = self.store.close_attempt(a.ask_id, mid, expect_status="deciding", settled=settled,
-                                                  exit_status=code, new_status="stale", outcome=text,
-                                                  decided_by=None)
-                if closed:
+                if not withdrawn:
+                    closed = self.store.close_attempt(a.ask_id, mid, expect_status="deciding",
+                                                      settled=settled, exit_status=code, new_status="stale",
+                                                      outcome=text, decided_by=None)
+                if closed and not withdrawn:
                     if isinstance(fresh, FreshCard):
                         superseded = self.commit_approval(
                             fresh, None, operation_key=None if binding is None else binding[0])
@@ -1596,11 +1602,13 @@ class Admind:
             self.conflict(a, "deciding")
             return
         self.audit.write("ask", action="refused" if settled == "refused" else "decided", message_id=mid,
-                         ask_id=a.ask_id, bead=bead, reason="stale", outcome=settled, status="stale",
-                         exit_status=code, fresh=fresh.row.ask_id if isinstance(fresh, FreshCard) else None,
+                         ask_id=a.ask_id, bead=bead, reason="source-withdrawn" if withdrawn else "stale",
+                         outcome=settled, status="cancelled" if withdrawn else "stale",
+                         exit_status=code,
+                         fresh=fresh.row.ask_id if not withdrawn and isinstance(fresh, FreshCard) else None,
                          refresh_refused=None if isinstance(fresh, FreshCard) else fresh[1],
                          updated_parts=len(updated))
-        if isinstance(fresh, FreshCard):
+        if not withdrawn and isinstance(fresh, FreshCard):
             self.audit_posted(fresh, None, superseded)
 
     async def read_and_settle(self, a: Attempt, bead: str) -> tuple[str, Readout | None]:
@@ -1623,6 +1631,8 @@ class Admind:
         both settle from the read-back like every other outcome. approve-bead's stderr line is quoted in
         every reply that has one (R12): inside the untouched and blocked wording, and on a line of its own
         after the recorded and uncertain wording (exit 5's warning, say)."""
+        if settled == "untouched" and self.store.operation_withdrawn(a.ask_id):
+            return "cancelled", "Source withdrew this approval request; no native decision was recorded."
         if settled == "untouched":
             return "open", (UNTOUCHED.format(line=line, bead=bead) if line
                             else UNTOUCHED_SILENT.format(bead=bead))
@@ -1681,7 +1691,7 @@ class Admind:
             return
         settled, back = await self.read_and_settle(a, row.bead)
         new_status, text = self.settlement(settled, back, a, row.bead, "")
-        if settled == "untouched":
+        if settled == "untouched" and new_status == "open":
             text = RECONCILE_RESTARTED if restarted else RECONCILE_STRANDED.format(ask_id=ask_id)
         with self.store.transaction():
             closed = self.store.close_attempt(ask_id, attempt, expect_status=status, settled=settled,
@@ -1794,9 +1804,8 @@ class Admind:
             if settled == "recorded" and back is not None:
                 self.settle_maintenance_recorded(a, row, back)
             elif settled == "untouched":
-                with self.store.transaction():
-                    self.close_refused(a, "cancelled", "Source withdrew this approval request; "
-                                       "no native decision was recorded.", "source-withdrawn")
+                self.close_refused(a, "cancelled", "Source withdrew this approval request; "
+                                   "no native decision was recorded.", "source-withdrawn")
             else:
                 self.hold_maintenance(a, "native-conflict" if settled == "blocked" else "read-unavailable")
             return

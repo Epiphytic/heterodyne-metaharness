@@ -168,14 +168,15 @@ def test_actual_socket_operation_validation_keeps_closed_reply_shape(unit: Unit)
 def test_status_lineage_uses_bounded_batch_queries(unit: Unit) -> None:
     for letter in "abcdefghjkmnpqrstuvwx":
         unit.store.insert_ask(card_row(ask_id="a" + letter + "23", status="stale"), None)
-    assert call(unit, request()).result == "ok"
+    # Terminal legacy history now gets a current card (R2#3); the query budget is unchanged.
+    assert call(unit, request()).result == "posted"
     statements = []
     unit.store.db.set_trace_callback(statements.append)
     try:
         result = call(unit, request("status"))
     finally:
         unit.store.db.set_trace_callback(None)
-    assert len(result.lineage) == len("abcdefghjkmnpqrstuvwx")
+    assert len(result.lineage) == len("abcdefghjkmnpqrstuvwx") + 1
     assert len([s for s in statements if s.lstrip().upper().startswith("SELECT")]) < 16
 
 

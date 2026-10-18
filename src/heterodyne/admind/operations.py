@@ -23,32 +23,6 @@ if TYPE_CHECKING:
 MAX_REQUEST, MAX_REPLY = 16_384, 1_048_576
 MAX_OPERATIONS, MAX_LINEAGE, MAX_PARTS = 4096, 256, 4096
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS approval_operations (
-    operation_key TEXT PRIMARY KEY, source TEXT NOT NULL, journal TEXT NOT NULL,
-    operation TEXT NOT NULL, bead TEXT UNIQUE, context_digest TEXT, intent_hash TEXT NOT NULL,
-    uid INTEGER NOT NULL, withdrawn INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL DEFAULT 0,
-    receipt TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS approval_operation_asks (
-    ask_id TEXT PRIMARY KEY, operation_key TEXT NOT NULL,
-    FOREIGN KEY(operation_key) REFERENCES approval_operations(operation_key));
-CREATE INDEX IF NOT EXISTS approval_operation_lineage ON approval_operation_asks(operation_key);
-CREATE TABLE IF NOT EXISTS approval_operation_events (
- seq INTEGER PRIMARY KEY, operation_key TEXT NOT NULL, action TEXT NOT NULL,
- uid INTEGER NOT NULL, peer_pid INTEGER, created_at TEXT NOT NULL,
- before_hash TEXT NOT NULL, after_hash TEXT NOT NULL,
- FOREIGN KEY(operation_key) REFERENCES approval_operations(operation_key));
-CREATE TRIGGER IF NOT EXISTS approval_operation_revision AFTER UPDATE ON asks
-WHEN EXISTS (SELECT 1 FROM approval_operations WHERE bead=NEW.bead)
-BEGIN
- UPDATE approval_operations SET revision=revision+1 WHERE bead=NEW.bead;
-END;
-CREATE TRIGGER IF NOT EXISTS approval_operation_insert AFTER INSERT ON asks
-BEGIN
- UPDATE approval_operations SET revision=revision+1 WHERE bead=NEW.bead;
-END;
-"""
-
 
 class Invalid(ValueError):
     """Fixed protocol code, without request text."""
@@ -156,9 +130,7 @@ def bead_binding(store: Store, bead: str | None) -> tuple[str, bool] | None:
 
 
 def decision_allowed(store: Store, ask_id: str) -> bool:
-    row = store.db.execute("SELECT o.withdrawn FROM approval_operations o JOIN asks a ON a.bead=o.bead "
-                           "WHERE a.ask_id=?", (ask_id,)).fetchone()
-    return row is None or not row[0]
+    return not store.operation_withdrawn(ask_id)
 
 
 def lineage(store: Store, bead: str | None) -> list[AskRow]:
@@ -170,7 +142,7 @@ def lineage(store: Store, bead: str | None) -> list[AskRow]:
     rows: list[AskRow] = []
     seen: set[str] = set()
     for row in history:
-        if row.kind != "approval" or asks.normalise_id(row.ask_id) != row.ask_id:
+        if asks.normalise_id(row.ask_id) != row.ask_id:
             raise Invalid("lineage-incomplete")
         if row.digest is None or fulfillment.HEX.fullmatch(row.digest) is None:
             raise Invalid("lineage-incomplete")
@@ -181,7 +153,7 @@ def lineage(store: Store, bead: str | None) -> list[AskRow]:
     return rows
 
 
-def enroll(store: Store, req: Request, uid: int) -> None:
+def enroll(store: Store, req: Request, uid: int, *, native_context_checked: bool = False) -> None:
     if existing(store, req, uid) is not None:
         return
     if store.db.execute("SELECT COUNT(*) FROM approval_operations").fetchone()[0] >= MAX_OPERATIONS:
@@ -189,7 +161,7 @@ def enroll(store: Store, req: Request, uid: int) -> None:
     if bead_binding(store, req.bead) is not None:
         raise Invalid("bead-key-conflict")
     rows = lineage(store, req.bead)
-    if rows and not any(row.digest == req.context_digest for row in rows):
+    if rows and not native_context_checked and not any(row.digest == req.context_digest for row in rows):
         raise Invalid("lineage-context-conflict")
     receipt = hashlib.sha256(msgspec.json.encode(("approval.operation.v1", key(req), req.bead,
                                                 req.context_digest, req.intent_hash, uid))).hexdigest()
@@ -244,13 +216,14 @@ def view(store: Store, req: Request, uid: int, result: str = "ok", code: str = "
         "SELECT x.ask_id,x.ref,x.message_id FROM ask_attempts x JOIN approval_operation_asks l "
         "ON l.ask_id=x.ask_id WHERE l.operation_key=? ORDER BY x.ask_id,x.rowid LIMIT ?",
         (operation_key, MAX_PARTS + 1)).fetchall()
-    # One pass over outbox keys, joined through the indexed lineage IDs. No per-row GLOB scans.
+    # Four indexed key ranges per lineage row; retained unrelated outbox history is not scanned.
     parts = store.db.execute(
-        "SELECT l.ask_id,o.key FROM outbox o CROSS JOIN approval_operation_asks l ON l.ask_id=CASE "
-        "WHEN o.key GLOB 'ask:????:*' THEN substr(o.key,5,4) "
-        "WHEN o.key GLOB 'asknote:????:*' THEN substr(o.key,9,4) "
-        "WHEN o.key GLOB 'askd:????:*' THEN substr(o.key,6,4) END "
-        "WHERE l.operation_key=? ORDER BY o.seq LIMIT ?",
+        "WITH prefixes AS (SELECT l.ask_id,k.p||l.ask_id||':' AS lo,k.p||l.ask_id||';' AS hi "
+        "FROM approval_operation_asks l CROSS JOIN "
+        "(SELECT 'ask:' AS p UNION ALL SELECT 'askr:' UNION ALL SELECT 'asknote:' "
+        "UNION ALL SELECT 'askd:') k WHERE l.operation_key=?) "
+        "SELECT p.ask_id,o.key FROM prefixes p CROSS JOIN outbox o "
+        "WHERE o.key>=p.lo AND o.key<p.hi ORDER BY o.seq LIMIT ?",
         (operation_key, MAX_PARTS + 1)).fetchall()
     if len(answers) + len(attempts) + len(parts) > MAX_PARTS:
         raise Invalid("lineage-parts-capacity")
@@ -336,33 +309,32 @@ async def post(daemon: Admind, req: Request, peer: Peer) -> Reply:
         return Reply("unavailable", "readout-busy")
     if readout.id != req.bead or readout.digest != req.context_digest:
         return Reply("refused", "context-conflict")
-    # Existing history is enrolled completely or not at all. Never manufacture a replacement card
-    # to make adoption succeed. A caller must reconcile its own original operation association.
+    # Initial enrollment adopts every historical row. A current live card can be reused; terminal
+    # or obsolete history needs a new current card under the ordinary native/principal/limit gates.
+    uid = peer.uid if peer.uid is not None else -1
     with daemon.store.transaction():
         rows = lineage(daemon.store, req.bead)
-        if rows:
-            if rows[-1].digest != req.context_digest:
-                raise Invalid("lineage-context-conflict")
-            enroll(daemon.store, req, peer.uid if peer.uid is not None else -1)
-            result = view(daemon.store, req, peer.uid if peer.uid is not None else -1)
-            record_transition(daemon.store, req, peer.uid if peer.uid is not None else -1, peer.pid,
-                              Reply("not-found", "not-found"), result)
+        reusable = any(row.digest == req.context_digest and row.status in {"open", "answered",
+                       "deciding", "uncertain", "approved"} for row in rows)
+        if reusable:
+            enroll(daemon.store, req, uid, native_context_checked=True)
+            result = view(daemon.store, req, uid)
+            record_transition(daemon.store, req, uid, peer.pid, Reply("not-found", "not-found"), result)
             return result
         fresh = daemon.prepare_approval("wsd", req.bead, readout)
-        # Local import avoids the runtime daemon/module cycle.
         from heterodyne.admind.daemon import FreshCard
         if not isinstance(fresh, FreshCard):
             return Reply("refused", "post-gate")
-        enroll(daemon.store, req, peer.uid if peer.uid is not None else -1)
+        enroll(daemon.store, req, uid, native_context_checked=True)
         superseded = daemon.commit_approval(fresh, peer.pid, operation_key=key(req))
-        reply = view(daemon.store, req, peer.uid if peer.uid is not None else -1, "posted", "posted")
-        record_transition(daemon.store, req, peer.uid if peer.uid is not None else -1, peer.pid,
-                          Reply("not-found", "not-found"), reply)
+        reply = view(daemon.store, req, uid, "posted", "posted")
+        record_transition(daemon.store, req, uid, peer.pid, Reply("not-found", "not-found"), reply)
     daemon.audit_posted(fresh, peer.pid, superseded)
     return reply
 
 
 def withdraw(daemon: Admind, req: Request, uid: int, pid: int | None = None) -> Reply:
+    cancelled: list[str] = []
     with daemon.store.transaction():
         before = view(daemon.store, req, uid)
         if before.withdrawn and not any(row.status in {"open", "answered"}
@@ -380,9 +352,12 @@ def withdraw(daemon: Admind, req: Request, uid: int, pid: int | None = None) -> 
             if daemon.store.fulfillment.protected(row.ask_id):
                 continue
             daemon.store.set_ask(row.ask_id, "cancelled")
+            cancelled.append(row.ask_id)
             daemon.ask_notice(row.ask_id, "cancelled", key(req),
                               f"Ask {row.ask_id} was withdrawn by its source. "
                               "Original decisions are retained.")
         after = view(daemon.store, req, uid)
         record_transition(daemon.store, req, uid, pid, before, after)
-        return after
+    for ask_id in cancelled:
+        daemon.audit_quietly("ask", action="cancelled", ask_id=ask_id, reason="source-withdrawn", pid=pid)
+    return after

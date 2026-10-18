@@ -146,6 +146,32 @@ CREATE TABLE IF NOT EXISTS notices (
     created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS outbox_message_id ON outbox(message_id);
 """
+OPERATION_SCHEMA = """
+CREATE TABLE IF NOT EXISTS approval_operations (
+    operation_key TEXT PRIMARY KEY, source TEXT NOT NULL, journal TEXT NOT NULL,
+    operation TEXT NOT NULL, bead TEXT UNIQUE, context_digest TEXT, intent_hash TEXT NOT NULL,
+    uid INTEGER NOT NULL, withdrawn INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL DEFAULT 0,
+    receipt TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS approval_operation_asks (
+    ask_id TEXT PRIMARY KEY, operation_key TEXT NOT NULL,
+    FOREIGN KEY(operation_key) REFERENCES approval_operations(operation_key));
+CREATE INDEX IF NOT EXISTS approval_operation_lineage ON approval_operation_asks(operation_key);
+CREATE TABLE IF NOT EXISTS approval_operation_events (
+ seq INTEGER PRIMARY KEY, operation_key TEXT NOT NULL, action TEXT NOT NULL,
+ uid INTEGER NOT NULL, peer_pid INTEGER, created_at TEXT NOT NULL,
+ before_hash TEXT NOT NULL, after_hash TEXT NOT NULL,
+ FOREIGN KEY(operation_key) REFERENCES approval_operations(operation_key));
+CREATE TRIGGER IF NOT EXISTS approval_operation_revision AFTER UPDATE ON asks
+WHEN EXISTS (SELECT 1 FROM approval_operations WHERE bead=NEW.bead)
+BEGIN
+ UPDATE approval_operations SET revision=revision+1 WHERE bead=NEW.bead;
+END;
+CREATE TRIGGER IF NOT EXISTS approval_operation_insert AFTER INSERT ON asks
+BEGIN
+ UPDATE approval_operations SET revision=revision+1 WHERE bead=NEW.bead;
+END;
+"""
+
 # cxmkf K26: columns added to a database from before card kinds, in one transaction.
 _CXMKF_COLUMNS = (("outbox", "thread_key"), ("asks", "question_form"), ("asks", "choices"), ("asks", "links"),
                   ("ask_answers", "choice"))
@@ -377,7 +403,6 @@ class Store:
         self.fulfillment = Lifecycle(self)
         try:
             self.fulfillment.migrate()
-            from heterodyne.admind.operations import SCHEMA as OPERATION_SCHEMA
             self.db.executescript(OPERATION_SCHEMA)
         except BaseException:
             self.db.close()
@@ -1053,14 +1078,20 @@ class Store:
                             "ORDER BY rowid DESC LIMIT 1", (ask_id, ask_id)).fetchone()
         return None if r is None else _ask(r)
 
+    @_locked
+    def operation_withdrawn(self, ask_id: str) -> bool:
+        """Source tombstone checked in the same transaction as every decision CAS."""
+        row = self.db.execute("SELECT o.withdrawn FROM approval_operations o JOIN asks a ON a.bead=o.bead "
+                              "WHERE a.ask_id=?", (ask_id,)).fetchone()
+        return row is not None and bool(row[0])
+
     # --- decision attempts (R23) ---------------------------------------------------------------
     @_locked
     def begin_attempt(self, a: Attempt) -> bool:
         """In one transaction: the ask `open -> deciding` with `attempt` set, the attempt row, and the
         inbound message `executing`. False, changing nothing, if the ask is not `open`."""
         with self.transaction():
-            from heterodyne.admind.operations import decision_allowed
-            if not decision_allowed(self, a.ask_id) or self.fulfillment.protected(a.ask_id):
+            if self.operation_withdrawn(a.ask_id) or self.fulfillment.protected(a.ask_id):
                 return False
             cur = self.db.execute("UPDATE asks SET status = 'deciding', attempt = ?, updated_at = ? "
                                   "WHERE ask_id = ? AND status = 'open'", (a.message_id, now(), a.ask_id))
@@ -1098,6 +1129,9 @@ class Store:
                 return False
             if self.fulfillment.protected(ask_id):
                 raise ValueError("already fulfilled; original answer retained")
+            if (new_status == "open" and settled in {"untouched", "refused"}
+                    and self.operation_withdrawn(ask_id)):
+                new_status = "cancelled"
             self.db.execute("DELETE FROM ask_maintenance WHERE ask_id = ? AND message_id = ?",
                             (ask_id, message_id))
             self.db.execute("UPDATE ask_attempts SET settled = ?, exit_status = COALESCE(?, exit_status) "
@@ -1167,8 +1201,7 @@ class Store:
     def issue_decision(self, a: Attempt, *, maintenance_retry: bool = False) -> bool:
         """Persist an issuing marker before launch; a crash never grants a replay entitlement."""
         with self.transaction():
-            from heterodyne.admind.operations import decision_allowed
-            if not decision_allowed(self, a.ask_id):
+            if self.operation_withdrawn(a.ask_id):
                 return False
             row = self.ask(a.ask_id)
             if row is None or row.status != "deciding" or self.current_attempt(a.ask_id) != a:
