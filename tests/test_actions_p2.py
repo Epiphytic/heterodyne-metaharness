@@ -58,7 +58,9 @@ class Provider:
 
     async def judge(self, invocation):
         self.calls.append(invocation)
-        return Reply(invocation.input_digest, self.model, wire(judgment(self.request, self.outcome)))
+        return Reply(
+            invocation.input_digest, self.model, wire(judgment(self.request, self.outcome)), invocation.nonce
+        )
 
 
 def policy_for(request):
@@ -112,9 +114,9 @@ def test_wrong_native_digest_refuses_before_provider():
 def test_permission_is_advisory_and_failure_escalates():
     action, request = inputs("permission")
     result = run(Provider(request), action, request)
-    assert (
-        current_projection(result, action, request, privacy(), SPEC, policy=policy_for(request))
-        == c.AllowProposal()
+    assert isinstance(
+        current_projection(result, action, request, privacy(), SPEC, policy=policy_for(request)),
+        c.EscalateProposal,
     )
     wrong = run(Provider(request, model=ModelSpec("other", SPEC.schema, SPEC.release)), action, request)
     assert isinstance(
@@ -181,7 +183,7 @@ def test_malformed_and_oversized_model_output_cannot_grant(kind, output):
 
     class Bad:
         async def judge(self, invocation):
-            return Reply(invocation.input_digest, SPEC, output)
+            return Reply(invocation.input_digest, SPEC, output, invocation.nonce)
 
     result = run(Bad(), action, selected)
     assert isinstance(
@@ -271,7 +273,7 @@ def test_unavailable_and_cancellation_are_not_groom_failures():
 
 
 def test_enrichment_proposal_requires_regenerated_whole_ask_and_fresh_judgement():
-    from heterodyne.gatekeeper.validate import digest
+    from heterodyne.actions.judgement import repin_enrichment
 
     action, selected = inputs()
     chosen = dict(
@@ -289,12 +291,25 @@ def test_enrichment_proposal_requires_regenerated_whole_ask_and_fresh_judgement(
     # this fixture does not implement the native context-digest algorithm.
     raw = msgspec.to_builtins(selected)
     raw["candidate"] = msgspec.to_builtins(proposal.candidate)
-    raw["base_candidate_sha256"] = digest(proposal.candidate)
+    raw["revision"] += 1
+    raw["enrichment"] = dict(
+        status="used",
+        base_description=selected.candidate.description,
+        context_source_ids=["private-source"],
+        additions=[dict(source_id="private-source", start=0, end=8, quote="Explicit")],
+    )
+    # base_candidate_sha256 retains the original candidate, as the host contract requires.
     raw["native_context_digest"] = "e" * 64
     enriched = prepare(seal(raw), privacy())
     assert isinstance(enriched, c.Ready)
-    regenerated = msgspec.structs.replace(
-        action, ask_bytes=b'{"whole":"new native fixture"}', context_digest="e" * 64
+    regenerated = repin_enrichment(
+        receipt,
+        action,
+        selected,
+        privacy(),
+        SPEC,
+        whole_ask=b'{"whole":"new native fixture"}',
+        context_digest="e" * 64,
     )
     assert isinstance(
         current_projection(receipt, regenerated, enriched.value, privacy(), SPEC), c.HoldUnavailable
@@ -423,7 +438,7 @@ def test_timeout_is_not_undone_when_fake_swallows_cancellation(monkeypatch):
             try:
                 await asyncio.sleep(1)
             except asyncio.CancelledError:
-                return Reply(invocation.input_digest, SPEC, wire(judgment(selected)))
+                return Reply(invocation.input_digest, SPEC, wire(judgment(selected)), invocation.nonce)
 
     monkeypatch.setattr(module, "DEADLINE_NS", 1_000_000)
     receipt = run(Suppressed(), action, selected)
@@ -452,7 +467,7 @@ def test_receipt_invalid_input_digest_never_reaches_sufficiency():
 
     class Misbound:
         async def judge(self, invocation):
-            return Reply("f" * 64, SPEC, wire(judgment(selected)))
+            return Reply("f" * 64, SPEC, wire(judgment(selected)), invocation.nonce)
 
     receipt = run(Misbound(), action, selected)
     assert receipt.reply is None
@@ -482,3 +497,199 @@ def test_existing_same_intent_denial_cannot_be_judged_into_permission():
     with pytest.raises(Refused):
         run(port, action, selected)
     assert port.calls == []
+
+
+@pytest.mark.parametrize("malformed", (False, True))
+def test_r1_hard_deny_precedes_stale_or_malformed_receipt(malformed):
+    action, selected = inputs("permission")
+    receipt = run(Provider(selected), action, selected)
+    if malformed:
+        receipt = None
+    assert (
+        current_projection(
+            receipt,
+            action,
+            selected,
+            privacy(),
+            SPEC,
+            policy=PolicyFacts(selected.policy_revision.sha256, True),
+        )
+        == c.DenyProposal()
+    )
+
+
+def test_r1_permission_floor_never_returns_bare_allow_or_calls_provider():
+    action, selected = inputs("permission")
+    port = Provider(selected)
+    receipt = run(port, action, selected)
+    assert port.calls == []
+    assert isinstance(
+        current_projection(receipt, action, selected, privacy(), SPEC, policy=policy_for(selected)),
+        c.EscalateProposal,
+    )
+
+
+def test_r1_raw_permission_failure_escalates():
+    action, _ = inputs()
+    assert isinstance(
+        current_projection(None, action, {"kind": "permission"}, privacy(), SPEC), c.EscalateProposal
+    )
+
+
+def test_r1_timeout_and_clock_refusal_are_honest_reasons(monkeypatch):
+    import heterodyne.actions.judgement as module
+
+    action, selected = inputs()
+
+    class Slow:
+        async def judge(self, invocation):
+            await asyncio.sleep(1)
+
+    monkeypatch.setattr(module, "DEADLINE_NS", 1000000)
+    receipt = run(Slow(), action, selected)
+    assert current_projection(receipt, action, selected, privacy(), SPEC).reason_code == "timeout"
+    times = iter((100, 99))
+    receipt = run(Provider(selected), action, selected, lambda: next(times))
+    assert current_projection(receipt, action, selected, privacy(), SPEC).reason_code == "invalid_host"
+
+
+def test_r1_forged_groom_state_does_not_route():
+    from heterodyne.actions.judgement import groom_route
+
+    action, _ = inputs()
+    with pytest.raises(Refused):
+        groom_route(GroomState(action.origin, 2, ()))
+
+
+GROOM = dict(
+    status="groom",
+    gaps=[dict(field="context", detail="Missing context")],
+    reason="Missing context",
+    additions=[],
+)
+
+
+def test_r1_skipped_assessment_reconciles_consumed_p1_revisions_with_fixed_exit():
+    from heterodyne.actions.judgement import concern, groom_route
+
+    action, selected = inputs()
+    state = record_groom(
+        GroomState(action.origin),
+        run(Provider(selected, GROOM), action, selected),
+        action,
+        selected,
+        privacy(),
+        SPEC,
+    )
+    action, selected = groomed_inputs(action, selected)
+
+    class Down:
+        async def judge(self, invocation):
+            raise OSError
+
+    assert record_groom(state, run(Down(), action, selected), action, selected, privacy(), SPEC) == state
+    # P1's independently callable pure transition has already consumed this revision.
+    action, selected = groomed_inputs(action, selected)
+    state = record_groom(
+        state, run(Provider(selected, GROOM), action, selected), action, selected, privacy(), SPEC
+    )
+    assert state.failures == 2 and state.revisions == (0, 2)
+    assert groom_route(state) == c.CannotApproveNotice()
+    assert concern(state, action, selected, privacy(), SPEC, "missing-context").recommended == "deny"
+    other = msgspec.structs.replace(action, key=msgspec.structs.replace(action.key, sequence=2))
+    with pytest.raises(Refused):
+        concern(state, other, selected, privacy(), SPEC, "missing-context")
+
+
+def test_r1_groom_transition_requires_current_negative_and_same_request():
+    from heterodyne.actions.judgement import groom_request
+
+    action, selected = inputs()
+    negative = run(Provider(selected, GROOM), action, selected)
+    state = record_groom(GroomState(action.origin), negative, action, selected, privacy(), SPEC)
+    args = dict(
+        intent=action.intent, resolved=action.resolved, source=action.requested_source, origin=action.origin
+    )
+    updated = groom_request(state, negative, action, selected, privacy(), SPEC, **args)
+    assert updated.groom_revisions == 1
+    positive = run(Provider(selected), action, selected)
+    with pytest.raises(Refused):
+        groom_request(state, positive, action, selected, privacy(), SPEC, **args)
+    other = msgspec.structs.replace(action, key=msgspec.structs.replace(action.key, sequence=2))
+    with pytest.raises(Refused):
+        groom_request(state, negative, other, selected, privacy(), SPEC, **args)
+
+
+def test_r1_nonce_and_clock_samples_bound_but_not_production_authentication():
+    action, selected = inputs()
+    times = iter((10, 20))
+    receipt = run(Provider(selected), action, selected, lambda: next(times))
+    assert receipt.attempt.started_ns == 10 and receipt.attempt.ended_ns == 20
+    assert receipt.reply.nonce == receipt.attempt.nonce
+    for altered in (
+        msgspec.structs.replace(receipt, elapsed_ns=0),
+        msgspec.structs.replace(receipt, attempt=None),
+        msgspec.structs.replace(receipt, attempt=msgspec.structs.replace(receipt.attempt, boot_id="other")),
+        msgspec.structs.replace(receipt, reply=msgspec.structs.replace(receipt.reply, nonce="0" * 32)),
+    ):
+        assert isinstance(current_projection(altered, action, selected, privacy(), SPEC), c.HoldUnavailable)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    (
+        ("shell_ids", ("btq-other",)),
+        ("recovery_operator_event", "other"),
+        ("recovery_evidence", "e" * 64),
+        ("recovery_closed_orphans", ("btq-other",)),
+    ),
+)
+def test_r1_all_retained_recovery_semantics_are_bound(field, value):
+    action, selected = inputs()
+    receipt = run(Provider(selected), action, selected)
+    changed = msgspec.structs.replace(action, **{field: value})
+    assert isinstance(current_projection(receipt, changed, selected, privacy(), SPEC), c.HoldUnavailable)
+
+
+def test_r1_current_host_policy_hard_deny_precedes_receipt_and_outward_floor():
+    action, selected = inputs("permission")
+    receipt = run(Provider(selected), action, selected)
+    assert (
+        current_projection(
+            receipt,
+            action,
+            selected,
+            privacy(),
+            SPEC,
+            policy=policy_for(selected),
+            host_overrides={"push_branch": "hard_deny"},
+        )
+        == c.DenyProposal()
+    )
+    assert isinstance(
+        current_projection(
+            receipt,
+            action,
+            selected,
+            privacy(),
+            SPEC,
+            policy=policy_for(selected),
+            host_overrides={"push_branch": "auto_approve"},
+        ),
+        c.EscalateProposal,
+    )
+
+
+def test_r1_enrichment_cannot_reuse_original_opaque_ask_or_digest():
+    from heterodyne.actions.requests import repin_enriched_ask
+
+    action, selected = inputs()
+    with pytest.raises(Refused):
+        repin_enriched_ask(action, action.ask_bytes, "e" * 64, "f" * 64)
+    with pytest.raises(Refused):
+        repin_enriched_ask(action, b"new whole ask", action.context_digest, "f" * 64)
+    updated = repin_enriched_ask(action, b"new whole ask", "e" * 64, "f" * 64)
+    assert updated.groom_revisions == action.groom_revisions
+    assert updated.request_revision == action.request_revision + 1
+    with pytest.raises(Refused):
+        bind(updated, selected, privacy(), SPEC)

@@ -8,15 +8,23 @@ neither authenticates their source nor claims that an opaque ask is a native can
 import asyncio
 import hashlib
 import time
-from collections.abc import Callable
-from typing import Literal, Protocol
+import uuid
+from collections.abc import Callable, Mapping
+from typing import Literal, Protocol, cast
 
 import msgspec
 
 from heterodyne.actions.codec import assemble_envelope, safe_label, validate_request_inputs
-from heterodyne.actions.contracts import Origin, PolicyFacts, Record
+from heterodyne.actions.contracts import Intent, Origin, PolicyFacts, Record, Resolved
 from heterodyne.actions.policy import denial_key, evaluate_policy
-from heterodyne.actions.requests import Refused, Request, digest_syntax, same_session, source_syntax
+from heterodyne.actions.requests import (
+    CreationKey,
+    Refused,
+    Request,
+    digest_syntax,
+    same_session,
+    source_syntax,
+)
 from heterodyne.gatekeeper import contracts as c
 from heterodyne.gatekeeper.project import disposition, groom_disposition
 from heterodyne.gatekeeper.validate import Fault, canonical, data, decode_result, digest, egress, prepare
@@ -34,16 +42,28 @@ class Invocation(Record, frozen=True):
     input_digest: str
     model: ModelSpec
     public_input: bytes
+    nonce: str
 
 
 class Reply(Record, frozen=True):
     input_digest: str
     reported: ModelSpec
     output: bytes
+    nonce: str = ""
 
 
 class Provider(Protocol):
     async def judge(self, invocation: Invocation) -> Reply: ...
+
+
+class Attempt(Record, frozen=True):
+    """Trusted future-owner observation, NOT an unforgeable provider attestation."""
+
+    nonce: str
+    boot_id: str
+    started_ns: int
+    ended_ns: int
+    budget_ns: int
 
 
 class Receipt(Record, frozen=True):
@@ -51,13 +71,17 @@ class Receipt(Record, frozen=True):
     kind: Literal["sufficiency", "permission"]
     elapsed_ns: int
     reply: Reply | None
-    failure: Literal["timeout", "unavailable", "stale_digest"] | None
+    failure: Literal["timeout", "unavailable", "stale_digest", "clock"] | None
+    attempt: Attempt | None = None
 
 
 class GroomState(Record, frozen=True):
     origin: Origin
     failures: int = 0
     assessed: tuple[str, ...] = ()
+    key: CreationKey | None = None
+    approval_id: str | None = None
+    revisions: tuple[int, ...] = ()
 
 
 def _prepared(request: object, privacy: c.PrivacyContext) -> c.SufficiencyRequest | c.PermissionRequest:
@@ -76,13 +100,35 @@ def bind(
     model: ModelSpec,
     *,
     policy: PolicyFacts | None = None,
+    host_overrides: Mapping[str, str] | None = None,
+    restrict: Mapping[str, list[str]] | None = None,
 ) -> str:
     """Bind exact whole ask, P1 state, source pins, policy, model and judgement schema.
 
     The native context digest remains opaque; an eventual native adapter must prove it.
     No snapshot from an earlier revision can be used to certify a later one.
     """
-    selected = _prepared(request, privacy)
+    return _bind(
+        action,
+        _prepared(request, privacy),
+        privacy,
+        model,
+        policy=policy,
+        host_overrides=host_overrides,
+        restrict=restrict,
+    )
+
+
+def _bind(
+    action: Request,
+    selected: c.SufficiencyRequest | c.PermissionRequest,
+    privacy: c.PrivacyContext,
+    model: ModelSpec,
+    *,
+    policy: PolicyFacts | None = None,
+    host_overrides: Mapping[str, str] | None = None,
+    restrict: Mapping[str, list[str]] | None = None,
+) -> str:
     try:
         if (
             type(action) is not Request
@@ -90,19 +136,17 @@ def bind(
             or not 1 <= len(action.ask_bytes) <= 65536
         ):
             raise Refused("judgement-binding-refused")
+        ask_bytes = action.ask_bytes
         action = msgspec.structs.replace(
             msgspec.convert(data(msgspec.structs.replace(action, ask_bytes=None)), type=Request, strict=True),
-            ask_bytes=action.ask_bytes,
+            ask_bytes=ask_bytes,
         )
         model = msgspec.convert(data(model), type=ModelSpec, strict=True)
         for label in (model.requested, model.schema, model.release):
             if not safe_label(label, 128):
                 raise Refused("judgement-model-refused")
         if (
-            type(action) is not Request
-            or action.phase not in {"ask-pinned", "sufficient", "filed"}
-            or type(action.ask_bytes) is not bytes
-            or not 1 <= len(action.ask_bytes) <= 65536
+            action.phase not in {"ask-pinned", "sufficient", "filed"}
             or action.context_digest is None
             or not digest_syntax(action.context_digest)
             or not source_syntax(action.requested_source)
@@ -148,6 +192,17 @@ def bind(
                 or selected.origin.session_ref != action.origin.session_key
             ):
                 raise Refused("judgement-binding-refused")
+            if isinstance(selected.enrichment, c.Used):
+                if (
+                    action.enrichment_base_ask is None
+                    or action.enrichment_base_context is None
+                    or action.enrichment_candidate != digest(selected.candidate)
+                    or hashlib.sha256(ask_bytes).hexdigest() == action.enrichment_base_ask
+                    or action.context_digest == action.enrichment_base_context
+                ):
+                    raise Refused("enrichment-repin-required")
+            elif action.enrichment_candidate is not None:
+                raise Refused("enrichment-repin-required")
         elif (
             selected.subject.task_id != action.origin.bead
             or selected.subject.session_ref != action.origin.session_key
@@ -160,7 +215,13 @@ def bind(
                 or type(policy.widens_permissions) is not bool
             ):
                 raise Refused("judgement-policy-refused")
-            evaluate_policy(action.envelope, action.config, policy, {}, {})
+            evaluate_policy(
+                action.envelope,
+                action.config,
+                policy,
+                {} if host_overrides is None else host_overrides,
+                {} if restrict is None else restrict,
+            )
         elif policy is not None:
             raise Refused("judgement-policy-refused")
         # Lifecycle phase/CAS versions may advance without changing the judged input.
@@ -179,16 +240,25 @@ def bind(
             context_digest=action.context_digest,
             denial_identity=action.denial_identity,
             prior_denials=action.prior_denials,
+            shell_ids=action.shell_ids,
+            recovery_operator_event=action.recovery_operator_event,
+            recovery_evidence=action.recovery_evidence,
+            recovery_closed_orphans=action.recovery_closed_orphans,
+            enrichment_base_ask=action.enrichment_base_ask,
+            enrichment_base_context=action.enrichment_base_context,
+            enrichment_candidate=action.enrichment_candidate,
         )
         return digest(
             dict(
                 domain="plan5-p2-v1",
                 state=state,
-                whole_ask=hashlib.sha256(action.ask_bytes).hexdigest(),
+                whole_ask=hashlib.sha256(ask_bytes).hexdigest(),
                 judgement=selected,
                 model=model,
                 privacy=privacy,
                 policy=policy,
+                host_overrides={} if host_overrides is None else host_overrides,
+                restrict={} if restrict is None else restrict,
             )
         )
     except (Fault, msgspec.ValidationError, TypeError, ValueError, AttributeError, RecursionError) as exc:
@@ -215,57 +285,77 @@ async def assess(
     provider: Provider,
     *,
     clock: Callable[[], int] = _boottime,
+    boot_id: str = "fake-provider-unattested-boot",
     policy: PolicyFacts | None = None,
+    host_overrides: Mapping[str, str] | None = None,
+    restrict: Mapping[str, list[str]] | None = None,
 ) -> Receipt:
-    """One bounded attempt. Cancellation propagates; provider failures never expose prose.
+    """One cooperative fake attempt; nonce/clocks are host observations, not model proof.
 
-    A cooperative async fake port is required. No thread, service or actual model adapter
-    is installed. A future service adapter must enforce its own resource cancellation.
+    A production owner must persist nonce+input+boot+start BEFORE invoking its adapter,
+    corroborate the echoed nonce and end sample, and recheck boot/deadline on use. This
+    pure port has no durable owner and its serialized receipts are forgeable by callers.
     """
     selected = _prepared(request, privacy)
-    identity = bind(action, selected, privacy, model, policy=policy)
+    identity = _bind(
+        action, selected, privacy, model, policy=policy, host_overrides=host_overrides, restrict=restrict
+    )
     kind: Literal["sufficiency", "permission"] = (
         "sufficiency" if isinstance(selected, c.SufficiencyRequest) else "permission"
     )
-    if isinstance(selected, c.SufficiencyRequest) and not isinstance(selected.lint, c.Passed):
+    # Every P0 outward action has at least the escalation floor. There is no approved
+    # typed semantic bridge from arbitrary permission tool input to this envelope.
+    if isinstance(selected, c.PermissionRequest):
         return Receipt(identity, kind, 0, None, "unavailable")
-    if isinstance(selected, c.PermissionRequest) and policy is not None and policy.widens_permissions:
+    if not isinstance(selected.lint, c.Passed):
         return Receipt(identity, kind, 0, None, "unavailable")
     public = egress(selected, privacy)
-    if not isinstance(public, c.Valid):
+    if not isinstance(public, c.Valid) or not safe_label(boot_id, 128):
         return Receipt(identity, kind, 0, None, "unavailable")
     try:
         start = _sample(clock)
     except (Refused, TypeError, ValueError, OverflowError, OSError):
-        return Receipt(identity, kind, 0, None, "unavailable")
+        return Receipt(identity, kind, 0, None, "clock")
+    nonce = uuid.uuid4().hex
     budget = DEADLINE_NS
-    if isinstance(selected, c.PermissionRequest):
-        budget = min(budget, max(0, selected.effective_budget_ms - selected.elapsed_ms) * 1_000_000)
-    if budget == 0:
-        return Receipt(identity, kind, 0, None, "timeout")
+    failure: Literal["timeout", "unavailable", "stale_digest", "clock"] | None = None
+    reply = None
     deadline = asyncio.timeout(budget / 1_000_000_000)
     try:
         async with deadline:
-            reply = await provider.judge(Invocation(identity, model, canonical(public.value)))
+            reply = await provider.judge(Invocation(identity, model, canonical(public.value), nonce))
     except TimeoutError:
-        return Receipt(identity, kind, budget, None, "timeout")
+        failure = "timeout"
     except Exception:
-        return Receipt(identity, kind, 0, None, "unavailable")
+        failure = "unavailable"
     try:
-        elapsed = _sample(clock) - start
+        end = _sample(clock)
     except (Refused, TypeError, ValueError, OverflowError, OSError):
-        return Receipt(identity, kind, 0, None, "unavailable")
-    if deadline.expired() or elapsed < 0 or elapsed >= budget:
-        return Receipt(identity, kind, max(0, elapsed), None, "timeout")
+        return Receipt(identity, kind, 0, None, "clock")
+    elapsed = end - start
+    attempt = Attempt(nonce, boot_id, start, end, budget)
+    if elapsed < 0:
+        return Receipt(identity, kind, elapsed, None, "clock", attempt)
+    if deadline.expired() or elapsed >= budget:
+        failure = "timeout"
+    if failure is not None:
+        return Receipt(identity, kind, elapsed, None, failure, attempt)
     if (
         type(reply) is not Reply
         or reply.input_digest != identity
         or reply.reported != model
+        or reply.nonce != nonce
         or type(reply.output) is not bytes
         or len(reply.output) > 32768
     ):
-        return Receipt(identity, kind, elapsed, None, "stale_digest")
-    return Receipt(identity, kind, elapsed, reply, None)
+        return Receipt(identity, kind, elapsed, None, "stale_digest", attempt)
+    return Receipt(identity, kind, elapsed, reply, None, attempt)
+
+
+def _permission_input(request: object) -> bool:
+    return isinstance(request, c.PermissionRequest) or (
+        type(request) is dict and cast(dict[object, object], request).get("kind") == "permission"
+    )
 
 
 def current_projection(
@@ -276,42 +366,77 @@ def current_projection(
     model: ModelSpec,
     *,
     policy: PolicyFacts | None = None,
+    boot_id: str = "fake-provider-unattested-boot",
+    host_overrides: Mapping[str, str] | None = None,
+    restrict: Mapping[str, list[str]] | None = None,
 ) -> c.Projection:
-    """Revalidate on EVERY use. Permission proposals cannot defeat deterministic P0 policy.
-
-    Even AllowProposal has no effect port or authorization meaning. P0 hard-deny and
-    outward-floor policy remain mandatory before any future adapter considers a proposal.
-    """
-    kind = "permission" if isinstance(request, c.PermissionRequest) else "sufficiency"
-    hold = c.EscalateProposal if kind == "permission" else c.HoldUnavailable
+    """Fresh deterministic hard denial/floor precedes every receipt failure."""
+    permission = _permission_input(request) or policy is not None
+    hold = c.EscalateProposal if permission else c.HoldUnavailable
+    if permission and type(policy) is PolicyFacts and policy.widens_permissions is True:
+        return c.DenyProposal()
     try:
         selected = _prepared(request, privacy)
-        kind = "permission" if isinstance(selected, c.PermissionRequest) else "sufficiency"
-        hold = c.EscalateProposal if kind == "permission" else c.HoldUnavailable
+        kind: Literal["permission", "sufficiency"] = (
+            "permission" if isinstance(selected, c.PermissionRequest) else "sufficiency"
+        )
+        if isinstance(selected, c.PermissionRequest):
+            # Keep the P0 result, including deterministic outward escalation. No tool
+            # request can be certified as the identical effect without a future bridge.
+            if type(policy) is not PolicyFacts or action.envelope is None:
+                return c.EscalateProposal("invalid_host")
+            floor = evaluate_policy(
+                action.envelope,
+                action.config,
+                policy,
+                {} if host_overrides is None else host_overrides,
+                {} if restrict is None else restrict,
+            )
+            return c.DenyProposal() if floor.tier == "hard_deny" else c.EscalateProposal("input_profile")
+        if not isinstance(selected.lint, c.Passed):
+            return disposition(kind, c.Ready(selected), None, privacy)
         if (
             type(receipt) is not Receipt
-            or receipt.input_digest != bind(action, selected, privacy, model, policy=policy)
+            or receipt.input_digest
+            != _bind(
+                action,
+                selected,
+                privacy,
+                model,
+                policy=policy,
+                host_overrides=host_overrides,
+                restrict=restrict,
+            )
             or receipt.kind != kind
-            or receipt.failure not in (None, "timeout", "unavailable", "stale_digest")
-            or type(receipt.elapsed_ns) is not int
-            or not 0 <= receipt.elapsed_ns < DEADLINE_NS
+            or receipt.failure not in (None, "timeout", "unavailable", "stale_digest", "clock")
         ):
             return hold("stale_digest")
-        if isinstance(selected, c.SufficiencyRequest) and not isinstance(selected.lint, c.Passed):
-            return disposition(kind, c.Ready(selected), None, privacy)
-        if isinstance(selected, c.PermissionRequest):
-            if policy is not None and policy.widens_permissions:
-                return c.DenyProposal()
-            remaining = max(0, selected.effective_budget_ms - selected.elapsed_ms) * 1_000_000
-            if receipt.elapsed_ns >= remaining:
-                return hold("deadline")
         if receipt.failure is not None:
-            return hold(receipt.failure)
+            return hold("invalid_host" if receipt.failure == "clock" else receipt.failure)
+        attempt = receipt.attempt
+        if (
+            type(attempt) is not Attempt
+            or type(attempt.nonce) is not str
+            or len(attempt.nonce) != 32
+            or any(ch not in "0123456789abcdef" for ch in attempt.nonce)
+            or not safe_label(attempt.boot_id, 128)
+            or attempt.boot_id != boot_id
+            or any(
+                type(v) is not int
+                for v in (attempt.started_ns, attempt.ended_ns, attempt.budget_ns, receipt.elapsed_ns)
+            )
+            or not 0 <= attempt.started_ns <= attempt.ended_ns
+            or not 0 < attempt.budget_ns <= DEADLINE_NS
+            or receipt.elapsed_ns != attempt.ended_ns - attempt.started_ns
+            or not 0 <= receipt.elapsed_ns < attempt.budget_ns
+        ):
+            return hold("invalid_host")
         reply = receipt.reply
         if (
             type(reply) is not Reply
             or reply.input_digest != receipt.input_digest
             or reply.reported != model
+            or reply.nonce != attempt.nonce
             or type(reply.output) is not bytes
         ):
             return hold("stale_digest")
@@ -319,6 +444,51 @@ def current_projection(
         return disposition(kind, c.Ready(selected), c.Completed(checked), privacy)
     except (Refused, Fault, TypeError, ValueError, AttributeError, RecursionError):
         return hold("stale_digest")
+
+
+def _valid_groom_state(state: GroomState, action: Request | None = None) -> bool:
+    if (
+        type(state) is not GroomState
+        or type(state.origin) is not Origin
+        or type(state.failures) is not int
+        or not 0 <= state.failures <= 2
+        or type(state.assessed) is not tuple
+        or type(state.revisions) is not tuple
+        or len(state.assessed) != len(state.revisions)
+        or len(state.assessed) > 3
+        or not all(digest_syntax(value) for value in state.assessed)
+        or len(set(state.assessed)) != len(state.assessed)
+        or any(type(v) is not int or not 0 <= v <= 2 for v in state.revisions)
+        or tuple(sorted(set(state.revisions))) != state.revisions
+    ):
+        return False
+    if not state.assessed:
+        return (
+            state.failures == 0
+            and state.key is None
+            and state.approval_id is None
+            and (
+                action is None
+                or (
+                    same_session(state.origin, action.origin)
+                    and action.origin.generation >= state.origin.generation
+                )
+            )
+        )
+    if (
+        type(state.key) is not CreationKey
+        or state.approval_id is None
+        or state.revisions[0] != 0
+        or state.revisions[-1] != state.failures
+    ):
+        return False
+    return action is None or (
+        state.key == action.key
+        and state.approval_id == action.approval_id
+        and same_session(state.origin, action.origin)
+        and action.origin.generation >= state.origin.generation
+        and action.groom_revisions >= state.failures
+    )
 
 
 def record_groom(
@@ -329,38 +499,92 @@ def record_groom(
     privacy: c.PrivacyContext,
     model: ModelSpec,
 ) -> GroomState:
-    """Record initial advice, then charge only failed actual groom revisions (maximum two).
+    """Record advice, reconciling already consumed P1 revisions without another groom.
 
-    This returns inert state, not a session-resume capability. P1.groom performs the
-    actual pure revision transition and clears prior whole-ask/sufficiency bindings.
+    An outage records no assessment; it cannot refund a P1 revision already consumed
+    elsewhere. A later negative assessment at revision two has a fixed concern exit.
+    New callers use groom_request to require current negative advice before advancing.
     """
-    if (
-        type(state) is not GroomState
-        or type(state.failures) is not int
-        or not 0 <= state.failures <= 2
-        or len(state.assessed) > 3
-        or (len(state.assessed) != state.failures + 1 and (state.failures != 0 or state.assessed))
-        or len(set(state.assessed)) != len(state.assessed)
-        or not all(digest_syntax(value) for value in state.assessed)
-        or not same_session(state.origin, action.origin)
-        or action.origin.generation < state.origin.generation
-    ):
+    if not _valid_groom_state(state, action):
         raise Refused("groom-origin-refused")
     proposal = current_projection(receipt, action, request, privacy, model)
     if not isinstance(proposal, c.NeedsGrooming):
         return state
     if receipt.input_digest in state.assessed:
         return state
-    if state.failures == 2 or action.groom_revisions != len(state.assessed):
+    if (
+        type(action.groom_revisions) is not int
+        or not 0 <= action.groom_revisions <= 2
+        or (not state.revisions and action.groom_revisions != 0)
+        or (state.revisions and action.groom_revisions <= state.revisions[-1])
+    ):
         raise Refused("groom-budget-refused")
-    return GroomState(action.origin, action.groom_revisions, (*state.assessed, receipt.input_digest))
+    return GroomState(
+        action.origin,
+        action.groom_revisions,
+        (*state.assessed, receipt.input_digest),
+        action.key,
+        action.approval_id,
+        (*state.revisions, action.groom_revisions),
+    )
+
+
+def groom_request(
+    state: GroomState,
+    receipt: Receipt,
+    action: Request,
+    request: object,
+    privacy: c.PrivacyContext,
+    model: ModelSpec,
+    *,
+    intent: Intent,
+    resolved: Resolved,
+    source: str,
+    origin: Origin,
+) -> Request:
+    """No session effect: only current recorded negative advice can spend a P1 groom."""
+    from heterodyne.actions.requests import groom
+
+    if (
+        not _valid_groom_state(state, action)
+        or not state.assessed
+        or state.failures != action.groom_revisions
+        or state.assessed[-1] != bind(action, request, privacy, model)
+        or not isinstance(current_projection(receipt, action, request, privacy, model), c.NeedsGrooming)
+    ):
+        raise Refused("groom-advice-required")
+    # Reuse the P1 typed transition; its validation also refuses supplied wrong types.
+    return groom(action, intent, resolved, source, origin=origin)
 
 
 def groom_route(state: GroomState) -> c.ReturnToOrigin | c.CannotApproveNotice:
-    """Fixed bounded advice only; silence/unknown is never an authenticated denial."""
-    if type(state.failures) is not int or not 0 <= state.failures <= 2:
+    """Fixed advice from a coherent assessed state, never from a bare counter."""
+    if not _valid_groom_state(state) or not state.assessed:
         raise Refused("groom-budget-refused")
     return groom_disposition(state.failures)
+
+
+def repin_enrichment(
+    receipt: Receipt,
+    action: Request,
+    request: object,
+    privacy: c.PrivacyContext,
+    model: ModelSpec,
+    *,
+    whole_ask: bytes,
+    context_digest: str,
+) -> Request:
+    """Rebuild opaque host-observed ask from a current validated enrichment proposal.
+
+    A future native adapter must prove candidate-to-canonical-ask equivalence. This
+    transition enforces distinct bytes/digest, clears sufficiency and charges no groom.
+    """
+    from heterodyne.actions.requests import repin_enriched_ask
+
+    proposal = current_projection(receipt, action, request, privacy, model)
+    if not isinstance(proposal, c.EnrichmentProposal):
+        raise Refused("enrichment-proposal-required")
+    return repin_enriched_ask(action, whole_ask, context_digest, digest(proposal.candidate))
 
 
 ConcernCode = Literal["missing-context", "ambiguous-target", "unsupported-effect", "lint-failed"]
@@ -385,14 +609,12 @@ def concern(
 ) -> Concern:
     """After two actual groom assessments, expose no model prose or private source pins."""
     if (
-        type(state) is not GroomState
+        not _valid_groom_state(state, action)
         or reason not in ("missing-context", "ambiguous-target", "unsupported-effect", "lint-failed")
         or state.failures != 2
-        or len(state.assessed) != 3
-        or len(set(state.assessed)) != 3
-        or not all(digest_syntax(value) for value in state.assessed)
-        or not same_session(state.origin, action.origin)
-        or action.origin.generation < state.origin.generation
+        or action.groom_revisions != 2
+        or not state.assessed
+        or state.assessed[-1] != bind(action, request, privacy, model)
     ):
         raise Refused("concern-refused")
     return Concern(reason, bind(action, request, privacy, model)[:12])
