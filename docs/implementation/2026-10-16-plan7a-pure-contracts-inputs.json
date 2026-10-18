@@ -74,8 +74,9 @@
     }
   ],
   "loaded_redaction_compatibility": {
-    "interpreter": "CPython 3.12",
+    "interpreter": "unoptimized CPython 3.12",
     "fingerprint": "83afc23702d60c698c818cc06fa1cf1978a797a9929d5086e0924a06b5ec9967",
-    "scope": "pure loaded explicit-directory kernel and effective pattern/constants; no filesystem attestation; mismatch refuses privacy binding"
+    "scope": "pure loaded explicit-directory kernel and effective pattern/constants; no filesystem attestation; mismatch refuses privacy binding",
+    "optimization": "-O/-OO are not admitted; -OO removes fingerprinted docstrings and fails closed; expected identity unchanged"
   }
 }

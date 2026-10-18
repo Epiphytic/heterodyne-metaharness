@@ -11,6 +11,7 @@ import msgspec
 from heterodyne.gatekeeper import contracts as c
 from heterodyne.gatekeeper.validate import (
     HOST_CODES,
+    Fault,
     aliases,
     appended,
     canonical,
@@ -36,14 +37,18 @@ def _nonready(kind: str, prepared: object) -> c.Projection:
                 not public_path(gap.field) or gap.detail is not None for gap in prepared.gaps
             ):
                 return _hold(kind, "invalid_host")
-        except (msgspec.ValidationError, TypeError, ValueError, UnicodeError, RecursionError):
+        except (Fault, msgspec.ValidationError, TypeError, ValueError, UnicodeError, RecursionError):
             return _hold(kind, "invalid_host")
         if kind == "intake":
             return c.HoldInvalidInput(prepared.gaps)
         if kind == "sufficiency":
             return c.NeedsGrooming(prepared.gaps)
         return c.EscalateProposal("input_profile")
-    if isinstance(prepared, c.HostFailed) and prepared.reason_code in HOST_CODES:
+    if (
+        isinstance(prepared, c.HostFailed)
+        and type(prepared.reason_code) is str
+        and prepared.reason_code in HOST_CODES
+    ):
         return _hold(kind, prepared.reason_code)
     return _hold(kind, "invalid_host")
 
@@ -139,7 +144,7 @@ def disposition(
     if attempt is None:
         return _hold(kind, "missing_attempt")
     if isinstance(attempt, c.HostFailed):
-        if attempt.reason_code not in HOST_CODES:
+        if type(attempt.reason_code) is not str or attempt.reason_code not in HOST_CODES:
             return _hold(kind, "invalid_host")
         if kind == "intake" and attempt.reason_code in ("timeout", "unavailable"):
             return c.RawUnreviewedProposal()

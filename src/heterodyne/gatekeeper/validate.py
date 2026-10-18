@@ -12,6 +12,7 @@ from typing import Literal, Never, cast
 
 import msgspec
 
+from heterodyne.admind import redact as redaction_kernel
 from heterodyne.admind.redact import redact_with_dirs
 from heterodyne.gatekeeper import contracts as c
 from heterodyne.gatekeeper._rule_identity import matches as rules_match
@@ -70,6 +71,39 @@ def fail(code: c.CheckCode | Literal["profile"], field: str = "") -> Never:
 
 
 def data(value: object) -> object:
+    """Bound occurrences BEFORE conversion can expand caller-shared graphs."""
+    pending = [(value, 0)]
+    count = size = 0
+    while pending:
+        current, depth = pending.pop()
+        count += 1
+        if count > 32768 or depth > 64:
+            fail("oversize")
+        if type(current) is str:
+            text = current
+            if len(text) > 262144:
+                fail("oversize")
+            # Count malformed Unicode without replacing the later field-owned unsafe check.
+            size += len(text.encode("utf-8", errors="surrogatepass"))
+            if size > 262144:
+                fail("oversize")
+        elif type(current) is dict:
+            items = cast(dict[object, object], current)
+            if len(items) > 32768:
+                fail("oversize")
+            pending.extend((child, depth + 1) for pair in items.items() for child in pair)
+        elif type(current) in (list, tuple):
+            children = cast(list[object] | tuple[object, ...], current)
+            if len(children) > 32768:
+                fail("oversize")
+            pending.extend((child, depth + 1) for child in children)
+        elif isinstance(current, msgspec.Struct):
+            pending.extend(
+                (getattr(current, field.name), depth + 1) for field in msgspec.structs.fields(type(current))
+            )
+        # Float grammar belongs to NativeValue validation, not this allocation bound.
+        elif type(current) not in (int, float, bool, type(None), msgspec.UnsetType):
+            fail("schema")
     return msgspec.to_builtins(value)
 
 
@@ -133,7 +167,11 @@ def _locator(value: str, field: str) -> None:
 
 def privacy_context(value: object) -> c.PrivacyContext:
     context = msgspec.convert(value, type=c.PrivacyContext, strict=True)
-    if context.rule_revision != RULE_REVISION or not rules_match():
+    if (
+        context.rule_revision != RULE_REVISION
+        or not rules_match()
+        or redact_with_dirs is not redaction_kernel.redact_with_dirs
+    ):
         fail("binding")
     if len(context.login_dirs) > 16 or tuple(sorted(set(context.login_dirs))) != context.login_dirs:
         fail("invariant")
@@ -179,7 +217,7 @@ def schema_path(error: msgspec.ValidationError, prefix: str = "") -> str:
             "/invocation/input",
         ):
             break
-        part = re.match(r"(?:\.([a-z_]+)|\[([0-9]+)\])", location)
+        part = re.match(r"(?:\.([a-z_][a-z0-9_]*)|\[([0-9]+)\])", location)
         if part is None:
             break
         segment = part.group(1) or part.group(2)
@@ -563,14 +601,13 @@ def _ready(request: c.AnyRequest, privacy: c.PrivacyContext) -> c.Ready[c.AnyReq
 
 
 def _typed_origin(raw: object, privacy: c.PrivacyContext) -> object:
-    # Bound object-valued origin data before to_builtins can expand shared containers.
+    # Bound all fields before origin-specific validation or typed conversion.
+    built = data(raw)
     if isinstance(raw, c.PermissionRequest):
         _native(raw.invocation.input, privacy, "/invocation/input")
     elif isinstance(raw, c.SufficiencyRequest):
         _candidate(raw.candidate, privacy)
-    if isinstance(raw, (c.IntakeRequest, c.SufficiencyRequest, c.PermissionRequest)):
-        return data(raw)
-    return raw
+    return built
 
 
 def prepare(
@@ -585,12 +622,16 @@ def prepare(
         raw = _typed_origin(raw, privacy)
     except Fault as error:
         return c.OriginGap((c.Gap(error.code, error.field, None),))
+    except (AttributeError, TypeError, ValueError, RecursionError, UnicodeError):
+        return c.InvalidHost("")
     if not isinstance(raw, dict):
         return c.InvalidHost("")
     raw = cast(dict[str, object], raw)
     kind = raw.get("kind")
     if not isinstance(kind, str) or kind not in REQUEST_TYPES:
         return c.InvalidHost("")
+    if kind == "permission" and type(raw.get("invocation")) is not dict:
+        return c.InvalidHost("/invocation")
     try:
         _origin_fields(raw, kind, privacy)
     except Fault as error:
@@ -728,7 +769,10 @@ def check_result(raw: object, request: c.AnyRequest, privacy: c.PrivacyContext) 
     except (Fault, msgspec.ValidationError, TypeError, ValueError, UnicodeError):
         return c.Invalid("result", "binding", "/privacy_sha256")
     try:
-        result = msgspec.convert(data(raw), type=RESULT_TYPES[request_kind(request)], strict=True)
+        built = data(raw)
+        if len(canonical(built)) > 32768:
+            fail("oversize")
+        result = msgspec.convert(built, type=RESULT_TYPES[request_kind(request)], strict=True)
         _outcome(request, result, privacy)
     except msgspec.ValidationError as error:
         return c.Invalid("result", "schema", schema_path(error))
@@ -787,6 +831,7 @@ def egress(request: c.AnyRequest, privacy: c.PrivacyContext) -> c.Check[dict[str
     prepared = prepare(request, privacy)
     if not isinstance(prepared, c.Ready):
         return _request_invalid(prepared)
+    request = prepared.value
     common: dict[str, object] = dict(
         format=1,
         kind=request_kind(request),

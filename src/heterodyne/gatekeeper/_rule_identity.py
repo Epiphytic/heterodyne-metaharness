@@ -2,7 +2,9 @@
 
 This is a deployment compatibility check, not source authentication or a sandbox. The
 source blobs and admitting product revision are separately pinned in the input manifest.
-Code identity is admitted on Python 3.12; another interpreter must be admitted explicitly.
+Code identity is admitted on unoptimized CPython 3.12. Optimization (including -OO,
+which strips fingerprinted docstrings) or another interpreter fails closed and needs
+separate admission; this adapter does not silently update the expected identity.
 """
 
 # This adapter deliberately fingerprints the exact shared internal kernel.

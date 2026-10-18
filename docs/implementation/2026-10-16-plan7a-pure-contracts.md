@@ -78,3 +78,26 @@ its exact source and kernel identity together with parity fixtures before use.
 The review's optional regex-compilation and generated-field-set suggestions are deferred:
 there is no measured performance regression requiring a new caching lifecycle, and closed
 schema tests cover the explicit public diagnostic field allowlist. No review pass is claimed.
+
+## Second HIGH code-review repairs
+
+The actual second FULL HIGH review returned REVISE with ten findings. The adjacent
+ordered review dispositions record eight addressed findings and two noncritical deferrals;
+no code-review pass is claimed. Conversion now has an allocation prewalk before expanding
+shared Python graphs. Normalized results have the same 32 KiB aggregate ceiling as wire
+results. Typed malformed fields and unhashable host codes refuse without escaping the
+projection, and egress is detached from caller-owned mutable input. Host invocation envelope
+faults stay host-owned; digit-bearing public diagnostic paths retain their full safe ancestor.
+
+The exact redactor binding actually used must match the fingerprinted kernel. Runtime
+admission is specifically **unoptimized CPython 3.12**; optimized execution, including `-OO`
+which removes fingerprinted docstrings, fails closed. The expected identity is unchanged.
+There is no ambient runtime detection fallback or new authority claim.
+
+Known noncritical limits remain: a future enrichment reassessment allocating a longer fresh
+request ID/revision can exceed the aggregate limit after a candidate proposal; it still
+refuses safely without sending oversized data. Semantic host grammar failures can be labeled
+`invariant` rather than `schema` at the same safe public field path. Neither limitation is
+claimed fixed or waived by this author. The earlier first-HIGH section records its candidate
+state; the actual second-HIGH findings and current limitations supersede that earlier pending
+review wording.
