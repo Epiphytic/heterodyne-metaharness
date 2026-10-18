@@ -5,9 +5,12 @@ An accepted refreshed reciprocal capsule is a prerequisite for a real compositio
 This module provides no CLI, native client, permission Allow, or production factory.
 """
 
+import asyncio
+import fcntl
 import hashlib
 import os
 import sqlite3
+import threading
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
@@ -28,7 +31,13 @@ Operation = Literal["allocate", "lookup", "blocker", "park", "land", "groom", "f
 State = Literal["prepared", "issuing", "observed", "refused-unissued", "uncertain"]
 MAX_REQUESTS = 4096
 MAX_EVENTS = 16384
-RESERVATION = 161
+DETAIL_EVENTS = 33
+LIFECYCLE_EVENTS = 128
+CLEANUP_EVENTS = 4
+ORDINARY_EVENTS = LIFECYCLE_EVENTS - CLEANUP_EVENTS
+COMMAND_HEADROOM = 8
+RESERVATION = LIFECYCLE_EVENTS + DETAIL_EVENTS
+MAX_WITHDRAWALS = 3
 TERMINAL = {"completed", "denied", "cancelled", "reconciled-abandoned"}
 
 
@@ -44,7 +53,6 @@ SCHEMA_SQL = (
     "CREATE TABLE grooming(k TEXT PRIMARY KEY,data BLOB);"
     "CREATE TABLE groom_plans(id TEXT PRIMARY KEY,data BLOB);"
     "CREATE INDEX commands_pending ON commands(k,state,operation);"
-    "CREATE INDEX events_request ON events(k,kind);"
 )
 
 
@@ -64,6 +72,7 @@ class Command(Record, frozen=True):
     policy_revision: str
     clock: Clock
     payload: bytes = b""
+    compact_cleanup: bool = False
 
 
 class ProviderResult(Record, frozen=True):
@@ -187,30 +196,66 @@ class FilingJournal:
         self, db: sqlite3.Connection, clock: Callable[[], Clock], nonce: Callable[[], str], ports: Ports
     ) -> None:
         self.db, self.clock, self.nonce, self.ports = db, clock, nonce, ports
+        self.path = Path(db.execute("PRAGMA database_list").fetchone()[2])
+        self._lease_owner: tuple[int, int] | None = None
+        self._lease_depth = 0
+        self._lease_mutex = threading.Lock()
+        self._live: set[str] = set()
+
+    @contextmanager
+    def ownership(self) -> Generator[None]:
+        """Nonblocking same-inode owner lease; never a SQLite writer over a port call."""
+        try:
+            task = asyncio.current_task()
+        except RuntimeError:
+            task = None
+        token = (threading.get_ident(), id(task) if task is not None else 0)
+        fd: int | None = None
+        with self._lease_mutex:
+            if self._lease_owner is not None and self._lease_owner != token:
+                raise Held("journal-owner-busy")
+            if self._lease_owner is None:
+                fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BaseException as exc:
+                    os.close(fd)
+                    raise Held("journal-owner-busy") from exc
+                self._lease_owner = token
+            self._lease_depth += 1
+        try:
+            yield
+        finally:
+            with self._lease_mutex:
+                self._lease_depth -= 1
+                if self._lease_depth == 0:
+                    self._lease_owner = None
+                    if fd is not None:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                        os.close(fd)
 
     @classmethod
     def create(
         cls, path: Path, *, clock: Callable[[], Clock], nonce: Callable[[], str], ports: Ports | None
     ) -> "FilingJournal":
-        cls._capability(ports)
+        ports = cls._capability(ports)
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         os.close(fd)
         db = sqlite3.connect(path, isolation_level=None, timeout=1)
         db.executescript(SCHEMA_SQL)
-        if ports is None:
-            raise Held("filing-capability-unavailable")
         return cls(db, clock, nonce, ports)
 
     @staticmethod
-    def _capability(ports: Ports | None) -> None:
+    def _capability(ports: Ports | None) -> Ports:
         if ports is None or ports.fixture_only is not True:
             raise Held("filing-capability-unavailable")
+        return ports
 
     @classmethod
     def open(
         cls, path: Path, *, clock: Callable[[], Clock], nonce: Callable[[], str], ports: Ports
     ) -> "FilingJournal":
-        cls._capability(ports)
+        ports = cls._capability(ports)
         st = path.lstat()
         if (
             not path.is_file()
@@ -232,19 +277,26 @@ class FilingJournal:
         if db.execute("PRAGMA user_version").fetchone()[0] != 1 or not compatible:
             db.close()
             raise Held("journal-schema-refused")
-        db.execute("UPDATE commands SET state='uncertain' WHERE state='issuing'")
-        return cls(db, clock, nonce, ports)
+        owner = cls(db, clock, nonce, ports)
+        try:
+            with owner.ownership():
+                db.execute("UPDATE commands SET state='uncertain' WHERE state='issuing'")
+        except BaseException:
+            db.close()
+            raise
+        return owner
 
     @contextmanager
     def transaction(self) -> Generator[None]:
-        self.db.execute("BEGIN IMMEDIATE")
-        try:
-            yield
-            self.db.execute("COMMIT")
-        except BaseException:
-            if self.db.in_transaction:
-                self.db.execute("ROLLBACK")
-            raise
+        with self.ownership():
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                yield
+                self.db.execute("COMMIT")
+            except BaseException:
+                if self.db.in_transaction:
+                    self.db.execute("ROLLBACK")
+                raise
 
     def sample(self) -> Clock:
         value = self.clock()
@@ -265,7 +317,9 @@ class FilingJournal:
             raise Held("request-missing")
         count, lifecycle = row
         # Every append enforces the finite reservation; reads cannot spend terminal slots.
-        if count >= RESERVATION or (kind != "detail" and lifecycle >= (128 if terminal else 124)):
+        if count >= RESERVATION or (
+            kind != "detail" and lifecycle >= (LIFECYCLE_EVENTS if terminal else ORDINARY_EVENTS)
+        ):
             raise Held("request-event-capacity-held")
         self.db.execute("INSERT INTO events(k,kind,data) VALUES(?,?,?)", (request_key, kind, data))
         self.db.execute(
@@ -296,9 +350,9 @@ class FilingJournal:
                 "SELECT count(*) FROM requests WHERE active=1 AND ws=? AND bead=?",
                 (request.key.workstream, request.key.bead),
             ).fetchone()[0]
-            retained = self.db.execute("SELECT count(*) FROM events").fetchone()[0]
+            retained = self.db.execute("SELECT coalesce(sum(events),0) FROM requests").fetchone()[0]
             reserved = self.db.execute(
-                "SELECT coalesce(sum(161 - events),0) FROM requests WHERE active=1"
+                "SELECT coalesce(sum(? - events),0) FROM requests WHERE active=1", (RESERVATION,)
             ).fetchone()[0]
             if (
                 count >= MAX_REQUESTS
@@ -341,17 +395,15 @@ class FilingJournal:
             self._cleanup(payload)
         with self.transaction():
             request = self.request(request_key)
-            pending = self.db.execute(
-                "SELECT id,operation,state FROM commands WHERE k=? "
-                "AND (state IN ('prepared','issuing','uncertain') OR "
-                "(operation='provider' AND state='observed' AND NOT EXISTS "
-                "(SELECT 1 FROM assessments WHERE assessments.id=commands.id)))",
-                (request_key,),
-            ).fetchall()
+            pending = self._pending(request_key)
             recoverable = (
                 operation == "withdraw"
                 and bool(pending)
-                and all(row[1] != "withdraw" and row[2] == "uncertain" for row in pending)
+                and all(
+                    row[1] != "withdraw"
+                    and (row[2] == "uncertain" or (row[1] == "provider" and row[2] == "observed"))
+                    for row in pending
+                )
             )
             if (pending and not recoverable) or request.phase in TERMINAL:
                 raise Held("command-pending-held")
@@ -377,8 +429,19 @@ class FilingJournal:
             if request.phase not in phases[operation]:
                 raise Held("command-phase-refused")
             used = self.db.execute("SELECT lifecycle FROM requests WHERE k=?", (request_key,)).fetchone()[0]
-            if used > (124 if operation == "withdraw" else 116):
+            if used > (
+                LIFECYCLE_EVENTS - 1 if operation == "withdraw" else ORDINARY_EVENTS - COMMAND_HEADROOM
+            ):
                 raise Held("terminal-lifecycle-reserved")
+            compact = operation == "withdraw" and used > ORDINARY_EVENTS
+            if (
+                operation == "withdraw"
+                and self.db.execute(
+                    "SELECT count(*) FROM commands WHERE k=? AND operation='withdraw'", (request_key,)
+                ).fetchone()[0]
+                >= MAX_WITHDRAWALS
+            ):
+                raise Held("withdrawal-attempt-capacity-held")
             clock = self.sample()
             nonce = self.nonce()
             if (
@@ -387,12 +450,13 @@ class FilingJournal:
                 or any(ch not in "0123456789abcdef" for ch in nonce)
             ):
                 raise Held("nonce-refused")
-            command = Command(nonce, operation, request, digest(request), policy, clock, payload)
+            command = Command(nonce, operation, request, digest(request), policy, clock, payload, compact)
             self.db.execute(
                 "INSERT INTO commands(id,k,operation,state,data,result,clock) VALUES(?,?,?,?,?,?,?)",
                 (nonce, request_key, operation, "prepared", encoded(command), None, encoded(clock)),
             )
-            self.append_event(request_key, "prepared", encoded(command), terminal=operation == "withdraw")
+            if not compact:
+                self.append_event(request_key, "prepared", encoded(command), terminal=operation == "withdraw")
             return command
 
     def command(self, command_id: str) -> tuple[Command, State]:
@@ -411,7 +475,13 @@ class FilingJournal:
             if command.operation == "allocate":
                 self._save(command.request, r.cancel_unissued_allocation(command.request))
             self.db.execute("UPDATE commands SET state='refused-unissued' WHERE id=?", (command_id,))
-            self.append_event(key(command.request), "abandoned-unissued", encoded(command), terminal=True)
+            if not command.compact_cleanup:
+                self.append_event(
+                    key(command.request),
+                    "abandoned-unissued",
+                    encoded(command),
+                    terminal=command.operation == "withdraw",
+                )
 
     @staticmethod
     def _cleanup(payload: bytes) -> Cleanup:
@@ -470,12 +540,13 @@ class FilingJournal:
                 "UPDATE commands SET state='issuing',data=?,clock=? WHERE id=?",
                 (encoded(command), encoded(now), command_id),
             )
-            self.append_event(
-                key(command.request),
-                "issuing",
-                encoded((now, current)),
-                terminal=command.operation == "withdraw",
-            )
+            if not command.compact_cleanup:
+                self.append_event(
+                    key(command.request),
+                    "issuing",
+                    encoded((now, current)),
+                    terminal=command.operation == "withdraw",
+                )
         return command
 
     def mark_unknown(self, command: Command) -> None:
@@ -485,6 +556,14 @@ class FilingJournal:
             )
 
     def execute(self, command_id: str) -> Observation:
+        with self.ownership():
+            self._live.add(command_id)
+            try:
+                return self._execute(command_id)
+            finally:
+                self._live.discard(command_id)
+
+    def _execute(self, command_id: str) -> Observation:
         prepared, _ = self.command(command_id)
         if prepared.operation == "provider":
             raise Held("provider-owner-required")
@@ -501,30 +580,55 @@ class FilingJournal:
                 command.request.requested_source,
                 "definitely-unissued",
             )
-            with self.transaction():
-                if self.command(command_id) != (command, "issuing"):
-                    raise Held("preissue-refusal-state-held") from None
-                if command.operation == "allocate":
-                    self._save(command.request, r.cancel_unissued_allocation(command.request))
-                self.db.execute(
-                    "UPDATE commands SET state='refused-unissued',result=? WHERE id=?",
-                    (encoded(result), command_id),
-                )
-                self.append_event(key(command.request), "preissue-refusal", encoded(result), terminal=True)
+            try:
+                with self.transaction():
+                    if self.command(command_id) != (command, "issuing"):
+                        raise Held("preissue-refusal-state-held") from None
+                    if command.operation == "allocate":
+                        self._save(command.request, r.cancel_unissued_allocation(command.request))
+                    self.db.execute(
+                        "UPDATE commands SET state='refused-unissued',result=? WHERE id=?",
+                        (encoded(result), command_id),
+                    )
+                    if not command.compact_cleanup:
+                        self.append_event(
+                            key(command.request),
+                            "preissue-refusal",
+                            encoded(result),
+                            terminal=command.operation == "withdraw",
+                        )
+            except BaseException:
+                self.mark_unknown(command)
+                raise
             return result
         except BaseException:
             self.mark_unknown(command)
             raise
         try:
-            self.observe(command_id, result)
+            self._observe(command_id, result)
         except BaseException:
             self.mark_unknown(command)
             raise
         return result
 
     def reconcile(self, command_id: str) -> Observation:
+        with self.ownership():
+            if command_id in self._live:
+                raise Held("command-live-held")
+            return self._reconcile(command_id)
+
+    def _withdraw_fence(self, command: Command) -> None:
+        if command.operation != "withdraw" and any(
+            row[1] == "withdraw" for row in self._pending(key(command.request))
+        ):
+            raise Held("withdrawal-fence-held")
+
+    def _reconcile(self, command_id: str) -> Observation:
         with self.transaction():
             command, state = self.command(command_id)
+            if command.operation == "provider":
+                raise Held("provider-owner-required")
+            self._withdraw_fence(command)
             if state not in {"issuing", "uncertain"}:
                 raise Held("reconcile-state-refused")
             if command.operation == "allocate":
@@ -580,8 +684,17 @@ class FilingJournal:
             raise Held("observation-binding-refused")
 
     def observe(self, command_id: str, observation: Observation) -> None:
+        with self.ownership():
+            if command_id in self._live:
+                raise Held("command-live-held")
+            self._observe(command_id, observation)
+
+    def _observe(self, command_id: str, observation: Observation) -> None:
         with self.transaction():
             command, state = self.command(command_id)
+            if command.operation == "provider":
+                raise Held("provider-owner-required")
+            self._withdraw_fence(command)
             self._correlated(command, observation)
             if state == "observed":
                 row = self.db.execute("SELECT result FROM commands WHERE id=?", (command_id,)).fetchone()
@@ -818,14 +931,17 @@ class FilingJournal:
         # Actual Q1 withdrawal + actual P1 returned terminal Request are both required.
         return self.prepare(request_key, "withdraw", policy, encoded(cleanup))
 
-    def _idle(self, request: r.Request) -> None:
-        if self.db.execute(
-            "SELECT 1 FROM commands WHERE k=? AND "
+    def _pending(self, request_key: str) -> list[tuple[str, str, str]]:
+        return self.db.execute(
+            "SELECT id,operation,state FROM commands WHERE k=? AND "
             "(state IN ('prepared','issuing','uncertain') OR "
             "(operation='provider' AND state='observed' AND NOT EXISTS "
             "(SELECT 1 FROM assessments WHERE assessments.id=commands.id)))",
-            (key(request),),
-        ).fetchone():
+            (request_key,),
+        ).fetchall()
+
+    def _idle(self, request: r.Request) -> None:
+        if self._pending(key(request)):
             raise Held("command-pending-held")
 
     async def assess(
@@ -838,39 +954,40 @@ class FilingJournal:
         *,
         policy_revision: str,
     ) -> tuple[str, j.Receipt]:
-        before = self.request(request_key)
-        # Bind/validate before allocating a nonce or starting a command.
-        j.bind(before, request, privacy, model)
-        command = self.prepare(request_key, "provider", policy_revision)
-        owned = DurableProvider(self, command, provider, self._issue)
-        receipt = await j.assess(
-            before,
-            request,
-            privacy,
-            model,
-            owned,
-            clock=owned.assessment_clock,
-            boot_id=command.clock.boot_id,
-            nonce=command.command_id,
-        )
-        with self.transaction():
-            completed, state = self.command(command.command_id)
-            if self.request(request_key) != before:
-                raise Held("provider-outcome-unknown")
-            if state == "prepared" and receipt.reply is None:
-                # P2 may refuse without invoking the provider, or the owner may
-                # refuse before issue. This is durable no-call evidence, not absence.
-                self.db.execute(
-                    "UPDATE commands SET state='refused-unissued' WHERE id=?", (command.command_id,)
-                )
-            elif state == "observed":
-                DurableProvider.verify_receipt(self, completed, receipt)
-            else:
-                raise Held("provider-outcome-unknown")
-            # Receipt includes end/deadline and the complete actual reply, before any projection.
-            self.db.execute("INSERT INTO assessments VALUES(?,?)", (command.command_id, encoded(receipt)))
-            self.append_event(request_key, "assessment", encoded(receipt))
-        return command.command_id, receipt
+        with self.ownership():
+            before = self.request(request_key)
+            # Bind/validate before allocating a nonce or starting a command.
+            j.bind(before, request, privacy, model)
+            command = self.prepare(request_key, "provider", policy_revision)
+            owned = DurableProvider(self, command, provider, self._issue)
+            receipt = await j.assess(
+                before,
+                request,
+                privacy,
+                model,
+                owned,
+                clock=owned.assessment_clock,
+                boot_id=command.clock.boot_id,
+                nonce=command.command_id,
+            )
+            with self.transaction():
+                completed, state = self.command(command.command_id)
+                if self.request(request_key) != before:
+                    raise Held("provider-outcome-unknown")
+                if state == "prepared" and receipt.reply is None:
+                    # P2 may refuse without invoking the provider, or the owner may
+                    # refuse before issue. This is durable no-call evidence, not absence.
+                    self.db.execute(
+                        "UPDATE commands SET state='refused-unissued' WHERE id=?", (command.command_id,)
+                    )
+                elif state == "observed":
+                    DurableProvider.verify_receipt(self, completed, receipt)
+                else:
+                    raise Held("provider-outcome-unknown")
+                # Receipt includes end/deadline and the complete actual reply, before any projection.
+                self.db.execute("INSERT INTO assessments VALUES(?,?)", (command.command_id, encoded(receipt)))
+                self.append_event(request_key, "assessment", encoded(receipt))
+            return command.command_id, receipt
 
     def projection(
         self,
@@ -934,7 +1051,9 @@ class FilingJournal:
         ):
             raise Held("detail-refused")
         with self.transaction():
-            self.request(request_key)
+            request = self.request(request_key)
+            if request.phase in TERMINAL:
+                raise Held("terminal-detail-held")
             prior = self.db.execute(
                 "SELECT data FROM details WHERE k=? AND id=?", (request_key, event_id)
             ).fetchone()

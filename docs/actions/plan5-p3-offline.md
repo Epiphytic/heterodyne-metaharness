@@ -18,7 +18,11 @@ Only the immediate adapter's typed pre-effect refusal has that meaning. A prepar
 intent can be locally CAS-abandoned without any port call; an uncertain intent
 cannot. A proved unissued allocation becomes terminal cancelled while retaining
 its issued-history bit, never enabling another create. Exact-schema reopen
-normalizes interrupted issuing commands to uncertain.
+normalizes interrupted issuing commands to uncertain only after acquiring the same
+nonblocking owner lease used across the actual invocation/assessment and result
+commit. Another connection or asynchronous owner cannot open-normalize an active
+call. This is a same-inode process/thread/task lease, not a SQLite writer lock
+held across external work. Generic readback APIs reject provider commands.
 
 Allocation lookups consume the durable P1 lookup count before each read and are
 spaced 1/5/30 seconds from the actual issued call, then preceding owned lookup.
@@ -31,7 +35,17 @@ reserves 161 lifecycle slots before allocation; retained history is not evicted.
 Transactional per-request counters avoid per-event history scans. Unknown or
 unavailable readbacks update bounded command diagnostics without spending the
 terminal reserve. Ordinary lifecycle traffic stops at 124; cleanup has four
-reserved slots within the 128-slot lifecycle bound.
+reserved slots within the 128-slot lifecycle bound. New ordinary commands stop
+at 116 to retain their eight-event completion headroom; non-command lifecycle
+updates remain bounded at 124. Cleanup retains at most three withdrawal intents,
+including every prior result/refusal. After an abandoned or immediate proven
+pre-effect first attempt, compact retry intents retain their full command rows
+without duplicating prepared/issuing history events; their terminal result still
+consumes a lifecycle event. Thus one failed first attempt at the ordinary limit
+can still settle within 128. Three exhausted attempts remain a finite-stage HOLD;
+no uncertain withdrawal is replayed or replaced. While any withdrawal is pending,
+older command readbacks are fenced before they can change its request snapshot.
+Terminal requests reject new detail traffic after releasing their unused reservation.
 Detail traffic has 32 exact bounded records plus one saturated aggregate, with
 four hashed samples. Overflow is bounded diagnostic information, not unlimited
 per-event deduplication or authority.
@@ -53,6 +67,9 @@ persisted before sufficiency adoption. A P2 preflight refusal with no provider
 call retains its exact Receipt and a refused-unissued intent; it can still yield
 the original P2 grooming projection without becoming a pending provider effect. A crash between result and Receipt leaves
 an explicit HOLD; it does not resample an end time, reroll a nonce or call again.
+That orphan result remains immutable and can be followed by the existing typed,
+authenticated P1 cancellation/withdrawal proof to reach a terminal state. A mere
+missing Receipt or caller-synthesized terminal projection grants no cleanup.
 Projection validates the retained input/result/receipt and current source/boot/
 60-second deadline. There is no permission Allow path.
 
@@ -76,7 +93,7 @@ fixture ports; they do not substitute for that outstanding pair acceptance.
 Local journal files are a trusted same-UID boundary. Raw SQLite changes used in
 adversarial tests model stale/concurrent data and are not a supported operator
 recovery interface. The first-review predecessor journal schema is deliberately incompatible with
-the counter/index schema: opening it holds without mutation, reset or automatic
+the current exact counter/schema: opening it holds without mutation, reset or automatic
 migration. Legacy/partial journals, missing receipts, unresolved effects
 and unavailable capabilities stay held. No deployment or production acceptance
 is claimed. Quality findings remain unwaived in the external task evidence. The full
