@@ -52,8 +52,16 @@ def test_fresh_proposal_preserves_history_and_needs_own_consent(tmp_path, reason
                 rig.boot = "42345678-1234-4234-8234-123456789abc"
             else:
                 rig.policy = "a" * 64
+        if reason in ("cap", "policy"):
+            rig.certificate()  # positive observation for the last issued generation
         old = fresh(rig)
         before = rig.service.get(old)
+        if reason == "boot":
+            with pytest.raises(recovery.Invalid, match="boot-changed"):
+                rig.register()
+            assert rig.service.current(rig.obj.operation, old)
+            assert rig.service.get(old) == before
+            return
         assert rig.register().result == "registered"
         assert rig.service.get(old) == before
         with pytest.raises(recovery.Invalid, match="superseded"):

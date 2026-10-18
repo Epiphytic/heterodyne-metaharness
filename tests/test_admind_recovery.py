@@ -175,6 +175,7 @@ class Rig:
             original_record_sha256=self.obj.original_record_sha256,
             effects_root=self.obj.effects_root,
             enrollment_sha256=self.obj.enrollment_sha256,
+            target_snapshot_sha256=recovery.target_snapshot(self.obj),
             boot_id=old["boot_id"],
             observed_boottime_ns=self.tick,
         )

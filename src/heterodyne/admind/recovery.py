@@ -71,6 +71,45 @@ class Descriptor(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     expires_at: str
 
 
+class Certificate(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    schema: Literal["maintenance-recovery-nonconsumption.v1"]
+    proposal_sha256: str
+    permit_sha256: str
+    generation: int
+    operation: str
+    original_record_sha256: str
+    effects_root: str | None
+    enrollment_sha256: str
+    target_snapshot_sha256: str
+    boot_id: str
+    observed_boottime_ns: int
+
+
+def target_snapshot(obj: Descriptor) -> str:
+    """Expected snapshot; only the queue can attest its fresh observation under EX."""
+    return sha(
+        {
+            "schema": "maintenance-recovery-target-snapshot.v1",
+            **{
+                name: getattr(obj, name)
+                for name in (
+                    "mode",
+                    "operation",
+                    "original_record_sha256",
+                    "effects_root",
+                    "effect_count",
+                    "proof_set_sha256",
+                    "local_records",
+                    "backup_before_sha256",
+                    "failure_before_sha256",
+                    "enrollment_sha256",
+                    "source_closure",
+                )
+            },
+        }
+    )
+
+
 class Register(msgspec.Struct, frozen=True, tag="maintenance.recovery.register", forbid_unknown_fields=True):
     descriptor: Descriptor
     proof_set_sha256: str
@@ -175,6 +214,25 @@ def descriptor(data: bytes) -> Descriptor:
     }
     if obj.result != expected[obj.mode]:
         raise Invalid("result")
+    health = obj.mode == "finish-health"
+    if health:
+        if (
+            obj.effects_root is not None
+            or obj.effect_count != 0
+            or obj.backup_before_sha256 is None
+            or obj.failure_before_sha256 is None
+            or obj.proof_set_sha256 != sha([])
+            or any(r.action != "finish-health" for r in obj.local_records)
+        ):
+            raise Invalid("mode-scope")
+    elif (
+        obj.backup_before_sha256 is not None
+        or obj.failure_before_sha256 is not None
+        or (obj.effect_count > 0 and obj.effects_root is None)
+        or any(r.action == "finish-health" for r in obj.local_records)
+        or (obj.mode == "settle" and any(r.action == "abandon-notice" for r in obj.local_records))
+    ):
+        raise Invalid("mode-scope")
     stamp(obj.expires_at)
     return obj
 
@@ -441,10 +499,23 @@ class Service:
         ).fetchone()
         return row is not None and row[0] == key
 
-    def supersede(self, operation: str) -> None:
+    def current_boot(self) -> tuple[str, int]:
+        boot, tick = self.boot(), self.boottime()
+        if type(boot) is not str:
+            raise Invalid("boot")
+        try:
+            if str(uuid.UUID(boot)) != boot:
+                raise ValueError
+        except ValueError:
+            raise Invalid("boot") from None
+        if type(tick) is not int or tick < 0:
+            raise Invalid("clock")
+        return boot, tick
+
+    def supersede(self, operation: str, enrolled: Enrollment) -> None:
         """A new consent may replace scope, never an active initiation window or terminal history."""
         row = self.store.db.execute(
-            "SELECT p.state,p.permit,p.terminal FROM maintenance_recovery_current c "
+            "SELECT p.state,p.permit,p.terminal,p.hash,p.descriptor FROM maintenance_recovery_current c "
             "JOIN maintenance_recovery_proposals p ON p.hash=c.proposal WHERE c.operation=?",
             (operation,),
         ).fetchone()
@@ -454,18 +525,25 @@ class Service:
             raise Invalid("operation-terminal")
         if row[1] is not None:
             old = decode(bytes(row[1]), dict[str, object])
-            boot = self.boot()
-            try:
-                if str(uuid.UUID(boot)) != boot:
-                    raise ValueError
-            except ValueError:
-                raise Invalid("boot") from None
-            tick = self.boottime()
+            boot, tick = self.current_boot()
             deadline = old.get("initiate_before_boottime_ns")
-            if type(tick) is not int or tick < 0 or type(deadline) is not int:
+            if type(deadline) is not int:
                 raise Invalid("clock")
-            if old.get("boot_id") == boot and tick < deadline:
+            if old.get("boot_id") != boot:
+                raise Invalid("boot-changed")
+            if tick < deadline:
                 raise Invalid("permit-active")
+            # Expiration/absence alone never proves nonconsumption. Require the
+            # queue's exact, durable positive observation and generation tombstone.
+            key = str(row[3])
+            cert = private_read(
+                Path(enrolled.coordinator_root)
+                / "recovery-v1"
+                / f"{key}.nonconsumption-{old['generation']}.json"
+            )
+            self.certificate(
+                descriptor(bytes(row[4])), Permit(key, hashlib.sha256(cert).hexdigest()), old, enrolled
+            )
 
     def enrollment(self) -> Enrollment:
         obj = decode(private_read(self.root / "enrollment.json"), Enrollment)
@@ -586,7 +664,7 @@ class Service:
                 if bytes(previous[0]) != canonical(obj):
                     raise Invalid("immutable-proposal")
                 return Reply("existing", "proposal already registered", self.get(key))
-            self.supersede(obj.operation)
+            self.supersede(obj.operation, enrolled)
             if (
                 self.store.db.execute("SELECT count(*) FROM maintenance_recovery_proposals").fetchone()[0]
                 >= 128
@@ -686,8 +764,9 @@ class Service:
             if delivery is None or target is None or delivery[0] != target or delivery[1] != notice_text:
                 raise Invalid("thread-unmapped")
             try:
-                self.live(descriptor(bytes(raw)), created)
-                live = self.current(descriptor(bytes(raw)).operation, key)
+                obj = descriptor(bytes(raw))
+                self.live(obj, created)
+                live = self.current(obj.operation, key)
             except Invalid:
                 live = False
             revoking = command[1] == "revoke" and state in ("awaiting-consent", "consented")
@@ -754,18 +833,20 @@ class Service:
                     raise Invalid("replay-mismatch")
                 post("Maintenance recovery refused: " + old[1] + ".")
                 return
-            policy = authority()
-            if policy is None:
-                return
             if reason == "replay-mismatch":
                 self.store.db.execute(
                     "INSERT OR IGNORE INTO maintenance_recovery_conflicts "
                     "SELECT proposal,account,group_id,message_id,? FROM maintenance_recovery_messages "
-                    "WHERE account=? AND group_id=? AND message_id=? UNION ALL "
+                    "WHERE account=? AND group_id=? AND message_id=? AND payload_sha256!=? UNION ALL "
                     "SELECT proposal,account,group_id,message_id,? FROM maintenance_recovery_revocations "
-                    "WHERE account=? AND group_id=? AND message_id=?",
-                    (payload, account, group, mid, payload, account, group, mid),
+                    "WHERE account=? AND group_id=? AND message_id=? AND payload_sha256!=?",
+                    (payload, account, group, mid, payload, payload, account, group, mid, payload),
                 )
+            # A contradiction to a retained authenticated ID is denial-only
+            # evidence even when fresh policy is unreadable; never new consent.
+            policy = authority()
+            if policy is None:
+                return
             if (
                 self.store.db.execute("SELECT count(*) FROM maintenance_recovery_refusals").fetchone()[0]
                 >= 128
@@ -785,14 +866,44 @@ class Service:
         if uid != os.getuid():
             raise Invalid("peer")
         enrolled = self.enrollment()
+        query = (
+            "SELECT descriptor,state,decision,operator,policy,generation,permit,"
+            "created_at FROM maintenance_recovery_proposals WHERE hash=?"
+        )
+        with self.store.lock:
+            observed = self.store.db.execute(query, (req.proposal_sha256,)).fetchone()
+        if observed is None:
+            raise Invalid("not-consented")
+        obj = descriptor(bytes(observed[0]))
+        if not self.current(obj.operation, req.proposal_sha256):
+            raise Invalid("superseded")
+        if observed[1] != "consented":
+            raise Invalid("not-consented")
+        # Authority may cross back to the daemon loop. Never hold the Store lock
+        # across that callback: current policy reads the same Store. Recheck the
+        # complete proposal tuple under the writer transaction before issuance.
+        current_policy = authority(observed[3])
+        if current_policy is None:
+            raise Invalid("authority")
+        if current_policy != observed[4]:
+            raise Invalid("policy-drift")
+        previous = None if observed[6] is None else bytes(observed[6])
+        repairing = previous is not None and req.certificate_sha256 is None
+        if previous is None and req.certificate_sha256 is not None:
+            raise Invalid("unexpected-certificate")
+        if previous is not None and not repairing:
+            if observed[5] >= 3:
+                raise Invalid("generation-cap")
+            old = decode(previous, dict[str, object])
+            if old["boot_id"] != self.current_boot()[0]:
+                raise Invalid("boot-changed")
+            self.certificate(descriptor(bytes(observed[0])), req, old, enrolled)
+        if authority(observed[3]) != current_policy:
+            raise Invalid("authority-drift")
         with self.store.transaction():
-            row = self.store.db.execute(
-                "SELECT descriptor,state,decision,operator,policy,generation,permit,"
-                "created_at FROM maintenance_recovery_proposals WHERE hash=?",
-                (req.proposal_sha256,),
-            ).fetchone()
-            if row is None:
-                raise Invalid("not-consented")
+            row = self.store.db.execute(query, (req.proposal_sha256,)).fetchone()
+            if row != observed:
+                raise Invalid("proposal-changed")
             obj = descriptor(bytes(row[0]))
             if not self.current(obj.operation, req.proposal_sha256):
                 raise Invalid("superseded")
@@ -806,37 +917,11 @@ class Service:
             ):
                 raise Invalid("conflict")
             self.live(obj, row[7])
-            current_policy = authority(row[3])
-            if current_policy is None:
-                raise Invalid("authority")
-            if current_policy != row[4]:
-                raise Invalid("policy-drift")
             generation = row[5]
-            previous = None if row[6] is None else bytes(row[6])
-            repairing = previous is not None and req.certificate_sha256 is None
             if previous is not None and repairing:
                 encoded = previous
             else:
-                if previous is None and req.certificate_sha256 is not None:
-                    raise Invalid("unexpected-certificate")
-                if previous is not None:
-                    if generation >= 3:
-                        raise Invalid("generation-cap")
-                    old = decode(previous, dict[str, object])
-                    if old["boot_id"] != self.boot():
-                        raise Invalid("boot-changed")
-                    self.certificate(obj, req, old, enrolled)
-                if authority(row[3]) != current_policy:
-                    raise Invalid("authority-drift")
-                boot = self.boot()
-                try:
-                    if str(uuid.UUID(boot)) != boot:
-                        raise Invalid("boot")
-                except ValueError:
-                    raise Invalid("boot") from None
-                issued = self.boottime()
-                if type(issued) is not int or issued < 0:
-                    raise Invalid("clock")
+                boot, issued = self.current_boot()
                 value = dict(
                     schema="maintenance-recovery-permit.v1",
                     permit_id=str(uuid.uuid4()),
@@ -875,7 +960,7 @@ class Service:
             or private_read(folder / f"{req.proposal_sha256}.superseded-{generation}.json") != raw
         ):
             raise Invalid("certificate-publication")
-        value = decode(raw, dict[str, object])
+        value = msgspec.to_builtins(decode(raw, Certificate))
         expected = dict(
             schema="maintenance-recovery-nonconsumption.v1",
             proposal_sha256=req.proposal_sha256,
@@ -885,6 +970,7 @@ class Service:
             original_record_sha256=obj.original_record_sha256,
             effects_root=obj.effects_root,
             enrollment_sha256=obj.enrollment_sha256,
+            target_snapshot_sha256=target_snapshot(obj),
             boot_id=old["boot_id"],
             observed_boottime_ns=value.get("observed_boottime_ns"),
         )

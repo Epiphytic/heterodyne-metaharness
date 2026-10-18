@@ -350,7 +350,12 @@ class Admind:
         self.agent = agent
         self.runner = runner
         self.account = account
-        self.maintenance_recovery = recovery.Service(store, settings.state_dir / "maintenance-recovery")
+        try:
+            self.maintenance_recovery: recovery.Service | None = recovery.Service(
+                store, settings.state_dir / "maintenance-recovery")
+        except (recovery.Invalid, OSError, sqlite3.Error):
+            self.maintenance_recovery = None
+            self.audit.write("maintenance-recovery", action="feature-unavailable")
         self.group = group
         self.hooks: asyncio.Queue[HookEvent | Delivery] = asyncio.Queue()
         # operator messages and reactions for worker_loop
@@ -693,7 +698,8 @@ class Admind:
                 failed=lambda: recovery.Reply("unavailable", "recovery unavailable"),
                 describe=lambda req: {"op": type(req).__name__},
             )
-            await recovery_server.start()
+            if self.maintenance_recovery is not None:
+                await recovery_server.start()
             self.ask_server = ctl.JsonSocketServer(
                 self.s.state_dir / asks.ASK_SOCKET, self.on_ask_wire, self.audit, kind="ask",
                 max_request=asks.MAX_REQUEST, max_reply=asks.MAX_REPLY,
@@ -755,13 +761,16 @@ class Admind:
 
     async def on_recovery(self, req: recovery.Request, peer: ctl.Peer) -> recovery.Reply:
         try:
+            service = self.maintenance_recovery
+            if service is None:
+                return recovery.Reply("unavailable", "recovery unavailable")
             if peer.uid != os.getuid():
                 raise recovery.Invalid("peer")
             if why := recovery.check(req):
                 raise recovery.Invalid(why)
             if isinstance(req, recovery.Status):
                 return recovery.Reply(
-                    "ok", "recovery status", self.maintenance_recovery.get(req.proposal_sha256)
+                    "ok", "recovery status", service.get(req.proposal_sha256)
                 )
             async with self.work_lock:
                 if not await self.check_group() or self.recovery_authority() is None:
@@ -770,17 +779,30 @@ class Admind:
                 # work_lock until the worker has actually stopped, including cancellation.
                 loop = asyncio.get_running_loop()
 
+                async def observe_authority(sender: str) -> str | None:
+                    # Policy refresh and membership state belong to the daemon loop,
+                    # never to the source-hashing worker. work_lock is still held.
+                    return self.recovery_authority(sender)
+
+                def authority(sender: str) -> str | None:
+                    pending = asyncio.run_coroutine_threadsafe(observe_authority(sender), loop)
+                    try:
+                        return pending.result(timeout=5)
+                    except TimeoutError:
+                        pending.cancel()
+                        raise recovery.Invalid("authority-unavailable") from None
+
                 def perform() -> recovery.Reply:
                     if isinstance(req, recovery.Register):
                         def post(key: str, text: str) -> None:
                             self.store.enqueue(key, text, None, lane=2, ownership_kind="system")
                             loop.call_soon_threadsafe(self.wake.set)
-                        return self.maintenance_recovery.register(
+                        return service.register(
                             req, uid=peer.uid, pid=peer.pid,
                             chunk_chars=self.s.chunk_chars, post=post,
                         )
-                    return self.maintenance_recovery.permit(
-                        req, uid=peer.uid, authority=self.recovery_authority,
+                    return service.permit(
+                        req, uid=peer.uid, authority=authority,
                     )
 
                 task = asyncio.create_task(asyncio.to_thread(perform))
@@ -809,7 +831,10 @@ class Admind:
                              sender_prefix=ev.message.sender.account_id_hex[:8],
                              text_chars=len(ev.message.text))
             return
-        await self.check_group()
+        service = self.maintenance_recovery
+        if service is None or not await self.check_group():
+            self.audit.write("maintenance-recovery", action="authority-unavailable")
+            return
         sender = ev.message.sender.account_id_hex.lower()
         mid = ev.message.message_id_hex.lower()
         fields = recovery.MessageFields(
@@ -825,12 +850,12 @@ class Admind:
             self.post(response_key, text, mid, owner=(sender,))
 
         try:
-            reply = self.maintenance_recovery.message(**fields, post=post)
+            reply = service.message(**fields, post=post)
             self.audit.write("maintenance-recovery", action=reply.message)
         except recovery.Invalid as exc:
             self.audit.write("maintenance-recovery", action="refused", reason=str(exc))
             try:
-                self.maintenance_recovery.refusal(**fields, reason=str(exc), post=post)
+                service.refusal(**fields, reason=str(exc), post=post)
             except (recovery.Invalid, OSError, sqlite3.Error):
                 self.audit.write("maintenance-recovery", action="refusal-unavailable")
         except (OSError, sqlite3.Error):

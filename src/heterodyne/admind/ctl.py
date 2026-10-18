@@ -179,13 +179,13 @@ class JsonSocketServer[Req, Rep: msgspec.Struct]:
         try:
             try:
                 line = await asyncio.wait_for(reader.readline(), READ_SECONDS)
+                if len(line.rstrip(b"\n")) > self.max_request:
+                    raise ValueError("request too long")
                 if self.kind == "ask":
                     envelope = msgspec.json.decode(line)
                     operation_request = (isinstance(envelope, dict)
                                          and cast(dict[str, object], envelope).get("type")
                                          == "approval.operation.v1")
-                if len(line.rstrip(b"\n")) > self.max_request:
-                    raise ValueError("request too long")
                 if self.kind == "maintenance-recovery":
                     from heterodyne.admind import recovery
 
