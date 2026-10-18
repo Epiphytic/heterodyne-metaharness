@@ -79,8 +79,16 @@ def test_held_parent_cannot_allocate_readonly_child(tmp_path):
 
 @pytest.mark.parametrize("now", [dis.Clock("new-boot", 1, 100), dis.Clock("boot", 10**9, 10**12)])
 def test_discontinuous_clock_has_exact_authenticated_no_replay_exit(tmp_path, now):
-    with closing(FixtureJournal.create(tmp_path / "fixture", clock=lambda: now)) as db:
+    samples = iter(
+        [
+            dis.Clock("allocation", 1, 1),
+            dis.Clock("allocation", 10**9 + 1, 10**9 + 1),
+            *([dis.Clock("boot", 1, 1)] * 4),
+        ]
+    )
+    with closing(FixtureJournal.create(tmp_path / "fixture", clock=lambda: next(samples))) as db:
         parent, _ = r3.ready_parent(db)
+        db.clock = lambda: now
         parent = db.transition(
             "dispatch",
             parent.approval_id,
@@ -104,6 +112,7 @@ def test_discontinuous_clock_has_exact_authenticated_no_replay_exit(tmp_path, no
             cleanup_proven=True,
             clock_discontinuity=True,
             observed_now=now,
+            clock_anchor=parent.started,
         )
         for bad in (
             msgspec.structs.replace(recovery, authenticated_current=False),

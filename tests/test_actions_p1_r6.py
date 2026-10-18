@@ -15,7 +15,7 @@ from heterodyne.actions.transitions import TransitionObservation
 @pytest.mark.parametrize("mode", ["allocate-dispatch", "abandon-dispatch", "abandon-allocation"])
 @pytest.mark.parametrize("sampler", [False, True])
 def test_decoy_recovery_cannot_bypass_the_selected_clock_check(tmp_path, mode, sampler):
-    actual = dis.Clock("continuous", 2, 2)
+    actual = dis.Clock("continuous", 1, 1)
     clock = (lambda: actual) if sampler else None
     with closing(FixtureJournal.create(tmp_path / "fixture", clock=clock)) as db:
         key = db.add_request(f.initial())

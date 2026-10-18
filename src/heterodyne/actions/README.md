@@ -266,9 +266,13 @@ not discard a visible decision opportunity.
 Allocation and dispatch lookup backoffs are measured from the previous retained
 lookup clock (or issuance/start for the first read), so their intervals are truly
 1, 5 and 30 seconds. Clock-discontinuity recovery on either path requires an
-explicit fixture clock callback. The journal samples it inside the transaction,
-compares the supplied observation exactly, and independently verifies discontinuity
-against its retained anchor. A caller-selected boot ID alone cannot bypass reads.
+explicit fixture clock callback. At dispatch insertion, allocation issuance and
+each clock-bearing transition, the journal samples it inside the transaction,
+checks exact agreement and retains a separate clock-provenance event. Recovery
+requires that provenance for the exact retained anchor and a matching explicit
+dispatch anchor; missing legacy provenance holds. A caller-selected boot ID alone
+cannot bypass reads. The fixture callback must supply deterministic sampled facts;
+this is not a production clock-port implementation.
 The exact authenticated recovery may adopt a canonical allocation with closed
 orphans, abandon the cleaned allocation, or settle the dispatch; it never recreates
 a shell or grants another effect claim. Historical missing anchors remain HOLD.
@@ -287,3 +291,16 @@ admitted design. An already-full historical journal without headroom also holds.
 Review R5 and all eight author dispositions are retained in `docs/reviews/`. The
 new named offline module is `tests/test_actions_p1_r5.py`; previous R1–R4 modules
 remain part of the regression command. No live adapter readiness is claimed.
+
+
+R7 distinguishes bounded read-only invocation attempts from actual target reads.
+A failed preparation, after exact authenticated cleanup settlement, consumes one
+of the three child invocation slots but supplies no `reconciliation_effect` and
+never increments the parent's read count. A later bounded child may proceed only
+when all previous children are settled and every successful read has been applied.
+Read-only children cannot restart preparation and thereby multiply that limit.
+After all three retained single-launch children settle, an existing exact scoped
+operator recovery can attest the parent outcome and cleanup using the exact child
+IDs. This retains operator attribution; it does not turn failed reads into absence.
+Live children, invented IDs, legacy multiplied launch histories and missing cleanup
+remain HOLD. No extra effect claim or general clearing authority is introduced.

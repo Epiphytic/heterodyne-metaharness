@@ -212,7 +212,7 @@ def test_cleanup_has_independent_bound_native_facts(tmp_path, field):
 
 @pytest.mark.parametrize("adopt", [False, True])
 def test_reboot_during_allocation_has_exact_no_recreate_recovery(tmp_path, adopt):
-    now = dis.Clock("new-boot", 1, 100)
+    now = dis.Clock("old-boot", 1, 1)
     with closing(FixtureJournal.create(tmp_path / "fixture", clock=lambda: now)) as db:
         key = db.add_request(f.initial())
         value = db.transition(
@@ -223,6 +223,7 @@ def test_reboot_during_allocation_has_exact_no_recreate_recovery(tmp_path, adopt
             observation=TransitionObservation(now=dis.Clock("old-boot", 1, 1)),
         )
         assert value.allocation_lookups == 0
+        now = dis.Clock("new-boot", 1, 100)
         if adopt:
             recovery = req.AllocationRecovery(
                 value.key,
@@ -283,7 +284,7 @@ def test_reboot_during_allocation_has_exact_no_recreate_recovery(tmp_path, adopt
 @pytest.mark.parametrize("mode", ["continuous", "mismatch", "no-sampler"])
 def test_allocation_recovery_cannot_fabricate_discontinuity(tmp_path, mode):
     start = dis.Clock("old", 1, 1)
-    actual = dis.Clock("old", 2, 2) if mode == "continuous" else dis.Clock("new", 1, 1)
+    actual = start
     with closing(
         FixtureJournal.create(tmp_path / "fixture", clock=None if mode == "no-sampler" else lambda: actual)
     ) as db:
@@ -291,6 +292,7 @@ def test_allocation_recovery_cannot_fabricate_discontinuity(tmp_path, mode):
         value = db.transition(
             "request", key, 0, req.issue_allocation, observation=TransitionObservation(now=start)
         )
+        actual = dis.Clock("old", 2, 2) if mode == "continuous" else dis.Clock("new", 1, 1)
         supplied = dis.Clock("forged", 1, 1) if mode == "mismatch" else actual
         recovery = req.AllocationRecovery(
             value.key,
@@ -514,9 +516,17 @@ def test_explicit_operation_cannot_select_worker_report_by_state_delta(tmp_path)
 def test_dispatch_clock_recovery_uses_last_retained_lookup_anchor(tmp_path):
     # Recovery binds the exact retained last observation, not a caller-selected
     # alternate anchor. The independent sampler establishes the discontinuity.
-    now = dis.Clock("boot", 3 * 10**9 + 1, 5 * 10**9 + 1)
-    with closing(FixtureJournal.create(tmp_path / "fixture", clock=lambda: now)) as db:
+    samples = iter(
+        [
+            dis.Clock("allocation", 1, 1),
+            dis.Clock("allocation", 10**9 + 1, 10**9 + 1),
+            *([dis.Clock("boot", 1, 1)] * 4),
+        ]
+    )
+    with closing(FixtureJournal.create(tmp_path / "fixture", clock=lambda: next(samples))) as db:
         parent, _ = r3.ready_parent(db)
+        now = dis.Clock("boot", 10**9 + 1, 10**9 + 1)
+        db.clock = lambda: now
         parent = db.transition(
             "dispatch",
             parent.approval_id,
@@ -525,7 +535,8 @@ def test_dispatch_clock_recovery_uses_last_retained_lookup_anchor(tmp_path):
             observation=TransitionObservation(dispatch_operation="uncertain"),
         )
         parent = f.persist_reconcile_observation(db, parent, 1)
-        anchor = dis.Clock("boot", 10**9 + 1, 10**9 + 1)
+        anchor = now
+        now = dis.Clock("boot", 3 * 10**9 + 1, 5 * 10**9 + 1)
         recovery = dis.DispatchRecovery(
             parent.approval_id,
             parent.revision,

@@ -20,7 +20,13 @@ from heterodyne.actions.codec import encode_record
 from heterodyne.actions.decisions import Decision, begin_decision
 from heterodyne.actions.dispatch import Clock, Dispatch, DispatchRecovery, clock_elapsed
 from heterodyne.actions.policy import request_denial_key
-from heterodyne.actions.requests import TERMINAL_REQUESTS, Refused, Request, request_bytes
+from heterodyne.actions.requests import (
+    TERMINAL_REQUESTS,
+    CancellationRecovery,
+    Refused,
+    Request,
+    request_bytes,
+)
 from heterodyne.actions.transitions import (
     EMPTY_OBSERVATION,
     TransitionObservation,
@@ -359,9 +365,9 @@ class FixtureJournal:
         if value.version != 0 or value.state != "preparing":
             raise Refused("dispatch-not-initial")
         with self.transaction():
+            sampled = self._sample_clock(value.started)
             decision = self.get("decision", value.approval_id)
             request = self._request_for_approval(value.approval_id)
-            self._terminal_budget(request)
             if (
                 request.phase != "filed"
                 or request.context_digest != value.digest
@@ -381,6 +387,7 @@ class FixtureJournal:
                 raise Refused("fixture-record-capacity-needs-recovery")
             if value.dispatch_kind == "reconcile":
                 self._add_reconciliation(value, key, data)
+                self._clock_event("dispatch", key, value.version, sampled)
                 return
             if value.dispatch_kind != "initial" or value.parent_attempt_id is not None:
                 raise Refused("dispatch-kind-binding")
@@ -391,6 +398,15 @@ class FixtureJournal:
             self.db.executemany("INSERT INTO resources VALUES(?,?)", ((r, key) for r in resources))
             self.db.execute("INSERT INTO dispatches VALUES(?,?,?)", (key, value.version, data))
             self._event("dispatch", key, value.version, data)
+            self._clock_event("dispatch", key, value.version, sampled)
+
+    def _reconciliation_children(self, approval_id: str) -> tuple[Dispatch, ...]:
+        return tuple(
+            msgspec.json.decode(bytes(row[0]), type=Dispatch)
+            for row in self.db.execute(
+                "SELECT data FROM dispatches WHERE key LIKE ?", (approval_id + ":reconcile:%",)
+            )
+        )
 
     def _add_reconciliation(self, value: Dispatch, key: str, data: bytes) -> None:
         parent = self.get("dispatch", value.approval_id)
@@ -407,15 +423,16 @@ class FixtureJournal:
         ):
             raise Refused("reconcile-parent-binding")
         reconciliations = 0
-        for row in self.db.execute(
-            "SELECT data FROM dispatches WHERE key=? OR key LIKE ?",
-            (value.approval_id, value.approval_id + ":reconcile:%"),
-        ):
-            previous = msgspec.json.decode(bytes(row[0]), type=Dispatch)
+        unread = 0
+        for previous in (parent, *self._reconciliation_children(value.approval_id)):
             if previous.dispatch_kind == "reconcile":
                 reconciliations += 1
+                if previous.launch_attempts != 1:
+                    raise Refused("reconcile-attempt-history-needs-recovery")
                 if not previous.settled:
                     raise Refused("reconcile-invocation-still-held")
+                if previous.reconciliation_effect is not None:
+                    unread += previous.attempt_id not in parent.reconciliation_attempts
             used = {
                 previous.startup_hash,
                 previous.claim_hash,
@@ -428,7 +445,7 @@ class FixtureJournal:
                 set(value.retired_startups) | set(value.retired_nonces)
             ):
                 raise Refused("reconcile-retired-history-required")
-        if reconciliations != parent.reconciliation_lookups:
+        if unread:
             raise Refused("reconcile-parent-observation-required")
         if reconciliations >= 3:
             raise Refused("reconcile-needs-authenticated-recovery")
@@ -482,7 +499,10 @@ class FixtureJournal:
         _, cls = TABLES[kind]
         with self.transaction():
             old = self.get(kind, key)
+            sampled = self._sample_clock(observation.now) if observation.now is not None else None
             observation = self._recovery_clock(old, observation)
+            if observation.now is not None and sampled is None and self.clock is not None:
+                sampled = observation.now
             try:
                 value = reducer(old)
             except Refused:
@@ -539,14 +559,12 @@ class FixtureJournal:
                 }[kind]
                 self.db.execute(query, (data, value.version, key, expected_version))
             if isinstance(value, Dispatch) and value.settled and value.dispatch_kind == "initial":
-                for row in self.db.execute(
-                    "SELECT data FROM dispatches WHERE key LIKE ?", (value.approval_id + ":reconcile:%",)
-                ):
-                    child = msgspec.json.decode(bytes(row[0]), type=Dispatch)
+                for child in self._reconciliation_children(value.approval_id):
                     if not child.settled:
                         raise Refused("reconciliation-invocation-still-held")
                 self.db.execute("DELETE FROM resources WHERE dispatch_key=?", (key,))
             self._event(kind, key, value.version, data)
+            self._clock_event(kind, key, value.version, sampled)
             if observation != EMPTY_OBSERVATION:
                 self._event(kind + "-observation", key, value.version, encode_record(observation))
         return value
@@ -554,10 +572,7 @@ class FixtureJournal:
     @staticmethod
     def _recovery_progress(old: Request | Decision | Dispatch, value: Request | Decision | Dispatch) -> bool:
         if isinstance(old, Request) and isinstance(value, Request):
-            return value.phase in TERMINAL_REQUESTS or old.phase in {
-                "allocation-intent",
-                "allocation-unknown",
-            }
+            return value.phase in TERMINAL_REQUESTS or old.phase == "allocation-unknown"
         if isinstance(old, Decision) and isinstance(value, Decision):
             # Every phase is finite; invalidation/substitution loops cannot spend this reserve.
             return value.phase != old.phase
@@ -571,6 +586,27 @@ class FixtureJournal:
             )
         return False
 
+    def _sample_clock(self, expected: Clock | None) -> Clock | None:
+        if self.clock is None:
+            return None
+        sampled = self.clock()
+        clock_elapsed(sampled, sampled)
+        if expected is not None and expected != sampled:
+            raise Refused("journal-clock-sample-mismatch")
+        return sampled
+
+    def _clock_event(self, kind: str, key: str, version: int, sampled: Clock | None) -> None:
+        if sampled is not None:
+            self._event(kind + "-clock", key, version, encode_record(sampled))
+
+    def _proven_clock(self, kind: str, key: str, version: int, expected: Clock | None) -> None:
+        row = self.db.execute(
+            "SELECT data FROM events WHERE kind=? AND key=? AND version=?",
+            (kind + "-clock", key, version),
+        ).fetchone()
+        if row is None or expected is None or msgspec.json.decode(row[0], type=Clock) != expected:
+            raise Refused("journal-clock-provenance-required")
+
     def _recovery_clock(
         self, old: Request | Decision | Dispatch, observation: TransitionObservation
     ) -> TransitionObservation:
@@ -580,6 +616,7 @@ class FixtureJournal:
                 observation.dispatch_recovery,
                 observation.allocation_recovery,
                 observation.abandonment_recovery,
+                observation.cancellation_recovery,
             )
             if item is not None
         )
@@ -590,7 +627,24 @@ class FixtureJournal:
             isinstance(old, Dispatch) != isinstance(recovery, DispatchRecovery) or isinstance(old, Decision)
         ):
             raise Refused("clock-recovery-record-mismatch")
-        if recovery is None or not recovery.clock_discontinuity:
+        if (
+            isinstance(old, Dispatch)
+            and isinstance(recovery, DispatchRecovery)
+            and recovery.completed_reconciliation_attempts
+        ):
+            children = self._reconciliation_children(old.approval_id)
+            if (
+                old.dispatch_kind != "initial"
+                or len(children) != 3
+                or any(
+                    not child.settled or not child.cleanup_proven or child.launch_attempts != 1
+                    for child in children
+                )
+                or tuple(sorted(child.attempt_id for child in children))
+                != tuple(sorted(recovery.completed_reconciliation_attempts))
+            ):
+                raise Refused("reconciliation-exhaustion-provenance-required")
+        if recovery is None or isinstance(recovery, CancellationRecovery) or not recovery.clock_discontinuity:
             return observation
         if self.clock is None:
             raise Refused("journal-clock-sampler-required")
@@ -598,11 +652,10 @@ class FixtureJournal:
         clock_elapsed(now, now)
         if recovery.observed_now != now or (observation.now is not None and observation.now != now):
             raise Refused("recovery-clock-sample-mismatch")
-        if isinstance(old, Dispatch):
-            started = self._dispatch_lookup_clock(old)
-            if not isinstance(recovery, DispatchRecovery):
-                raise Refused("clock-recovery-record-mismatch")
-            if recovery.clock_anchor is not None and recovery.clock_anchor != started:
+        started = None
+        if isinstance(old, Dispatch) and isinstance(recovery, DispatchRecovery):
+            started = self._dispatch_lookup_clock(old, proven=True)
+            if recovery.clock_anchor != started:
                 raise Refused("recovery-clock-anchor-mismatch")
         elif isinstance(old, Request):
             row = self.db.execute(
@@ -610,8 +663,7 @@ class FixtureJournal:
                 (request_key(old), old.version),
             ).fetchone()
             started = msgspec.json.decode(row[0], type=TransitionObservation).now if row else None
-        else:
-            raise Refused("clock-recovery-record-mismatch")
+            self._proven_clock("request", request_key(old), old.version, started)
         if started is None:
             raise Refused("clock-recovery-history-required")
         try:
@@ -620,8 +672,10 @@ class FixtureJournal:
             return msgspec.structs.replace(observation, now=now)
         raise Refused("clock-recovery-not-discontinuous")
 
-    def _dispatch_lookup_clock(self, old: Dispatch) -> Clock:
+    def _dispatch_lookup_clock(self, old: Dispatch, *, proven: bool = False) -> Clock:
         if old.reconciliation_lookups == 0:
+            if proven:
+                self._proven_clock("dispatch", dispatch_key(old), 0, old.started)
             return old.started
         # Find the first retained state with the current lookup count, not a later
         # worker/hold event or a caller-supplied timestamp. Storage is bounded.
@@ -640,6 +694,8 @@ class FixtureJournal:
                     msgspec.json.decode(row[0], type=TransitionObservation) if row else EMPTY_OBSERVATION
                 )
                 if observed.now is not None:
+                    if proven:
+                        self._proven_clock("dispatch", dispatch_key(old), version, observed.now)
                     return observed.now
                 break
         raise Refused("reconciliation-clock-history-required")

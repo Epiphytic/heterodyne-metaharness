@@ -160,7 +160,8 @@ def restart_preparation(value: Dispatch, startup_hash: str, now: Clock) -> Dispa
     """A new bounded launcher attempt needs its own startup nonce and original fixed deadline."""
     _within(value, now)
     if (
-        value.state != "held"
+        value.dispatch_kind != "initial"
+        or value.state != "held"
         or value.claim_consumed
         or value.launch_attempts >= 3
         or not digest_syntax(startup_hash)
@@ -295,6 +296,8 @@ def reconcile_lookup(
         raise Refused("reconciliation-not-due")
     if effect not in {"succeeded", "absent", "unknown"}:
         raise Refused("invalid-reconciliation")
+    if value.state == "failed" and effect == "succeeded":
+        raise Refused("reconciliation-outcome-conflict-needs-authenticated-recovery")
     if effect == "succeeded" and cleanup_proven and digest_syntax(evidence or ""):
         return changed(
             value,
@@ -337,10 +340,17 @@ class DispatchRecovery(Record, frozen=True):
     clock_discontinuity: bool = False
     observed_now: Clock | None = None
     clock_anchor: Clock | None = None
+    # Exact journal-retained settled invocation IDs; never a count of successful reads.
+    completed_reconciliation_attempts: tuple[str, ...] = ()
 
 
 def settle_dispatch(value: Dispatch, observation: DispatchRecovery) -> Dispatch:
     """Exact operator-attested outcome and cleanup; never machine attribution or retry."""
+    exhausted = (
+        value.dispatch_kind == "initial"
+        and len(observation.completed_reconciliation_attempts) == 3
+        and len(set(observation.completed_reconciliation_attempts)) == 3
+    )
     discontinuous = False
     if observation.clock_discontinuity and observation.observed_now is not None:
         _clock(observation.observed_now)
@@ -351,12 +361,15 @@ def settle_dispatch(value: Dispatch, observation: DispatchRecovery) -> Dispatch:
     if (
         value.state not in {"held", "uncertain", "failed"}
         or value.settled
-        or (value.claim_consumed and value.reconciliation_lookups != 3 and not discontinuous)
+        or (
+            value.claim_consumed and value.reconciliation_lookups != 3 and not discontinuous and not exhausted
+        )
         or (
             not value.claim_consumed
             and value.state != "held"
             and value.reconciliation_lookups != 3
             and not discontinuous
+            and not exhausted
         )
         or (
             observation.approval_id,

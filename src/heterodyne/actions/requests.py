@@ -287,6 +287,12 @@ def settle_request(
     dispatch: object = None,
     recovery: object = None,
 ) -> Request:
+    needs_withdrawal = phase == "cancelled" and value.phase in {"ask-pinned", "sufficient", "filed"}
+    if recovery is not None and not (
+        (phase == "reconciled-abandoned" and isinstance(recovery, AbandonmentRecovery))
+        or (needs_withdrawal and isinstance(recovery, CancellationRecovery))
+    ):
+        raise Refused("unexpected-settlement-recovery")
     if (
         phase not in TERMINAL_REQUESTS
         or key != value.key
