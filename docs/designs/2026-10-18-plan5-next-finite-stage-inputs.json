@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "status": "Unreviewed proposed finite admission; no implementation or human approval",
+  "status": "Sole HIGH REVISE10 incorporated once; genuine human admission outstanding",
   "author": "Codex",
   "task": "btq-voe5f",
   "source_base": "a73e91d367bd626556371f33a46e25f003243c6e",
@@ -92,12 +92,6 @@
       "git_blob": "53561b1babd764209bf95d419d2d6496ced76e96"
     },
     {
-      "commit": "f80412a853a2b81ec87d3e7fbf18c6c9c91f7cb2",
-      "path": "btq_actions/core.py",
-      "sha256": "88ccf97977f49d4719749c66e645c2f7d4ae951243bea696f6479c64a8b45ab0",
-      "git_blob": "74f089c5b57548794bd4665c08d4d61b5e4cc456"
-    },
-    {
       "path": "docs/reviews/2026-10-18-plan5-next-p1-r11.md",
       "sha256": "1b4d5d9ddc97879936323d1894d584e7ff27a7d0582969c2e2e428bb1971ad3d",
       "kind": "byte-exact actual review output; original ordinal unchanged"
@@ -106,17 +100,67 @@
       "path": "docs/reviews/2026-10-18-plan5-next-p2-r4.md",
       "sha256": "a0276cba50eeda9d244a759699aabb13996476485f9780ba973e7790aed9a880",
       "kind": "byte-exact actual review output; original ordinal unchanged"
+    },
+    {
+      "commit": "7a631dbd18b9232ed51f60b664127fe694bf4ee7",
+      "path": "btq_actions/core.py",
+      "sha256": "2c74e4d6f2e6a0667efb3ac7e7d0c79c772babccbb460395949a766679eb506d",
+      "git_blob": "b304f098ea8eb6251b7f40c885e27a19396af2b7"
+    },
+    {
+      "commit": "7a631dbd18b9232ed51f60b664127fe694bf4ee7",
+      "path": "docs/reviews/9guj8-code-r2-author-dispositions.md",
+      "sha256": "e65d3070de597092b877bb8cb236d9c1034a3a2774683d7af3aed4a459230448",
+      "git_blob": "a3210f8c6216e43a08f0bf0630a4241ccc174d90"
+    },
+    {
+      "commit": "a73e91d367bd626556371f33a46e25f003243c6e",
+      "path": "src/heterodyne/wsd/park.py",
+      "sha256": "c462a30d5f625dadacc5bba59851b7ed72fee124b0e11ba9d9a9bcd2f1cc29bb",
+      "git_blob": "0d1bbafe9ba8995c06d6c95ca78e6c168fe641b6"
+    },
+    {
+      "commit": "a73e91d367bd626556371f33a46e25f003243c6e",
+      "path": "src/heterodyne/wsd/daemon.py",
+      "sha256": "3c285bdc61d2dc1cc245e0c90fac54a3fa821ce45298d858c8b016e2a38c60bd",
+      "git_blob": "3264856f84fb7de7a51d0fbea6e484b9074b422f"
+    },
+    {
+      "commit": "a73e91d367bd626556371f33a46e25f003243c6e",
+      "path": "src/heterodyne/actions/fake_ports.py",
+      "sha256": "555a191876d34c79407dcb602dbf0981503a1addb480a99352be8bc6d7226cba",
+      "git_blob": "d45c262d2bc32ff78ca4c7f97744f4404a71d530"
+    },
+    {
+      "path": "docs/reviews/2026-10-18-plan5-next-design-r1-high.md",
+      "sha256": "ea74a538324171cd47eb2f4035f13d566c7dddfbd5dcd95e319f18701af02662",
+      "kind": "byte-exact actual review; original ordinal retained"
+    },
+    {
+      "path": "docs/reviews/2026-10-18-plan5-next-q0-r2.md",
+      "sha256": "a74a2db94be31702a076340cc58b0fd20efdf6606b479364c223d70214d703e8",
+      "kind": "byte-exact actual review; original ordinal retained"
     }
   ],
   "availability": {
     "P1": "merged dd38; actual R11 APPROVE offline only, eight retained findings",
     "P2": "source00ff; docs1865; PR118 not asserted merged/CI complete",
-    "Q0": "f804 candidate pending controller second HIGH, no backend/default factory"
+    "Q0": "R2 REVISE10 on f804; author repair7a631db; eventual reviewed accepted exact pair required, no live adapter"
   },
   "method": [
     "Semble search exact actions/ports/judgement locations",
     "ripwire pack-task (bounded output disclosure retained)",
-    "git show exact objects; no tests, model, queue or live effects"
+    "git show exact objects; no tests, model, queue or live effects",
+    "One author incorporation of actual HIGH REVISE10; source research only; no second design review/validation"
   ],
-  "missing_public_filename": "docs/reviews/efddg-code-r11-medium.md absent at dd38 and efddg HEAD; actual N log copied byte-exact under this design-specific path"
+  "missing_public_filename": "docs/reviews/efddg-code-r11-medium.md absent at dd38 and efddg HEAD; actual N log copied byte-exact under this design-specific path",
+  "review": {
+    "ordinal": 1,
+    "effort": "HIGH",
+    "verdict": "REVISE",
+    "findings": 10,
+    "raw_sha256": "ea74a538324171cd47eb2f4035f13d566c7dddfbd5dcd95e319f18701af02662",
+    "author_incorporation_only": true,
+    "second_review_or_validation": false
+  }
 }
