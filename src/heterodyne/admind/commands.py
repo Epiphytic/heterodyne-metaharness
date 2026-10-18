@@ -13,8 +13,9 @@ from heterodyne.admind.redact import redact
 from heterodyne.services import ServiceManager, shown
 
 HELP = ("admind commands: !new · !interrupt · !tail [n] · !restart <unit> · !ps · !details [full] · "
-        "!asks [bump|repeat] · !answer <id> <text> · !approve · !deny (as a reply to an approval card)")
-ASKS_USAGE = "Usage: !asks [bump|repeat]."
+        "!asks [bump|repeat|retire <proof-token>] · !answer <id> <text> · !approve · !deny "
+        "(as a reply to an approval card)")
+ASKS_USAGE = "Usage: !asks [bump|repeat|retire <proof-token>]."
 FENCE = "`" * 3  # a code block around !tail output (spelled this way so it can't close a Markdown fence)
 TAIL_DEFAULT = 40
 TAIL_MAX = 500
@@ -53,6 +54,11 @@ def parse(text: str) -> Command | None:
         return _deny(text)
     name, *args = text[1:].split()
     if name == "asks":      # `!asks`, `!asks bump` or `!asks repeat` (asks bump design B1, B11)
+        if args[:1] == ["retire"]:
+            if (len(text.encode("utf-8")) > 1024 or len(args) != 2
+                    or re.fullmatch(r"[0-9a-f]{24}", args[1]) is None):
+                raise CommandError(ASKS_USAGE)
+            return Command("asks", arg="retire", rest=args[1])
         if args not in ([], ["bump"], ["repeat"]):
             raise CommandError(ASKS_USAGE)
         return Command("asks", arg=args[0] if args else None)
