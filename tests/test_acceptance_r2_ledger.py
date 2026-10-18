@@ -33,7 +33,7 @@ def test_unprepared_abort_intent_failure_never_poisoned(tmp_path, failure):
     elif failure == "start":
         intent = replace(intent, start_event_sha256="b" * 64)
     elif failure == "proof":
-        ledger.proofs.verify = lambda *_: (_ for _ in ()).throw(Hold("synthetic_refusal"))
+        ledger.proofs.verify = lambda request, inventory: (_ for _ in ()).throw(Hold("synthetic_refusal"))
     with pytest.raises((Hold, codec.InvalidEvidence)):
         ledger.abort("bad reason" if failure == "reason" else "synthetic", intent)
     assert not list(ledger.root.glob("intent-*"))
