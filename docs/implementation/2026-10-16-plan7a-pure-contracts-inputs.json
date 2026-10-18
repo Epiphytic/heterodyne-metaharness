@@ -1,0 +1,82 @@
+{
+  "format": 1,
+  "task": "btq-a3nmk",
+  "base": "35176c855b2773f0d1ab51f577c4e02c95a1967b",
+  "authority": {
+    "native_approval": "btq-s72ds",
+    "archive_revision": "b4c464f7120ac7ac8fdcdefa24f4a85124879f6c",
+    "path": "docs/adr/2026-10-16-plan7a-intake-and-sufficiency-contracts-d4.md",
+    "sha256": "baf6af7be881d7d3cb7e4a485e3b06de07f8f2be255d11f208b3adff919de837",
+    "archive_anchor": "root-provided approved native ADR archive; historical design reports preserve their original verdicts"
+  },
+  "native_shape_capture": {
+    "format": 1,
+    "revision": "6fe57598468ff53bf74dfd9e1cf181ad3177c3f1",
+    "path": "bin/btq",
+    "sha256": "ec2bc67b227326c80bf5d9a32eb661b220ea9af6942ef31bff04d8c06941bd2e",
+    "constants": {
+      "ASK_FIELDS": [
+        "effect",
+        "excludes",
+        "why",
+        "risks",
+        "refs",
+        "targets"
+      ],
+      "REF_FIELDS": [
+        "kind",
+        "id",
+        "repo",
+        "path"
+      ],
+      "REF_KINDS": [
+        "commit",
+        "file",
+        "range",
+        "bead"
+      ],
+      "BEAD_ID": "[a-z][a-z0-9-]{0,31}-[0-9a-z]{5}"
+    },
+    "proof": "existing wsd.btq.load only; no Queue construction or CLI invocation"
+  },
+  "execution_authority": "none; pure offline component only",
+  "activation_requires": "separate genuine ADR amendment and reviewed integration/deployment authority",
+  "legacy_redaction_rule_inputs": [
+    {
+      "repository": "heterodyne-metaharness",
+      "revision": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/admind/redact.py",
+      "git_blob": "c5a3af2d8aa74742d337beed18370b7b16940153",
+      "sha256": "533ecbb089b57e643c1edf8745eb13dd908b5dc1cbd14f74f48e3a59883a0d8c"
+    },
+    {
+      "repository": "heterodyne-metaharness",
+      "revision": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "path": "src/heterodyne/config/secret_scan.py",
+      "git_blob": "e5db682fefdc1c9c747320502a4842977f5867c9",
+      "sha256": "92422444c6e632c54a2fe8a4e5c80554fcce0421e6ada2f383ae58fdfff0bc59"
+    }
+  ],
+  "redaction_rule_inputs": [
+    {
+      "repository": "heterodyne-metaharness",
+      "revision": "c3e827949b35601dc3f39936b9f5821358dcb6c9",
+      "path": "src/heterodyne/admind/redact.py",
+      "git_blob": "55d2da469eb31cdd0c496a90b7f314bb0a99ffbb",
+      "sha256": "21af3568b438ca8a827f1f0c26df8d8fbc20e17eca1415bd0dad1a437007e275"
+    },
+    {
+      "repository": "heterodyne-metaharness",
+      "revision": "c3e827949b35601dc3f39936b9f5821358dcb6c9",
+      "path": "src/heterodyne/config/secret_scan.py",
+      "git_blob": "e5db682fefdc1c9c747320502a4842977f5867c9",
+      "sha256": "92422444c6e632c54a2fe8a4e5c80554fcce0421e6ada2f383ae58fdfff0bc59"
+    }
+  ],
+  "loaded_redaction_compatibility": {
+    "interpreter": "unoptimized CPython 3.12",
+    "fingerprint": "83afc23702d60c698c818cc06fa1cf1978a797a9929d5086e0924a06b5ec9967",
+    "scope": "pure loaded explicit-directory kernel and effective pattern/constants; no filesystem attestation; mismatch refuses privacy binding",
+    "optimization": "-O/-OO are not admitted; -OO removes fingerprinted docstrings and fails closed; expected identity unchanged"
+  }
+}
