@@ -547,10 +547,12 @@ def test_r1_timeout_and_clock_refusal_are_honest_reasons(monkeypatch):
 
     monkeypatch.setattr(module, "DEADLINE_NS", 1000000)
     receipt = run(Slow(), action, selected)
-    assert current_projection(receipt, action, selected, privacy(), SPEC).reason_code == "timeout"
+    proposal = current_projection(receipt, action, selected, privacy(), SPEC)
+    assert isinstance(proposal, c.HoldUnavailable) and proposal.reason_code == "timeout"
     times = iter((100, 99))
     receipt = run(Provider(selected), action, selected, lambda: next(times))
-    assert current_projection(receipt, action, selected, privacy(), SPEC).reason_code == "invalid_host"
+    proposal = current_projection(receipt, action, selected, privacy(), SPEC)
+    assert isinstance(proposal, c.HoldUnavailable) and proposal.reason_code == "invalid_host"
 
 
 def test_r1_forged_groom_state_does_not_route():
@@ -607,23 +609,54 @@ def test_r1_groom_transition_requires_current_negative_and_same_request():
     action, selected = inputs()
     negative = run(Provider(selected, GROOM), action, selected)
     state = record_groom(GroomState(action.origin), negative, action, selected, privacy(), SPEC)
-    args = dict(
-        intent=action.intent, resolved=action.resolved, source=action.requested_source, origin=action.origin
+    updated = groom_request(
+        state,
+        negative,
+        action,
+        selected,
+        privacy(),
+        SPEC,
+        intent=action.intent,
+        resolved=action.resolved,
+        source=action.requested_source,
+        origin=action.origin,
     )
-    updated = groom_request(state, negative, action, selected, privacy(), SPEC, **args)
     assert updated.groom_revisions == 1
     positive = run(Provider(selected), action, selected)
     with pytest.raises(Refused):
-        groom_request(state, positive, action, selected, privacy(), SPEC, **args)
+        groom_request(
+            state,
+            positive,
+            action,
+            selected,
+            privacy(),
+            SPEC,
+            intent=action.intent,
+            resolved=action.resolved,
+            source=action.requested_source,
+            origin=action.origin,
+        )
     other = msgspec.structs.replace(action, key=msgspec.structs.replace(action.key, sequence=2))
     with pytest.raises(Refused):
-        groom_request(state, negative, other, selected, privacy(), SPEC, **args)
+        groom_request(
+            state,
+            negative,
+            other,
+            selected,
+            privacy(),
+            SPEC,
+            intent=action.intent,
+            resolved=action.resolved,
+            source=action.requested_source,
+            origin=action.origin,
+        )
 
 
 def test_r1_nonce_and_clock_samples_bound_but_not_production_authentication():
     action, selected = inputs()
     times = iter((10, 20))
     receipt = run(Provider(selected), action, selected, lambda: next(times))
+    assert receipt.attempt is not None and receipt.reply is not None
     assert receipt.attempt.started_ns == 10 and receipt.attempt.ended_ns == 20
     assert receipt.reply.nonce == receipt.attempt.nonce
     for altered in (
@@ -684,6 +717,7 @@ def test_r1_enrichment_cannot_reuse_original_opaque_ask_or_digest():
     from heterodyne.actions.requests import repin_enriched_ask
 
     action, selected = inputs()
+    assert action.ask_bytes is not None and action.context_digest is not None
     with pytest.raises(Refused):
         repin_enriched_ask(action, action.ask_bytes, "e" * 64, "f" * 64)
     with pytest.raises(Refused):

@@ -4,6 +4,7 @@ No native queue/session/ask API is installed here. In particular FILED is an off
 state, never a credential or consent token. Production adapters remain unavailable.
 """
 
+import hashlib
 from typing import Literal
 
 import msgspec
@@ -215,8 +216,6 @@ def repin_enriched_ask(
     P2 checks the enrichment proposal before using this transition. Like pin_ask,
     caller-supplied opaque bytes are not authenticated by this reducer.
     """
-    import hashlib
-
     if (
         value.phase != "ask-pinned"
         or value.ask_bytes is None
