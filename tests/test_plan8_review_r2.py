@@ -172,7 +172,7 @@ def test_native_exception_is_not_suppressed(tmp_path):
         raise RuntimeError('companion failed too')
     with pytest.raises(OSError) as caught:
         paired_attempt(tmp_path, binding, native, companion)
-    assert caught.value is failure and seen == [(1, 'unknown')]
+    assert caught.value is failure and seen == [(1, 'failed')]
 
 
 def test_startup_failure_has_final_failed_heartbeat(tmp_path, monkeypatch):
@@ -293,13 +293,13 @@ def test_repeated_bad_result_survives_real_control_wire(tmp_path, result, reason
     asyncio.run(exercise())
 
 
-def test_missing_manifest_is_configuration_hold_not_runtime_crash(tmp_path):
+def test_missing_manifest_is_restartable_io_failure(tmp_path):
     from test_schedule_admission import installed
 
-    from heterodyne.wsd.schedule_manifest import ManifestInvalid, load
+    from heterodyne.wsd.schedule_manifest import load
     daemon, _ = installed(tmp_path)
     try:
-        with pytest.raises(ManifestInvalid, match='unavailable'):
+        with pytest.raises(FileNotFoundError):
             load(daemon.s)
     finally:
         daemon.drain_now(3)

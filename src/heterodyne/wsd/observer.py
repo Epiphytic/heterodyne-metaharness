@@ -1,5 +1,6 @@
 """Observation-only durable episodes. No task, effect journal, relay receipt or authority mutation."""
 
+import errno
 import hashlib
 import os
 import stat
@@ -68,7 +69,21 @@ class Observer:
 
     def _load(self, utc: float) -> ObserverState:
         try:
-            fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            try:
+                fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            except OSError as exc:
+                # Classify from the entry itself, never follow an unsafe target. Transient
+                # failures on otherwise valid entries must preserve the existing epoch.
+                try:
+                    info = self.path.lstat()
+                except FileNotFoundError:
+                    raise ValueError("observer state missing") from None
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                        or info.st_mode & 0o077):
+                    raise ValueError("observer state is not private") from None
+                if isinstance(exc, FileNotFoundError):
+                    raise OSError(errno.EAGAIN, "observer entry changed during open") from exc
+                raise
             try:
                 info = os.fstat(fd)
                 if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
@@ -90,7 +105,7 @@ class Observer:
                 )
             ):
                 raise ValueError("observer identity")
-        except (FileNotFoundError, ValueError, msgspec.DecodeError):
+        except (ValueError, msgspec.DecodeError):
             installed = self.directory / ".observer-installed"
             first = not installed.exists() and not self.path.exists() and not self.path.is_symlink()
             if self.path.exists() or self.path.is_symlink():

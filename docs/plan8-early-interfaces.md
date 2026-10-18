@@ -70,9 +70,25 @@ Failed local copy workers clean only their exact unsealed private scratch after 
 exclusive owner recovery. Unknown/foreign/sealed artifacts are preserved; a full bounded inventory
 refuses further local accumulation. Verified local bundles use the calendar retention policy even
 when native status is unknown, while their manifests remain partial. Pruning failures do not discard
-sealed result identity. Repeated latest failed/partial cycles return typed refusal results, and
-older compacted results return `result_unavailable`; none claims success or replays a native backup.
+sealed result identity. Repeated failed or unverified partial cycles return typed refusal results. A latest committed verified
+local partial returns `completed` for the companion only, while native outcome and stored manifest
+remain partial/unknown. Older compacted results return `result_unavailable`; no response upgrades
+native success or replays a native backup.
 The adapter preserves original native exceptions even when its companion also fails.
 
 The second review's lower-ranked observer timeout/budget concern remains unresolved and must be
 addressed before live observer/timer activation. No live acceptance is inferred from offline checks.
+
+Third-review repairs keep separate native-succeeded and local-only daily/weekly artifact buckets,
+and protect the latest verified native-successful pair independently of newer partials. This retains
+bounded local history without mistaking it for a complete native recovery set. Reverification cost
+remains on the bounded copy worker and remains an unwaived performance limitation.
+
+At capacity, alert eviction uses the oldest verified payload timestamp, with a deterministic filename
+tie-break. If foreign/protected files prevent gaining a usable slot, settled notices stay intact.
+No local settlement promises remote delivery. Unsafe observer entries are quarantined without
+following symlinks; ordinary I/O on valid state preserves continuity and retries. Manifest I/O errors
+remain restartable while malformed installed facts remain configuration failures. Native backup
+exceptions remain original failures; shutdown does not begin companion IPC. Cancelled startup
+retains in-progress recovery rather than claiming completion. The approved independent unknown
+predicate remains unchanged; a different-boot health snapshot is not proof of current unavailability.

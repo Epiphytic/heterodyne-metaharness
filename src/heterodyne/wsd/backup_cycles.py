@@ -170,6 +170,8 @@ def retain(directory: Path, identity: Identity, now: float, unresolved: str | No
     integrity proof upgrades unknown native results. Unknown artifacts hold for operator recovery.
     """
     successes: list[tuple[float, Path]] = []
+    latest_native: tuple[float, Path] | None = None
+    native_attempts: set[Path] = set()
     attempts = list(islice(directory.iterdir(), 257))
     if len(attempts) > 256:
         return  # unknown artifact saturation is a visible retention hold, never unbounded work
@@ -183,23 +185,33 @@ def retain(directory: Path, identity: Identity, now: float, unresolved: str | No
             if completed > now:
                 continue
             successes.append((completed, attempt))
+            if raw["native_status"] == "succeeded":
+                native_attempts.add(attempt)
+            if raw["native_status"] == "succeeded" and (
+                latest_native is None or completed > latest_native[0]
+            ):
+                latest_native = (completed, attempt)
         except (OSError, ValueError, KeyError, TypeError, sqlite3.Error):
             continue
     successes.sort(reverse=True)
     keep: set[Path] = {successes[0][1]} if successes else set()
-    days: set[str] = set()
-    weeks: set[str] = set()
+    if latest_native is not None:
+        keep.add(latest_native[1])
+    days: set[tuple[bool, str]] = set()
+    weeks: set[tuple[bool, str]] = set()
     today = datetime.fromtimestamp(now, UTC).date()
     monday = today - timedelta(days=today.weekday())
     for completed, attempt in successes:
         day = datetime.fromtimestamp(completed, UTC).date()
         week = day - timedelta(days=day.weekday())
-        if 0 <= (today - day).days < 7 and day.isoformat() not in days:
+        day_key = (attempt in native_attempts, day.isoformat())
+        week_key = (attempt in native_attempts, week.isoformat())
+        if 0 <= (today - day).days < 7 and day_key not in days:
             keep.add(attempt)
-            days.add(day.isoformat())
-        if 0 <= (monday - week).days < 28 and week.isoformat() not in weeks:
+            days.add(day_key)
+        if 0 <= (monday - week).days < 28 and week_key not in weeks:
             keep.add(attempt)
-            weeks.add(week.isoformat())
+            weeks.add(week_key)
     for _, attempt in successes:
         if attempt not in keep:
             shutil.rmtree(attempt)  # exact owned verified artifacts only; last success is always protected

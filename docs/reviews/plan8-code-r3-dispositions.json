@@ -1,0 +1,81 @@
+{
+  "schema": "plan8-code-review-dispositions-v1",
+  "review_ordinal": 3,
+  "effort": "medium",
+  "actual_verdict": "REVISE",
+  "raw_sha256": "a374aaba4744e72dfff0e738c65d0a3399d59534062c18d32fb500088d34d127",
+  "source": "613bedd46c9401a85c18dbd00b9338d33a187132",
+  "reviewer_disclosure": "Static high-recall candidates, no separate verification pass. Author tests are not replacement cross-model review.",
+  "findings": [
+    {
+      "number": 1,
+      "verbatim_finding": "1. `src/heterodyne/wsd/observer.py:170`: The R2 #7 repair maps a different-boot snapshot to all-unknown but also forces values['unknown']='true', and 'unknown' is itself an episode code in CODES, so the per-reboot spurious failure/recovery alert pair remains under another name.\n\n   Failure scenario: After a reboot the babysitter (OnBootSec=5) reads health.json with the old boot_id, so invalid_boot=True and values['unknown']='true'. The 'unknown' episode goes closed->open and publishes 'Plan8 health: unknown. Scheduled work status requires attention.' WSD then heartbeats for the new boot, unknown becomes 'false', and a recovery notice follows. That is the same spurious pair R2 #7 reported. Also, if WSD never comes up after a reboot (EX_CONFIG, crash loop), the observer only ever reports 'unknown' and never 'unavailable', so a real outage is misclassified indefinitely.\n\n",
+      "verbatim_sha256": "67d5120d6885ff40186145c1e01749f2e4f8b4da1d8fd1aadfb4a8582e426ff1",
+      "status": "rebutted-contract",
+      "resolution": "Approved D4 \u00a77 explicitly defines unknown as an independent predicate/episode; invalid boot/clock evidence is unknown, only explicit false clears. Keep the existing old-boot regression. An unknown health notice is not proof of unavailable, nor a claim of recovery of other conditions. No cross-boot elapsed-time outage inference is authorized."
+    },
+    {
+      "number": 2,
+      "verbatim_finding": "2. `src/heterodyne/wsd/backup_cycles.py:185`: retain() now puts partial (native failed/unknown) bundles in the same daily/weekly buckets as native-succeeded ones and keeps only the newest per bucket, so a later partial bundle displaces the day's or week's only native-succeeded paired set, and 'last success is always protected' (line 205) is no longer true.\n\n   Failure scenario: Native succeeds Monday 00:00 (bundle S, status succeeded), then fails at 06:00, 12:00 and 18:00 Monday through Sunday (partial bundles). The Monday daily slot and the week slot both keep the newest Monday/week bundle, which is a partial, and successes[0] is the latest partial. S is rmtree'd on the next cycle. After a week of native failures no native-succeeded paired recovery point remains, though the design separates native-succeeded pairs from local-only partials.\n\n",
+      "verbatim_sha256": "e2b89dd621a71c3ba2f6c22e05ae7b95434068be175501913cfd91afb994ca70",
+      "status": "fixed",
+      "resolution": "Calendar buckets separate native-succeeded paired sets from verified local-only sets; protect latest native-succeeded even outside retention horizon, alongside latest local set. No partial upgrades native status."
+    },
+    {
+      "number": 3,
+      "verbatim_finding": "3. `src/heterodyne/local_alerts.py:228`: Capacity eviction walks `entries` in metadata order, which is filename-hash order because canonical() uses sort_keys=True, not age order. It can evict a just-settled recovery or reset notice ahead of much older settled ones.\n\n   Failure scenario: At 255 tracked entries, the observer writes a recovery notice R and settles it 'published' in the same pass. The next failure publish needs one slot. If R's sha-derived filename sorts first, R is unlinked milliseconds after being written, before admind's alert poll relays it, while weeks-old settled notices survive. This is the R2 #1 symptom again, now at capacity.\n\n",
+      "verbatim_sha256": "d0861b6dd08c812df23584faba3f4f3890f0f1f049f8b351ba4e9801e836ec7d",
+      "status": "fixed",
+      "resolution": "At actual capacity only, verify exact settled payloads and evict oldest created_at first, deterministic filename tie-break; no new metadata schema."
+    },
+    {
+      "number": 4,
+      "verbatim_finding": "4. `src/heterodyne/local_alerts.py:229`: The eviction loop's stop condition counts foreign (non-ledger) files, which can never be evicted, so with foreign saturation it unlinks every settled notice and still frees no slot.\n\n   Failure scenario: The alert dir holds 255 foreign *.json diagnostics plus 40 settled p8 notices. On the next new publish, count stays at 255 or more after each eviction, so the loop deletes all 40 settled notices (including fresh recovery notices) and then falls through to the coalesced/held overflow path anyway. Every relayable settled notice is destroyed for no capacity gain.\n\n",
+      "verbatim_sha256": "6f3bded39ec3025596cc3fa72bf184869f1dfeddc2a69002c6b7c83bb504105e",
+      "status": "fixed",
+      "resolution": "Before unlinking, prove removing all eligible files can free a usable individual slot. Otherwise preserve settled bytes and retain existing bounded held/coalesced behavior. Foreign/unsettled bytes remain untouched."
+    },
+    {
+      "number": 5,
+      "verbatim_finding": "5. `src/heterodyne/wsd/observer.py:93`: Narrowing the reset handler to FileNotFoundError/ValueError/DecodeError leaves corrupt-path cases with no recovery: a symlink at observer-state.json gives ELOOP from O_NOFOLLOW and a wrong-owner file gives EACCES. Both propagate on every pass, and the `self.path.is_symlink()` reset branch is now unreachable for symlinks.\n\n   Failure scenario: observer-state.json is replaced by a symlink (or left root-owned 0600 by a manual repair). Every babysitter pass raises OSError from _load before any predicate is evaluated. No reset notice is written and no health alert is ever produced again until an operator intervenes. This is permanent silent loss of the observer rather than the designed corruption reset.\n\n",
+      "verbatim_sha256": "dace2ec72d8f8f768af3cb98b25e92229afb3ed337be5895f551f2b36b97dbb1",
+      "status": "fixed",
+      "resolution": "No-follow failed open is classified by no-follow lstat. Missing/unsafe entry resets; valid-entry transient errors propagate preserving epoch. Symlink is quarantined without dereferencing. Actual inability to rename/persist remains a retryable local failure."
+    },
+    {
+      "number": 6,
+      "verbatim_finding": "6. `src/heterodyne/wsd/schedule_manifest.py:89`: load() now turns every OSError from open/fstat/read (EMFILE, EIO, EACCES on a late mount, ENOENT during install) into ManifestInvalid, which `wsd run` maps to EX_CONFIG, and the unit is configured not to restart on 78.\n\n   Failure scenario: At boot the state dir is briefly unreadable (late mount or transient EIO), or EMFILE occurs. serve() raises ManifestInvalid and `wsd run` exits 78, so systemd does not restart it. A transient fault becomes a permanent WSD outage that needs manual action, and the observer then reports only stale/unknown.\n\n",
+      "verbatim_sha256": "f216df1479d325a6029111c02aa16e45b00e49ce719afc0dfb49d0ebfee3ce70",
+      "status": "fixed",
+      "resolution": "Open/fstat/read OSError propagates as restartable runtime error; malformed JSON/schema/installed identity remains ManifestInvalid/EX_CONFIG. No automatic override of invalid configuration."
+    },
+    {
+      "number": 7,
+      "verbatim_finding": "7. `src/heterodyne/wsd/effects.py:257`: Repeating the latest cycle returns the raw stored state, so a verified local bundle with native_status unknown (state 'partial', the normal case per R2 #4) is refused as local_partial and exits non-zero, while the first request for the same cycle returned queued and exited 0.\n\n   Failure scenario: The native wrapper sends `paired-backup 7 unknown`, which is queued and exits 0. The copy verifies and finish_backup stores state='partial'. A retry of cycle 7 gets refused/local_partial with a non-zero exit, so the caller is told the local companion failed when it succeeded. Results for the same cycle are inconsistent, and a retrying wrapper will escalate a normal outcome.\n\n",
+      "verbatim_sha256": "47e547c6d0f4ac886820bf80c967ad1357de2f8e276f2be62578573ddb09286f",
+      "status": "fixed",
+      "resolution": "Latest committed partial with verified attempt/hash returns completed local result. Stored native status remains unknown/failed and local state partial. Empty/unverified partial and failed results remain refusals; older compacted result unavailable. No new copy/replay."
+    },
+    {
+      "number": 8,
+      "verbatim_finding": "8. `src/heterodyne/wsd/backup_pairing.py:88`: When native() raises, the finally block notifies the companion with the pre-initialised status 'unknown' instead of 'failed', even though a raised native backup is a known failure; the finally also runs on BaseException (SystemExit/KeyboardInterrupt from a unit stop), performing blocking companion IPC during shutdown.\n\n   Failure scenario: The Beads backup raises (disk full). The companion records cycle N as native_status=unknown and seals a partial manifest saying native outcome unknown, so the local ledger misstates a known native failure. Separately, on a SIGTERM/KeyboardInterrupt during native(), the native owner blocks on the companion socket before exiting and may exceed TimeoutStopSec.\n\n",
+      "verbatim_sha256": "419de14aa11d83debafdd0bd66aec2ae1c30f997a14b97681c0a24c645e53896",
+      "status": "fixed",
+      "resolution": "Ordinary native Exception notifies failed then re-raises exact original error; companion Exception is logged, never replaces native failure. BaseException shutdown propagates without starting companion IPC."
+    },
+    {
+      "number": 9,
+      "verbatim_finding": "9. `src/heterodyne/wsd/daemon.py:892`: When stop arrives during startup, `starting` is cancelled, so failed=None and recovery_status is set to 'complete' although recovery never finished. The heartbeat keeps publishing 'complete' during the drain.\n\n   Failure scenario: A systemd stop arrives while startup recovery is in progress. serve() sets recovery_status='complete' and the heartbeat publishes recovery=complete for up to DRAIN_SECONDS. The observer closes any recovery_stalled episode with a false 'recovered' notice, and the last published snapshot claims a completed recovery that never happened.\n\n",
+      "verbatim_sha256": "c803d8abccac114c2d96f58ffb90556522b4f3f42a576857fc5ef24a0226cf93",
+      "status": "fixed",
+      "resolution": "Cancelled startup retains in_progress during drain; only actual finished startup may report complete. Failed startup still publishes failed after fencing health writer."
+    },
+    {
+      "number": 10,
+      "verbatim_finding": "10. `src/heterodyne/wsd/backup_cycles.py:181`: On every backup cycle, retain() fully re-runs verify_bundle on every retained bundle (full sha256 of both DB copies plus PRAGMA integrity_check). Including partials raises the number of bundles, so the copy-lane work grows to about 12 x 2 full-database scans per cycle.\n\n    Failure scenario: With 7 daily and 4 weekly bundles plus the latest, each cycle reads and integrity-checks about 24 full DB copies after the new copy, which lengthens copy-lane occupancy (making 'busy' refusals more likely) and adds disk I/O. Checking only the manifest hash and file sizes for already-sealed bundles, or caching verification by manifest digest, would avoid repeated full scans.\n",
+      "verbatim_sha256": "d5e155e9e8e787c210e9d464adc070c7758e207ab9212e3f614ee40650bfc825",
+      "status": "deferred-performance",
+      "resolution": "Full verification of bounded retained inventory remains in separate copy worker, not serving loop/writer lane. Retention may now preserve separate native/local buckets. I/O cost and busy delay remain unwaived; no unsafe manifest-only proof/cache introduced. Production sizing is preactivation work, not evidence of completion."
+    }
+  ]
+}

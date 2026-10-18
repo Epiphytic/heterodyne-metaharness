@@ -225,17 +225,33 @@ def publish(directory: Path, intent: Intent) -> Literal["written", "existing", "
                 )
                 # Retain settled notices for the relay until capacity actually requires eviction.
                 # Only exact locally settled bytes are eligible; this is never a receipt claim.
-                for old_name, entry in list(entries.items()):
-                    if count < MAX_EXACT and len(entries) < MAX_EXACT:
-                        break
-                    if entry.settled is not None:
+                if count >= MAX_EXACT or len(entries) >= MAX_EXACT:
+                    removable: list[tuple[float, str, bool]] = []
+                    for old_name, entry in entries.items():
+                        if entry.settled is None:
+                            continue
                         path = directory / old_name
-                        if path.exists():
-                            if hashlib.sha256(_read(path)).hexdigest() != entry.hash:
+                        visible = path.exists()
+                        age = float("-inf")
+                        if visible:
+                            raw = _read(path)
+                            if hashlib.sha256(raw).hexdigest() != entry.hash:
                                 return "held"
-                            path.unlink()
-                            count -= 1
-                        del entries[old_name]
+                            age = datetime.fromisoformat(
+                                json.loads(raw)["created_at"].replace("Z", "+00:00")
+                            ).timestamp()
+                        removable.append((age, old_name, visible))
+                    # Do not destroy relayable notices if foreign/protected files make freeing
+                    # a slot impossible. Missing settled entries can still free metadata capacity.
+                    can_fit = count - sum(int(row[2]) for row in removable) < MAX_EXACT
+                    if can_fit:
+                        for _, old_name, visible in sorted(removable):
+                            if count < MAX_EXACT and len(entries) < MAX_EXACT:
+                                break
+                            if visible:
+                                (directory / old_name).unlink()
+                                count -= 1
+                            del entries[old_name]
                 if count >= MAX_EXACT or len(entries) >= MAX_EXACT:
                     if count >= 256 and not (directory / "shared_overflow.json").exists():
                         return "held"

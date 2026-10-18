@@ -246,7 +246,9 @@ class EffectStore:
             raise ValueError("backup cycle")
         with self.lock:
             db = self._owned()
-            high, pending, latest = db.execute("SELECT high_water,cycle,state FROM backup_cycle").fetchone()
+            high, pending, latest, attempt, sha = db.execute(
+                "SELECT high_water,cycle,state,attempt,manifest_hash FROM backup_cycle"
+            ).fetchone()
             if pending is not None and int(pending) == cycle:
                 return "joined"
             if pending is not None:
@@ -254,7 +256,9 @@ class EffectStore:
             if cycle < int(high):
                 return "result_unavailable"  # older result compacted, never replay or claim success
             if cycle == int(high):
-                return "completed" if latest == "succeeded" else str(latest)
+                # Completion acknowledges the verified local companion, not native success.
+                verified = latest == "partial" and bool(attempt) and bool(sha)
+                return "completed" if latest == "succeeded" or verified else str(latest)
             with db:
                 db.execute("UPDATE backup_cycle SET cycle=?,native=?,state='copying',"
                            "attempt='',manifest_hash=''", (str(cycle), native))

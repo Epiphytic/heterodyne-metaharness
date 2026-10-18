@@ -889,7 +889,8 @@ class Wsd:
                 task.cancel()
             await asyncio.gather(starting, stopped, return_exceptions=True)
         failed = None if starting.cancelled() else starting.exception()
-        self.recovery_status = "failed" if failed is not None else "complete"
+        self.recovery_status = ("in_progress" if starting.cancelled() else
+                                "failed" if failed is not None else "complete")
 
         if starting.cancelled() or failed is not None or stop.is_set():
             try:
