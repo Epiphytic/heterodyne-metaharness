@@ -14,7 +14,7 @@ from typing import Literal, Protocol, cast
 
 import msgspec
 
-from heterodyne.actions.codec import assemble_envelope, safe_label, validate_request_inputs
+from heterodyne.actions.codec import assemble_envelope, safe_label
 from heterodyne.actions.contracts import Intent, Origin, PolicyFacts, PolicyResult, Record, Resolved
 from heterodyne.actions.policy import DENIAL_DOMAIN, evaluate_policy, request_denial_key
 from heterodyne.actions.requests import (
@@ -135,7 +135,6 @@ def _identity(action: Request, selected: c.SufficiencyRequest | c.PermissionRequ
     checked = msgspec.convert(
         data(msgspec.structs.replace(action, ask_bytes=None)), type=Request, strict=True
     )
-    validate_request_inputs(checked.intent, checked.origin, checked.resolved, checked.config)
     if (
         checked.denial_domain != DENIAL_DOMAIN
         or checked.phase in {"completed", "cancelled", "reconciled-abandoned", "blocker-pending"}
@@ -195,6 +194,8 @@ def _bind(
             host_overrides=host_overrides,
             restrict=restrict,
         )[0]
+    except Refused:
+        raise
     except (Fault, msgspec.ValidationError, TypeError, ValueError, AttributeError, RecursionError) as exc:
         raise Refused("judgement-binding-refused") from exc
 
@@ -310,6 +311,8 @@ def _bind_checked(
             )
         )
         return binding, floor
+    except Refused:
+        raise
     except (Fault, msgspec.ValidationError, TypeError, ValueError, AttributeError, RecursionError) as exc:
         raise Refused("judgement-binding-refused") from exc
 
@@ -440,19 +443,15 @@ def current_projection(
             precheck = disposition("permission", c.Ready(selected), None, privacy)
             if precheck == c.EscalateProposal("deadline"):
                 return precheck
-            if action.approval_id is None:
+            if action.approval_id is None or action.envelope is None:
                 return c.EscalateProposal("input_profile")
-            _, floor = _bind_checked(
-                action,
-                selected,
-                privacy,
-                model,
-                policy=policy,
-                host_overrides=host_overrides,
-                restrict=restrict,
+            floor = evaluate_policy(
+                action.envelope,
+                action.config,
+                policy,
+                {} if host_overrides is None else host_overrides,
+                {} if restrict is None else restrict,
             )
-            if floor is None:
-                raise Refused("judgement-policy-refused")
             if floor.tier == "hard_deny":
                 return c.DenyProposal()
             return c.EscalateProposal("input_profile")

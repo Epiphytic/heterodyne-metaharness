@@ -1,0 +1,17 @@
+{
+  "schema": "source-pins.v1",
+  "base": "77e3c4a833ea6385cc48bbda3fcea61b54bdf622",
+  "prior": "bed3bb6263965838fe7c3fb0d2145fecd42cb3ea",
+  "approved_design": "092c10221660605598bb41151b496bda0f0bfa38",
+  "raw_report_sha256": "63a61d5c497bb0afda8aa7ce82e449af3a4922925b4a66972de6cf75eb6b13d1",
+  "files": {
+    "docs/reviews/2026-10-18-plan5-c1-r2-dispositions.json": "9ea5ea635244158a1edc840b6a93e18da9a8a8d392ff4993b718bfaf157e2aed",
+    "docs/reviews/2026-10-18-plan5-c1-r2-dispositions.md": "4394fabd09f42d7e56930ee50c7c64fbd2da8a633daff0ac740410e5e9de49e6",
+    "docs/reviews/2026-10-18-plan5-c1-r2-high.md": "63a61d5c497bb0afda8aa7ce82e449af3a4922925b4a66972de6cf75eb6b13d1",
+    "src/heterodyne/actions/decisions.py": "67c2603332941fe39fdee4988d6f2b88ef53b570a9bd84738956c2dce58fd567",
+    "src/heterodyne/actions/journal.py": "0ed51fc2cd2726c7eb4a96874b21994db2aa654174edf1a8f18afb77982c76b1",
+    "src/heterodyne/actions/judgement.py": "bcdae3e1d40cd3abc9972563d31b4b02491e344620116bfc6b12e12511fceffc",
+    "tests/test_actions_c1_r2.py": "5609088db737e6c5967a7a009e37d450daae5d9a94d24a9429a478204ac0201d",
+    "tests/test_actions_p1_r3.py": "d9719a394469a2704b33912b6af1c18fa53679d689584ff895e762db25967c93"
+  }
+}

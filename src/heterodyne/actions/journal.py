@@ -26,6 +26,8 @@ from heterodyne.actions.dispatch import (
     Dispatch,
     DispatchRecovery,
     clock_elapsed,
+    prepare,
+    prepare_reconciliation,
     reconciliation_disposition,
 )
 from heterodyne.actions.policy import DENIAL_DOMAIN, request_denial_key
@@ -43,6 +45,13 @@ from heterodyne.actions.transitions import (
     dispatch_transition,
     request_transition,
 )
+
+
+def _current_request(value: Request) -> Request:
+    if value.denial_domain != DENIAL_DOMAIN:
+        raise Refused("legacy-denial-domain-needs-provenance")
+    return value
+
 
 APPLICATION_ID = 0x50315031
 SCHEMA_VERSION = 2
@@ -269,17 +278,17 @@ class FixtureJournal:
         if row is None:
             raise Refused("fixture-record-missing-decision-or-request")
         try:
-            value = msgspec.json.decode(row[0], type=cls)
-            if isinstance(value, Request) and value.denial_domain != DENIAL_DOMAIN:
-                raise Refused("legacy-denial-domain-needs-provenance")
-            return value
+            return (
+                _current_request(msgspec.json.decode(row[0], type=Request))
+                if cls is Request
+                else msgspec.json.decode(row[0], type=cls)
+            )
         except msgspec.DecodeError:
             raise Refused("fixture-record-corrupt") from None
 
     def add_request(self, value: Request) -> str:
         key, data = request_key(value), request_bytes(value)
-        if value.denial_domain != DENIAL_DOMAIN:
-            raise Refused("legacy-denial-domain-needs-provenance")
+        _current_request(value)
         if value.version != 0 or value.phase != "allocation-intent":
             raise Refused("request-not-initial")
         with self.transaction():
@@ -334,8 +343,7 @@ class FixtureJournal:
                 value = msgspec.json.decode(bytes(row[0]), type=Request)
                 if value.approval_id not in approvals:
                     continue
-                if value.denial_domain != DENIAL_DOMAIN:
-                    raise Refused("legacy-denial-domain-needs-provenance")
+                _current_request(value)
                 if value.approval_id in matches:
                     raise Refused("unique-durable-request-required")
                 matches[value.approval_id] = value
@@ -410,10 +418,12 @@ class FixtureJournal:
         return "recorded"
 
     def add_dispatch(self, value: Dispatch) -> None:
-        key, data = dispatch_key(value), encode_record(value)
+        key = dispatch_key(value)
         if value.version != 0 or value.state != "preparing":
             raise Refused("dispatch-not-initial")
         with self.transaction():
+            if self.db.execute("SELECT 1 FROM dispatches WHERE key=?", (key,)).fetchone():
+                raise Refused("dispatch-already-exists-no-initial-replay")
             sampled = self._sample_clock()
             value = msgspec.structs.replace(
                 value,
@@ -421,6 +431,28 @@ class FixtureJournal:
                 deadline_ns=sampled.mono_ns + DISPATCH_WINDOW_NS,
                 preparation_deadline_ns=sampled.mono_ns + PREPARATION_WINDOW_NS,
             )
+            if value.dispatch_kind == "initial":
+                expected = prepare(
+                    value.approval_id,
+                    value.revision,
+                    value.digest,
+                    value.target,
+                    value.attempt_id,
+                    value.resource,
+                    value.startup_hash,
+                    sampled,
+                    fake_finalized_approval=True,
+                )
+            else:
+                parent = self.get("dispatch", value.approval_id)
+                expected = prepare_reconciliation(parent, value.attempt_id, value.startup_hash, sampled)
+                # Retired identities include earlier read-only children; _add_reconciliation
+                # verifies the complete durable history before admitting these inert lists.
+                expected = msgspec.structs.replace(
+                    expected, retired_startups=value.retired_startups, retired_nonces=value.retired_nonces
+                )
+            if value != expected:
+                raise Refused("dispatch-not-initial")
             data = encode_record(value)
             decision = self.get("decision", value.approval_id)
             request = self._request_for_approval(value.approval_id)
@@ -437,8 +469,6 @@ class FixtureJournal:
                 or (decision.digest, decision.request_revision) != (value.digest, value.revision)
             ):
                 raise Refused("dispatch-decision-not-committed-approve")
-            if self.db.execute("SELECT 1 FROM dispatches WHERE key=?", (key,)).fetchone():
-                raise Refused("dispatch-already-exists-no-initial-replay")
             if self.db.execute("SELECT count(*) FROM dispatches").fetchone()[0] >= MAX_RECORDS:
                 raise Refused("fixture-record-capacity-needs-recovery")
             if value.dispatch_kind == "reconcile":
@@ -609,7 +639,7 @@ class FixtureJournal:
                         reconciliation = self.get("dispatch", observation.reconciliation_key)
                     if value.reconciliation_lookups != old.reconciliation_lookups:
                         observation = msgspec.structs.replace(
-                            observation, reconciliation_started=self._dispatch_lookup_clock(old, proven=True)
+                            observation, reconciliation_started=self._dispatch_lookup_clock(old)
                         )
                     dispatch_transition(old, value, observation=observation, reconciliation=reconciliation)
                     if value.reconciliation_lookups != old.reconciliation_lookups:
@@ -634,7 +664,11 @@ class FixtureJournal:
                 self.db.execute("DELETE FROM resources WHERE dispatch_key=?", (key,))
             self._event(kind, key, value.version, data)
             self._clock_event(kind, key, value.version, sampled)
-            if observation != EMPTY_OBSERVATION:
+            allocation_clock = isinstance(value, Request) and (
+                value.phase == "allocation-unknown"
+                or (isinstance(old, Request) and value.allocation_lookups != old.allocation_lookups)
+            )
+            if allocation_clock or msgspec.structs.replace(observation, now=None) != EMPTY_OBSERVATION:
                 self._event(kind + "-observation", key, value.version, encode_record(observation))
         return value
 
@@ -662,9 +696,8 @@ class FixtureJournal:
         clock_elapsed(sampled, sampled)
         return sampled
 
-    def _clock_event(self, kind: str, key: str, version: int, sampled: Clock | None) -> None:
-        if sampled is not None:
-            self._event(kind + "-clock", key, version, encode_record(sampled))
+    def _clock_event(self, kind: str, key: str, version: int, sampled: Clock) -> None:
+        self._event(kind + "-clock", key, version, encode_record(sampled))
 
     def _proven_clock(self, kind: str, key: str, version: int, expected: Clock | None) -> None:
         row = self.db.execute(
@@ -674,11 +707,22 @@ class FixtureJournal:
         if row is None or expected is None or msgspec.json.decode(row[0], type=Clock) != expected:
             raise Refused("journal-clock-provenance-required")
 
+    def _worker_succeeded(self, old: Dispatch) -> bool:
+        """Retained exact-parent reports remain evidence even without cleanup proof."""
+        rows = self.db.execute(
+            "SELECT data FROM events WHERE kind='dispatch-observation' AND key=? ORDER BY version",
+            (dispatch_key(old),),
+        )
+        return any(
+            (readback := _observation(raw).dispatch_readback) is not None and readback.effect == "succeeded"
+            for (raw,) in rows
+        )
+
     def _recovery_clock(
         self,
         old: Request | Decision | Dispatch,
         observation: TransitionObservation,
-        sampled: Clock | None,
+        sampled: Clock,
     ) -> TransitionObservation:
         recoveries = tuple(
             item
@@ -705,7 +749,9 @@ class FixtureJournal:
             children = self._reconciliation_children(old.approval_id)
             facts = tuple(reconciliation_disposition(old, child) for child in children)
             unread = any(item.effect is not None and not item.applied for item in facts)
-            if recovery.effect_definitively_absent and any(item.effect == "succeeded" for item in facts):
+            if recovery.effect_definitively_absent and (
+                self._worker_succeeded(old) or any(item.effect == "succeeded" for item in facts)
+            ):
                 raise Refused("reconciliation-success-conflicts-with-absence")
             if (
                 unread or recovery.completed_reconciliation_attempts or recovery.observed_reconciliations
@@ -728,20 +774,18 @@ class FixtureJournal:
                 raise Refused("reconciliation-exhaustion-provenance-required")
         if recovery is None or isinstance(recovery, CancellationRecovery) or not recovery.clock_discontinuity:
             return observation
-        if sampled is None:
-            raise Refused("journal-clock-sampler-required")
         now = sampled
         started = None
         if isinstance(old, Dispatch) and isinstance(recovery, DispatchRecovery):
-            started = self._dispatch_lookup_clock(old, proven=True)
+            started = self._dispatch_lookup_clock(old)
             if recovery.clock_anchor != started:
                 raise Refused("recovery-clock-anchor-mismatch")
         elif isinstance(old, Request):
             row = self.db.execute(
-                "SELECT data FROM events WHERE kind='request-observation' AND key=? AND version=?",
+                "SELECT data FROM events WHERE kind='request-clock' AND key=? AND version=?",
                 (request_key(old), old.version),
             ).fetchone()
-            started = _observation(row[0]).now if row else None
+            started = msgspec.json.decode(row[0], type=Clock) if row else None
             self._proven_clock("request", request_key(old), old.version, started)
         if started is None:
             raise Refused("clock-recovery-history-required")
@@ -751,10 +795,9 @@ class FixtureJournal:
             return msgspec.structs.replace(observation, now=now)
         raise Refused("clock-recovery-not-discontinuous")
 
-    def _dispatch_lookup_clock(self, old: Dispatch, *, proven: bool = False) -> Clock:
+    def _dispatch_lookup_clock(self, old: Dispatch) -> Clock:
         if old.reconciliation_lookups == 0:
-            if proven:
-                self._proven_clock("dispatch", dispatch_key(old), 0, old.started)
+            self._proven_clock("dispatch", dispatch_key(old), 0, old.started)
             return old.started
         # Find the first retained state with the current lookup count, not a later
         # worker/hold event or a caller-supplied timestamp. Storage is bounded.
@@ -771,8 +814,7 @@ class FixtureJournal:
                 ).fetchone()
                 observed = _observation(row[0]) if row else EMPTY_OBSERVATION
                 if observed.now is not None:
-                    if proven:
-                        self._proven_clock("dispatch", dispatch_key(old), version, observed.now)
+                    self._proven_clock("dispatch", dispatch_key(old), version, observed.now)
                     return observed.now
                 break
         raise Refused("reconciliation-clock-history-required")
@@ -852,8 +894,7 @@ class FixtureJournal:
         for identity, approval in rows:
             value = requests[approval]
             if (
-                value.denial_domain != DENIAL_DOMAIN
-                or value.origin.session_key != session_key
+                value.origin.session_key != session_key
                 or value.denial_identity != identity
                 or identity != request_denial_key(value.intent, value.origin, value.resolved, value.config)
             ):

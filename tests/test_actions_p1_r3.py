@@ -163,13 +163,15 @@ def test_journal_checks_independent_actual_clock_not_reducer_clock(tmp_path, sec
     with closing(FixtureJournal.create(tmp_path / "fixture")) as db:
         parent, clock = ready_parent(db, consumed=False)
         now = dis.Clock(clock.boot_id, clock.mono_ns + seconds * 10**9, clock.utc_ns + seconds * 10**9)
+        # Independent journal sampler: caller/reducer both claim the earlier valid time.
+        db.clock = lambda: now
         with pytest.raises(Refused):
             db.transition(
                 "dispatch",
                 parent.approval_id,
                 parent.version,
                 lambda old: dis.consume_claim(old, "e" * 64, clock, fresh_gates=True),
-                observation=TransitionObservation(dispatch_operation="consume-claim", now=now),
+                observation=TransitionObservation(dispatch_operation="consume-claim", now=clock),
             )
         assert not db.get("dispatch", parent.approval_id).claim_consumed
         db.clock = None

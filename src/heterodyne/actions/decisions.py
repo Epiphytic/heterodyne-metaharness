@@ -51,6 +51,24 @@ def _emoji_base(ch: str) -> bool:
     return unicodedata.category(ch) == "So" and (0x2300 <= ord(ch) <= 0x27BF or 0x1F000 <= ord(ch) <= 0x1FAFF)
 
 
+def _visible_joiner(reason: str, index: int) -> bool:
+    if index == 0 or index + 1 == len(reason):
+        return False
+    before, after = reason[index - 1], reason[index + 1]
+    # Indic virama-consonant shaping; the combining mark is semantically visible.
+    if unicodedata.combining(before) == 9 and unicodedata.category(after).startswith("L"):
+        return True
+    if reason[index] == "\u200c":
+        return all(
+            unicodedata.category(c).startswith("L") and unicodedata.name(c, "").startswith("ARABIC LETTER")
+            for c in (before, after)
+        )
+    left = index - 1
+    while left >= 0 and (reason[left] == "\ufe0f" or 0x1F3FB <= ord(reason[left]) <= 0x1F3FF):
+        left -= 1
+    return left >= 0 and _emoji_base(reason[left]) and _emoji_base(after)
+
+
 def _metadata_controls_safe(reason: str) -> bool:
     """Finite visible metadata grammar, including emoji adornments and flag tags."""
     index = 0
@@ -63,27 +81,25 @@ def _metadata_controls_safe(reason: str) -> bool:
             index += 2
             continue
         if ch == "🏴" and index + 1 < len(reason) and 0xE0000 <= ord(reason[index + 1]) <= 0xE007F:
-            end = index + 1
-            while end < len(reason) and (
-                0xE0061 <= ord(reason[end]) <= 0xE007A or 0xE0030 <= ord(reason[end]) <= 0xE0039
-            ):
-                end += 1
-            if end == index + 1 or end == len(reason) or ord(reason[end]) != 0xE007F:
+            # RGI subdivision flags plus the retained bounded GB metadata fixture.
+            flags = tuple(
+                "".join(chr(0xE0000 + ord(c)) for c in name) + "\U000e007f"
+                for name in ("gb", "gbeng", "gbsct", "gbwls")
+            )
+            suffix = next((flag for flag in flags if reason.startswith(flag, index + 1)), None)
+            if suffix is None:
                 return False
-            index = end + 1
+            index += 1 + len(suffix)
             continue
-        if ch == "\u200d":
-            left = index - 1
-            while left >= 0 and (reason[left] == "\ufe0f" or 0x1F3FB <= ord(reason[left]) <= 0x1F3FF):
-                left -= 1
-            if (
-                left < 0
-                or index + 1 == len(reason)
-                or not (_emoji_base(reason[left]) and _emoji_base(reason[index + 1]))
-            ):
+        if ch in {"\u200c", "\u200d"}:
+            if not _visible_joiner(reason, index):
+                return False
+        elif 0xFE00 <= code <= 0xFE0F:
+            if ch not in {"\ufe0e", "\ufe0f"} or index == 0 or not _emoji_base(reason[index - 1]):
                 return False
         elif (
-            unicodedata.category(ch) in {"Cc", "Cs", "Cf"}
+            unicodedata.category(ch) in {"Cc", "Cs", "Cf", "Co", "Cn"}
+            or 0xE0100 <= code <= 0xE01EF
             or ch in "\u2028\u2029\u115f\u1160\u3164\uffa0\u2800\u034f"
             or 0x180B <= code <= 0x180E
         ):
