@@ -63,7 +63,17 @@ from heterodyne.admind.hook import (
 from heterodyne.admind.notices import NoticePost
 from heterodyne.admind.redact import redact
 from heterodyne.admind.settings import AdmindSettings, Operator
-from heterodyne.admind.store import REACTION_PREFIX, AskRow, OutboxRow, Store, TurnRow, now
+from heterodyne.admind.store import (
+    MAINTENANCE_CAPACITY,
+    MAINTENANCE_RETRY_SECONDS,
+    MAINTENANCE_SUSPENDED,
+    REACTION_PREFIX,
+    AskRow,
+    OutboxRow,
+    Store,
+    TurnRow,
+    now,
+)
 from heterodyne.agents.claude_code import headless_argv
 from heterodyne.config.secret_scan import show
 from heterodyne.marmot.control import (
@@ -1285,25 +1295,31 @@ class Admind:
     def hold_maintenance(self, a: Attempt, reason: str) -> None:
         """Retain provenance and publish one durable, threaded notice per fixed hold reason."""
         with self.store.transaction():
-            if not self.store.defer_maintenance(a, self.wallclock() + 30.0):
+            deferred = self.store.defer_maintenance(
+                a, self.wallclock() + MAINTENANCE_RETRY_SECONDS, reason=reason)
+            if not deferred:
                 self.conflict(a, "deciding")
                 return
+            decision = "denial" if a.action == "deny" else "approval"
+            next_step = ("Automatic retry is suspended. Authenticated recovery is not available in this "
+                         "version; the separate recovery design must be approved and implemented. "
+                         if reason in MAINTENANCE_SUSPENDED else
+                         "It will retry after fresh card and operator-authority checks. ")
             self.ask_notice(a.ask_id, "maintenance-" + reason, a.message_id,
-                            f"Ask {a.ask_id}: approval received and held ({reason}). "
-                            "No decision was issued by this attempt. It will retry while the exact "
-                            "card and operator authority remain valid. Conflicting decisions or changed "
-                            "authority require operator recovery; the original reply is preserved.",
-                            a.message_id)
+                            f"Ask {a.ask_id}: {decision} received and held ({reason}). "
+                            "No decision was issued by the invocation that returned maintenance HOLD. "
+                            + next_step + "The original reply is preserved.", a.message_id)
         self.audit_quietly("ask", action="maintenance-held", ask_id=a.ask_id,
                            message_id=a.message_id, reason=reason)
 
-    async def run_attempt(self, a: Attempt, row: AskRow, *, maintenance_retry: bool = False) -> None:
+    async def run_attempt(self, a: Attempt, row: AskRow, *, maintenance_retry: bool = False,
+                          prechecked: Readout | None = None) -> None:
         """Steps 4-8 of a persisted attempt. Until the decision child exists, every failure closes the
         attempt as `refused` (r5-1); once it exists, every exit goes through the reap and the read-back."""
         assert self.approve_bead is not None and row.bead is not None      # noqa: S101 - checked by decide
         ab, bead, mid = self.approve_bead, row.bead, a.message_id
         launched = False
-        if not maintenance_retry and len(self.store.maintenance_pending()) >= 128:
+        if not maintenance_retry and len(self.store.maintenance_pending()) >= MAINTENANCE_CAPACITY:
             self.close_refused(a, "open", "Maintenance retention capacity reached; no decision was issued. "
                                "Operator recovery is required before retrying.", "maintenance-capacity")
             return
@@ -1315,26 +1331,31 @@ class Admind:
         code: int | None = None
         line = ""
         audited = unauthorised = False
+        authority_reason: str | None = None
         stop: tuple[str, str, str] | None = None
         r: Readout | Busy | None = None
+        proven_hold = False
         try:
             self.audit.write("ask", action="deciding", message_id=mid, ask_id=a.ask_id, bead=bead,
                              decision=a.action, operator=a.operator)
             audited = True
-            r = await ab.read(bead)                                     # step 5
+            r = prechecked if prechecked is not None else await ab.read(bead)  # step 5
             stop = self.preflight(r, a, bead)
             if stop is None:
-                unauthorised = (not self.authorised(mid)
-                                or (maintenance_retry and self.operator_name(mid) != a.operator))
+                if maintenance_retry:
+                    authority_reason = self.maintenance_authority_reason(a)
+                    unauthorised = authority_reason is not None
+                else:
+                    unauthorised = not self.authorised(mid)
                 if not unauthorised:
-                    if maintenance_retry and not self.store.issue_maintenance_retry(a):
+                    if not self.store.issue_decision(a, maintenance_retry=maintenance_retry):
                         self.conflict(a, "deciding")
                         return
                     result = await ab.decide(a, bead, on_launch)        # step 7
                     if isinstance(result, approvals.MaintenanceHold):
-                        self.hold_maintenance(a, "maintenance")
-                        return
-                    code, line = result
+                        proven_hold = True
+                    else:
+                        code, line = result
         except asyncio.CancelledError:
             raise       # left `deciding`; the startup reconcile settles it (R26)
         except Exception as exc:  # noqa: BLE001 - fixed words; nothing launched means nothing was written
@@ -1344,9 +1365,13 @@ class Admind:
                 word = (exc.word if isinstance(exc, BtqError)
                         else "unavailable" if isinstance(exc, OSError) and audited else "error")
                 stop = ("open", PREFLIGHT_FAILED.format(bead=bead, word=word), word)
+        if proven_hold:
+            # Outside the ambiguous-child catch: publication failure must retain the issuing marker.
+            self.hold_maintenance(a, "maintenance")
+            return
         if unauthorised:
             if maintenance_retry:
-                self.hold_maintenance(a, "authority")
+                self.hold_maintenance(a, authority_reason or "authority")
                 return
             with self.store.transaction():
                 closed = self.store.close_attempt(a.ask_id, mid, expect_status="deciding", settled="refused",
@@ -1361,7 +1386,7 @@ class Admind:
             return
         if stop is not None:
             if maintenance_retry:
-                self.hold_maintenance(a, "changed-card")
+                self.hold_maintenance(a, self.maintenance_stop_reason(stop))
                 return
             if stop[0] == "stale" and isinstance(r, Readout):
                 await self.refresh(a, row, r, "refused", None, "")
@@ -1503,9 +1528,12 @@ class Admind:
         if a is None or a.message_id != attempt or row is None or row.bead is None:
             self.audit_quietly("ask", action="reconcile-skipped", ask_id=ask_id)
             return
-        if any(x == ask_id and y == attempt for x, y, _ in self.store.maintenance_pending()):
+        if self.store.maintenance_retry_at(ask_id, attempt, include_suspended=True) is not None:
             # Proven pre-effect attempts keep their original inbound/provenance across restart.
             # The bounded retry loop performs fresh policy and native checks before any new child.
+            return
+        if row.outcome == "maintenance-issuing":
+            await self.reconcile_issuing(a, row)
             return
         if self.approve_bead is None:
             self.unverified(ask_id, attempt, row.bead)
@@ -1530,60 +1558,109 @@ class Admind:
                          status=new_status, was=status, restarted=restarted)
 
     async def maintenance_retry_loop(self) -> None:
-        """Retry only persisted proven-pre-effect attempts, serially under the normal worker lock."""
+        """Bounded serial cycles; overdue or failed work never creates a tight exception loop."""
         while True:
-            for ask_id, mid, due in self.store.maintenance_pending():
-                if self.wallclock() < due:
-                    continue
-                async with self.work_lock:
-                    try:
-                        await self.retry_maintenance(ask_id, mid)
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as exc:  # noqa: BLE001 - preserve attempt, never infer an effect
-                        self.audit_quietly("ask", action="maintenance-retry-failed", ask_id=ask_id,
-                                           error=type(exc).__name__)
-            pending = self.store.maintenance_pending()
-            delay = min((due - self.wallclock() for _, _, due in pending), default=30.0)
-            await asyncio.sleep(max(0.1, min(30.0, delay)))
+            delay = MAINTENANCE_RETRY_SECONDS
+            failed = False
+            try:
+                for ask_id, mid, due in self.store.maintenance_retryable():
+                    if self.wallclock() < due:
+                        delay = min(delay, max(1.0, due - self.wallclock()))
+                        continue
+                    async with self.work_lock:
+                        try:
+                            await self.retry_maintenance(ask_id, mid)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as exc:  # noqa: BLE001 - preserve uncertainty; bounded cycle
+                            failed = True
+                            self.audit_quietly("ask", action="maintenance-retry-failed", ask_id=ask_id,
+                                               error=type(exc).__name__)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - DB listing failure also receives full backoff
+                failed = True
+                self.audit_quietly("ask", action="maintenance-list-failed", error=type(exc).__name__)
+            await asyncio.sleep(MAINTENANCE_RETRY_SECONDS if failed else delay)
+
+    def maintenance_authority_reason(self, a: Attempt) -> str | None:
+        """Separate temporary observation/policy failure from a proven sender-policy mismatch."""
+        if self.approve_bead is None:
+            return "approvals-unconfigured"
+        if not self.refresh_authority():
+            return "policy-unavailable"
+        if self.latched():
+            return "latched"
+        if not self.group_ok or not self.observing or self.changing:
+            return "group-unverified"
+        sender = self.store.inbound_sender(a.message_id)
+        # No await after the successful refresh above: classify against that one policy snapshot.
+        if sender is None or sender not in self.operators or self.operator_name(a.message_id) != a.operator:
+            return "authority"
+        return None
+
+    @staticmethod
+    def maintenance_stop_reason(stop: tuple[str, str, str]) -> str:
+        return {"busy": "native-busy", "stale": "changed-card", "decided": "native-conflict",
+                "not open": "not-open", "not approval": "not-approval",
+                "not an approver": "not-approver", "gate": "gate"}.get(stop[2], "read-unavailable")
+
+    async def reconcile_issuing(self, a: Attempt, row: AskRow) -> None:
+        """Only an exact native decision settles stranded issuance; untouched proves no retry right."""
+        settled, back = (await self.read_and_settle(a, row.bead or "")
+                         if self.approve_bead is not None else ("uncertain", None))
+        if settled == "recorded" and back is not None:
+            self.settle_maintenance_recorded(a, row, back)
+            return
+        with self.store.transaction():
+            self.ask_notice(a.ask_id, "issuance-unverified", a.message_id,
+                            f"Ask {a.ask_id}: decision issuance remains unverified. The original reply "
+                            "is preserved; no automatic replay or untouched settlement is permitted. "
+                            "Authenticated recovery is not available in this version.", a.message_id)
+        self.audit_quietly("ask", action="issuance-held", ask_id=a.ask_id, message_id=a.message_id,
+                           outcome=settled)
+
+    def settle_maintenance_recorded(self, a: Attempt, row: AskRow, back: Readout) -> None:
+        new_status, text = self.settlement("recorded", back, a, row.bead or "", "")
+        with self.store.transaction():
+            closed = self.store.close_attempt(a.ask_id, a.message_id,
+                                              expect_status="deciding", settled="recorded",
+                                              exit_status=None, new_status=new_status, outcome=text,
+                                              decided_by=a.operator)
+            if closed:
+                self.finish(a.message_id, "done", text, "ask")
+        if not closed:
+            self.conflict(a, "deciding")
+            return
+        self.audit_quietly("ask", action="reconciled", ask_id=a.ask_id, message_id=a.message_id,
+                           outcome="recorded", status=new_status, was="pending-maintenance")
 
     async def retry_maintenance(self, ask_id: str, mid: str) -> None:
         """Read native first: another valid decision wins; only an untouched exact card can retry."""
-        pending = next((due for aid, message, due in self.store.maintenance_pending()
-                        if aid == ask_id and message == mid), None)
+        pending = self.store.maintenance_retry_at(ask_id, mid)
         if pending is None or self.wallclock() < pending:
             return
         a, row = self.store.current_attempt(ask_id), self.store.ask(ask_id)
         if a is None or a.message_id != mid or row is None or row.bead is None or row.status != "deciding":
             return
         # Backoff persists even on failed policy/readback, including across daemon restarts.
-        self.store.defer_maintenance(a, self.wallclock() + 30.0)
-        if (self.approve_bead is None or not self.authorised(mid)
-                or self.operator_name(mid) != a.operator):
-            self.hold_maintenance(a, "authority")
+        self.store.defer_maintenance(a, self.wallclock() + MAINTENANCE_RETRY_SECONDS)
+        reason = self.maintenance_authority_reason(a)
+        if reason is not None:
+            self.hold_maintenance(a, reason)
             return
         settled, back = await self.read_and_settle(a, row.bead)
         if settled == "recorded" and back is not None:
-            new_status, text = self.settlement(settled, back, a, row.bead, "")
-            with self.store.transaction():
-                closed = self.store.close_attempt(ask_id, mid, expect_status="deciding", settled=settled,
-                                                  exit_status=None, new_status=new_status, outcome=text,
-                                                  decided_by=a.operator)
-                if closed:
-                    self.finish(mid, "done", text, "ask")
-            if not closed:
-                self.conflict(a, "deciding")
-                return
-            self.audit_quietly("ask", action="reconciled", ask_id=ask_id, message_id=mid,
-                               outcome=settled, status=new_status, was="pending-maintenance")
+            self.settle_maintenance_recorded(a, row, back)
             return
         if settled != "untouched" or back is None:
             self.hold_maintenance(a, "native-conflict" if settled == "blocked" else "read-unavailable")
             return
-        if self.preflight(back, a, row.bead) is not None or row.digest != a.digest:
-            self.hold_maintenance(a, "changed-card")
+        stop = self.preflight(back, a, row.bead)
+        if stop is not None:
+            self.hold_maintenance(a, self.maintenance_stop_reason(stop))
             return
-        await self.run_attempt(a, row, maintenance_retry=True)
+        await self.run_attempt(a, row, maintenance_retry=True, prechecked=back)
 
     def unverified(self, ask_id: str, attempt: str, bead: str) -> None:
         """A stranded attempt that cannot be read back: approve_bead was removed (say, for a rollback).

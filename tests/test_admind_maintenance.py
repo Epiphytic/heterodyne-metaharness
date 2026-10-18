@@ -182,7 +182,8 @@ def test_prelaunch_crash_consumes_only_retry_entitlement(tmp_path: Path) -> None
             u.daemon.approve_bead = port
             await u.daemon.reconcile_asks(u.store.recovery_snapshot())
             assert port.calls == 1  # ambiguous restart uses readback, never calls decide again
-            assert u.store.current_attempt(APPROVE.ask_id) is None
+            assert u.store.current_attempt(APPROVE.ask_id) == APPROVE
+            assert u.store.inbound_status(MID) == "executing"
         finally:
             u.store.close()
 
@@ -201,13 +202,13 @@ def test_retry_rechecks_operator_name_after_native_await(tmp_path: Path) -> None
             async def changed(bead: str, on_launch: Callable[[], None] | None = None) -> Readout:
                 nonlocal reads
                 reads += 1
-                if reads == 2:
+                if reads == 1:
                     u.daemon.operator_name = lambda _: "renamed"  # type: ignore[method-assign]
                 return await original(bead, on_launch)
 
             port.read = changed  # type: ignore[method-assign]
             await u.daemon.retry_maintenance(APPROVE.ask_id, MID)
-            assert reads == 2 and port.calls == 1
+            assert reads == 1 and port.calls == 1
             assert u.store.maintenance_pending() == [(APPROVE.ask_id, MID, 160.0)]
             assert u.store.current_attempt(APPROVE.ask_id) == APPROVE
         finally:
