@@ -1,0 +1,306 @@
+{
+  "schema": "scanner-socket-inventory-clarification-inputs.v1",
+  "status": "PROPOSED_UNREVIEWED_NOT_AUTHORITY",
+  "design_task": "btq-zckld",
+  "publication_base": "878b50e55cafdfcd4bd22f2a258c3cce2863e4a8",
+  "parent_designs": [
+    {
+      "commit": "f05aeb43d8b871dec2d83c5d0df8efa933b53b68",
+      "path": "docs/adr/2026-10-16-scanner-private-environment-recovery.md",
+      "sha256": "2306d4bad6beaabcbcaef90e60bf6a4318f65d10bca7ae41df7c15e5268161c6",
+      "bytes": 13177
+    },
+    {
+      "commit": "e22f4ed366d6ddcdc1a5d7f0c9fe30d088b12ea8",
+      "path": "docs/adr/0002-scanner-execution-fd-prerequisite-d4.md",
+      "sha256": "e551a9a287f1ce850bc87cfa196e905b1b35747f0dd95c53b2e9e0d373bed840",
+      "bytes": 22305
+    }
+  ],
+  "sources": {
+    "scanner_snapshot": {
+      "head": "c2d919ec6fa18088b0211a7d9898e4f8436bff2b",
+      "dirty_paths": [
+        "src/heterodyne/admind/hook.py",
+        "src/heterodyne/admind/redact.py",
+        "src/heterodyne/config/secret_scan.py"
+      ],
+      "files": [
+        {
+          "path": "tests/test_admind_cli.py",
+          "sha256": "0601ee2f4ef45c22a668120e1ccacab29605b8eea222f2f291e952a819fd23c5",
+          "bytes": 36116
+        },
+        {
+          "path": "src/heterodyne/marmot/control.py",
+          "sha256": "5015667928bb080578dbcc19406a215d79fbcf2696e94b84026c2cf6e14a4862",
+          "bytes": 11949
+        },
+        {
+          "path": "src/heterodyne/marmot/nip19.py",
+          "sha256": "b661174b8f27388b449f8c6ae851f3daf5d14dc0ec2c29536a3b3616fc427507",
+          "bytes": 2861
+        },
+        {
+          "path": "tests/deploy_host.py",
+          "sha256": "b4b5c596ad1ac8bce45566654fe0eb27c1dee4c4e89b1eb71f8757bcd6b632e9",
+          "bytes": 29723
+        },
+        {
+          "path": "tests/test_harness_walk.py",
+          "sha256": "90525ba634e484724e7f8642146d565a40cde6ce8cf8df96e655af5bb42f164e",
+          "bytes": 21132
+        },
+        {
+          "path": "tests/tmux_guard.py",
+          "sha256": "fe83b88ff6e538e80d19237e59e9724cd9de7807f00702c17625124d8f9d6324",
+          "bytes": 15297
+        },
+        {
+          "path": "tests/tmux_watchdog.py",
+          "sha256": "b9166cd74ca8a7d7abe9af9323724ec444313f96faa1fc45c9420251d7582348",
+          "bytes": 24536
+        },
+        {
+          "path": "src/heterodyne/tmux.py",
+          "sha256": "bdb567595b4030f2b7ec23182346de3f1bf2ddf1deb5b2e03de2ba8f6c4de69b",
+          "bytes": 11971
+        },
+        {
+          "path": "tests/conftest.py",
+          "sha256": "951a0f17143e9a4dca2dd69af4b33d3e4423819a015e2d784676fbbce36cb60a",
+          "bytes": 2177
+        },
+        {
+          "path": "tests/sandbox_env.py",
+          "sha256": "c198f2208af154b2d586c1af8374b334d5c1566ac9a3cd1e5fb6f0af8034ffcf",
+          "bytes": 12761
+        },
+        {
+          "path": "src/heterodyne/sandbox/spec.py",
+          "sha256": "6d5904be6673356b6db39a0e05ae6189ca076d79195d6d0ef33a9546f12b931f",
+          "bytes": 15268
+        },
+        {
+          "path": "src/heterodyne/admind/hook.py",
+          "sha256": "5be12d583044fd20784a0446cbcfc9cdae8ad04f4f4f501f4664e12c5ac7b4bd",
+          "bytes": 35270
+        },
+        {
+          "path": "src/heterodyne/admind/redact.py",
+          "sha256": "81501f95fd9c0c23c8e30e4768232366f037be9bd6607392a2e578fd07a9e1d1",
+          "bytes": 6848
+        },
+        {
+          "path": "src/heterodyne/config/secret_scan.py",
+          "sha256": "abc7aa4a96acae73c2807e5fc260f7d8b9c015b99d1cdbf245d6aea358c7376a",
+          "bytes": 8471
+        }
+      ]
+    },
+    "helper_snapshot": {
+      "head": "48f63469519440c615653617275480b95118902c",
+      "executable_commit": "0ca2d17",
+      "files": [
+        {
+          "path": "scripts/scanner_recovery/environment.py",
+          "sha256": "124fdf3c58cb7944bb1531ca2e9c522fbe67a06fabc8147473b52796fb4bce0d",
+          "bytes": 23114
+        },
+        {
+          "path": "scripts/scanner_recovery/runner.py",
+          "sha256": "afce46190ed78f8b1ee7a6833ebc2dc25f626581154cfadea6f95df1fc0b37ce",
+          "bytes": 44632
+        },
+        {
+          "path": "docs/reviews/scanner-boundary/execution-fd-prerequisite-d4-inputs.json",
+          "sha256": "363a09214dd7a753b1595d9af8db5ba088b6404bdfb30de3bdebdbb646424143",
+          "bytes": 21525
+        },
+        {
+          "path": "docs/reviews/scanner-boundary/environment-contract.json",
+          "sha256": "679d4090981f5cd39981294cf74e2570fa1a48483c8742acd74a1586b46fbb01",
+          "bytes": 6599
+        }
+      ]
+    }
+  },
+  "negative_client_registry": [
+    {
+      "id": "original-missing-wn-agent-client",
+      "node": "tests/test_admind_cli.py::test_socket_errors_do_not_echo_the_path",
+      "test_function": {
+        "path": "tests/test_admind_cli.py",
+        "symbol": "test_socket_errors_do_not_echo_the_path",
+        "start_line": 591,
+        "end_line": 595,
+        "sha256": "7f0b3a9ac66b5a4173276037692e80f19f58f33f984dc4a72f86097d2a9573f6",
+        "hash_convention": "Complete physical lines from first def/async def through end_lineno, inclusive; original line endings; decorators excluded"
+      },
+      "constructor_chain": [
+        {
+          "path": "src/heterodyne/marmot/control.py",
+          "symbol": "account_list",
+          "start_line": 245,
+          "end_line": 246,
+          "sha256": "a4b57a1fd4857bbea7791d5e966dcff6dd1dc122e4755915c04d85d1956a368f",
+          "hash_convention": "Complete physical lines from first def/async def through end_lineno, inclusive; original line endings; decorators excluded"
+        },
+        {
+          "path": "src/heterodyne/marmot/control.py",
+          "symbol": "call",
+          "start_line": 227,
+          "end_line": 243,
+          "sha256": "78561d62cb3681865a9391361c406b94cba99550afd31b2ac4a548d8be7e27be",
+          "hash_convention": "Complete physical lines from first def/async def through end_lineno, inclusive; original line endings; decorators excluded"
+        },
+        {
+          "path": "src/heterodyne/marmot/control.py",
+          "symbol": "_open",
+          "start_line": 196,
+          "end_line": 202,
+          "sha256": "e60d5f77804ef1100de4484f706882a7d6ee4c6f82d5d9fa8e33c1b83858e945",
+          "hash_convention": "Complete physical lines from first def/async def through end_lineno, inclusive; original line endings; decorators excluded"
+        },
+        {
+          "path": "src/heterodyne/marmot/nip19.py",
+          "symbol": "hex_to_npub",
+          "start_line": 74,
+          "end_line": 84,
+          "sha256": "dacfab8376e35bf6d9fca9b718ab742c9472b998fc7407f09aed1af873bf3663",
+          "hash_convention": "Complete physical lines from first def/async def through end_lineno, inclusive; original line endings; decorators excluded"
+        }
+      ],
+      "expected_operation": "connect-error",
+      "maximum_encoded_bytes": 127,
+      "actual_fixed_root_formula_bytes": 126,
+      "successful_endpoint": false,
+      "new_listener": false,
+      "case_component_bytes": 31,
+      "case_prefix": "test_socket_errors_do_not_echo",
+      "public_test_key_encoded_bytes": 63,
+      "suffix": "missing.sock",
+      "generic_exception_rule": false
+    }
+  ],
+  "relative_bind_registry": [
+    {
+      "id": "deploy-host-bus",
+      "argument": "bus",
+      "argument_bytes": 3,
+      "function": {
+        "path": "tests/deploy_host.py",
+        "symbol": "bind_bus",
+        "start_line": 571,
+        "end_line": 582,
+        "sha256": "d55aa33ac0812e62ddc71f1d15a5470a77b1df6619c4f08643a448360f1aa334",
+        "hash_convention": "Complete physical lines from first def/async def through end_lineno, inclusive; original line endings; decorators excluded"
+      }
+    },
+    {
+      "id": "harness-walk-socket",
+      "argument": "s",
+      "argument_bytes": 1,
+      "function": {
+        "path": "tests/test_harness_walk.py",
+        "symbol": "test_a_fifo_a_socket_and_a_device_are_refused",
+        "start_line": 132,
+        "end_line": 160,
+        "sha256": "65bffd1a26cda83e8bdff1d3c1991a004313d191e0643cb80e1c9eb93daf2ec4",
+        "hash_convention": "Complete physical lines from first def/async def through end_lineno, inclusive; original line endings; decorators excluded"
+      }
+    }
+  ],
+  "independent_root_registry": [
+    {
+      "id": "tmux-guard",
+      "creator": {
+        "path": "tests/tmux_guard.py",
+        "symbol": "pytest_configure",
+        "start_line": 208,
+        "end_line": 219,
+        "sha256": "a8eb7d984b8b018de457e5fed298ecd2c47f6edbd355589838d02427200dcac7",
+        "hash_convention": "Complete physical lines from first def/async def through end_lineno, inclusive; original line endings; decorators excluded"
+      },
+      "cleanup": {
+        "path": "tests/tmux_guard.py",
+        "symbol": "pytest_unconfigure",
+        "start_line": 227,
+        "end_line": 248,
+        "sha256": "341c7765c1616a52fef633c75077da145353ecb0a71056f44b0bf7d2b97c9eea",
+        "hash_convention": "Complete physical lines from first def/async def through end_lineno, inclusive; original line endings; decorators excluded"
+      },
+      "selector": {
+        "path": "src/heterodyne/tmux.py",
+        "symbol": "_selector",
+        "start_line": 65,
+        "end_line": 68,
+        "sha256": "d8216d70a14b2b7df0f516c47d5b9cf15ec04cf7fe4b6918db92dd320c4518c7",
+        "hash_convention": "Complete physical lines from first def/async def through end_lineno, inclusive; original line endings; decorators excluded"
+      },
+      "root_formula": "/tmp/hzt<8 random ASCII>",
+      "maximum_root_bytes": 16,
+      "socket_formula": "root/s/<8 hex>",
+      "maximum_argument_bytes": 27,
+      "already_below_helper_root": false
+    }
+  ],
+  "collection_proof": {
+    "legacy_count": 3372,
+    "selected_modules": 81,
+    "ascii_ids": true,
+    "max_sanitized_prefix_collision": 41,
+    "maximum_case_component_bytes": 32,
+    "added_H_node": "tests/test_sandbox_hostread.py::test_a_leaked_fd_that_another_test_left_closing_meanwhile_is_no_leak",
+    "H_existing_prefix_count": 0,
+    "ordered_minus_added_legacy_sha256": "ce942161d2de1350694ccc829a7d3abd7453407cd7427d646643906b1bf1e032",
+    "conditional_only": true
+  },
+  "private_evidence_anchor": "controller_evidence",
+  "private_evidence": [
+    {
+      "path": "57l70-inventory-preparation-r4/result.json",
+      "sha256": "a5a5ba81e6574dbcbc501dc9d5756c8f49be21b4201de115367e1bacb132b4c6"
+    },
+    {
+      "path": "57l70-inventory-preparation-r4/analysis.md",
+      "sha256": "36f15f3379bbb17fb9194b2b551eae397bf1a34a339457f4160a512f76ca5b06"
+    },
+    {
+      "path": "57l70-inventory-preparation-r4/constructor-inventory.json",
+      "sha256": "5428b41764b0be5ab253c86028a66dfc08e8ca1278e6aa615dfe9f776b9e701a"
+    },
+    {
+      "path": "57l70-inventory-preparation-r4/import-closure.json",
+      "sha256": "96640de27d5ee533190aa0c34e345d7b939ada933dd975df57db4b9deda6ba30"
+    },
+    {
+      "path": "57l70-inventory-preparation-r4/pytest-name-proof.json",
+      "sha256": "c0f438d30a3854bf26fcddc7341a5f2c01dfc1f5635080c3b9277d95c39f2936"
+    },
+    {
+      "path": "57l70-inventory-preparation-r4/blockers.json",
+      "sha256": "1a075419d17cfd2c135dbaa598e535ee32022cc7a9ba884f57d19693cb5de438"
+    },
+    {
+      "path": "57l70-inventory-preparation-r4/source-pins.json",
+      "sha256": "d86c3cf72f47032c599401ae5071c783d106e1294253253b4a0721dcff5aab26"
+    },
+    {
+      "path": "57l70-inventory-preparation-r4/external-source-pins.json",
+      "sha256": "936673236ae5d45d7df49e3ae84cab8a651a57f18c4e30ec2a2879fc664dde76"
+    }
+  ],
+  "scope_command": {
+    "full_suite_live_ignore": "--ignore=tests/live",
+    "inherited_live_flags": false,
+    "new_test_stages": false,
+    "runtime_inventories_complete": false
+  },
+  "implementation_scope": "Proposed repair of existing helper only; genuine native target/approval binding required before implementation; no task mutation or approval claimed",
+  "spec": {
+    "path": "docs/adr/2026-10-18-scanner-socket-inventory-clarification.md",
+    "sha256": "96864dff6c164dbcc028d120eda0d486120ef4c8ecb4f01bb3a1f0d7cdac20dc",
+    "bytes": 13997
+  }
+}
