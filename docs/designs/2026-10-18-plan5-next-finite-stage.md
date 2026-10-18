@@ -29,8 +29,10 @@ P2 is source `00ff9fc2071ecb22f6d950422232ca1c95a5540e`, with review-filing
 commit `1865fdf34e2a906309d08a010a2df6e1fd4d550b` (PR118); this draft does not
 assert its merge or hosted CI completion. Q0's second full HIGH reviewed
 `f80412a853a2b81ec87d3e7fbf18c6c9c91f7cb2` and returned REVISE10. Its author
-repair is `7a631dbd18b9232ed51f60b664127fe694bf4ee7`; controller review is pending
-at this incorporation. Neither source is accepted by this document. Q1 acceptance
+repair is `7a631dbd18b9232ed51f60b664127fe694bf4ee7`; actual third MEDIUM now
+says APPROVE as an offline PoC, retaining ten findings. This is not future-stage
+acceptance: R3 #1/#2 are real source defects that Q1 must fix before composed
+acceptance. f804 is not the accepted repair. Q1 acceptance
 must select the eventual actually reviewed/accepted repaired Q0 and C1 product
 commits and trees together, include predecessor raw reviews/dispositions and run
 the reciprocal compatibility cases below. A later source correction requires a
@@ -181,6 +183,14 @@ requires the existing bounded lookup history and authenticated AbandonmentRecove
 not a timeout. Cannot-approve-as-written is a diagnostic reason for a separately
 proved cancellation, not a new terminal proof or authority class.
 
+Distinguish two different recovery cases. For a consumed existing claim, the
+pinned `dispatch.reconcile_lookup` already exists: Q1 MUST add it to Contracts
+and wire Queue reconciliation through it, persisting its journal-timed 1/5/30
+lookup count rather than repeatedly calling report. After the required retained
+lookups, the existing exact authenticated DispatchRecovery and cleanup predicate
+can settle; failed calls are not absence. Q0 R3 #1 is a wiring defect, not a
+missing authority/interface, and cannot be deferred.
+
 A committed approved execution with no Dispatch has NO supported settlement in
 the current source: `settle_dispatch` requires a real attempt, while completed
 request settlement requires a genuinely settled dispatch. Do not fabricate a
@@ -212,7 +222,12 @@ core.Refused, enforces strict bool ports, and never exposes raw exceptions as a
 success/refusal proof. Programming faults fail visibly with retained uncertainty
 if issuance was possible. P3/P4 never retry decide with stale Expected to discover
 whether it landed: resume is readback only. Backend prewrite classification is a
-fixture capability, not proof of a live Dolt adapter.
+fixture capability, not proof of a live Dolt adapter. In particular a malformed
+lookup/read result is Uncertain, including after a lost allocation acknowledgement;
+empty lookup proves no safe recreate either. Q0 R3 #2 must replace the incorrect
+Refused oracle with a regression preserving allocation uncertainty. Narrow
+foreign reducer translation to the actual closed typed exceptions; do not catch
+all ValueError, discard fixed codes or turn programming bugs into policy refusal.
 
 ### 3.3. Clock and provider-attempt ownership
 
@@ -359,8 +374,31 @@ queue metadata permits it. Do not sanitize the decision or claim this accepted.
 Q1 must verify repaired #2 immutable success, #3 terminal write refusal, #4 emoji
 metadata vs identifier controls, #6 phase-typed backend errors, #7 malformed row
 handling, #8 strict typed ports, #9 approve-with-denial refusal and #10 bounds.
-Any later resolution of #1/#5 needs an exact accepted product/queue pair and the
-source-owned contract; current candidate code is evidence, not approval.
+Any later resolution of Q0 R2 #1/#5 needs an exact accepted product/queue pair
+and the source-owned contract. R3 #1 below is a DIFFERENT existing-dispatch wiring
+case and must not be mislabelled as missing undispatched authority.
+
+The completed Q0 R3 report is [preserved byte-exact](../reviews/2026-10-18-plan5-next-q0-r3.md).
+Its original ten ordinals are carried into this admission individually:
+
+| Q0 R3 finding | Required owner/treatment before affected composed acceptance |
+|---|---|
+| #1 consumed-claim recovery wiring | Q1 adds the existing pinned reconcile_lookup Contracts port and scheduled Queue wiring with journal counters/anchors; C1 supplies exact reducer compatibility. Prove genuine positive recovery after three retained observations and negative failed/early/forged-clock cases. Mandatory source fix, not backend deferral. |
+| #2 malformed post-lost-ack lookup | Q1 returns Uncertain for malformed replies, retains issuing allocation and replaces the incorrect Refused test. No recreate; mandatory before Q1/P3 acceptance. |
+| #3 no whole-request withdraw | Q1 implements §3.1 with C1's exact supported terminal projection. Unknown dispatch-free approved execution remains distinct HOLD, never expiration-based release. |
+| #4 emoji tags / CRLF | C1/Q1 define metadata-only Unicode rules that permit actual tag-emoji and CRLF denial bytes while keeping identifiers strict; preserve exact authenticated text/digest. C1 must resolve the product execution multiline codec incompatibility before claiming that positive supported; no silent newline rewrite. |
+| #5 invisible denial | C1/Q1 reject denial composed solely of whitespace/format controls, while preserving valid visible emoji joiner sequences; approve requires empty reason. Exact source tests, no lossy rendering-based consent. |
+| #6 ValueError masking | Q1 catches only actual typed reducer failures with fixed codes. Arbitrary ValueError/programming errors remain visible and retain uncertainty after possible issuance, per §3.2. |
+| #7 malformed public read | Q1 uses consistent typed Uncertain for malformed backend observations; no invalid dict-to-Row field access. |
+| #8 stale docs/command | Q1 publishes the actual metadata rules and exact named command including every retained R2/R3 regression; counts belong to exact accepted head. |
+| #9 dead condition | Q1 removes the unreachable extra branch without altering approve/deny semantics; retain regression. |
+| #10 duplicated success rule | C1/Q1 reuse the source-owned success/evidence predicate and retain a minimal pre-reducer succeeded-downgrade guard; test parity against the pinned actual report reducer. No independently drifting second success policy. |
+
+These are future C1/Q1 work, not fixes made by this design. The candidate's actual
+R3 APPROVE is offline-only and does not waive these consumer admission criteria.
+The [Q0 R3 carry-forward dispositions](../reviews/2026-10-18-plan5-next-q0-r3-admission-dispositions.md)
+include each exact finding and its owner; Q0's earlier review ordinals remain
+unchanged. No new model invocation or second design review occurred.
 
 ## 5. Offline acceptance and delivery
 

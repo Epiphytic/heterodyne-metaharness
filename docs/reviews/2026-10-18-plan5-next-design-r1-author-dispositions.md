@@ -12,7 +12,7 @@ Raw SHA256: `ea74a538324171cd47eb2f4035f13d566c7dddfbd5dcd95e319f18701af02662`.
 
    Failure scenario: Q1 or P3 workers build against f804's Contracts/Queue as the 'conditional boundary'. The R2 #1 fix (a settle path for undispatched rows) and the #8 fix (typed reducer ports) change those signatures. Alternatively, f804 bugs get baked into the composed fixture: rows still writable after terminal (#3), Refused turned into Uncertain (#6), raw AttributeError/ValueError (#7/#8). In both cases the 'accepted Q0 source' is never defined against the R2 dispositions, and the human approves a design whose Q0 pin is already known to be REVISE. P2 has a similar gap: C1 is allowed to stack on 00ff while PR118 CI is pending, with no rule that C1 cannot be accepted or merged before P2 merges with green CI.
 
-**Author disposition:** Corrected stale Q0 facts to actual R2 REVISE10 and repaired 7a631db candidate, with raw/disposition pins and eventual accepted exact pair requirement; P2 green CI+merge is mandatory before C1 acceptance/merge.
+**Author disposition:** Corrected stale Q0 facts to actual R2 REVISE10 and repaired 7a631db (subsequently actual R3 APPROVE offline PoC), with raw/disposition pins and eventual accepted exact pair requirement; P2 green CI+merge is mandatory before C1 acceptance/merge.
 
 ## Finding 2 — verbatim
 
@@ -91,3 +91,11 @@ Raw SHA256: `ea74a538324171cd47eb2f4035f13d566c7dddfbd5dcd95e319f18701af02662`.
 The inputs link now resolves from both the identical design and ADR copies via
 `../designs/2026-10-18-plan5-next-finite-stage-inputs.json`. No runtime tests or
 second design validation/review were performed. Document/hash checks only.
+
+## Completed predecessor review during incorporation
+
+Q0 actual third MEDIUM completed during this same incorporation, APPROVE offline
+PoC with ten findings. Its raw report and all ten carry-forward admission
+dispositions are now filed separately. Existing reconcile_lookup wiring and
+malformed lost-ack typing are mandatory Q1 repairs; the former is not a missing
+contract. This completion is not another review of this design.

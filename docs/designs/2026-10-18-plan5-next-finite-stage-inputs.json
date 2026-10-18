@@ -140,18 +140,24 @@
       "path": "docs/reviews/2026-10-18-plan5-next-q0-r2.md",
       "sha256": "a74a2db94be31702a076340cc58b0fd20efdf6606b479364c223d70214d703e8",
       "kind": "byte-exact actual review; original ordinal retained"
+    },
+    {
+      "path": "docs/reviews/2026-10-18-plan5-next-q0-r3.md",
+      "sha256": "318447181e9617b615a594fb5e5b86335bf08dbf3053b57005770f6cf0c154ea",
+      "kind": "byte-exact actual third MEDIUM review, ten findings retained"
     }
   ],
   "availability": {
     "P1": "merged dd38; actual R11 APPROVE offline only, eight retained findings",
     "P2": "source00ff; docs1865; PR118 not asserted merged/CI complete",
-    "Q0": "R2 REVISE10 on f804; author repair7a631db; eventual reviewed accepted exact pair required, no live adapter"
+    "Q0": "Actual R3 MEDIUM APPROVE offlinePoC7a631db, ten retained findings; R3#1 existing reconcile_lookup wiring and #2 malformed lookup typing mandatory Q1 fixes; no composed/live acceptance"
   },
   "method": [
     "Semble search exact actions/ports/judgement locations",
     "ripwire pack-task (bounded output disclosure retained)",
     "git show exact objects; no tests, model, queue or live effects",
-    "One author incorporation of actual HIGH REVISE10; source research only; no second design review/validation"
+    "One author incorporation of actual HIGH REVISE10; source research only; no second design review/validation",
+    "Controller supplied completed Q0 R3 during same sole HIGH author incorporation; no new review or validation"
   ],
   "missing_public_filename": "docs/reviews/efddg-code-r11-medium.md absent at dd38 and efddg HEAD; actual N log copied byte-exact under this design-specific path",
   "review": {
