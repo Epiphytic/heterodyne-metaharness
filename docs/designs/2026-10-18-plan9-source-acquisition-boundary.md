@@ -1,160 +1,261 @@
 # Plan9 source acquisition boundary
 
-Status: author proposal; no design review or human approval yet. This document
-does not authorize deployment or start the qualification clock.
+Status: proposed boundary after the ONE actual Claude Opus HIGH design review,
+which returned REVISE. Its findings are incorporated once below; no second
+review or validation is claimed. Human design approval remains required. No
+implementation, deployment, source admission or qualification clock is authorized.
 
 Parent: [approved Plan9 d4](https://github.com/Epiphytic/heterodyne-metaharness/blob/e009a2c6d1a4c7887bb5c5effd5f7d9bbbd023cc/docs/designs/2026-10-16-plan9-release-corpus-and-acceptance-d4.md),
-native approval `btq-e9toz`. This proposal makes the previously unspecified
-acquisition/retention interface concrete. It changes no qualification predicate,
-approval requirement, source completeness obligation, or 72-hour duration.
+native approval `btq-e9toz`. This proposal concretizes acquisition and retention;
+it changes no qualification predicate, completeness obligation or 72-hour duration.
+All questions, decisions and approvals use Marmot admind; diagnostics are not consent.
 
-## Problem and existing implementation
+## 1. Actual boundaries and proposed topology
 
-The acceptance ledger already separates `publisher.lock` from `spool.lock`.
-`Ledger.spool(raw)` retains exact strict JSON bytes without the publisher lock;
-`Ledger.retain(Artifact, raw)` publishes the same original bytes and immutable
-identity under the publisher lock. Terminal release names an exact spool
-snapshot, so later arrivals stay active. These mechanisms currently have no
-production source acquisition owner.
+`Ledger.spool` accepts strict JSON, addresses records by content digest, has
+1024 active entries and 100000 lifetime files, and terminal commit/release take
+publisher.lock then spool.lock. Release retirement knows ledger spool digests,
+not source acquisition receipts. It is unsuitable as an all-acquisition store.
+`Ledger.retain(Artifact, raw)` can retain arbitrary exact bytes plus an immutable
+ID binding under publisher.lock. Neither API establishes source authority.
 
-`wsd.journal.Journal.events_since(seq, limit)` reads real progress events with
-fields `seq, at, ws, bead, kind, detail, ref`. It bounds row count only. Its UTC
-`at` is not a boot clock, its SQLite sequence is not an authenticated epoch,
-and this log is not a complete host, native approval, process, or privilege
-audit. Constructing Journal can create a database. A collector must therefore
-receive an already opened owner; it must never construct Journal from a path
-in submitted evidence or discover the host's database.
+The proposed initial WSD adapter is an in-process diagnostic owner facade over
+an already opened `Journal`, sharing WSD's UID, privileges and failure domain.
+It is not a separate security principal or an existing transport API. The
+collector receives this fixed owner facade at trusted construction; evidence
+cannot select a path, executable, database or class. A separate-process WSD
+collector would require a separately specified owner transport, not construction
+of another Journal. `Journal.events_since` currently coerces values to strings
+and bounds only row count. It is not the new lossless snapshot method.
 
-The existing captured native and managed-install adapters remain diagnostics.
-Neither a successful parser nor this acquisition protocol turns them into
-authority. Default acceptance `Proofs` remain Unavailable.
+The acquisition store is a NEW acceptance-local component, physically separate
+from Ledger objects, spool and locks. It never calls Ledger.spool. One source
+owner reader writes a dedicated source lane; terminal publication only reads
+completed immutable acquisition receipts. This is proposed software, not an
+installed capability. Default production Proofs remain Unavailable.
 
-## Finite acquisition contract
+## 2. Registration, occurrence and bounded read contract
 
-Trusted deployment construction admits each concrete source owner separately.
-Its registration pins source ID, owner epoch, implementation/configuration
-identity, retention location, cursor semantics and supported snapshot method.
-Registration is a retained artifact with independent admission evidence; a
-JSON string or constructor flag is not proof of registration. No evidence
-field chooses a Python class, executable, arbitrary path or database.
+A retained closed registration contains schema `acquisition-source.v1`, source_id
+(existing ID grammar, 1..128 chars), fixed adapter/configuration digests,
+retention profile digest and epoch tagged union. Epoch is either
+`{kind:unestablished}` or `{kind:admitted,id:ID,evidence_sha256:Digest}`.
+Admission requires genuine source-specific evidence of restore, loss, retention
+and completeness behavior; the tag alone is not that evidence. The initial
+WSD registration is unestablished and diagnostic only. A local lane UUID is
+storage identity, NEVER an owner epoch. A lane belongs to exactly one registration
+and one explicit binding union: `{kind:diagnostic}` or
+`{kind:ledger,entry_sha256:Digest,run_id:ID}`. Do not reuse a lane across runs.
 
-The internal read interface is `capture(after, record_limit, byte_limit)`.
-It returns a closed immutable batch with source ID, admitted owner epoch,
-after ordinal, high-water ordinal, and ordered `(ordinal, original_bytes)`
-records. Limits are 128 records and 1 MiB total original bytes per batch;
-ordinals are exact integers 0..2147483646, rejecting booleans. Zero is only the
-initial cursor. IDs use the existing 128-character acceptance ID grammar.
+Proposed `capture(after, expected_anchor, record_limit, byte_limit)` returns a
+closed immutable batch: registration digest, after, high_water, anchor digest
+at after (null only at zero), and ordered (ordinal, original_bytes). Limits:
+128 records, 1048576 original bytes total; ordinal is exact int 0..2147483646,
+not bool. Zero is only initial cursor. Read anchor and rows in the SAME source
+snapshot. Missing/changed acknowledged anchor, high-water regression, gaps or
+unexpected types HOLD without advancing. Records start at after+1 and remain
+contiguous through at most high_water. Positive batches must advance. Empty is
+valid only at after==high_water and creates no retained batch/receipt.
 
-The high-water belongs to the source snapshot, not acquisition completion time.
-Records are contiguous from after+1, never beyond high-water; a partial batch
-must make positive progress. An empty batch requires after==high-water. The
-owner must enforce the byte limit before materializing unbounded row values.
-An oversized single record is an explicit unsupported-source HOLD, never
-truncation, stringification or a skipped cursor.
+An anchor detects replacement at that cursor, not an arbitrary rewritten middle
+range, restore followed by catch-up, or loss outside this log. No anchor, inode,
+mtime, sequence, local UUID or receipt chain establishes a restore-safe epoch or
+complete audit. Until a source-specific admitted epoch/continuity mechanism
+proves those properties, captures stay diagnostic and operational AuditInterval
+and terminal-fence Proofs HOLD. Never silently reset after a source change.
 
-For byte-native JSON sources, original bytes are retained verbatim before any
-decoding. For SQLite progress rows, the source itself supplies a separately
-versioned lossless field envelope: all seven original typed columns, including
-the exact original `at` and `detail` strings and nullable columns. This is a
-representation of SQL values, not a claim to original database-file bytes.
-The raw database and WAL are protected through the approved backup owner;
-the collector does not copy a live database file or invent byte provenance.
+Byte-native sources retain original bytes, including non-JSON, duplicate keys,
+floats and malformed text, without passing through acceptance codec.load.
+Decoding/classification occurs AFTER durable retention; a strict evidence parser
+may refuse publication as structured evidence but cannot erase originals or
+wedge subsequent diagnostic acquisition. Oversized records HOLD before retaining
+an incomplete batch; no truncation or skip-as-complete.
 
-The WSD owner adds a bounded snapshot-read method under its existing journal
-mutex and a single read transaction. It first checks row sizes and schema,
-then reads the bounded rows and snapshot high-water. It must reject an existing
-write transaction rather than joining it. No schema migration, event emission,
-source mutation, SQLite write, producer pause, service restart or schema-check
-bypass is part of capture. Busy/unusable/corrupt outcomes become distinct fixed
-HOLD codes with original private exception evidence retained.
+## 3. WSD SQL snapshot and exact envelope
 
-An epoch change, missing cursor, regressing high-water or changed previously
-retained cursor is HOLD. The production owner registration must establish
-immutability and detect restore/replacement of the source; an inode alone is
-insufficient. If the current WSD journal cannot establish that guarantee, its
-captured rows are diagnostic inventory only, and it cannot satisfy audit
-continuity. No guessed epoch or automatic cursor reset fills this gap.
+The NEW owner method holds Journal.lock only for a bounded read snapshot and
+copy. Reject an already active transaction. Use explicit BEGIN, a first SELECT
+to establish the snapshot, fixed schema/version checks and bounded SELECTs,
+then ROLLBACK in finally. Do not use transaction()/snapshot() (BEGIN IMMEDIATE),
+Journal constructor, migration, checkpoint, or `_check`/integrity_check per poll.
+Existing open-time validation is not a promise against later corruption: query,
+schema or I/O failures return fixed HOLD codes. No writer transaction is taken.
+Measure the actual mutex window with concurrent WSD writes before deployment;
+if the approved capture cadence cannot be met, this topology is ineligible.
+No hard real-time latency or separate failure-domain claim is made.
 
-## Durable acquisition and publication
+The versioned SQL original is a canonical envelope of the seven named columns
+seq, at, ws, bead, kind, detail, ref, each with an explicit SQLite storage class.
+Null is `{storage:null}`; integer is `{storage:integer,decimal:<exact signed
+base10>}`; real is `{storage:real,ieee754_be:<16 lowercase hex>}` from the exact
+SQLite returned binary64 value; text/blob are respectively `{storage:text,hex:H}`
+and `{storage:blob,hex:H}`. TEXT hex is obtained by hex(CAST(column AS BLOB)),
+not UTF-8 decoding or str(). This preserves stored text bytes, including invalid
+UTF-8, and distinguishes identical BLOB/TEXT bytes. It does not claim database
+page, original SQL literal or WAL byte fidelity. Seq must actually have INTEGER
+storage and satisfy the ordinal bound; other storage classes remain represented,
+not implicitly coerced into valid events.
 
-Each source has a private mode0700 acquisition namespace, with owned single-link
-mode0600 regular files and a retained lock inode. Paths are generated from
-validated digest keys, never source IDs used as path components. Reuse the
-ledger's checked private-file primitives rather than copying an unsafe writer.
-Acquisition does not hold a product/queue lock or publisher.lock.
+Before fetching value contents, query typeof and length(CAST(column AS BLOB))
+for TEXT/BLOB in the same snapshot. Fixed seven-column metadata is bounded;
+fetch at most 128 row metadata entries plus one existence sentinel. Compute the
+exact canonical envelope size from ASCII hex lengths, fixed field syntax and
+bounded integer/real representations before fetching hex content. Reject any
+row/batch exceeding the remaining byte budget. Hex creates exactly two ASCII
+bytes per stored byte, with no JSON escaping multiplier. Recheck fetched lengths
+and final serialized bytes before exposing a batch. No fetchall of unbounded
+values; no full-table scan/integrity check masquerading as a size guard. Busy,
+corrupt, schema/type, budget or snapshot failures become typed HOLDs; private
+exception text is retained diagnostically, not projected as authority.
 
-Before spooling, persist an immutable pending capture containing the complete
-exact batch bytes, prior receipt digest and next intended cursor. Fsync the
-capture and its directory before acknowledging any progress. Then spool every
-original unchanged, persist a canonical immutable receipt referencing each
-original digest, and fsync it. Finally publish a durable frontier pointing to
-that receipt and fsync the directory. Only this final publication acknowledges
-the cursor. A receipt proves local retention, not source authentication.
+## 4. Independent durable occurrence store
 
-The receipt has exactly: schema version, source ID, owner epoch, previous
-receipt digest (nullable only at zero), after, through, high-water, and ordered
-ordinal/digest pairs. Pending original bytes and completed receipts are never
-deleted as part of retry or terminal release. Bound pending captures to1024
-and completed receipt objects to100000; exhaustion holds with originals intact.
-Existing ledger spool/retained-object bounds also apply. There is no pruning.
+All writers use one collector quota lock before a source-lane lock; quota
+reservations/counts are durably bound to the pending batch, with crash replay
+accounting once. The quota lock is not held during source reads or publication.
+No code acquires quota while holding a lane lock. Each lane has a private 0700
+directory, 0600 single-link regular files, a fixed
+source-lane lock inode, originals/, receipts/, and at most ONE pending batch.
+No symlink traversal or caller-selected location. File operations use no-replace
+publication, fsync file then directory, verify exact existing bytes on replay.
+A trusted same-UID local owner can tamper with these files; hashes are integrity
+bindings, not independent authentication.
 
-On restart, finish the exact pending capture before asking the source for a
-new batch. Do not overwrite it with a later snapshot. Verify every pending
-original and every receipt link. An identical retry is idempotent; conflicting
-bytes, multiple incompatible tails or a missing acknowledged original HOLD.
-An interrupted atomic frontier update is resolved only from its retained exact
-intent and complete receipt, never from a maximum filename or source absence.
+Concrete finite profile: at most 1000000 retained occurrences, 100000 positive
+batch receipts and 4 GiB retained originals per lane, at most 16 lanes per
+collector; the whole collector shares a 4 GiB original-byte budget. A pending
+batch reserves its final counts/bytes BEFORE capture acknowledgement and uses
+at most 1 MiB payload plus bounded metadata. No empty-poll receipt or permanent
+completed pending-file accumulation. Missing capacity HOLDs before capture
+acknowledgement and never drops a source event. These are finite admission
+limits, not a guarantee of 72 hours at arbitrary event rates. Admission must
+measure the actual source rate, disk/inode budget and terminal publication
+capacity; 100000-row temporary benchmarks must fit this profile.
 
-Publishing captured artifacts is a separate operation after releasing the
-acquisition lock. Artifact identity binds source ID, epoch, ordinal and original
-digest. Publication calls `Ledger.retain` on the exact spooled bytes; it never
-re-reads the live owner. Terminal proof callbacks consume immutable captured
-snapshots only. They perform no source reads, native calls or product locking.
-Source capture and spooling must continue while the publisher lock is held.
+For each positive batch, under the lane lock:
 
-The source owner still needs an independently admitted terminal fence/coverage
-contract before a receipt can satisfy checkpoint or terminal_fence proof.
-This proposal supplies no such proof. Releasing snapshot A cannot consume
-later snapshot B or retire the acquisition journal. No terminal conclusion is
-inferred from an empty source batch.
+1. Verify contiguous receipt chain and last anchor, reserve capacity, and durably
+   publish the complete immutable pending batch including exact originals,
+   registration/lane binding and predecessor receipt hash.
+2. Retain every original under its OCCURRENCE identity, not content digest alone.
+   Identity tuple is [1,lane_uuid,registration_sha256,ordinal,original_sha256].
+   Its hash uses UTF-8 compact JSON arrays, no whitespace/newline. Thus identical
+   bytes at distinct ordinals remain distinct occurrences. Same ordinal with
+   different bytes is a conflict, never an overwrite.
+3. Write the next contiguous numbered immutable receipt, then fsync. Only this
+   receipt advances the acknowledged cursor. Retire the pending file only after
+   verifying that receipt and all its originals; unlink+directory fsync. Crash
+   leftovers replay exact bytes idempotently, never produce a second branch.
 
-## Delivery order and checks
+Receipt schema `acquisition-receipt.v1` has lane_uuid, registration_sha256,
+binding, number, previous_sha256 (null only number zero), after, through,
+high_water, anchor_before_sha256, anchor_after_sha256, ordered occurrences
+(ordinal, occurrence_sha256, original_sha256, original_byte_count), and
+capture_observation. The latter contains exact sampled boot_id and monotonic
+start/end plus observation UTC, or `{kind:unavailable}`; it describes local
+capture only. A proposed source adapter must supply these observations honestly;
+they do not establish native event time, run duration, or source completeness.
+A completed receipt may optionally bind a previously supplied immutable terminal
+request {entry_sha256,run_id,fence_sha256}; absent is explicit null. This binding
+records requested correlation, not proof that the endpoint was sampled after
+that fence. Actual source-fence proof remains a separate required capability.
 
-1. Implement bounded capture/receipt/retry mechanics with a real independently
-   persisted temporary owner. Preserve noncanonical original JSON bytes.
-2. Add the WSD owner's read-only bounded snapshot method and test it against
-   an actual independently written temporary Journal, including WAL concurrency.
-3. Bind WSD progress capture as diagnostics through explicit trusted construction.
-   Keep every operational source proof unavailable until registration and real
-   completeness/epoch guarantees are demonstrated.
-4. Admit other source owners individually through their existing supported APIs.
-   A generic source protocol is not admission of native approvals, Marmot
-   history, daemon control, process audit, clocks or installations.
-5. Prepare a separate exact-release deployment request with parent design and
-   this amendment linked, configuration/source registrations, protected data,
-   rollback, and a list of deviations. Offline merges are not deployment.
+Numbered receipts are the ONLY frontier. Recover from zero and verify contiguous
+names/hash links, not max filename, an overwritable pointer, mtime or guessed
+cursor. Indexes/cached counters may accelerate verified prefix reads but are
+rebuildable hints, never independent authority. Crash after receipt/before
+pending deletion completes deletion, not source recapture. Unknown tail,
+missing original, conflicting receipt or broken capacity accounting HOLD.
 
-Required regressions cover gaps, overlap with changed bytes, epoch rotation,
-regressing watermarks, oversized values before row materialization, busy and
-poisoned journals, each fsync crash boundary, exact retry after source append,
-full spool/receipt capacity, unsafe private files and competing acquisition.
-Use a separate process to hold publisher.lock while capture completes; prove
-post-snapshot arrivals remain active after exact release. Preserve production
-constructor/network/service traps. Tests must show default checkpoint and
-terminal-fence proofs still HOLD even with a complete acquisition receipt.
+Terminal Ledger.release cannot retire any acquisition original: it has neither
+this namespace nor its lock/retirement API. Snapshot A's publication names exact
+completed receipt hashes and bounded occurrence ranges; an incomplete batch B
+is not selectable. B remains retained even if ledger commit/release runs.
+After completion, B is independently selectable even if bytes equal A's bytes.
 
-Record measured capture time, peak retained memory, lock duration and owner
-load on a representative100000-row temporary journal. No numerical production
-latency claim is made before measurements; if the 300-second nominal capture
-and 600-second maximum-audit requirements cannot be met, entry remains HOLD.
-Full configured typing, focused tests, existing acceptance oracles, normal
-hooks, actual Claude code review and hosted CI remain merge gates.
+Retirement is explicit and whole-lane only: stopped capture, no pending batch,
+no active ledger binding/fence or unfulfilled artifact references, and an
+independently verified durable export of ALL receipt/original bytes. A retained
+retirement manifest binds export hashes, counts and final receipt. Only a later
+separately authorized deployment/operational retention action may remove local
+bytes; this proposal authorizes no deletion, automatic eviction or history reset.
+If export/reference discharge cannot be proved, retain and HOLD on exhaustion.
 
-## Human decision
+## 5. Publication without invented authority
 
-Approve this acquisition/retention boundary and the explicit lossless SQL-value
-envelope, permitting offline implementation and diagnostic WSD integration.
-Accept that insufficient epoch/completeness capabilities keep operational
-acceptance blocked until a separately demonstrated source-specific contract
-exists. This approval does not waive that contract, activate a collector,
-authorize production data access, deploy services, or start the release clock.
+Mapping canonical object schema `acquisition-mapping.v1` contains the complete
+identity tuple, lane binding, exact receipt Artifact, original Artifact and
+ordinal. Raw Artifact.id is `acq_` plus occurrence SHA256 (68 chars); mapping
+Artifact.id is `acqm_` plus SHA256 of canonical mapping bytes (69 chars). The
+receipt Artifact ID is `acqr_` plus receipt hash. Receipt contains occurrence
+identities, not mapping IDs, avoiding a circular hash. All satisfy existing ID
+bounds. Publish exact receipt, original and mapping bytes through Ledger.retain;
+the mapping is itself retained, never merely an opaque hash label. Byte identity
+is checked before publication; missing mapping/original HOLDs. Ledger's own
+100000 object capacity remains real: do not promise a million-object terminal
+publication. Measure the selected bounded publication set; exhaustion HOLDs.
+
+Acquisition originals and receipts continue independently while REAL commit or
+release holds BOTH publisher.lock and spool.lock. Publication waits for the
+publisher; acquisition never acquires either lock, calls a proof callback or
+performs native reads under them. The only overlap is copying completed immutable
+bytes outside acquisition lock, then checking their hashes at publication.
+No source/lane lock is held while waiting for publisher. Product Journal.lock is
+released before filesystem persistence or any acceptance lock. This is the
+closed lock order, not a claim of bounded external proof-callback execution.
+
+Parent AuditInterval cursor IDs are separately retained `cur_` plus SHA256 of
+[registration_sha256,lane_uuid,ordinal,original_sha256]; a mapping Artifact retains
+the tuple. Capture monotonic time is NOT AuditInterval event coverage time.
+A real admitted adapter must prove the interval endpoints, entire durable source
+history and source-fence ordering using its actual source capability. Diagnostic
+receipts cannot fill those authority fields from local timestamps or supplied
+run/fence labels. WSD progress rows alone cannot establish complete operational
+audit. All unsupported gate/native/Marmot/host proofs remain Unavailable.
+
+## 6. Finite implementation and offline acceptance
+
+Future code tasks: independent occurrence store and byte codec; owner-local WSD
+bounded read facade; diagnostic publication mappings; then separately admitted
+source-specific authority adapters. No native CLI, service, model, network or
+queue effect is authorized by this design. Implementation gets actual code
+review and separate deployment approval. Deployment requests link approved design
+and deviations. No operational admission/72-hour acceptance is claimed here.
+
+Required offline fixtures preserve all existing ledger oracles and cover:
+
+- 100000 occurrences, more than 4320 empty polls, pending cleanup, byte/count
+  exhaustion, identical bytes at distinct ordinals, terminal A versus pending B.
+- Non-JSON/floats/duplicate keys/deep bytes retained exactly; strict publication
+  refusal does not drop diagnostic occurrences; oversized source remains HOLD.
+- SQL INTEGER/REAL/NULL/BLOB/TEXT including invalid UTF-8, control characters and
+  four-byte text, exact pre-materialization bounds, concurrent WAL writer and
+  explicit read BEGIN, no `_check` or writer transaction per capture.
+- Changed anchor, restored-middle-range limitations, unestablished epoch never
+  qualifying, exact run/lane binding and diagnostic timing/fence nonauthority.
+- Crash at every pending/original/receipt/fsync/deletion step, conflicting tails,
+  replay after receipt, capacity reservation and stopped export retirement.
+- Separate process holding publisher only AND actual commit/release holding
+  publisher+spool through a blocked fake proof callback: acquisition still makes
+  durable progress; exact publication later retains mapping/receipt/raw bytes.
+- No lock inversion between Journal, acquisition and publisher; concurrent
+  captures serialize per lane; diagnostic adapters never fabricate Proofs.
+
+Measure time, memory, file/inode count and mutex windows using temporary data
+and the actual topology, including restart chain replay and terminal object
+capacity. No benchmark or 300/600-second audit cadence result is claimed by this
+prose. Failure to establish bounded capacity/cadence or real source admission
+keeps operational qualification HOLD; collection cannot manufacture silence.
+
+## 7. Human decision and provenance
+
+Human design approval would authorize future implementation of this finite
+retention/read boundary and diagnostic mappings. It does not approve production
+source completeness, new source permissions, retention deletion, deployment or
+clock start. Initial WSD in-process shared-failure-domain diagnostics and finite
+capacity/explicit stopped retirement are disclosed choices. The independent
+occurrence store replaces the earlier all-acquisition Ledger.spool proposal;
+parent terminal spool remains unchanged. Exact reviewed source and all ten
+verbatim findings plus the additional frontier note are retained in the companion
+review record and input manifest. The actual REVISE verdict remains history;
+incorporation is not a fabricated APPROVE.

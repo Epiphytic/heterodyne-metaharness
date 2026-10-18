@@ -1,0 +1,45 @@
+{
+  "schema": "plan9-acquisition-inputs.v1",
+  "author_base": "82ff8e750f24e62f10f066d3ab01a515c8879176",
+  "source_inputs": [
+    {
+      "repository": "heterodyne-metaharness-v2",
+      "commit": "82ff8e750f24e62f10f066d3ab01a515c8879176",
+      "path": "src/heterodyne/acceptance/ledger.py",
+      "blob": "5398982850f6b2b76eec6852890d9325c4b2d6c7",
+      "sha256": "a95604b3f0ea0a8e69fddeda58224b4fede9767144b55bb8d3c1b986c1bea576"
+    },
+    {
+      "repository": "heterodyne-metaharness-v2",
+      "commit": "82ff8e750f24e62f10f066d3ab01a515c8879176",
+      "path": "src/heterodyne/acceptance/codec.py",
+      "blob": "f4f9101e2d5138d8a74518f45eccfb1698c72615",
+      "sha256": "5018b9d0c892f3a0f62297ff0c41af214b8dcdfb4c19c3696ed58f44a4058e11"
+    },
+    {
+      "repository": "heterodyne-metaharness-v2",
+      "commit": "82ff8e750f24e62f10f066d3ab01a515c8879176",
+      "path": "src/heterodyne/wsd/journal.py",
+      "blob": "326aa053bf281fdb24fb50136124b8f1860df659",
+      "sha256": "06ba493d59ef84c95c9a7602ca91105b16a8b15266036485365f66b06c5406ac"
+    }
+  ],
+  "parent": {
+    "commit": "e009a2c6d1a4c7887bb5c5effd5f7d9bbbd023cc",
+    "path": "docs/designs/2026-10-16-plan9-release-corpus-and-acceptance-d4.md",
+    "sha256": "41d064b8c8008017ebd4215313b06af1b9588bf0f0e3418173791df2638fa231"
+  },
+  "actual_single_review_sha256": "c84b400c94a723b2d281b46a22eb976ca6eb88f266c758833628bf7714632b31",
+  "status": "ONE HIGH REVISE incorporated once; human approval pending; no implementation",
+  "artifacts": {
+    "docs/designs/2026-10-18-plan9-source-acquisition-boundary.md": "4b95975b9298e7a15607d026e74d77e3d6db1d5e787600f09a0d20a84e841432",
+    "docs/reviews/plan9-acquisition-design-r1-high.md": "c215a2f1595a70a425a41eefdf496a4cf179a6b9e33a090a81ffc4c5e64328f3",
+    "docs/reviews/plan9-acquisition-design-r1-dispositions.json": "4e379ace82716f0e5d992b5fc15b7efe9063b0fd25f86844ee0d8314d142cd86",
+    "docs/reviews/plan9-acquisition-design-r1-dispositions.md": "225316079e881feb3cc0474225b3006e2e5ba8b2445a98001fb6336229ef02cb"
+  },
+  "raw_publication": {
+    "original_sha256": "c84b400c94a723b2d281b46a22eb976ca6eb88f266c758833628bf7714632b31",
+    "published_sha256": "c215a2f1595a70a425a41eefdf496a4cf179a6b9e33a090a81ffc4c5e64328f3",
+    "rule": "Public copy replaces literal \u002fhome\u002fopenclaw with /home/&#111;penclaw; reverse that exact substitution to recover original bytes. External original log is unchanged. Public copy is reversibly encoded, not byte-identical."
+  }
+}
