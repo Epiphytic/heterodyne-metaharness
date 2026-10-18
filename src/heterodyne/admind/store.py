@@ -1003,8 +1003,7 @@ class Store:
             if count >= 128 and exists is None:
                 raise RuntimeError("maintenance pending capacity")
             self.db.execute("INSERT INTO ask_maintenance VALUES (?, ?, ?) ON CONFLICT(ask_id) "
-                            "DO UPDATE SET retry_at = excluded.retry_at "
-                            "WHERE message_id = excluded.message_id",
+                            "DO UPDATE SET message_id = excluded.message_id, retry_at = excluded.retry_at",
                             (a.ask_id, a.message_id, retry_at))
             self.db.execute("UPDATE asks SET outcome = 'pending-maintenance', updated_at = ? "
                             "WHERE ask_id = ?",
@@ -1013,6 +1012,11 @@ class Store:
 
     @_locked
     def maintenance_pending(self) -> list[tuple[str, str, float]]:
+        # Only the overlay is removed for terminal/superseded attempts. Preserve all attempt history.
+        self.db.execute("DELETE FROM ask_maintenance WHERE NOT EXISTS "
+                        "(SELECT 1 FROM asks a JOIN ask_attempts t ON t.ask_id = a.ask_id "
+                        "AND t.message_id = a.attempt WHERE a.ask_id = ask_maintenance.ask_id "
+                        "AND a.attempt = ask_maintenance.message_id AND a.status = 'deciding')")
         rows = self.db.execute("SELECT ask_id, message_id, retry_at FROM ask_maintenance "
                                "ORDER BY retry_at, ask_id LIMIT 128").fetchall()
         return [(str(a), str(m), float(t)) for a, m, t in rows]

@@ -15,15 +15,24 @@ from heterodyne.admind.approvals import ApproveBead, Attempt, MaintenanceHold, R
 HOLD = b'{"schema":"maintenance-hold.v1","effect":"not-issued","reason":"maintenance"}'
 
 
-@pytest.mark.parametrize("code,out,expected", [
-    (75, HOLD, True), (0, HOLD, False), (1, HOLD, False), (75, b"", False),
-    (75, b"maintenance", False), (75, HOLD + b"x", False),
-    (75, HOLD.replace(b"not-issued", b"issued"), False),
-    (75, HOLD.replace(b".v1", b".v2"), False),
-    (75, HOLD[:-1] + b',"reason":"maintenance"}', False),
-    (75, HOLD[:-1] + b',"extra":true}', False), (75, b" " * 257 + HOLD, False),
-    (75, b'"maintenance-hold.v1"', False), (75, b"\xff", False),
-])
+@pytest.mark.parametrize(
+    "code,out,expected",
+    [
+        (75, HOLD, True),
+        (0, HOLD, False),
+        (1, HOLD, False),
+        (75, b"", False),
+        (75, b"maintenance", False),
+        (75, HOLD + b"x", False),
+        (75, HOLD.replace(b"not-issued", b"issued"), False),
+        (75, HOLD.replace(b".v1", b".v2"), False),
+        (75, HOLD[:-1] + b',"reason":"maintenance"}', False),
+        (75, HOLD[:-1] + b',"extra":true}', False),
+        (75, b" " * 257 + HOLD, False),
+        (75, b'"maintenance-hold.v1"', False),
+        (75, b"\xff", False),
+    ],
+)
 def test_closed_hold_protocol(code: int, out: bytes, expected: bool) -> None:
     assert maintenance_hold(code, out) is expected
 
@@ -39,15 +48,24 @@ class Port(ApproveBead):
         assert bead == BEAD
         return self.current
 
-    async def decide(self, a: Attempt, bead: str,
-                     on_launch: Callable[[], None] | None = None) -> tuple[int, str] | MaintenanceHold:
+    async def decide(
+        self, a: Attempt, bead: str, on_launch: Callable[[], None] | None = None
+    ) -> tuple[int, str] | MaintenanceHold:
         self.calls += 1
         if on_launch:
             on_launch()
         if self.hold:
             return MaintenanceHold()
-        self.current = readout(status="closed", decided=True, decision=a.action, approved_by=a.operator,
-                               approved_digest=a.digest, via_ref=a.ref, gate_valid=True, gate_preview=None)
+        self.current = readout(
+            status="closed",
+            decided=True,
+            decision=a.action,
+            approved_by=a.operator,
+            approved_digest=a.digest,
+            via_ref=a.ref,
+            gate_valid=True,
+            gate_preview=None,
+        )
         return 0, ""
 
 
@@ -89,6 +107,7 @@ def test_hold_restart_same_attempt_and_exactly_once(tmp_path: Path) -> None:
             assert port.calls == 2
         finally:
             u.store.close()
+
     asyncio.run(scenario())
 
 
@@ -119,6 +138,7 @@ def test_retry_revalidates_and_preserves_authenticated_attempt(tmp_path: Path, c
             assert u.store.maintenance_pending() == [(APPROVE.ask_id, MID, 160.0)]
         finally:
             u.store.close()
+
     asyncio.run(scenario())
 
 
@@ -129,16 +149,24 @@ def test_native_first_valid_result_wins_without_reissue(tmp_path: Path, own: boo
         try:
             await u.daemon.run_attempt(APPROVE, card_row())
             u.daemon.wallclock = lambda: 130.0
-            port.current = readout(status="closed", decided=True, decision="approve", approved_by="op",
-                                   approved_digest=D, via_ref=APPROVE.ref if own else "marmot:other",
-                                   gate_valid=True, gate_preview=None)
+            port.current = readout(
+                status="closed",
+                decided=True,
+                decision="approve",
+                approved_by="op",
+                approved_digest=D,
+                via_ref=APPROVE.ref if own else "marmot:other",
+                gate_valid=True,
+                gate_preview=None,
+            )
             await u.daemon.retry_maintenance(APPROVE.ask_id, MID)
             assert port.calls == 1
-            assert u.store.ask(APPROVE.ask_id).status == ("approved" if own else "blocked")  # type: ignore
-            assert u.store.current_attempt(APPROVE.ask_id) is None
-            assert u.store.maintenance_pending() == []
+            assert u.store.ask(APPROVE.ask_id).status == ("approved" if own else "deciding")  # type: ignore
+            assert u.store.current_attempt(APPROVE.ask_id) == (None if own else APPROVE)
+            assert u.store.maintenance_pending() == ([] if own else [(APPROVE.ask_id, MID, 160.0)])
         finally:
             u.store.close()
+
     asyncio.run(scenario())
 
 
@@ -157,6 +185,7 @@ def test_prelaunch_crash_consumes_only_retry_entitlement(tmp_path: Path) -> None
             assert u.store.current_attempt(APPROVE.ask_id) is None
         finally:
             u.store.close()
+
     asyncio.run(scenario())
 
 
@@ -183,15 +212,18 @@ def test_retry_rechecks_operator_name_after_native_await(tmp_path: Path) -> None
             assert u.store.current_attempt(APPROVE.ask_id) == APPROVE
         finally:
             u.store.close()
+
     asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("output,proven", [(HOLD, True), (b"", False), (HOLD + b"x", False)])
-def test_decide_classifies_only_closed_pre_effect_child_result(tmp_path: Path, output: bytes,
-                                                             proven: bool) -> None:
+def test_decide_classifies_only_closed_pre_effect_child_result(
+    tmp_path: Path, output: bytes, proven: bool
+) -> None:
     class ChildResult(ApproveBead):
-        async def _run(self, argv: list[str], timeout: float, cap: int,
-                       on_launch: Callable[[], None] | None = None) -> tuple[int, bytes, bytes]:
+        async def _run(
+            self, argv: list[str], timeout: float, cap: int, on_launch: Callable[[], None] | None = None
+        ) -> tuple[int, bytes, bytes]:
             if on_launch:
                 on_launch()
             return 75, output, b"diagnostic"
@@ -206,8 +238,10 @@ def test_ambiguous_child_failure_never_enters_maintenance_retry(tmp_path: Path) 
     async def scenario() -> None:
         u, port = setup(tmp_path)
         try:
-            async def failure(a: Attempt, bead: str,
-                              on_launch: Callable[[], None] | None = None) -> tuple[int, str]:
+
+            async def failure(
+                a: Attempt, bead: str, on_launch: Callable[[], None] | None = None
+            ) -> tuple[int, str]:
                 port.calls += 1
                 if on_launch:
                     on_launch()
@@ -222,4 +256,91 @@ def test_ambiguous_child_failure_never_enters_maintenance_retry(tmp_path: Path) 
             assert port.calls == 1
         finally:
             u.store.close()
+
+    asyncio.run(scenario())
+
+
+def test_not_open_without_decision_stays_visibly_held(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        u, port = setup(tmp_path)
+        try:
+            await u.daemon.run_attempt(APPROVE, card_row())
+            u.daemon.wallclock = lambda: 130.0
+            port.current = readout(status="in_progress", decided=False)
+            await u.daemon.retry_maintenance(APPROVE.ask_id, MID)
+            assert port.calls == 1
+            assert u.store.current_attempt(APPROVE.ask_id) == APPROVE
+            assert u.store.ask(APPROVE.ask_id).status == "deciding"  # type: ignore[union-attr]
+            count = u.store.db.execute(
+                "SELECT COUNT(*) FROM outbox WHERE key LIKE 'asknote:%maintenance%'"
+            ).fetchone()[0]
+            assert count == 2  # one original maintenance notice plus one conflict notice
+            u.daemon.wallclock = lambda: 160.0
+            await u.daemon.retry_maintenance(APPROVE.ask_id, MID)
+            assert (
+                u.store.db.execute(
+                    "SELECT COUNT(*) FROM outbox WHERE key LIKE 'asknote:%maintenance%'"
+                ).fetchone()[0]
+                == count
+            )
+        finally:
+            u.store.close()
+
+    asyncio.run(scenario())
+
+
+def test_rollback_overlay_replaced_only_by_exact_current_attempt(tmp_path: Path) -> None:
+    u, _ = setup(tmp_path)
+    try:
+        u.store.db.execute("INSERT INTO ask_maintenance VALUES (?, ?, ?)", (APPROVE.ask_id, "obsolete", 0))
+        assert u.store.defer_maintenance(APPROVE, 130.0)
+        assert u.store.maintenance_pending() == [(APPROVE.ask_id, MID, 130.0)]
+        u.store.db.execute(
+            "UPDATE asks SET status = 'open', attempt = NULL WHERE ask_id = ?", (APPROVE.ask_id,)
+        )
+        assert u.store.maintenance_pending() == []
+        assert u.store.db.execute("SELECT COUNT(*) FROM ask_attempts").fetchone()[0] == 1
+    finally:
+        u.store.close()
+
+
+def test_capacity_refused_before_child(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario() -> None:
+        u, port = setup(tmp_path)
+        try:
+            monkeypatch.setattr(u.store, "maintenance_pending", lambda: [("other", "old", 0.0)] * 128)
+            await u.daemon.run_attempt(APPROVE, card_row())
+            assert port.calls == 0
+            assert u.store.ask(APPROVE.ask_id).status == "open"  # type: ignore[union-attr]
+            assert u.store.current_attempt(APPROVE.ask_id) is None
+        finally:
+            u.store.close()
+
+    asyncio.run(scenario())
+
+
+def test_retry_loop_processes_overdue_before_first_sleep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        u, port = setup(tmp_path)
+        try:
+            await u.daemon.run_attempt(APPROVE, card_row())
+            u.daemon.wallclock = lambda: 130.0
+            port.hold = False
+            sleeps: list[float] = []
+
+            async def stop(delay: float) -> None:
+                sleeps.append(delay)
+                raise asyncio.CancelledError
+
+            monkeypatch.setattr(asyncio, "sleep", stop)
+            with pytest.raises(asyncio.CancelledError):
+                await u.daemon.maintenance_retry_loop()
+            assert port.calls == 2
+            assert u.store.ask(APPROVE.ask_id).status == "approved"  # type: ignore[union-attr]
+            assert sleeps == [30.0]
+        finally:
+            u.store.close()
+
     asyncio.run(scenario())

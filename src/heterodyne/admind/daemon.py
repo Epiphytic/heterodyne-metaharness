@@ -1282,12 +1282,31 @@ class Admind:
         self.audit_quietly("ask", action="conflict", ask_id=a.ask_id, message_id=a.message_id,
                            expected=expected)
 
+    def hold_maintenance(self, a: Attempt, reason: str) -> None:
+        """Retain provenance and publish one durable, threaded notice per fixed hold reason."""
+        with self.store.transaction():
+            if not self.store.defer_maintenance(a, self.wallclock() + 30.0):
+                self.conflict(a, "deciding")
+                return
+            self.ask_notice(a.ask_id, "maintenance-" + reason, a.message_id,
+                            f"Ask {a.ask_id}: approval received and held ({reason}). "
+                            "No decision was issued by this attempt. It will retry while the exact "
+                            "card and operator authority remain valid. Conflicting decisions or changed "
+                            "authority require operator recovery; the original reply is preserved.",
+                            a.message_id)
+        self.audit_quietly("ask", action="maintenance-held", ask_id=a.ask_id,
+                           message_id=a.message_id, reason=reason)
+
     async def run_attempt(self, a: Attempt, row: AskRow, *, maintenance_retry: bool = False) -> None:
         """Steps 4-8 of a persisted attempt. Until the decision child exists, every failure closes the
         attempt as `refused` (r5-1); once it exists, every exit goes through the reap and the read-back."""
         assert self.approve_bead is not None and row.bead is not None      # noqa: S101 - checked by decide
         ab, bead, mid = self.approve_bead, row.bead, a.message_id
         launched = False
+        if not maintenance_retry and len(self.store.maintenance_pending()) >= 128:
+            self.close_refused(a, "open", "Maintenance retention capacity reached; no decision was issued. "
+                               "Operator recovery is required before retrying.", "maintenance-capacity")
+            return
 
         def on_launch() -> None:
             nonlocal launched
@@ -1313,9 +1332,7 @@ class Admind:
                         return
                     result = await ab.decide(a, bead, on_launch)        # step 7
                     if isinstance(result, approvals.MaintenanceHold):
-                        self.store.defer_maintenance(a, self.wallclock() + 30.0)
-                        self.audit.write("ask", action="pending-maintenance", ask_id=a.ask_id,
-                                         message_id=mid, outcome="not-issued")
+                        self.hold_maintenance(a, "maintenance")
                         return
                     code, line = result
         except asyncio.CancelledError:
@@ -1329,8 +1346,7 @@ class Admind:
                 stop = ("open", PREFLIGHT_FAILED.format(bead=bead, word=word), word)
         if unauthorised:
             if maintenance_retry:
-                self.store.defer_maintenance(a, self.wallclock() + 30.0)
-                self.audit_quietly("ask", action="maintenance-held", ask_id=a.ask_id, reason="authority")
+                self.hold_maintenance(a, "authority")
                 return
             with self.store.transaction():
                 closed = self.store.close_attempt(a.ask_id, mid, expect_status="deciding", settled="refused",
@@ -1345,8 +1361,7 @@ class Admind:
             return
         if stop is not None:
             if maintenance_retry:
-                self.store.defer_maintenance(a, self.wallclock() + 30.0)
-                self.audit_quietly("ask", action="maintenance-held", ask_id=a.ask_id, reason=stop[2])
+                self.hold_maintenance(a, "changed-card")
                 return
             if stop[0] == "stale" and isinstance(r, Readout):
                 await self.refresh(a, row, r, "refused", None, "")
@@ -1517,7 +1532,6 @@ class Admind:
     async def maintenance_retry_loop(self) -> None:
         """Retry only persisted proven-pre-effect attempts, serially under the normal worker lock."""
         while True:
-            await asyncio.sleep(30.0)
             for ask_id, mid, due in self.store.maintenance_pending():
                 if self.wallclock() < due:
                     continue
@@ -1529,6 +1543,9 @@ class Admind:
                     except Exception as exc:  # noqa: BLE001 - preserve attempt, never infer an effect
                         self.audit_quietly("ask", action="maintenance-retry-failed", ask_id=ask_id,
                                            error=type(exc).__name__)
+            pending = self.store.maintenance_pending()
+            delay = min((due - self.wallclock() for _, _, due in pending), default=30.0)
+            await asyncio.sleep(max(0.1, min(30.0, delay)))
 
     async def retry_maintenance(self, ask_id: str, mid: str) -> None:
         """Read native first: another valid decision wins; only an untouched exact card can retry."""
@@ -1543,21 +1560,28 @@ class Admind:
         self.store.defer_maintenance(a, self.wallclock() + 30.0)
         if (self.approve_bead is None or not self.authorised(mid)
                 or self.operator_name(mid) != a.operator):
-            self.audit_quietly("ask", action="maintenance-held", ask_id=ask_id, reason="authority")
+            self.hold_maintenance(a, "authority")
             return
         settled, back = await self.read_and_settle(a, row.bead)
-        if settled in ("recorded", "blocked") and back is not None:
+        if settled == "recorded" and back is not None:
             new_status, text = self.settlement(settled, back, a, row.bead, "")
             with self.store.transaction():
-                if self.store.close_attempt(ask_id, mid, expect_status="deciding", settled=settled,
-                                            exit_status=None, new_status=new_status, outcome=text,
-                                            decided_by=a.operator if settled == "recorded" else None):
+                closed = self.store.close_attempt(ask_id, mid, expect_status="deciding", settled=settled,
+                                                  exit_status=None, new_status=new_status, outcome=text,
+                                                  decided_by=a.operator)
+                if closed:
                     self.finish(mid, "done", text, "ask")
+            if not closed:
+                self.conflict(a, "deciding")
+                return
+            self.audit_quietly("ask", action="reconciled", ask_id=ask_id, message_id=mid,
+                               outcome=settled, status=new_status, was="pending-maintenance")
             return
         if settled != "untouched" or back is None:
+            self.hold_maintenance(a, "native-conflict" if settled == "blocked" else "read-unavailable")
             return
         if self.preflight(back, a, row.bead) is not None or row.digest != a.digest:
-            self.audit_quietly("ask", action="maintenance-held", ask_id=ask_id, reason="changed-card")
+            self.hold_maintenance(a, "changed-card")
             return
         await self.run_attempt(a, row, maintenance_retry=True)
 
