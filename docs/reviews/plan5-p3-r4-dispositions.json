@@ -1,0 +1,83 @@
+{
+  "review_round": 4,
+  "reasoning": "medium",
+  "question": "Are there any critical flaws with this, or is this good enough to implement as a PoC?",
+  "reviewed_commit": "95a9541082c23623e1a04b5913e3f7ed0afef558",
+  "base": "b436af6f823852f68a48f85e2b53f9ac4056bc39",
+  "actual_verdict": "Good enough to build as an offline PoC; no critical offline blocker. Fresh signed reciprocal product/Q1 pair and live/quality qualification remain outstanding.",
+  "capture_kind": "manual-foreign-observed-stream-not-reserved-profile-proof",
+  "raw_sha256": "df3f28f6a10754fcbd32ead01e4311382f1ae1b3bda91a893c266cc310ed03b6",
+  "stream_sha256": "f7c8d20838abf193c071d72e68c4a95f3d792658b4112be469f67ad06cd51d16",
+  "findings": [
+    {
+      "number": 1,
+      "title": "Sidecar replacement across instances",
+      "disposition": "OPEN_OFFLINE_QUALIFICATION",
+      "response": "Private stable sidecar is not unlinked by this implementation. External replacement is not yet bound to persistent journal identity; do not qualify multi-process live ownership against replacement from this PoC."
+    },
+    {
+      "number": 2,
+      "title": "Decision/dispatch facts are fixture-supplied",
+      "disposition": "OPEN_OFFLINE_ONLY",
+      "response": "Typed reducer eligibility is not authenticated durable native decision or dispatch evidence. No live adapter exists; callers cannot promote fixture facts into authority."
+    },
+    {
+      "number": 3,
+      "title": "Reducer refusal exception contract",
+      "disposition": "OPEN_MAINTENANCE",
+      "response": "P1 Refused can escape prepare/issue; compatibility intentionally preserves explicit tests. Production integration must normalize or handle both refusal types."
+    },
+    {
+      "number": 4,
+      "title": "Detached public issue",
+      "disposition": "OPEN_OFFLINE_ONLY",
+      "response": "Public issue remains intent simulation; supported execute/assess own the live lifecycle and all five native adapters are unavailable."
+    },
+    {
+      "number": 5,
+      "title": "Groom preparation concurrency/crash gap",
+      "disposition": "OPEN_OFFLINE_ONLY",
+      "response": "Advice read and command/plan commits retain a crash/concurrency HOLD gap; no replay or synthetic outcome."
+    },
+    {
+      "number": 6,
+      "title": "Fork inheritance of owner descriptor",
+      "disposition": "OPEN_OFFLINE_QUALIFICATION",
+      "response": "O_CLOEXEC covers exec, not a child that forks without exec. Such children can prolong owner-busy after parent death; no automatic reclaim."
+    },
+    {
+      "number": 7,
+      "title": "Restrictive umask sidecar creation",
+      "disposition": "OPEN_OFFLINE_QUALIFICATION",
+      "response": "Exact0600 sidecar validation can refuse restrictive-umask creation. This is an availability HOLD, not a permission to chmod existing unknown artifacts."
+    },
+    {
+      "number": 8,
+      "title": "Repeated cancellation fixture",
+      "disposition": "OPEN_MAINTENANCE",
+      "response": "Three explicit fixture inputs are deliberately retained with original assertions and archived original files; no shared helper migration in this patch."
+    },
+    {
+      "number": 9,
+      "title": "Nonce validator duplication",
+      "disposition": "OPEN_MAINTENANCE",
+      "response": "P3/P2 nonce checks remain duplicated; valid configured contracts match today, drift risk retained."
+    },
+    {
+      "number": 10,
+      "title": "Catalogue and lock-path duplication",
+      "disposition": "OPEN_MAINTENANCE",
+      "response": "Operation/phase catalogue and sidecar path reconstruction remain duplicated. Measured quality debt remains unwaived."
+    }
+  ],
+  "all_findings_retained": true,
+  "all_findings_open_unwaived": true,
+  "code_changes_after_review": false,
+  "not_claimed": [
+    "fresh signed reciprocal Q1 pair",
+    "live adapter availability",
+    "quality gate clearance",
+    "production qualification",
+    "deployment"
+  ]
+}

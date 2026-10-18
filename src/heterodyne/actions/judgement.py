@@ -338,6 +338,7 @@ async def assess(
     *,
     clock: Callable[[], int] = _boottime,
     boot_id: str = FAKE_BOOT_ID,
+    nonce: str | None = None,
     policy: PolicyFacts | None = None,
     host_overrides: Mapping[str, str] | None = None,
     restrict: Mapping[str, list[str]] | None = None,
@@ -368,7 +369,11 @@ async def assess(
         start = _sample(clock)
     except (Refused, TypeError, ValueError, OverflowError, OSError):
         return Receipt(identity, kind, 0, None, "clock")
-    nonce = uuid.uuid4().hex
+    if nonce is not None and (
+        type(nonce) is not str or len(nonce) != 32 or any(ch not in "0123456789abcdef" for ch in nonce)
+    ):
+        raise Refused("judgement-nonce-refused")
+    nonce = uuid.uuid4().hex if nonce is None else nonce
     budget = DEADLINE_NS
     failure: Literal["timeout", "unavailable", "stale_digest", "clock"] | None = None
     reply = None
