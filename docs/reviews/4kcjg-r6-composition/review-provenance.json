@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-18T21:30:13.482576+00:00",
+  "exit": 0,
+  "head": "b436af6f823852f68a48f85e2b53f9ac4056bc39",
+  "source_unchanged": true,
+  "stream_sha256": "91ec31feaf5121a82b1ecf0ffc96f9e5e4f200af96f5884996515782a474b2c0",
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "events": 49,
+  "malformed_line_numbers": [],
+  "terminal_results": 1,
+  "terminal_success": true,
+  "log_sha256": "c7f1bc0cb84166364e57929a408f3a43c56d4b3314aa6d78b7e5138afa87f9e5"
+}
