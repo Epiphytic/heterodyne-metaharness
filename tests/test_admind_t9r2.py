@@ -83,10 +83,12 @@ async def reach_stale_check(u: Unit, client: GatedClient, count_b: int) -> tuple
     check_a = asyncio.create_task(u.daemon.check_group())
     assert await client.entered.get() == 1          # A's slow periodic check is waiting
     client.drops[0].set_result(None)                # A disconnects
-    assert await client.entered.get() == 2          # B was acknowledged and began its own check
+    while len(client.drops) < 2:
+        await asyncio.sleep(0)                      # replacement subscription starts behind RPC lock
     assert not u.daemon.observing
-    fut_a.set_result(2)                             # A's delayed answer: two members
+    fut_a.set_result(2)                             # stale RPC must settle before B can check
     await check_a
+    assert await client.entered.get() == 2
     return check_a, fut_b
 
 
@@ -104,39 +106,39 @@ def test_a_stale_group_check_cannot_enable_posting_on_an_unverified_replacement(
         try:
             _check_a, fut_b = await reach_stale_check(u, client, 2)
             assert not u.daemon.observing and not u.daemon.may_post()
-            u.daemon.post("k", "private reply", None)
+            u.daemon.post("k", "private reply", None, owner=None)
             await u.daemon.outbox_pass()
             assert client.sent == []                # nothing before B's own check passes
             fut_b.set_result(2)
             await client.acks.get()
             assert u.daemon.observing and u.daemon.may_post()
             await u.daemon.outbox_pass()
-            assert [s.text for s in client.sent] == ["private reply"]
+            assert [s.text for s in client.sent if s.key == "k"] == ["private reply"]
         finally:
             await stop(u)
     run(scenario())
 
 
-def test_the_replacement_check_latches_with_nothing_posted_when_it_finds_three(tmp_path: Path) -> None:
+def test_replacement_check_observes_three_without_latching(tmp_path: Path) -> None:
     u, client = gated_unit(tmp_path)
 
     async def scenario() -> None:
         try:
             _check_a, fut_b = await reach_stale_check(u, client, 3)
-            u.daemon.post("k", "private reply", None)
+            u.daemon.post("k", "private reply", None, owner=None)
             await u.daemon.outbox_pass()
             assert client.sent == []
             fut_b.set_result(3)
             await client.acks.get()
-            assert u.daemon.latched() and not u.daemon.observing
+            assert not u.daemon.latched() and u.daemon.observing
             await u.daemon.outbox_pass()
-            assert client.sent == []
+            assert [s.text for s in client.sent if s.key == "k"] == ["private reply"]
         finally:
             await stop(u)
     run(scenario())
 
 
-def test_a_stale_check_that_finds_three_members_still_latches(tmp_path: Path) -> None:
+def test_stale_count_observation_neither_latches_nor_verifies_replacement(tmp_path: Path) -> None:
     u, client = gated_unit(tmp_path)
 
     async def scenario() -> None:
@@ -153,13 +155,16 @@ def test_a_stale_check_that_finds_three_members_still_latches(tmp_path: Path) ->
             check_a = asyncio.create_task(u.daemon.check_group())
             await client.entered.get()
             client.drops[0].set_result(None)
-            await client.entered.get()
+            while len(client.drops) < 2:
+                await asyncio.sleep(0)
             fut_a.set_result(3)
             await check_a
-            assert u.daemon.latched()               # an old answer can still fail closed
+            assert await client.entered.get() == 2
+            assert not u.daemon.latched()
+            assert not u.daemon.observing and not u.daemon.may_post()
             fut_b.set_result(2)
             await client.acks.get()
-            assert not u.daemon.may_post()
+            assert u.daemon.observing and u.daemon.may_post()
         finally:
             await stop(u)
     run(scenario())

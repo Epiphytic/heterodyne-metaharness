@@ -1,0 +1,81 @@
+{
+  "format": 1,
+  "review": "actual second FULL HIGH Claude Opus built-in \u002fcode-review",
+  "verdict": "REVISE",
+  "report_sha256": "08430415bfeeab97dcf7e356643b2fc341aedb42a4b3663349b8465e3d64d74c",
+  "reviewed_head": "c0de199f39c26461fe7073685969a7d9428f8513",
+  "findings": [
+    {
+      "number": 1,
+      "finding": "`src\u002fheterodyne\u002fgatekeeper\u002fvalidate.py:731`: check_result calls msgspec.to_builtins (data(raw)) on the caller-supplied Valid value without any size bound first. The two-argument *_disposition wrappers pass any forged Completed(Valid(...)) through to it, so containers that share references expand exponentially. _nonready (data(prepared) on a forged OriginGap) and _typed_origin's data(raw) on non-object typed fields have the same problem.\n\n   Failure scenario: Build l0=['x']*32, then l_{k+1}=[l_k]*32 up to l7. Call sufficiency_disposition(real_ready, Completed(Valid({'format':1,'kind':'sufficiency',...,'outcome':{'status':'groom','gaps':l7,...}}))). to_builtins tries to build about 32^8 nodes before strict convert can reject anything, ending in a hang or an uncaught MemoryError. A total projection should return HoldUnavailable('bad_output').",
+      "sha256": "a0671d57af2d35d8b4048e25f4e320c39e6fec9c433e4348b32ffd888da0bfc5",
+      "status": "addressed",
+      "disposition": "Addressed: bounded occurrence\u002fdepth\u002fstring-byte prewalk runs before msgspec conversion, including normalized model and OriginGap paths. Shared and cyclic graphs are refused without expansion. Float and malformed Unicode remain owned by later profile\u002funsafe validation."
+    },
+    {
+      "number": 2,
+      "finding": "`src\u002fheterodyne\u002fgatekeeper\u002fvalidate.py:585`: prepare's typed-request path wraps _typed_origin only in `except Fault`. A forged typed record (msgspec Struct __init__ does not validate types) raises AttributeError from _candidate\u002f_text, or TypeError from to_builtins, out of prepare. The same exceptions escape egress() and the four-argument disposition().\n\n   Failure scenario: prepare(SufficiencyRequest(..., candidate=Candidate(title=None, ...)), privacy) reaches `None.encode` in _text and raises AttributeError. prepare(IntakeRequest(..., open_tasks=(object(),)), privacy) makes to_builtins raise TypeError. Both should come back as InvalidHost or OriginGap, not raise; disposition('sufficiency', c.Ready(forged), None, privacy) crashes the same way.",
+      "sha256": "f1dab3bfa8be8db9613fe6cc244199e7e9417fbd1cbd50c21a239f96cea2a653",
+      "status": "addressed",
+      "disposition": "Addressed: malformed typed origin validation failures become InvalidHost or OriginGap; egress and the explicit four-argument projection cannot propagate those exceptions. Unsupported objects are refused before conversion."
+    },
+    {
+      "number": 3,
+      "finding": "`src\u002fheterodyne\u002fgatekeeper\u002fproject.py:46`: `prepared.reason_code in HOST_CODES` (and line 142, `attempt.reason_code not in HOST_CODES`) does a set lookup on an unvalidated host token. An unhashable forged reason_code raises TypeError instead of mapping to invalid_host.\n\n   Failure scenario: intake_disposition(c.HostFailed(['timeout']), None) raises TypeError: unhashable type 'list'. So does intake_disposition(real_ready, c.HostFailed({})). The D4 rule that unknown codes in supposedly typed host objects are invalid_host is broken by an exception.",
+      "sha256": "4677f54d6027c5b605471d226fdb186288e6a06719401359fcd07c9165d6f6c0",
+      "status": "addressed",
+      "disposition": "Addressed: both prepared and attempted HostFailed require an exact string code before set lookup; malformed\u002funhashable codes hold invalid_host."
+    },
+    {
+      "number": 4,
+      "finding": "`src\u002fheterodyne\u002fgatekeeper\u002fvalidate.py:839`: egress validates through prepare(request, privacy) but then builds the DTO from the caller's original `request` (invocation.input, ask.effect\u002fexcludes\u002fwhy\u002frisks) instead of the validated copy in prepared.value. The output therefore shares mutable host objects, or list\u002fdict subclasses, that were never what got checked.\n\n   Failure scenario: A host prepares a request from a dict, so convert keeps raw['invocation']['input'] by reference, then calls egress(ready.value, p). The returned DTO's 'input' is that same caller-owned dict. Setting input['cmd']='\u002fhome\u002falice\u002f.claude' afterwards changes the model payload with no re-check. A dict subclass whose __iter__ hides keys from _native would be serialized by whatever reads the real storage.",
+      "sha256": "d262563b58cb92d4f0bb9dca3132feaed2e1bc1aa2fc58b95e6469cff361d03b",
+      "status": "addressed",
+      "disposition": "Addressed: egress builds exclusively from the detached validated request returned by prepare. Host mutation cannot alter an already-returned DTO; untrusted container subclasses are refused."
+    },
+    {
+      "number": 5,
+      "finding": "`src\u002fheterodyne\u002fgatekeeper\u002fvalidate.py:722`: check_result, the only result check the two-argument dispositions re-run, has no aggregate response bound. Only decode_result enforces the 32 KiB limit, on raw bytes. A forged normalized Valid can carry far more than D4's whole-response limit and still project successfully.\n\n   Failure scenario: sufficiency_disposition(ready, Completed(Valid(SufficiencyJudgment(..., Groom(gaps=64 x 4096-byte details, ...))))) returns NeedsGrooming carrying about 256 KiB of model text. D4 says output that is valid item by item but over the whole-response limit is completed invalid\u002foversize, mapping to HoldUnavailable('bad_output').",
+      "sha256": "e5ab92dd66da58a800325dfcfc7bb37b4dd74102d7144ebbcae74f6cb371263e",
+      "status": "addressed",
+      "disposition": "Addressed: normalized check_result enforces the whole canonical 32768-byte response bound before conversion and outcome validation. Whole oversized model data maps to bad_output, with zero partial grooming output."
+    },
+    {
+      "number": 6,
+      "finding": "`src\u002fheterodyne\u002fgatekeeper\u002fproject.py:83`: The atomic overflow check sizes the reassessment using the current revision and request_id. D4 requires the mandatory Used reassessment to have a new revision (changed whenever judged input changes), and it may have a different request_id, so the budget does not reserve for those fields growing.\n\n   Failure scenario: canonical(rebuilt) comes to exactly 131072 bytes at revision 99 with a 10-character request_id, so EnrichmentProposal is returned. The required reassessment at revision 100 with a fresh 36-character request_id is over 131072, and prepare returns HostFailed('egress_oversize') instead of the atomic NeedsGrooming D4 promises.",
+      "sha256": "acc74899f697de8158eed67e968f8daa4eae0461a41be2931cec4e48305529a7",
+      "status": "deferred-noncritical",
+      "disposition": "Deferred noncritical: reassessment sizing includes the complete Used evidence but still uses the current request_id\u002frevision. A future owner allocating larger fresh identity fields may encounter a later egress_oversize hold at the edge. No oversized request is sent or sufficient result inferred. Reserving all possible future owner identity growth remains a known atomic-enrichment completeness limitation."
+    },
+    {
+      "number": 7,
+      "finding": "`src\u002fheterodyne\u002fgatekeeper\u002fvalidate.py:182`: schema_path's segment regex `\\.([a-z_]+)` cannot match field names that contain digits (sha256, privacy_sha256, snapshot_sha256, base_candidate_sha256). Errors on those fields fall back to a parent path or to empty, not the longest allowed ancestor D4 specifies.\n\n   Failure scenario: A wire request with \"snapshot_sha256\": 5 returns Invalid('request','schema','') instead of '\u002fsnapshot_sha256'. A type error at $.policy_revision.sha256 reports '\u002fpolicy_revision', and $.invocation.sha256 reports '\u002finvocation'.",
+      "sha256": "d021ed90565ecb660a8a73ed990694f1c08fcdd94863ccedfd510d8a8037fd87",
+      "status": "addressed",
+      "disposition": "Addressed: the diagnostic path parser admits digits after the first field-name character, retaining allowed sha256 field paths while dynamic\u002fprivate key projection remains bounded."
+    },
+    {
+      "number": 8,
+      "finding": "`src\u002fheterodyne\u002fgatekeeper\u002fvalidate.py:660`: _request_invalid turns every InvalidHost into code 'invariant', so host-grammar Faults that _host raises as 'schema' (range or regex failures) are misreported by decode_request and egress. This is the remainder of R1 #4.\n\n   Failure scenario: A wire request with \"revision\": 0, \"request_id\": \"bad id!\" or an uppercase policy sha256 passes strict convert. _host then raises Fault('schema','\u002frevision'), prepare returns InvalidHost('\u002frevision'), and decode_request reports Invalid('request','invariant','\u002frevision') instead of schema.",
+      "sha256": "f9bd0b85356294c7b5f9b339248c84ed0421e1e28ffe256cf034d5d7afa66f58",
+      "status": "deferred-noncritical",
+      "disposition": "Deferred noncritical: semantic host grammar Faults still normalize through InvalidHost to invariant rather than schema at the same safe public field path. Invalid input remains refused; no authority or unsafe output results. Diagnostic classification precision remains incomplete."
+    },
+    {
+      "number": 9,
+      "finding": "`src\u002fheterodyne\u002fgatekeeper\u002fvalidate.py:306`: _origin_fields treats a missing or non-dict permission `invocation` envelope as an origin gap. invocation also carries the host-owned cwd_id\u002fsha256, so this is host envelope corruption, which D4 says must be invalid_host.\n\n   Failure scenario: A permission request with invocation=None returns OriginGap(schema, '\u002finvocation\u002finput'). permission_disposition then gives EscalateProposal('input_profile') and decode_request reports a schema error blaming the origin, instead of EscalateProposal('invalid_host').",
+      "sha256": "746b8781f73e1021678def0acf07c9a4c595950b3f390604c32faa6699611f1f",
+      "status": "addressed",
+      "disposition": "Addressed: absent\u002fnon-dict permission invocation is classified as InvalidHost at \u002finvocation before origin input validation. Actual invocation.input remains origin-owned."
+    },
+    {
+      "number": 10,
+      "finding": "`src\u002fheterodyne\u002fgatekeeper\u002f_rule_identity.py:31`: The fingerprint attests kernel.redact_with_dirs read from the redact module, but validate._text calls its own `redact_with_dirs` binding captured at import, so the function actually doing the redaction is never fingerprinted. Separately, the fingerprint includes docstring constants, so running under python -OO silently fails every privacy context closed.\n\n    Failure scenario: Rebinding heterodyne.gatekeeper.validate.redact_with_dirs leaves rules_match() True while every _text check runs different code. Under `python -OO`, redact_with_dirs' docstring is stripped from co_consts, the fingerprint changes, and every prepare\u002fcheck_result returns InvalidHost or binding: a total gatekeeper outage that the CPython 3.12 disclosure does not mention.",
+      "sha256": "8f665e8774b44894f85507b1446de9ba145913326c96c1c4b7da0a8fcc59857d",
+      "status": "addressed",
+      "disposition": "Addressed binding; disclosed runtime limit: privacy admission now checks the exact function binding actually called as well as the loaded kernel fingerprint. EXPECTED is unchanged. Only unoptimized CPython 3.12 is admitted; -OO strips fingerprinted docstrings and fails closed, as now explicitly documented. No optimized runtime admission or source-authentication claim is added."
+    }
+  ],
+  "review_rounds_consumed": 2,
+  "next_review": "third MEDIUM controlled by parent; not launched by author"
+}

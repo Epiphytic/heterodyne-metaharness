@@ -1,0 +1,449 @@
+{
+  "planning_task": "btq-1a845",
+  "implementation_task": "btq-1wu2i",
+  "canonical_source_base": "07637745fe75dc614109a0b8ba72d3489f262a97",
+  "historical_fix_commit": "9a14b3b2664e4ea0c5452c9eea013bf37aab658f",
+  "historical_fix_parent": "2c0c5b5b775ee652d2ce32c192091aa2314e5b32",
+  "historical_fix_signature": "G",
+  "historical_fix_changed_paths": [
+    "tests/test_sandbox_hostread.py"
+  ],
+  "overlay_proof": {
+    "original_test_equals_current": true,
+    "product_unchanged": true,
+    "exact_patch_check_on_current_exit": 0,
+    "patch_sha256": "bb6847b2835c6934226c1beddac6dddd4d345efc0d8a844ae2b1c16dacc122ac",
+    "patch_bytes": 4823
+  },
+  "historical_code_review": {
+    "round": 1,
+    "verdict": "APPROVE",
+    "model": "not recorded in retained report or brief; do not infer from commit co-author",
+    "brief": {
+      "path": "tmp-docs/brief-hostread-fix2-c1.md",
+      "sha256": "8f0700829d1d90ef2d6ab1dfed038114643a43000847dda74ea5373050aa6b94"
+    },
+    "report": {
+      "path": "tmp-docs/review-hostread-fix2-c1.md",
+      "sha256": "5f26a52d4581af1713cf980e1a2f4d0ddaea49e3659251075395627c43f7a6fb"
+    },
+    "reported_validation": {
+      "python": "3.12.3",
+      "serial_passed": 92,
+      "parallel_n8_passed": 92,
+      "instrumented_regression_passed": 1
+    },
+    "fresh_validation_claimed": false
+  },
+  "preserved_scanner_protocol": {
+    "planning_commit": "c21f85f",
+    "approval_artifacts_commit": "24a687ccbb246f17a34b15a7ae8c0a07e4af2364",
+    "native_approval": "btq-pxtig",
+    "approved_digest": "e2a5f3d08708d82358db6ed75550675fa14bd78397f6dedea66e75761f36144b",
+    "expected_data_sha256": "52d8772fa92925addc23d87b203adb95aca60400681c86a405a190c07ec476e0"
+  },
+  "failed_runs": [
+    {
+      "artifact_directory": "codex/scanner-1wu2i-implementation/t2s2",
+      "actual_exit": 1,
+      "total": 3372,
+      "failed": 5,
+      "fd_count_before": 43,
+      "fd_count_after": 25,
+      "log_sha256": "f710ffb2e6cf39dd0f7ec8bae76be606f45735921bea0a8f1394686a57d9fd9b",
+      "junit_sha256": "541a8e68d2821ce38bdc79af6d61845cb97dcd0bc07befd1d923ffa90bdce5f3",
+      "collection_file": "collection-pinned.json",
+      "collection_file_sha256": "3659430f4bd3e12edf6ff2295c30bd27538c25eaaaa14c8a2b6c954d00224f09",
+      "collection_semantic_legacy_sha256": "ce942161d2de1350694ccc829a7d3abd7453407cd7427d646643906b1bf1e032"
+    },
+    {
+      "artifact_directory": "codex/scanner-1wu2i-implementation/t2s2-rerun",
+      "actual_exit": 1,
+      "total": 3372,
+      "failed": 5,
+      "fd_count_before": 40,
+      "fd_count_after": 25,
+      "log_sha256": "183bb2b1646ae0f36a1940925fd0f9ef38e220e7031b3530fbd58fdd3d9f6c91",
+      "junit_sha256": "8ccb8af767a59bdfcae9452eaad370d220644c2ff1fc02af4d59492151112d7b",
+      "collection_file": "collection-pinned.json",
+      "collection_file_sha256": "3659430f4bd3e12edf6ff2295c30bd27538c25eaaaa14c8a2b6c954d00224f09",
+      "collection_semantic_legacy_sha256": "ce942161d2de1350694ccc829a7d3abd7453407cd7427d646643906b1bf1e032"
+    }
+  ],
+  "private_diagnosis": [
+    {
+      "path": "codex/scanner-1wu2i-implementation/hostread-diagnosis-result.json",
+      "sha256": "745824b64791ae5caaf9f3b30d24c3d6cfe45fba551cef7ed84d064b9ca85f13"
+    },
+    {
+      "path": "codex/scanner-1wu2i-implementation/fd-gc-natural-diagnosis.json",
+      "sha256": "4e9a0a91da34fe70f3e7bc0476f95c2ee9948365abba672cfaef81cf34195b7b"
+    },
+    {
+      "path": "codex/scanner-1wu2i-implementation/sqlite-gc-reproduction.json",
+      "sha256": "8cc35f77e30c790cef7e985b228b79e2595460acd80c862dc0da319dab2aadcd"
+    },
+    {
+      "path": "codex/scanner-1wu2i-implementation/t2s2-unexpected-failure-diagnosis.json",
+      "sha256": "1dddf672cd0a90dd26a3503ef2f85aa0d8fcae3d5dc10d1e8f76fed8ae11cbd6"
+    }
+  ],
+  "published_patch": {
+    "observed_at": "2026-10-16T07:15:54.475918+00:00",
+    "commit": "9a14b3b2664e4ea0c5452c9eea013bf37aab658f",
+    "branch": "design/scanner-hostread-test-prerequisite-9a14",
+    "status": "DRAFT PUBLICATION ONLY; NOT IMPLEMENTATION APPROVAL OR FRESH CODE REVIEW",
+    "path": "tests/test_sandbox_hostread.py",
+    "blob": "53b1af47be9a4d71d7bd80fafe3719d7aa62b375",
+    "url": "https://github.com/Epiphytic/heterodyne-metaharness/blob/9a14b3b2664e4ea0c5452c9eea013bf37aab658f/tests/test_sandbox_hostread.py",
+    "patch_url": "https://github.com/Epiphytic/heterodyne-metaharness/commit/9a14b3b2664e4ea0c5452c9eea013bf37aab658f"
+  },
+  "locked_environment_inputs": [
+    {
+      "path": "uv.lock",
+      "base": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "sha256": "450b91c21227d80eda778c734bd914c71c74a18371a536da33ee8e4221df6c56"
+    },
+    {
+      "path": "pyproject.toml",
+      "base": "07637745fe75dc614109a0b8ba72d3489f262a97",
+      "sha256": "f772a967a4e3f944e4f0293a744a5f0157ead4cc77ee9d7fd8854c176bbeb911"
+    }
+  ],
+  "native_primitive_source": {
+    "repo": "beads-task-queue (controller configured canonical local repository)",
+    "observed_head": "6fe57598468ff53bf74dfd9e1cf181ad3177c3f1",
+    "path": "bin/btq",
+    "sha256": "ec2bc67b227326c80bf5d9a32eb661b220ea9af6942ef31bff04d8c06941bd2e",
+    "lines": "827\u2013878",
+    "limit": "read-only source proof, not native operation or live policy validation",
+    "adr_glob_default_source_line": 105,
+    "adr_glob_default": "docs/adr/*.md",
+    "policy_limit": "Default source proof only; controller must verify configured policy before creating native tasks."
+  },
+  "schema": 4,
+  "status": "UNREVIEWED d4; R1 REVISE13, R2 REVISE16, R3 REVISE14; 3/3 exhausted; no further review or implementation authority",
+  "prior_frozen_revisions": [
+    "d1bfc8da0e39fd5827edd44f434d1fcd9fe61691",
+    "d442d48e57e7963f9981a0ff276ee0efe5820cca",
+    "a5646255b4ce36e62a9a76685c9504a7227f8f72"
+  ],
+  "blob_identities": {
+    "original_and_current_test": {
+      "git_blob": "306b1fcc632be1eaad921b532bd93e47428c8bda",
+      "bytes": 51572,
+      "sha256": "032a568e849094af2832b2de9bf8927001362c1859e8b0a68d88e9ab7f482e17"
+    },
+    "fixed_test": {
+      "git_blob": "53b1af47be9a4d71d7bd80fafe3719d7aa62b375",
+      "bytes": 53849,
+      "sha256": "35e94c4b67a8f50a7f73e2c16e838b137c3917ae034dc6b384c0922346f19f86"
+    },
+    "unchanged_product_all_three_trees": {
+      "git_blob": "2864c87cef46443a039422eeb2f0f1d0fe85f082",
+      "bytes": 23084,
+      "sha256": "692a17d1c8b87cf1e36f142ccc499707744c312171d547070861d536c0948e77"
+    }
+  },
+  "private_evidence_locator": {
+    "logical_root": "operator-handoff-2026-10-15",
+    "resolution": "Root supplies actual retained private directory directly to reviewer; absent/private-unavailable is a disclosed evidence gap. No encoded copies are tracked in final candidate.",
+    "history_archive_commit": "d442d48e57e7963f9981a0ff276ee0efe5820cca"
+  },
+  "private_originals": [
+    {
+      "private_relative": "codex/scanner-1wu2i-implementation/scanner_evidence.py",
+      "bytes": 5429,
+      "sha256": "607512464d94d9168cae1d87fa04c425414d62dec16c396537fb2b07ac3a518c",
+      "role": "historical combined verifier/mask and fixed-path runner; preserve verifier/mask functions, adapt only declared runner surfaces"
+    },
+    {
+      "private_relative": "codex/scanner-1wu2i-implementation/probe_verifier.py",
+      "bytes": 2484,
+      "sha256": "31382ebcdcd1b89652a8cc6e536e5085db5a6204bd75fdf03e87fb2790a308ac",
+      "role": "nineteen negative-probe harness for strict verifier rejection behavior"
+    },
+    {
+      "private_relative": "codex/scanner-1wu2i-implementation/scanner_probe.py",
+      "bytes": 323,
+      "sha256": "1f69202e9ab60e0a85ace9abbdded3300269cebc12f51b25411f286b7f104cd3",
+      "role": "pytest plugin setting unique node identity evidence"
+    },
+    {
+      "private_relative": "codex/scanner-1wu2i-implementation/run_partial.py",
+      "bytes": 2745,
+      "sha256": "f17f1516bcf0135379b6ba9218d595f52fd855d04fbfed7526b84c26824b90f6",
+      "role": "historical disposable overlap runner; fixed paths/environment are not renewed authority"
+    },
+    {
+      "private_relative": "codex/scanner-1wu2i-implementation/run_full.py",
+      "bytes": 4130,
+      "sha256": "a029e39d2960ba58b65899ab8158599265abcf2779f2edb02122616eb40f94e7",
+      "role": "historical full runner; fixed paths/environment are not renewed authority"
+    },
+    {
+      "private_relative": "codex/scanner-1wu2i-implementation/targeted-modules.json",
+      "bytes": 2843,
+      "sha256": "340e6650fa81301027f5ee095a3069d532b560d93eb7857b087e8db096e2c4de",
+      "role": "ordered81-module selector; data, not executable"
+    },
+    {
+      "private_relative": "codex/scanner-1wu2i-implementation/b1.patch",
+      "bytes": 9370,
+      "sha256": "a594f7bab06ae8c57830da7656449a72965387bd900ab5f0e6c52f291691a0e6",
+      "role": "exact scanner-only B1 source delta; patch data, not executable driver"
+    },
+    {
+      "private_relative": "codex/scanner-1wu2i-implementation/b2.patch",
+      "bytes": 3883,
+      "sha256": "9659b908b659029018c4dd7319b0a2b505ced84ec36479f3b8a663e2a13fd25d",
+      "role": "exact four-fixture B2 delta; patch data, not executable driver"
+    }
+  ],
+  "appendix_a_test_module": {
+    "commit": "1995977b7e0fab4d6caa8ef5d50fea2d80886fa4",
+    "path": "tests/test_secret_scan_boundary.py",
+    "git_blob": "a87bd77552c21499dd5df668de4c08e9545fb57c",
+    "bytes": 13097,
+    "sha256": "91befae4c93170a52f07090ed3c71c5d1b9d9535e11ddf62321317083e49ebe2",
+    "role": "committed Appendix A test module; not driver; no duplicate tracked copy"
+  },
+  "supplemental_kernel_note": {
+    "private_handoff_relative": "tmp-docs/pr-hostread-fix2-pidfs.md",
+    "sha256": "c52d57b2c1e2fc89fc438faadeaf20462ac2fac6d1114dd6fa586457bb965f1f",
+    "authority": "supplemental historical author note; not proven part of historical code review"
+  },
+  "native_admission_contract": {
+    "immutable_revision": "D = final actually reviewed signed published revision, spec already under docs/adr/*.md; R=D; no later archive/pin file. Runtime IDs/OPS/decision only in separate receipt.",
+    "separate_receipt_fields": [
+      "D",
+      "R",
+      "actual_H",
+      "actual_A_H",
+      "OPS_reference_and_authority",
+      "before_after_native_state_and_edges",
+      "scanner_original_pins",
+      "actual_final_design_review_reference",
+      "required_ADR_glob_reference",
+      "authentic_decision_reference_and_digest",
+      "native_approval_valid_readback"
+    ],
+    "ask_targets": "exactly [actual H], never scanner",
+    "release": "H pre-pinned to R, parked through decision; root OPS/broad-slot readiness and APPROVED readback before supported release/own claim; H92 proof precedes H completion; scanner gates only after verified H completion/delivery and scanner recovery/claim",
+    "denial": "H stays blocked/uncompleted indefinitely; retiring H requires distinct authentic Marmot disposition and verified scanner hold before administrative close",
+    "adr_glob": "docs/adr/*.md",
+    "adr_path": "docs/adr/0002-scanner-execution-fd-prerequisite-d4.md",
+    "human_scope": "Complete on-card text in d4 spec is mandatory before refs; includes exact oracle/residual/dependency/two-stage-delivery/one-renewal/denial scope."
+  },
+  "collection_delta": {
+    "before": 3372,
+    "after_expected": 3373,
+    "added_node": "tests/test_sandbox_hostread.py::test_a_leaked_fd_that_another_test_left_closing_meanwhile_is_no_leak",
+    "immediate_predecessor": "tests/test_sandbox_hostread.py::test_no_readable_worker_settles",
+    "immediate_successor": "tests/test_sandbox_hostread.py::test_another_users_zombie_leader_with_unread_threads_settles[unreadable-mixed-uid]",
+    "ordered_minus_added_legacy_sha256": "ce942161d2de1350694ccc829a7d3abd7453407cd7427d646643906b1bf1e032",
+    "must_match_before_execution": true,
+    "raw_file_hash_comparison_for_minus_node_predicate": false,
+    "unchanged_expected_assertion_failures": 4
+  },
+  "result_contract": {
+    "required_fields": [
+      "run_id",
+      "stage",
+      "source_head",
+      "source_receipt_identity",
+      "source_planning_commits",
+      "before_porcelain",
+      "after_porcelain",
+      "source_file_hashes",
+      "b1_three_file_sha256",
+      "b1_patch_sha256",
+      "b2_target_file_sha256",
+      "b2_patch_sha256",
+      "hostread_test_blob",
+      "hostread_product_blob",
+      "driver_source_sha256",
+      "verifier_function_source_sha256",
+      "mask_function_source_sha256",
+      "probe_harness_sha256",
+      "identity_plugin_sha256",
+      "modules_sha256",
+      "expected_data_sha256",
+      "interpreter_realpath",
+      "python_version",
+      "uv_lock_sha256",
+      "pyproject_sha256",
+      "installed_distribution_inventory",
+      "editable_import_origins",
+      "venv_alias_before_target_or_absence",
+      "venv_alias_after_absence",
+      "sanitized_environment_allowlist_values",
+      "hypothesis_fresh_directory",
+      "explicit_plugin_names_versions",
+      "invocation_argv",
+      "timeout_seconds",
+      "actual_exit_or_signal",
+      "elapsed_seconds",
+      "per_node_durations",
+      "raw_collection_file_sha256",
+      "legacy_node_list_sha256",
+      "portable_node_list_sha256",
+      "execution_collection_sha256",
+      "log_sha256",
+      "junit_sha256",
+      "verification_result_or_error",
+      "process_snapshot_sha256",
+      "kernel_identity",
+      "attempt_timestamp",
+      "active_source_root",
+      "pythonpath_order",
+      "per_stage_import_hash_assertions",
+      "broad_slot_reservation_identity_start_end"
+    ],
+    "raw_hash": "SHA256 complete raw bytes including newline",
+    "legacy_node_hash": "SHA256(json.dumps(nodes).encode(UTF-8)); default Python separators/ensure_ascii=True; no newline; retained verifier result key collection_sha256 uses this convention",
+    "portable_node_hash": "SHA256(json.dumps(nodes,ensure_ascii=True,separators=(comma,colon)).encode(UTF-8)), ordered list, no newline; record separately, never compare to raw or legacy hash",
+    "null": "Only with explicit reason; required gate evidence unavailable holds; aborted attempt still retained",
+    "env": "Empty parent mapping plus only explicit spec allowlist; no arbitrary parent capture or secrets; fresh per-run Hypothesis directory",
+    "explicit_plugins": [
+      "scanner_probe",
+      "_hypothesis_pytestplugin"
+    ],
+    "environment_allowlist": [
+      "HOME",
+      "PATH",
+      "TMPDIR",
+      "LANG",
+      "LC_ALL",
+      "TZ",
+      "PYTHONHASHSEED",
+      "PYTHONNOUSERSITE",
+      "PYTEST_DISABLE_PLUGIN_AUTOLOAD",
+      "HZ_REQUIRE_TMUX",
+      "HYPOTHESIS_STORAGE_DIRECTORY",
+      "PYTHONPATH",
+      "SCANNER_COLLECTION"
+    ],
+    "pythonpath_order": [
+      "active_source_root/src",
+      "audited_run_local_plugin_directory"
+    ]
+  },
+  "actual_design_reviews": [
+    {
+      "report_private_path": "codex/review-1a845-builtin-design-r1.log",
+      "sha256": "2bebab4e7abdee455add025fc63e4f173727c5362df819687f381c034b48cffc",
+      "verdict": "REVISE",
+      "findings": 13,
+      "rounds_used": 1,
+      "cap": 3,
+      "result_private_path": "codex/review-1a845-builtin-design-r1-result.json",
+      "result_sha256": "21931bd79a46eba385b686313306d19a575726b915d12f61a744089457840aab"
+    },
+    {
+      "report_private_path": "codex/review-1a845-builtin-design-r2.log",
+      "sha256": "579da33ab67424d45e4b441730931c9c4eba3879ae312fccdd470a6d9e7803f6",
+      "verdict": "REVISE",
+      "findings": 16,
+      "round": 2,
+      "rounds_remaining": 1,
+      "cap": 3
+    },
+    {
+      "report_private_path": "codex/review-1a845-builtin-design-r3.log",
+      "sha256": "36f274dd25130a9307acd5a2d72666ab0e9d303688ea755faa6e235efc0c0c53",
+      "verdict": "REVISE",
+      "findings": 14,
+      "round": 3,
+      "rounds_remaining": 0,
+      "cap": 3,
+      "private_verbatim_findings": {
+        "path": "codex/1a845-d4-author/r3-verbatim-findings.json",
+        "sha256": "39d2b68e62fe306401ea0aab9236e621b9865b22748ba8eaaf89cf481ce7de09"
+      }
+    }
+  ],
+  "accepted_residuals": [
+    "FD identity reuse/anonymous-inode limitations including supplemental pre6.9 note",
+    "GC cost and bare-bool leak diagnostics in unchanged admitted blob",
+    "Shared-host live-process recovery races remain; bounded snapshot is diagnostic, no quiescence proof or waiver"
+  ],
+  "revision_artifacts": [
+    {
+      "path": "docs/adr/0002-scanner-execution-fd-prerequisite-d4.md",
+      "bytes": 22305,
+      "sha256": "e551a9a287f1ce850bc87cfa196e905b1b35747f0dd95c53b2e9e0d373bed840"
+    },
+    {
+      "path": "docs/reviews/scanner-boundary/execution-fd-prerequisite-r3-dispositions.json",
+      "bytes": 7247,
+      "sha256": "d36f0a6c0a30a5047fb66090f0f54ff198e226e5768da15525e15bf278f0d00a"
+    },
+    {
+      "path": "docs/reviews/scanner-boundary/execution-fd-prerequisite-r3-dispositions.md",
+      "bytes": 3020,
+      "sha256": "47e9acfdc35c782c3af4afc61f5677a185940919fd94374648ee0f2e825003c5"
+    }
+  ],
+  "strict_verifier_function_pins": [
+    {
+      "name": "mask",
+      "private_source_relative": "codex/scanner-1wu2i-implementation/scanner_evidence.py",
+      "line_start": 17,
+      "line_end": 18,
+      "sha256": "e6854efd5661d82289af20a16514ec3facbdf4137776deae026cda2574da6a6a",
+      "bytes": 94,
+      "extraction": "raw complete source lines from def through final body line inclusive, retain line terminators"
+    },
+    {
+      "name": "verify",
+      "private_source_relative": "codex/scanner-1wu2i-implementation/scanner_evidence.py",
+      "line_start": 20,
+      "line_end": 48,
+      "sha256": "0a41e8c6a2a411ac4de48e76070f24421cb7ac9a2f755a22593bac405f4d2b8d",
+      "bytes": 1930,
+      "extraction": "raw complete source lines from def through final body line inclusive, retain line terminators"
+    }
+  ],
+  "metadata19": {
+    "source_private_relative": "codex/scanner-1wu2i-implementation/t2s2/collection-pinned.json",
+    "source_raw_sha256": "3659430f4bd3e12edf6ff2295c30bd27538c25eaaaa14c8a2b6c954d00224f09",
+    "selection": "Exact retained ordered test_config.py metadata nodes, four rendered-unit + fourteen invalid + one preservation; not all metadata-named nodes",
+    "nodes": [
+      "tests/test_config.py::test_rendered_unit_environment_loads_without_metadata_overrides[b2b1b451cf43f1f2a06b9a92434e35ef1ff67168-render0]",
+      "tests/test_config.py::test_rendered_unit_environment_loads_without_metadata_overrides[b2b1b451cf43f1f2a06b9a92434e35ef1ff67168-render1]",
+      "tests/test_config.py::test_rendered_unit_environment_loads_without_metadata_overrides[85db676d0d9a2a205a47bd3e8047b1fc462945ab7942c2a84dfb1184160752f6-render0]",
+      "tests/test_config.py::test_rendered_unit_environment_loads_without_metadata_overrides[85db676d0d9a2a205a47bd3e8047b1fc462945ab7942c2a84dfb1184160752f6-render1]",
+      "tests/test_config.py::test_invalid_unit_metadata_rejected_without_echo[empty-HETERODYNE_RELEASE-40]",
+      "tests/test_config.py::test_invalid_unit_metadata_rejected_without_echo[empty-HETERODYNE_UNIT_REV-12]",
+      "tests/test_config.py::test_invalid_unit_metadata_rejected_without_echo[short-HETERODYNE_RELEASE-40]",
+      "tests/test_config.py::test_invalid_unit_metadata_rejected_without_echo[short-HETERODYNE_UNIT_REV-12]",
+      "tests/test_config.py::test_invalid_unit_metadata_rejected_without_echo[long-HETERODYNE_RELEASE-40]",
+      "tests/test_config.py::test_invalid_unit_metadata_rejected_without_echo[long-HETERODYNE_UNIT_REV-12]",
+      "tests/test_config.py::test_invalid_unit_metadata_rejected_without_echo[uppercase-HETERODYNE_RELEASE-40]",
+      "tests/test_config.py::test_invalid_unit_metadata_rejected_without_echo[uppercase-HETERODYNE_UNIT_REV-12]",
+      "tests/test_config.py::test_invalid_unit_metadata_rejected_without_echo[nonhex-HETERODYNE_RELEASE-40]",
+      "tests/test_config.py::test_invalid_unit_metadata_rejected_without_echo[nonhex-HETERODYNE_UNIT_REV-12]",
+      "tests/test_config.py::test_invalid_unit_metadata_rejected_without_echo[space-HETERODYNE_RELEASE-40]",
+      "tests/test_config.py::test_invalid_unit_metadata_rejected_without_echo[space-HETERODYNE_UNIT_REV-12]",
+      "tests/test_config.py::test_invalid_unit_metadata_rejected_without_echo[newline-HETERODYNE_RELEASE-40]",
+      "tests/test_config.py::test_invalid_unit_metadata_rejected_without_echo[newline-HETERODYNE_UNIT_REV-12]",
+      "tests/test_config.py::test_unit_metadata_preserves_overrides_unknown_rejection_and_secret_scan"
+    ],
+    "ordered_legacy_sha256": "c8d44a733b40cc2a1fdb95f8388cafdc57c3f77b92e54875769e066b668a9fb8",
+    "ordered_compact_sha256": "9c7067517b091fc6fd3ebdc77a3bdac311a5f42f1838812835a1e39ab3c27635"
+  },
+  "historical_document_resolution": {
+    "d2_commit": "d442d48e57e7963f9981a0ff276ee0efe5820cca",
+    "d2_spec_url": "https://github.com/Epiphytic/heterodyne-metaharness/blob/d442d48e57e7963f9981a0ff276ee0efe5820cca/docs/superpowers/specs/2026-10-16-scanner-execution-fd-prerequisite-d2.md",
+    "exhibits_resolution": "Resolve d2 manifest archive_path and relative links at d442 only; private originals use the dated handoff root. Do not copy d1/d2/d3 docs or opaque exhibits into main snapshot."
+  },
+  "delivery_contract": {
+    "H": "Real 9a14 ancestry + exact d4 portable snapshot on canonical ancestry; actual code review, fresh92, hosted secrets/test PASS and merge before close",
+    "scanner": "Retain merged H; B1+B2 production delta atomic; complete final source-range review and hosted PASS",
+    "forbidden_ancestry": [
+      "d442d48e57e7963f9981a0ff276ee0efe5820cca",
+      "a5646255b4ce36e62a9a76685c9504a7227f8f72"
+    ]
+  }
+}

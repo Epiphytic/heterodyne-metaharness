@@ -10,7 +10,7 @@ This is the operator runbook for `admind` (ADR 0001 §8, revision 13). The ADR i
 
 - has its own service unit and shares no dependency with `wsd`, the Hermes gateway, beads or the gatekeeper;
 - has its own Marmot identity and connection, through a private `wn-agent` child that it spawns and supervises itself (own home, own socket, own bearer token);
-- refuses to operate if the group's member count is not the count it trusts (the admin bot plus its confirmed operators), and accepts messages only from a confirmed operator's exact npub, MLS-authenticated. Anything else is dropped and logged without its content.
+- requires a live acknowledged subscription and verified positive member count, and accepts authenticated operator keys only when persisted confirmations and fresh policy both authorize them. Counts/events do not identify operators or latch admind. Unauthorized input is dropped and logged without its content.
 
 **Deliberate privilege.** The admin agent runs as the harness's service user, with permission prompts bypassed, no sandbox and no root. Its purpose is to repair anything the harness can break, so a least-privilege identity would defeat it. This is an operator decision (2026-09-29). The design review's objection and the rebuttal are recorded in the [r1 response](reviews/0001-design-review-r1-response.md) ("Finding 10: admind"); the accepted residual risk is repeated in the [security model](security-model.md#the-admin-override-channel-admind-8).
 
@@ -41,17 +41,19 @@ This is the operator runbook for `admind` (ADR 0001 §8, revision 13). The ADR i
 
 ### Operators
 
-Every name under `operators` in `policy.toml` that has an `identities.<name>.marmot_npub` is an admind operator. A name must be 1 to 128 characters with no control characters, two operators may not share a key, and at least one must exist; otherwise admind refuses to start (a configuration error). `admind init` puts all of them in the group. After that the group and `policy.toml` are two separate records, and admind only acts for an operator that is in **both**: listed in `policy.toml`, and confirmed as a member of the group (stored by admind). Editing `policy.toml` alone authorises no one, and it does not revoke anyone at once either. admind acts on a cached operator set, and that set (the authority) is refreshed only at startup, after a committed (successful) `admind operators add|remove`, and after a successful `admind rearm`. A refused membership request or a refused rearm may read `policy.toml` (some are refused before they do), but never refreshes the cache. Until a refresh, an operator whose entry you deleted still commands admind.
+Every name under `operators` in `policy.toml` with an `identities.<name>.marmot_npub` identifies a configured operator. Names must be 1 to 128 characters without control characters, keys must be unique, and at least one operator must exist. Effective authority is the persisted `group_operators` confirmed set intersected with freshly validated policy. Policy is read at potentially authorized message/reaction ingress and immediately before each command, paste, answer, approval, details operation and outbound chunk, including after lock waits. Removing a policy entry revokes its next effect without a restart; adding an entry alone grants nothing. An unreadable/invalid policy closes the current gate without a permanent latch; a later valid read restores operation.
 
+Membership conveys read access, not command authority. Observed joins, departures and counts never add or remove confirmed keys. A departed key may remain confirmed until policy explicitly revokes it; MLS protects subsequent group epochs. Neither a count nor an event identifies which operator left.
 Change the group with the running daemon, as the service user. `admind` is a console script of the heterodyne package, so it is on `PATH` only where the package's environment is (an activated virtualenv, or its `bin/`); `python -m heterodyne.admind` with that environment's interpreter is equivalent:
 
 ```sh
 admind operators add NAME      # NAME is a policy.toml operator; admind adds its npub to the group
-admind operators remove NAME   # NAME must be a confirmed operator
+admind operators remove NAME   # NAME is a policy operator; it may be unconfirmed
 ```
 
-Both ask the daemon over its control socket (section 7), so admind must be running, not latched, and watching the group. `add` needs the entry to be in `policy.toml` already. `remove` is refused for the last operator: at least one other confirmed operator must remain in `policy.toml`. A change is journaled before it is made; the member count is checked afterwards, and a change that cannot be confirmed latches admind (section 5). The result is printed and recorded in the audit log as a `membership` record.
+Both ask the running daemon over its host control socket (section 7). Local changes are journaled and serialized with dispatch/sends. Explicit wn-agent success commits only the requested confirmed-set addition/removal; explicit peer failure leaves the set unchanged. Events or a different post-count cannot reverse that result. Without a valid post-count, successful changes may record a provisional expected count; the next valid observation replaces it. A timeout, cancellation or missing response leaves an unresolved membership-only hold, never retries the mutation and grants no authority. Ordinary confirmed-policy work resumes after group verification, but further membership mutations need explicit recovery.
 
+Removing the last policy-confirmed operator remains forbidden, and local mutation retains its minimum target-count safeguard; accepting observed count 1 or rearming at 1 does not authorize an unsafe local removal. Removing an unconfirmed policy key is permitted for recovery and leaves the confirmed set unchanged on success. Unknown/non-policy keys are refused. The result is printed and audited as a `membership` record.
 ### Temporary operators
 
 To let a test key command admind for a while:
@@ -62,8 +64,7 @@ To let a test key command admind for a while:
 4. Run `admind operators remove NAME`.
 5. Delete the entry from `policy.toml` (from `operators`, `approvers` and `[identities.<name>]`).
 
-Keep this order. `remove` finds the name among the operators admind has loaded (the cache above) and checks the freshly read `policy.toml` for another eligible operator. Deleting the entry first does not revoke access, because the cache still holds it, and the group and `policy.toml` disagree. A restart then rebuilds the set from the file, so the key stays in the group with no name and `remove` can no longer find it. A `rearm` does not necessarily fix that: the member count still includes the deleted operator, so it no longer matches the remaining `policy.toml` operators, the reconciliation fails, and the rearm is refused with the cache unchanged. Put the entry back, run `admind rearm` (it succeeds once `policy.toml` matches the group again and refreshes the cache), then `admind operators remove NAME`, then delete the entry.
-
+Keep this order when removing both membership and policy trust. Policy deletion itself immediately revokes subsequent effects; group removal additionally removes read access. Removal resolves the exact key from fresh policy, so retain the entry until the membership operation completes. If an unknown add actually succeeded but a duplicate add is rejected, verify membership in your client and explicitly rearm, remove the unconfirmed policy key, then add it again. Only the add's own explicit success confirms it. A failed remove grants nothing and is not proof of absence.
 ## 3. Before first use of the admin agent
 
 On its first launch in `workdir`, Claude Code may show its bypass-permissions acceptance and workspace-trust dialogs. They appear before any hook runs, so admind cannot relay them to Marmot. Clear them once, as part of setup on the host, before the operators start using the agent:
@@ -114,34 +115,29 @@ This is a setup step only (ADR 0001 §8.1, host exception 1). In operation, oper
 - **Control characters.** A message containing a C0 or C1 control character (other than tab and newline) is refused with a reply, never altered: such a character can break out of the terminal's bracketed paste. The check runs before commands are parsed, so a command name or argument holding one is never parsed or echoed.
 - **Output policy.** Everything admind posts, summarizes or audits goes through one redactor (`admind/redact.py`): a recognized secret pattern, npub or run of 64 or more hex digits is replaced by a marker such as `<redacted hex key>`, and every control character except newline and tab is escaped as `\xNN`. It runs on the whole text before it is chunked and again at delivery, and repeats until the text stops changing (text still changing after 10 passes becomes `<redacted text>`). That covers replies, summaries, batches, `!details`, `!tail`, command replies, alerts, notices and the audit log. This replaces the earlier "relayed verbatim" rule for the agent's reply and the `!tail` screen: the text is the agent's, but a recognized secret in it is masked and the rest is kept. The redactor does not detect arbitrary passwords or credentials, so none of this output is guaranteed secret-free. A short reply is therefore verbatim apart from redaction, not byte for byte. Failures are reported with fixed wording (`a tmux command failed`, `internal error`), never the underlying error text, which can contain paths or identifiers.
 
-## 5. The latch
+## 5. Membership observations and recovery
 
-**What triggers it.** admind latches when:
+**Events and counts do not latch admind.** The five allowlisted membership/admin event kinds (`member_added`, `member_removed`, `member_left`, `admin_added`, `admin_removed`) in admind's group request a coalesced check and a bounded notice. Other groups are ignored. A stable count of at least 1 is adopted as observation only, including increases, decreases and equal counts. The confirmed operator set is unchanged. No event arithmetic settles local mutations.
 
-- the member count is anything other than the trusted count, stored by admind (the admin bot plus its confirmed operators; checked at start, after each message, every `group_check_seconds`, and on every resubscribe), or
-- the membership subscription reports any membership or admin event (`member_added`, `member_removed`, `member_left`, `admin_added`, `admin_removed`) in admind's group.
+**Posting needs a live subscription.** Count checks share one lock and capture the acknowledged subscription generation and membership epoch. Before any adoption, a stale generation, changed epoch, active local transition or lost acknowledgement invalidates the response without changing replacement-subscription state. A failed read or count below 1 leaves the group temporarily unverified and blocks effects until bounded checking recovers; it does not create a global latch or prove removal from the group. No automatic init, new identity or new group is attempted.
 
-`group_info` returns a count, not a member list, so a swap that keeps the count is visible only as an event. Two more cases latch: a membership change (`admind operators add|remove`) that cannot be confirmed (an unreadable answer, an event or a lost subscription meanwhile, an exception after it was journaled), and a start that finds a change still pending. A change interrupted by a crash is therefore never trusted by count alone.
+**Notices are bounded and durable.** One constant-size accumulator retains first/last counts, saturated event-kind counters and a sequence. Counts carry no identities; event counters are observed signals, not distinct people. Equal-count/admin-only signals still generate notices. The group-check timer flushes without requiring another event. At most one unresolved observation snapshot (`membership-event:<sequence>`) exists beside the accumulator, with at least `group_check_seconds` between successful observation deliveries. No future-due snapshot is queued as selectable pending work. Clock rollback/recovered not-due snapshots enter durable delayed state, which does not block replies/cards; delivery and its timestamp settle atomically. Local-operation result notices (`membership:<change_id>`) retain ordinary notice rules.
 
-**While latched, admind is silent.** Every inbound message is dropped, nothing is posted (replies, notices and alerts alike), and queued prompts stay held. The latch is stored, so it survives a restart. It does not clear itself.
+**Authorisation and queued ownership.** Fresh policy is checked after waits and before every effect/chunk. Authenticated requester ownership survives queues, continuations, details, summaries, batches and restart; a multi-owner batch needs all owners current or must be rebuilt without revoked contributions. Revoked delivery groups are terminally suppressed, never retried as backstop output. System notices/cards are explicitly system-owned. Legacy rows with no provable durable provenance are atomically quarantined, preserving payload, threads, original status and migration evidence; null never means system. Quarantined/suppressed/delayed rows are excluded from pending selection and cannot block later eligible rows. Release from quarantine requires an explicit operator decision and validated whole-group provenance. A policy read failure may temporarily stall all delivery, including system rows; that fail-closed PoC limit is intentional. An already-started external effect cannot be undone, but its next effect/send is checked again.
 
-**Recovery.** Look at the group's member list in your Marmot client first. If it is the admin bot and the operators you expect, run on the host:
+**Migration and rollout.** Migration preserves historical sent/failed records, payloads, thread/request links, sequence high-water marks and indexes in one transaction; failure rolls back rather than discarding the database. Before deployment, test the reviewed migration on a consistent private backup and report row/group counts, especially quarantine totals, without exposing identities. Migration performs no sends. Do not deploy, rearm, change membership or send a live verification message merely by following this document: use the separately authorized rollout and marked verification procedure. After traffic, reverting the old daemon/schema or restoring a pre-traffic backup can lose decisions or replay effects and requires a reconciled operator rollback plan.
+
+**Remaining global latches.** Unknown authority at startup/migration, an unresolved local membership mutation discovered at startup, malformed stored authority, and existing non-membership integrity safeguards still require operator recovery. In-process mutation ambiguity holds only further membership changes after cleanup; a restart with that unresolved record retains the conservative startup latch. A global latch survives restart and is never automatically cleared. Membership events, count mismatch and subscription replacement cannot create one.
+
+**Recovery.** Inspect actual membership in your Marmot client first, then use the host control socket:
 
 ```sh
 admind rearm
 ```
 
-`rearm` asks the running admind, over its control socket (`ctl.sock` in the state directory), so admind must be running and subscribed: it refuses, changing nothing, unless it is reading the subscription's events. It reads the group's member count and refuses, again changing nothing, if the group changed while it read it (a membership event, a new latch or a resubscription), if `policy.toml` cannot be read, or if the group has fewer than 2 members. It then reconciles which operators are confirmed in the group (B21, B22): the count must be accounted for by the admin bot plus operators from `policy.toml` and the stored confirmations (and a pending change). If it cannot account for the count, it refuses: make `policy.toml`'s operators match the group's members, then rearm again. Otherwise it trusts the count, stores the confirmed operators, clears the latch and any pending change, and prints the result. The running admind needs no restart: its next periodic group check (every `group_check_seconds`) re-verifies the count, and if the membership subscription is still live, posting and dispatch resume. If the subscription had dropped, they resume once it is re-established and verified. admind re-checks the member count, but it cannot see a one-for-one swap, so the check in your client is the real one. While it is latched, an operator's message is dropped and audited whole under their name, never acted on.
+Rearm requires a stable acknowledged subscription, fresh valid policy and a count of at least 1; an event or subscription change during its read refuses it without changes. With a valid stored confirmed set, it keeps exactly confirmed∩fresh policy, adopts the observed count and clears pending mutation/global latch. It never grants authority from count and needs no temporary policy edits to account for extra members. With no historical confirmed record, the existing explicit migration assertion may confirm policy keys only when the count equals 1 plus policy operators and the operator invoked rearm after visual verification. Malformed stored authority requires operator repair, never silent replacement. A single-known-operator migration retains its prior behavior. Restart and continuous adversarial churn remain PoC availability limits: unknown pending startup needs rearm, and rearm can keep refusing during churn.
 
-**Posting needs a live subscription.** admind posts and dispatches only while the membership subscription is live and the group has been verified. After any outage the order is: resubscribe, then verify the count, then observe events. Nothing is sent while the subscription is down, even if a count check succeeds. Every subscription attempt has its own generation, and a count check is tied to the generation it started on: only a check that began after the subscription was acknowledged, and that finishes while it is still the current one, can turn observation on. A slow answer that arrives after a disconnect (from an earlier subscription) is discarded and cannot enable posting on the replacement; the replacement is always verified by its own check. An old answer that reports a wrong member count still latches admind (it fails closed).
-
-**Authorisation is rechecked before side effects.** A message accepted while admind was authorised is checked again after each wait: after the group check, immediately before a command runs or a prompt is dispatched, and (for `!interrupt` and `!new`) after taking the dispatch lock and before any Esc or state change. If admind has stopped being authorised meanwhile, the message is dropped with fixed wording; the operator gets a "could not verify the group membership, try again" reply unless admind is latched, in which case nothing is sent. The check happens before the action starts; it does not cancel one that is already running. A command that has begun (a slow `!restart`, say) runs to completion if a latch lands meanwhile, and its reply is held in the outbox by the outbound gate until the latch is cleared and the group is verified.
-
-**Residual risks** (ADR §3.4, accepted):
-
-- A one-for-one membership swap made on the `wn-agent` control socket by a process running as the same user is invisible to admind: the count stays the same and no event reaches it.
-- After an outage of the subscription, re-verification is by count only. A swap that happened while admind was not watching and left the count unchanged is not detected. A membership event already buffered when re-verification passes is handled immediately after, so there is a brief window in which the outbox could post before it is read.
-- A process running as the same user can write to the hook socket and forge a reply event for the current session. The socket is mode 0600 in a 0700 directory, and events for any other session are dropped, but the same-user boundary is the limit.
+**Residual risks.** Additional members can read group traffic without becoming operators. Counts/events do not identify membership; equal-count swaps and missed events cannot be attributed. Re-verification after an outage is numeric only. Same-user processes can forge hook events or reach private control sockets; the service user remains the host trust boundary. Per-launch hook nonces separate stale turns but are not authentication against that user.
 
 **How replies are anchored.** admind pastes a prompt, then waits for the agent's `UserPromptSubmit` hook with the same text (whitespace-insensitive). Only then is the prompt confirmed, and only then is the reply threaded to the operator's message. A reply appears **top-level** instead when:
 
@@ -251,7 +247,7 @@ Everything admind creates is private: directories 0700, files 0600. What is enfo
 **Upgrading from plan 2.** `admind.db` is migrated in place at startup; nothing needs to be removed.
 
 - **`expected_members`.** A group from plan 2 always had two members, so a database without the stored count gets `2` (audited as `guard` / `migrated`).
-- **`group_operators`.** A database that has not recorded which operators are confirmed in the group takes the single `policy.toml` operator as confirmed (audited as `migrated-operators`). With **several** operators in `policy.toml` at upgrade time admind cannot know which are in the group, so it latches until a `rearm` (make `policy.toml` match the group first, section 5).
+- **`group_operators`.** A database that has not recorded which operators are confirmed in the group takes the single `policy.toml` operator as confirmed (audited as `migrated-operators`). With **several** operators in `policy.toml` at upgrade time admind cannot know which are in the group, so it latches until an explicit `rearm` migration assertion after visual membership verification (section 5).
 - **The outbox.** The `lane` column is added (existing rows are lane 1) and the replies queued but not yet sent are redacted once. A reply's pending chunks are joined, redacted and chunked again under new keys, so text already received may be re-sent; a continuation that cannot be checked against what was already sent is replaced whole by a fixed notice. This is recorded as an `outbox` record (`redacted-after-upgrade`).
 - **A pending membership record** latches admind on startup (a change interrupted by a stop is not trusted by count).
 - The `details_stage` table is created if missing (`CREATE TABLE IF NOT EXISTS`) and emptied at every start.
@@ -288,7 +284,7 @@ An older database from before plan 2 (for example an older `inbound` status cons
 - **A summary's quality is not tested:** the summarizer is asked to quote every question and error verbatim, but only the prompt wording is checked.
 - **Count-only re-verification** after an outage and **same-user forgery** on the control and hook sockets are accepted residual risks (section 5).
 - **Missed membership events** while disconnected cannot be detected.
-- **Schema upgrades** are in place from plan 2 (section 7); older databases are not migrated.
+- **Schema upgrades** preserve historical rows and sequence identities transactionally. Unknown legacy delivery provenance is quarantined before recovery/delivery, never guessed or sent (section 5).
 - **Approver names are not mapped** (section 10): an operator's `policy.toml` name must equal a name in btq's `approvers` to approve from Marmot.
 - **Asks and approvals are interim** (section 10): there is no gatekeeper judgement on an ask's context, and ADR revision 14 absorbs the relay.
 - **No picker asks yet.** ADR revision 14 (§8.1) specifies a `picker` ask kind, so that the agent's interactive question tool reaches the operators on Marmot as a card bound to its launch, and `!asks cancel <id>` to withdraw one. Neither is built. Today the agent should ask in its reply text, which reaches the operators as that reply, and they answer by passthrough. A picker shown anyway waits in the pane: `!tail` shows it, and `!interrupt` (Esc) dismisses it unanswered.
@@ -637,3 +633,42 @@ Every record about asks has kind `ask`. Asks are recorded by IDs and lengths, ne
 ```sh
 grep -F 'id:<12 hex>' <state>/admind/audit.jsonl
 ```
+
+### Complete local ask binding evidence
+
+`admind ask binding ASK --json` reads the new `ask.binding.v1` operation over the running daemon's
+local ask socket. It returns a versioned, closed evidence envelope with the complete stored render
+inputs (including chunk size and historical approval in-flight counts) and canonical SHA-256, reproduced card parts and their local outbox delivery state, all retained
+answer/note records with native message and sender provenance, and separately named native decision
+attempts. Native `outcome`, `decided_by` and `current_attempt` are included separately;
+a settled attempt does not substitute for these stored fields. The recommendation comes from the stored form, including a recommendation other than A.
+Policy principals and their canonical fingerprint are read afresh; the envelope records Linux boot ID
+and BOOTTIME at the read. An answer's `current_policy` flag describes only its configured principal,
+not current group membership or new authority. Revoked actors and contrary answers remain in history.
+
+Exit 0 means complete evidence was returned, not that an operator approved anything. `delivered` means
+the original or a full repeat's outbox parts are marked sent; it does not prove remote visibility or
+human acceptance. Decision attempts remain attempts, including uncertain or unsettled ones. Existing
+`get` and `list` response formats are unchanged. The reader does not write SQLite, execute native task
+commands, accept caller policy/files, or bypass a latch.
+
+Exit 1 returns a fixed typed refusal when evidence is missing, incomplete, oversized, redacted, truncated,
+not reproducible by the current renderer, or has invalid state, unavailable policy, or unavailable boot
+clock evidence. It never returns partial evidence as complete. Legacy records without durable sender
+provenance, stored inputs rejected by current posting rules, and cards rendered with an incompatible
+chunk configuration may therefore be refused. An originally truncated card remains refused even after
+a full repeat. Free answer/note prose gets no public-digest exemption: if redaction would change it,
+the whole binding is refused without modifying the native record. Typed decision digests remain typed
+provenance; this does not make arbitrary answer text safe to expose.
+
+The CLI also emits fixed JSON for invalid IDs and incompatible/legacy replies (`invalid-state` or
+`invalid-reply`), and for a connected response deadline (`response-timeout`, exit 1). Exit 69 includes
+fixed JSON with `transport-unavailable`; it means connection/transport failed, not that an approval
+was declined. A daemon cannot select these client-only failure codes, and an envelope for a different
+ask is rejected. Error messages never echo peer text. The bounded read uses an independent read-only
+SQLite WAL snapshot off the event loop; it holds neither the post lock nor the live Store lock while
+rendering. Uncommitted writes are excluded, and ordinary daemon reads/writes can continue. All returned
+approval prose is screened, including fields not printed on the card; only validated typed digest and
+Marmot reference identities are exempt. Historical raw prose that would redact still refuses. New
+settlement outcomes are redacted in the existing atomic decision transaction, without changing their
+native status/actor/attempt identity. This interface requires deployment before use.

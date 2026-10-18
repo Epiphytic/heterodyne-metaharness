@@ -146,6 +146,9 @@ class FakeRuntime:
             del self.ends[key]                  # its record goes with its directory, as SandboxRuntime's does
         return done
 
+    def settle_sandbox(self, ws: str, sid: str, generation: int) -> str:
+        return "never observed"
+
     def finish_resolution(self, ws: str, sid: str, generation: int) -> None:
         intent = self.intents.get((sid, generation))
         if intent is not None and intent.ws != ws:

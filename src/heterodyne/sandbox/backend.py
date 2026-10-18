@@ -35,10 +35,15 @@ class Watch:
     tmux_socket: str                # the server's socket name (`-L`)
     tmux_socket_path: Path | None   # or its exact socket (`-S`)
 
+    ledger: Path
+    alerts: Path
+    ready: Path
+
     def argv(self) -> list[str]:
         path = [] if self.tmux_socket_path is None else ["--tmux-socket-path", str(self.tmux_socket_path)]
         return ["--generation", str(self.generation), "--marker", str(self.marker), "--pane", self.pane,
-                "--tmux", self.tmux, "--tmux-socket", self.tmux_socket, *path]
+                "--tmux", self.tmux, "--tmux-socket", self.tmux_socket, *path,
+                "--ledger", str(self.ledger), "--alerts", str(self.alerts), "--ready", str(self.ready)]
 
 
 class Backend(Protocol):
@@ -90,7 +95,8 @@ class Backend(Protocol):
 
     def reaper_argv(self, name: str, deadline: int, record: Path, watch: Watch) -> list[str]:
         """A host command, run outside wsd (D13's backstop), that waits until `deadline` (UTC epoch
-        seconds) and then deletes the sandbox until the backend no longer lists it. It reads the session
-        `record` before it goes (`reaper.settled`), and `watch` before its first kill (g08sd). It carries
+        seconds) and then deletes the sandbox until a durable settlement and confirmed deletion exist.
+        Settlement comes only from the host ledger in `watch`; `record` supplies lifetime evidence
+        before its first kill (g08sd). An unresolved create is watched indefinitely. It carries
         its own environment, as `tty_argv` does."""
         ...

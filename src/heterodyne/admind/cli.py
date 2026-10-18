@@ -17,7 +17,7 @@ import msgspec
 
 from heterodyne import config as hconfig
 from heterodyne import units
-from heterodyne.admind import approvals, asks, ctl, fulfillment_cli, initialised, links, refs, unit
+from heterodyne.admind import approvals, asks, binding, ctl, fulfillment_cli, initialised, links, refs, unit
 from heterodyne.admind.agent import TMUX_SOCKET, AdminAgent, tmux_launcher
 from heterodyne.admind.audit import Audit
 from heterodyne.admind.commands import CommandRunner
@@ -249,6 +249,8 @@ def ask_command(s: AdmindSettings, args: argparse.Namespace) -> int:
     stderr), 69 when no daemon answers, 3 when `wait` times out."""
     if args.ask_command == "fulfillment":
         return fulfillment_cli.command(s, args)
+    if args.ask_command == "binding":
+        return ask_binding_command(s, args.ask_id)
     req: asks.AskRequest
     if args.ask_command == "post":
         post = _ask_post(args)
@@ -289,6 +291,40 @@ def ask_command(s: AdmindSettings, args: argparse.Namespace) -> int:
         for line in rest:           # the K14 warning: for the poster, not for a script reading the ID
             print(f"admind: {_terminal(line)}", file=sys.stderr)
     return 0 if reply.result in ("posted", "ok") else 1
+
+
+def ask_binding_command(s: AdmindSettings, ask_id: str) -> int:
+    """Only the daemon reads native state. The client cannot supply policy, files or answer evidence."""
+    req = asks.AskBinding(ask_id)
+    why = asks.check(req)
+    if why is not None:
+        print(msgspec.json.encode(binding.AskBindingReply(
+            "refused", "ask.binding.v1 unavailable", code="invalid-state")).decode())
+        return 1
+    async def request() -> binding.AskBindingReply:
+        peer = await asyncio.wait_for(ctl.request(s.state_dir / asks.ASK_SOCKET, req, ASK_READ_SECONDS,
+                                                  reply_type=binding.AskBindingReply,
+                                                  max_reply=asks.MAX_REPLY), ASK_READ_SECONDS)
+        if peer.code in ("transport-unavailable", "response-timeout", "invalid-reply"):
+            raise ctl.CtlInvalidReply("client-only refusal from peer")
+        return peer
+    try:
+        reply = asyncio.run(request())
+    except ctl.CtlInvalidReply:
+        reply = binding.AskBindingReply("refused", "ask.binding.v1 unavailable", code="invalid-reply")
+    except (ctl.CtlResponseTimeout, TimeoutError):
+        reply = binding.AskBindingReply("refused", "ask.binding.v1 unavailable", code="response-timeout")
+    except ctl.CtlUnavailable:
+        reply = binding.AskBindingReply("refused", "ask.binding.v1 unavailable", code="transport-unavailable")
+    if (reply.ask is not None or reply.asks is not None
+            or (reply.result == "ok" and (reply.binding is None or reply.code is not None
+                                          or reply.binding.inputs.ask_id != asks.normalise_id(ask_id)))
+            or (reply.result != "ok" and (reply.code is None or reply.binding is not None))):
+        reply = binding.AskBindingReply("refused", "ask.binding.v1 unavailable", code="invalid-reply")
+    elif reply.result != "ok":
+        reply = binding.AskBindingReply("refused", "ask.binding.v1 unavailable", code=reply.code)
+    print(msgspec.json.encode(reply).decode())
+    return EX_UNAVAILABLE if reply.code == "transport-unavailable" else (0 if reply.result == "ok" else 1)
 
 
 def _ask_wait(s: AdmindSettings, req: asks.AskRequest, timeout: float, as_json: bool) -> int:
@@ -506,6 +542,9 @@ def _ask_parser(ask: argparse.ArgumentParser) -> None:
             one.add_argument("--json", action="store_true")
         if name == "wait":
             one.add_argument("--timeout", type=float, default=WAIT_TIMEOUT)
+    bound = sub.add_parser("binding", help="read complete source-owned ask.binding.v1 evidence")
+    bound.add_argument("ask_id")
+    bound.add_argument("--json", action="store_true", required=True)
     sub.add_parser("list", help="active asks and the 20 most recent others").add_argument(
         "--json", action="store_true")
 

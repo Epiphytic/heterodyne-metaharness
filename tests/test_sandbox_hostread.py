@@ -2,11 +2,13 @@
 
 import contextlib
 import errno
+import gc
 import json
 import logging
 import os
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
@@ -287,8 +289,24 @@ def stamped(scratch: Path, made_ns: int | None = None) -> Path:
     return scratch / f"{hostread.home_prefix(made)}abc"
 
 
-def open_fds() -> int:
-    return len(list(Path("/proc/self/fd").iterdir()))
+Fds = frozenset[tuple[int, int, int]]
+
+
+def open_fds() -> Fds:
+    """This process's open fds, each with the file it names (device and inode; a pidfd's is its
+    process's), so a number reused for another file counts as new. A count would also move when
+    garbage collection closes a connection another test leaked, during the code under test."""
+    fds: set[tuple[int, int, int]] = set()
+    for entry in Path("/proc/self/fd").iterdir():
+        with contextlib.suppress(FileNotFoundError):        # the listing's own fd, closed since
+            info = entry.stat()
+            fds.add((int(entry.name), info.st_dev, info.st_ino))
+    return frozenset(fds)
+
+
+def none_left(before: Fds) -> bool:
+    """No fd is open that wasn't open at `before`: nothing leaked, whatever else closed meanwhile."""
+    return open_fds() <= before
 
 
 @pytest.mark.parametrize("fault", ["pidfd", "proc", "signal", "deadline"])
@@ -331,7 +349,7 @@ def test_an_unconfirmed_recovery_keeps_the_homes_and_never_raises(tmp_path: Path
             monkeypatch.setattr(hostread.signal, "pidfd_send_signal", no_kill)
         before = open_fds()
         recover(scratch, seconds=0.3)
-        assert open_fds() == before
+        assert none_left(before)
         assert logged() == [DIAG_RECOVERY_KEPT]
         assert home.exists() and orphan.poll() is None
         monkeypatch.undo()
@@ -665,10 +683,10 @@ def killed_then_removed(seam: Seam, logged: Callable[[], list[str]]) -> None:
 
 
 def kept_at_the_deadline(seam: Seam, logged: Callable[[], list[str]], fake_time: FakeTime,
-                         before: int) -> None:
+                         before: Fds) -> None:
     assert fake_time.now > hostread.RECOVER_SECONDS
     assert seam.events == [] and seam.child.poll() is None
-    assert seam.home.exists() and open_fds() == before
+    assert seam.home.exists() and none_left(before)
     assert logged() == [DIAG_RECOVERY_KEPT]
 
 
@@ -727,6 +745,44 @@ def test_no_readable_worker_settles(monkeypatch: pytest.MonkeyPatch, seam: Seam,
     before = open_fds()
     recover(seam.scratch)
     kept_at_the_deadline(seam, logged, fake_time, before)
+
+
+def test_a_leaked_fd_that_another_test_left_closing_meanwhile_is_no_leak(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seam: Seam, fake_time: FakeTime,
+        logged: Callable[[], list[str]]) -> None:
+    """The flake (19 == 25): another test's connection, held only by a reference cycle, is closed by
+    garbage collection while recover runs. The check counts only what is new, and still sees a new fd
+    that took a closed one's number."""
+
+    class Cycle:
+        me: "Cycle"
+        db: sqlite3.Connection
+
+    Scripted(monkeypatch, seam.child.pid, [
+        {"environ": EACCES, "status": status_text("Z", 4), "stat": ("Z", PF_EXITING), "tasks": {}}])
+    sleep = fake_time.sleep
+
+    def collecting(seconds: float) -> None:
+        gc.collect()
+        sleep(seconds)
+
+    monkeypatch.setattr(fake_time, "sleep", collecting)
+    gc.disable()                                # nothing collects the cycle before `before` is taken
+    try:
+        leaked = Cycle()
+        leaked.me, leaked.db = leaked, sqlite3.connect(tmp_path / "leaked.db")
+        del leaked
+        before = open_fds()
+        recover(seam.scratch)
+    finally:
+        gc.enable()
+    assert len(open_fds()) < len(before)       # the leaked connection's fd went during recover
+    kept_at_the_deadline(seam, logged, fake_time, before)
+    fd = os.pidfd_open(seam.child.pid)          # most likely on the closed connection's number
+    try:
+        assert not none_left(before)
+    finally:
+        os.close(fd)
 
 
 # Another user's uid, outside this host's subordinate ranges (165536-231071) as well as ours.
@@ -835,7 +891,7 @@ def test_a_genuinely_empty_environment_keeps_the_home(tmp_path: Path, escapes: E
         before = open_fds()
         recover(scratch)
         assert fake_time.now > hostread.RECOVER_SECONDS
-        assert home.exists() and open_fds() == before and bare.poll() is None
+        assert home.exists() and none_left(before) and bare.poll() is None
         assert logged() == [DIAG_RECOVERY_KEPT]
     finally:
         escapes.end()

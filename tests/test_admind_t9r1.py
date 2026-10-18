@@ -19,24 +19,24 @@ from heterodyne.admind.store import Store, private_dir
 from heterodyne.services import UnitStatus
 
 
-def test_rearm_after_a_latched_count_check_restores_observing_without_a_restart(tmp_path: Path) -> None:
+def test_rearm_after_an_explicit_latch_restores_observing_without_a_restart(tmp_path: Path) -> None:
     u = Unit(tmp_path)
     u.daemon.group_ok = False
     u.daemon.observing = False
-    u.client.member_count = 3
+    u.daemon.latch("test recovery latch")
 
     async def scenario() -> None:
         task = asyncio.create_task(u.daemon.inbound_loop())
         try:
-            await u.client.acked.wait()                 # acknowledged, found three members, latched
-            assert u.daemon.latched() and not u.daemon.observing
-            u.client.member_count = 2
+            await u.client.acked.wait()                 # subscription acknowledged, explicit latch remains
+            assert u.daemon.latched() and not u.daemon.may_post()
+            u.client.member_count = 1             # count is observational
             u.store.delete("latched")                   # what `admind rearm` does
             assert await u.daemon.check_group()         # the periodic check passes
             assert u.daemon.observing and u.daemon.may_post()
             await u.say("hello")
             assert u.tmux.pasted == ["hello"]           # dispatch resumed
-            u.daemon.post("k", "posted", None)
+            u.daemon.post("k", "posted", None, owner=None)
             await u.daemon.outbox_pass()
             assert "posted" in [s.text for s in u.client.sent]
         finally:
@@ -49,9 +49,10 @@ def test_rearm_after_a_latched_count_check_restores_observing_without_a_restart(
 def test_a_passing_check_before_the_subscription_is_acknowledged_does_not_observe(tmp_path: Path) -> None:
     u = Unit(tmp_path)
     u.daemon.observing = False
+    u.daemon.acked = False
 
     async def scenario() -> None:
-        assert await u.daemon.check_group()
+        assert not await u.daemon.check_group()
         assert not u.daemon.observing
     run(scenario())
 

@@ -4,6 +4,7 @@ real wn-agent, claude, systemctl, network or ~/.claude.
 """
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 from test_admind_r1 import Unit, run
@@ -22,11 +23,11 @@ def test_a_failed_supersession_notice_still_clears_the_old_anchor(
     hits: list[str] = []
 
     def enqueue(self: Store, key: str, text: str, reply_to: str | None, lane: int = 1,
-                thread_key: str | None = None) -> bool:
+                thread_key: str | None = None, **kwargs: Any) -> bool:
         if key.startswith("abandoned:") and not hits:
             hits.append(key)
             raise OSError("outbox write failed")
-        return real(self, key, text, reply_to, lane, thread_key)
+        return real(self, key, text, reply_to, lane, thread_key, **kwargs)
 
     async def scenario() -> None:
         a = await u.say("job A")
@@ -77,10 +78,10 @@ def test_a_persistent_abandonment_notice_failure_does_not_stop_a_dead_agent_rela
     real = Store.enqueue
 
     def enqueue(self: Store, key: str, text: str, reply_to: str | None, lane: int = 1,
-                thread_key: str | None = None) -> bool:
+                thread_key: str | None = None, **kwargs: Any) -> bool:
         if key.startswith("abandoned:"):
             raise OSError("outbox write failed")
-        return real(self, key, text, reply_to, lane, thread_key)
+        return real(self, key, text, reply_to, lane, thread_key, **kwargs)
 
     async def scenario() -> None:
         await u.say("job A")

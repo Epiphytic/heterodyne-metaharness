@@ -96,7 +96,12 @@ class AskCancel(msgspec.Struct, frozen=True, tag="cancel", forbid_unknown_fields
     ask_id: str
 
 
-AskRequest = AskPost | AskGet | AskList | AskCancel | NoticePost
+class AskBinding(msgspec.Struct, frozen=True, tag="ask.binding.v1", forbid_unknown_fields=True):
+    """Source-owned read-back; no caller paths, policy or answer claims."""
+    ask_id: str
+
+
+AskRequest = AskPost | AskGet | AskList | AskCancel | AskBinding | NoticePost
 
 
 class AnswerView(msgspec.Struct, frozen=True):
@@ -164,7 +169,7 @@ def new_id(taken: Callable[[str], bool]) -> str:
 
 def check(req: AskRequest) -> str | None:
     """Why a request is refused before it is logged or handled (R4, R16, R19); None if it may go on."""
-    if isinstance(req, AskGet | AskCancel):
+    if isinstance(req, AskGet | AskCancel | AskBinding):
         return None if normalise_id(req.ask_id) is not None else (
             f"an ask ID is {ID_LENGTH} characters from {ID_ALPHABET}")
     if isinstance(req, AskList):
@@ -250,7 +255,8 @@ def describe(req: AskRequest) -> dict[str, object]:
         return {"op": "notice", **notices_describe(req)}
     if isinstance(req, AskList):
         return {"op": "list"}
-    return {"op": "get" if isinstance(req, AskGet) else "cancel", "ask_id": normalise_id(req.ask_id)}
+    op = "get" if isinstance(req, AskGet) else "ask.binding.v1" if isinstance(req, AskBinding) else "cancel"
+    return {"op": op, "ask_id": normalise_id(req.ask_id)}
 
 
 # --- rendering ---------------------------------------------------------------------------------
@@ -437,6 +443,17 @@ def full_chunks(row: AskRow, chunk_chars: int) -> list[str]:
     chunk.TooWide if the chunk size has shrunk since it was posted so that a link no longer fits: a link is
     never cut (K23), so the caller refuses visibly."""
     return _packed(row, redact(context(row)).rstrip("\n"), chunk_chars)
+
+
+def checked_card_chunks(row: AskRow, chunk_chars: int, *, repeat: bool = False
+                        ) -> tuple[list[str] | str, bool]:
+    """Evidence-only renderer: reject redaction on both whole text and packed parts, as approvals do.
+
+    Ordinary posting still uses the established redacting renderer. A binding must instead distinguish
+    faithful reproduction from output that was changed by redaction, including only after a split.
+    """
+    shown, truncated = (context(row).rstrip("\n"), False) if repeat else _shown(row)
+    return _checked(_tagged(row, shown, chunk.usable(chunk_chars)), chunk_chars), truncated
 
 
 # --- answers on question cards (K17q, K18q, K19) -------------------------------------------------

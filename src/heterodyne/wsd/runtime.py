@@ -265,6 +265,10 @@ class AgentRuntime(Protocol):
         ResolveFailed, or RuntimeUnavailable when what runs can't be listed."""
         ...
 
+    def settle_sandbox(self, ws: str, sid: str, generation: int) -> str:
+        """Accept late-create risk after linger and confirmed absence; return observation evidence."""
+        ...
+
     def finish_resolution(self, ws: str, sid: str, generation: int) -> None:
         """Remove a finished resolve's intent, once its journal entry is committed: the hold ends here."""
         ...
@@ -303,6 +307,9 @@ class NoRuntime:
     def resolve_unlanded(self, ws: str, sid: str, generation: int, action: Action,
                          tip: str | None) -> Resolution:
         raise ResolveRefused("no runtime holds sessions")
+
+    def settle_sandbox(self, ws: str, sid: str, generation: int) -> str:
+        raise ResolveRefused("no runtime holds create evidence")
 
     def finish_resolution(self, ws: str, sid: str, generation: int) -> None:
         return None

@@ -77,7 +77,9 @@ def test_guard_names_the_operator() -> None:
 def test_member_count_against_expected() -> None:
     assert guard.judge_member_count(3, 3).action == "process"
     v = guard.judge_member_count(2, 3)
-    assert v.action == "latch" and v.reason == "group has 2 members, expected 3"
+    assert v.action == "process" and v.reason == "group has 2 observed members"
+    assert guard.judge_member_count(1, 3).action == "process"
+    assert guard.judge_member_count(0, 3).action == "drop"
 
 
 # --- the daemon -----------------------------------------------------------------------------------

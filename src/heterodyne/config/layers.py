@@ -1,5 +1,6 @@
 """Read and merge config layers with provenance, enforcing the §15 layer rules."""
 
+import re
 import tomllib
 from collections.abc import Mapping
 from importlib import resources
@@ -17,6 +18,10 @@ HOST_ONLY_KEYS = frozenset({"accounts", "usage"})   # §4.4 D1: workstreams choo
 ENV_KEYS = {"HETERODYNE_CONFIG_DIR": ("paths", "config_dir"),
             "HETERODYNE_STATE_DIR": ("paths", "state_dir"),
             "HETERODYNE_LOG_LEVEL": ("debug", "log_level")}
+
+# Generated unit identity markers are validated metadata, never config overrides.
+ENV_METADATA = {"HETERODYNE_RELEASE": r"[0-9a-f]{40}|[0-9a-f]{64}",
+                "HETERODYNE_UNIT_REV": r"[0-9a-f]{12}"}
 
 
 def read_defaults() -> dict[str, Any]:
@@ -51,6 +56,10 @@ def env_layer(env: Mapping[str, str]) -> tuple[dict[str, Any], dict[str, str]]:
     labels: dict[str, str] = {}
     for var, value in env.items():
         if not var.startswith("HETERODYNE_"):
+            continue
+        if var in ENV_METADATA:
+            if not re.fullmatch(ENV_METADATA[var], value):
+                raise ConfigError(f"{show(var, False)}: invalid deployment metadata format")
             continue
         if var not in ENV_KEYS:
             raise ConfigError(f"{show(var, False)}: environment overrides are limited to {sorted(ENV_KEYS)}")
