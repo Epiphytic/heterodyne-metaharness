@@ -1003,6 +1003,8 @@ class Store:
             row = self.ask(a.ask_id)
             if row is None or row.status != "deciding" or self.current_attempt(a.ask_id) != a:
                 return False
+            if row.outcome is not None and row.outcome.startswith("maintenance-held:"):
+                return False
             # Cleanup is a writer operation, never an inspection side effect.
             self.db.execute("DELETE FROM ask_maintenance WHERE NOT EXISTS "
                             "(SELECT 1 FROM asks a WHERE a.ask_id = ask_maintenance.ask_id "
@@ -1056,6 +1058,8 @@ class Store:
             if row is None or row.status != "deciding" or self.current_attempt(a.ask_id) != a:
                 return False
             if maintenance_retry:
+                if row.outcome != "pending-maintenance":
+                    return False
                 cur = self.db.execute("DELETE FROM ask_maintenance WHERE ask_id = ? AND message_id = ?",
                                       (a.ask_id, a.message_id))
                 if cur.rowcount != 1:

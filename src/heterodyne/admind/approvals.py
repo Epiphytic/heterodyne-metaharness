@@ -214,7 +214,7 @@ class ApproveBead:
 
     async def decide(self, a: Attempt, bead: str,
                      on_launch: Callable[[], None] | None = None) -> tuple[int, str] | MaintenanceHold:
-        """Run the decision: (exit status, the first stderr line, redacted, at most MAX_LINE characters)."""
+        """Return a closed pre-effect MaintenanceHold, or (exit status, redacted first stderr line)."""
         code, out, err = await self._run(decision_argv(self.binary, a, bead), DECIDE_SECONDS, MAX_OUTPUT,
                                        on_launch)
         if maintenance_hold(code, out):

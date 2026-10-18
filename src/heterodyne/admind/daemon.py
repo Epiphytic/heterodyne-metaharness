@@ -530,8 +530,10 @@ class Admind:
         if not self.latched():
             with self.store.transaction():
                 self.store.set("latched", why)
-                # A latch is final for already-retained consent even if rearm happens before the
-                # next retry tick. Do not manufacture any HOLD proof for ordinary in-flight children.
+                self.store.set("maintenance_latch_token", uuid.uuid4().hex)
+            # Commit the safety latch before best-effort overlay suspension. Failure below must
+            # never roll back the latch; no await allows rearm between these synchronous writes.
+            with self.store.transaction():
                 for ask_id, mid, due in self.store.maintenance_pending():
                     attempt = self.store.current_attempt(ask_id)
                     if attempt is not None and attempt.message_id == mid:
@@ -1306,6 +1308,9 @@ class Admind:
                 a, self.wallclock() + MAINTENANCE_RETRY_SECONDS, reason=reason)
             if not deferred:
                 self.conflict(a, "deciding")
+                row = self.store.ask(a.ask_id)
+                self.finish(a.message_id, "done",
+                            CONFLICT.format(ask_id=a.ask_id, bead=row.bead if row else ""), "ask")
                 return
             decision = "denial" if a.action == "deny" else "approval"
             next_step = ("Automatic retry is suspended. Authenticated recovery is not available in this "
@@ -1322,7 +1327,8 @@ class Admind:
     async def run_attempt(self, a: Attempt, row: AskRow, *, maintenance_retry: bool = False,
                           prechecked: Readout | None = None) -> None:
         """Steps 4-8 of a persisted attempt. Until the decision child exists, every failure closes the
-        attempt as `refused` (r5-1); once it exists, every exit goes through the reap and the read-back."""
+        attempt as `refused` (r5-1). The child is reaped; ordinary results use native readback,
+        while a closed pre-effect HOLD retains the attempt without native readback."""
         assert self.approve_bead is not None and row.bead is not None      # noqa: S101 - checked by decide
         ab, bead, mid = self.approve_bead, row.bead, a.message_id
         launched = False
@@ -1342,6 +1348,7 @@ class Admind:
         stop: tuple[str, str, str] | None = None
         r: Readout | Busy | None = None
         proven_hold = False
+        latch_token = self.store.get("maintenance_latch_token")
         try:
             self.audit.write("ask", action="deciding", message_id=mid, ask_id=a.ask_id, bead=bead,
                              decision=a.action, operator=a.operator)
@@ -1384,7 +1391,8 @@ class Admind:
                 self.conflict(a, "deciding")
                 self.finish(mid, "done", CONFLICT.format(ask_id=a.ask_id, bead=bead), "ask")
                 return
-            self.hold_maintenance(a, "latched" if self.latched() else "maintenance")
+            revoked = self.latched() or self.store.get("maintenance_latch_token") != latch_token
+            self.hold_maintenance(a, "latched" if revoked else "maintenance")
             return
         if unauthorised:
             if maintenance_retry:
@@ -1661,7 +1669,8 @@ class Admind:
         if a is None or a.message_id != mid or row is None or row.bead is None or row.status != "deciding":
             return
         # Backoff persists even on failed policy/readback, including across daemon restarts.
-        self.store.defer_maintenance(a, self.wallclock() + MAINTENANCE_RETRY_SECONDS)
+        if not self.store.defer_maintenance(a, self.wallclock() + MAINTENANCE_RETRY_SECONDS):
+            return
         reason = self.maintenance_authority_reason(a)
         if reason is not None:
             self.hold_maintenance(a, reason)
@@ -2105,6 +2114,13 @@ class Admind:
                                    "Nothing changed.")
             previous = self.store.get("latched")
             with self.store.transaction():
+                # A previous suspension write may have failed after the safety latch committed.
+                # Rearm must finish that fence before clearing the latch; failure keeps it set.
+                if previous is not None:
+                    for ask_id, mid, due in self.store.maintenance_pending():
+                        attempt = self.store.current_attempt(ask_id)
+                        if attempt is not None and attempt.message_id == mid:
+                            self.store.defer_maintenance(attempt, due, reason="latched")
                 self.store.set("expected_members", str(count))
                 self.store.delete("expected_members_provisional")
                 self.store.set("group_operators", json.dumps(sorted(confirmed)))
