@@ -6,6 +6,7 @@ Never imports an old driver or changes the actual source worktree.
 
 import argparse
 import datetime as dt
+import errno
 import hashlib
 import json
 import math
@@ -369,8 +370,10 @@ def group_has_writers(group):
             continue
         try:
             fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
-        except FileNotFoundError:
-            continue
+        except OSError as error:
+            if error.errno in (errno.ENOENT, errno.ESRCH):
+                continue
+            raise ValueError("Cannot inspect child process group") from error
         if int(fields[2]) == group and fields[0] not in ("Z", "X"):
             return True
     return False
@@ -384,6 +387,8 @@ def run(argv, env, cwd, folder, name, timeout, commands):
         "timeout_seconds": timeout,
         "started_at": stamp(),
         "process_group_quiescent": False,
+        "quiescence_scope": "original-PGID-only; no containment of setsid/tmux-daemon escape",
+        "global_descendant_quiescence_proven": False,
     }
     commands.append(record)
     with (folder / name).open("xb") as log:
@@ -413,6 +418,26 @@ def run(argv, env, cwd, folder, name, timeout, commands):
         record["process_group_quiescent"] = True
     record.update(actual_exit_or_signal=status, timeout=timed_out, elapsed_seconds=time.monotonic() - t)
     return record
+
+
+def revalidate_candidates(source, candidates, file_hashes):
+    """Re-enumerate the candidate set as well as every whole source-file identity."""
+    recovery.require(
+        recovery.source_candidates(source) == candidates,
+        "Inventory candidate set changed after planning",
+    )
+    recovery.require(
+        {name: sha(recovery.source_bytes(source / name)) for name in file_hashes} == file_hashes,
+        "Inventory candidate source files changed after planning",
+    )
+
+
+def inspect_source(active):
+    """Replace the one assignment template before inserting any literal path bytes."""
+    return INSPECT.replace(
+        "root=pathlib.Path(ROOT); mods=MODS",
+        f"root=pathlib.Path({str(active)!r}); mods={ORIGINS!r}",
+    )
 
 
 def collection_check(nodes, count, m, broad):
@@ -632,7 +657,7 @@ def main():
     planned_layout["root"] = {"path": "/" + "x" * 15}
     candidates = recovery.source_candidates(w)
     candidate_files = {reference.rsplit(":", 1)[0] for reference in candidates}
-    candidate_file_hashes = {name: sha((w / name).read_bytes()) for name in sorted(candidate_files)}
+    candidate_file_hashes = {name: sha(recovery.source_bytes(w / name)) for name in sorted(candidate_files)}
     recovery.validate_inventory(
         w, planned_layout, source_inventory, raw=inventory_data, measured=True, candidates=candidates
     )
@@ -726,10 +751,7 @@ def main():
         layout = recovery.create_layout()
         result["private_runtime_layout"] = layout
         result["environment_filesystem_preflight"] = recovery.filesystem_preflight(layout)
-        recovery.require(
-            {name: sha((w / name).read_bytes()) for name in candidate_file_hashes} == candidate_file_hashes,
-            "Inventory candidate source files changed after planning",
-        )
+        revalidate_candidates(w, candidates, candidate_file_hashes)
         result["inventory_source_file_sha256"] = candidate_file_hashes
         result["socket_path_budget_inventory"] = recovery.validate_inventory(
             w, layout, source_inventory, raw=inventory_data, measured=True, candidates=candidates
@@ -831,7 +853,7 @@ def main():
                 {p: sha((active / p).read_bytes()) for p in ORIGINS.values()} == active_hashes,
                 "Runner precondition failed at original line 357",
             )
-            code = INSPECT.replace("ROOT", repr(str(active))).replace("MODS", repr(ORIGINS))
+            code = inspect_source(active)
             r = run(
                 [str(a.python), "-c", code],
                 env,

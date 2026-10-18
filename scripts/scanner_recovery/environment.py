@@ -227,26 +227,48 @@ def walk_error(error: OSError) -> None:
     raise error
 
 
-def source_candidates(source: Path) -> dict[str, str]:
-    """Candidates are prompts for full manual reachability review, never a completeness proof.
+SOCKET_TOKENS = (
+    b".sock",
+    b"af_unix",
+    b"short_dir",
+    b".bind(",
+    b".connect(",
+    b".connect_ex(",
+    b".sendto(",
+    b"socketpair",
+    b"unix_connection",
+    b"unix_server",
+    b"socket_path",
+    b"socketpath",
+    b"listen_url",
+    b"listenstream=",
+    b"listener(",
+    b"manager(",
+    b"xdg_runtime_dir",
+)
+MAXIMUM_SOURCE_BYTES = 8 * 1024 * 1024
 
-    Include all shell/config lines and indirect Python endpoint calls anywhere in the tree,
-    including scripts reached from tests. Refuse links rather than inspecting external targets.
-    """
+
+def source_bytes(path: Path) -> bytes:
+    """Read one bounded regular source file, without following links or opening FIFOs."""
+    before = path.lstat()
+    require(stat.S_ISREG(before.st_mode), "Source inventory requires regular files")
+    require(before.st_size <= MAXIMUM_SOURCE_BYTES, "Source inventory byte limit exceeded")
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as stream:
+        opened = os.fstat(stream.fileno())
+        require(
+            stat.S_ISREG(opened.st_mode) and (opened.st_dev, opened.st_ino) == (before.st_dev, before.st_ino),
+            "Source inventory regular file changed",
+        )
+        data = stream.read(MAXIMUM_SOURCE_BYTES + 1)
+        require(len(data) <= MAXIMUM_SOURCE_BYTES, "Source inventory byte limit exceeded")
+        return data
+
+
+def source_candidates(source: Path) -> dict[str, str]:
+    """Bounded review prompts, never a proof of complete offline reachability."""
     candidates = {}
-    tokens = (
-        b".sock",
-        b"AF_UNIX",
-        b"tmux",
-        b"short_dir",
-        b".bind(",
-        b".connect(",
-        b"unix_connection",
-        b"unix_server",
-        b"socket_path",
-        b"socketpath",
-        b"listen_url",
-    )
     for parent, dirs, files in os.walk(source, followlinks=False, onerror=walk_error):
         dirs[:] = sorted(
             name
@@ -261,23 +283,31 @@ def source_candidates(source: Path) -> dict[str, str]:
                 ".py",
                 ".sh",
                 ".bash",
+                ".zsh",
                 ".toml",
                 ".yaml",
                 ".yml",
                 ".ini",
                 ".cfg",
+                ".conf",
+                ".env",
                 ".service",
                 ".socket",
-            )
-            # Extensionless launchers must not evade shell/config inventory.
+                ".timer",
+                ".path",
+                ".mount",
+                ".target",
+            ) or name in (".env", "Makefile", "Dockerfile", "justfile", "Procfile")
             if not selected and path.suffix:
                 continue
-            require(not path.is_symlink(), "Source inventory refuses symlinked files")
-            data = path.read_bytes()
+            data = source_bytes(path)
             if not selected and not data.startswith(b"#!"):
                 continue
             for number, line in enumerate(data.splitlines(), 1):
-                if line.strip() and (path.suffix != ".py" or any(token in line for token in tokens)):
+                lower = line.lower()
+                if line.strip() and (
+                    path.suffix != ".py" or b"tmux" in lower or any(token in lower for token in SOCKET_TOKENS)
+                ):
                     candidates[f"{path.relative_to(source)}:{number}"] = digest(line)
     return candidates
 
@@ -300,6 +330,8 @@ def validate_inventory(
     if not isinstance(rows, list) or not rows:
         raise ValueError("Source-backed derivations required")
     covered: set[str] = set()
+    obligations: dict[str, set[str]] = {"socket": set(), "tmux": set()}
+    classified: dict[str, set[str]] = {"socket": set(), "tmux": set()}
     measured_paths = []
     source_lines: dict[str, list[bytes]] = {}
     basetemp = Path(layout["p"]["path"])
@@ -311,37 +343,22 @@ def validate_inventory(
         require(
             all(isinstance(ref, str) and ref in candidates for ref in references), "Unknown source reference"
         )
-        lines = []
         for reference in references:
             filename, number = reference.rsplit(":", 1)
             if filename not in source_lines:
-                source_lines[filename] = (source / filename).read_bytes().splitlines()
+                source_lines[filename] = source_bytes(source / filename).splitlines()
             line = source_lines[filename][int(number) - 1]
             require(digest(line) == candidates[reference], "Inventory reference bytes changed")
-            lines.append(line)
+            lower = line.lower()
+            if b"tmux" in lower:
+                obligations["tmux"].add(reference)
+            if any(token in lower for token in SOCKET_TOKENS):
+                obligations["socket"].add(reference)
         covered.update(references)
         kind = row.get("kind")
         require(kind in ("socket", "tmux", "non-endpoint"), "Unknown inventory derivation kind")
-        if any(b"tmux" in line.lower() for line in lines):
-            require(kind == "tmux", "tmux endpoint requires isolation classification")
-        elif any(
-            any(
-                token in line.lower()
-                for token in (
-                    b".sock",
-                    b"af_unix",
-                    b".bind(",
-                    b".connect(",
-                    b"unix_connection",
-                    b"unix_server",
-                    b"socket_path",
-                    b"socketpath",
-                    b"listenstream=",
-                )
-            )
-            for line in lines
-        ):
-            require(kind == "socket", "socket endpoint requires bounded classification")
+        if kind in classified:
+            classified[kind].update(references)
         if kind == "socket":
             require(row.get("base") in ("h", "p", "t", "r", "root"), "Unbound socket base")
             component = row.get("case_component_bytes")
@@ -368,6 +385,11 @@ def validate_inventory(
                 and all(ref in candidates for ref in row["guard_references"]),
                 "Missing tmux guard source",
             )
+    for endpoint_kind in ("socket", "tmux"):
+        require(
+            obligations[endpoint_kind] <= classified[endpoint_kind],
+            f"{endpoint_kind} endpoint requires independent classification",
+        )
     require(covered == set(candidates), "Unreviewed socket/tmux inventory candidates")
     require(inventory.get("reviewed_by_controller") is True, "Controller inventory review required")
     return {
@@ -412,21 +434,44 @@ def measured_socket_path(row: dict[str, Any], base: Path) -> dict[str, Any]:
 
 
 def directory_entries(root_fd: int, parent: str = "."):
-    """Borrow root_fd; traverse depth-first with one owned descriptor per level."""
-    names = sorted(os.listdir(root_fd))  # noqa: PTH208 - descriptor-relative; Path would reopen by name
-    yield parent, names, root_fd
-    for name in names:
-        info = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
-        if stat.S_ISDIR(info.st_mode):
-            child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+    """Borrow root_fd; iterative DFS holds at most65 directory descriptors."""
+    stack: list[tuple[int, str, list[str], int]] = []
+    total = 0
+    try:
+        names = sorted(os.listdir(root_fd))  # noqa: PTH208 - descriptor-relative
+        stack.append((root_fd, parent, names, 0))
+        yield parent, names, root_fd
+        while stack:
+            descriptor, relative, names, index = stack[-1]
+            if index == len(names):
+                stack.pop()
+                if stack:
+                    os.close(descriptor)
+                continue
+            stack[-1] = descriptor, relative, names, index + 1
+            total += 1
+            require(total <= 65536, "Scratch traversal exceeds entry limit")
+            name = names[index]
+            info = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+            if not stat.S_ISDIR(info.st_mode):
+                continue
+            require(len(stack) <= 64, "Scratch traversal exceeds depth limit")
+            child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
             try:
                 opened = os.fstat(child)
                 require(
                     (opened.st_dev, opened.st_ino) == (info.st_dev, info.st_ino), "Scratch directory changed"
                 )
-                yield from directory_entries(child, str(Path(parent) / name))
-            finally:
+                children = sorted(os.listdir(child))  # noqa: PTH208 - descriptor-relative
+            except BaseException:
                 os.close(child)
+                raise
+            child_relative = str(Path(relative) / name)
+            stack.append((child, child_relative, children, 0))
+            yield child_relative, children, child
+    finally:
+        for descriptor, _, _, _ in reversed(stack[1:]):
+            os.close(descriptor)
 
 
 def archive_scratch(

@@ -80,8 +80,9 @@ opens a symlink target, and only a complete archive gets an inventory digest.
 Second-review repairs retain the original 51+6 fields, 14 environment keys,
 plugins, product, dependencies and test oracles. Source candidates now include
 systemd `.service`/`.socket` units and extensionless shebang scripts. The parsed
-supplement and raw inventory bytes each have one identity; execution reuses the
-candidate map and rechecks complete candidate-file hashes before any child.
+supplement and raw inventory bytes each have one identity; execution re-enumerates the candidate map and rechecks complete candidate-file
+hashes before any child. The previous single-enumeration optimization was
+replaced because it could miss newly added files.
 
 Every socket derivation used by the runner also supplies
 `worst_case_component` and `worst_case_suffix`: actual UTF-8 path components
@@ -110,3 +111,27 @@ isolation remain required inventory obligations. Unconfirmed group quiescence
 retains scratch in place and refuses to copy it. Construction exceptions after
 mkdtemp carry their partial layout into the HOLD result; available scratch is
 archived independently of an absent runtime child. No failed attempt retries.
+
+Third-review critical repairs enforce socket and tmux obligations independently
+for each referenced line. Mixed rows cannot hide a socket bound behind tmux
+isolation; a line containing both needs both row kinds. Candidate discovery and
+socket obligations use one casefolded token set, including short_dir, listen_url,
+connect_ex, sendto, socketpair, Listener/Manager and XDG_RUNTIME_DIR. Additional
+unit/drop-in/shell suffixes and known extensionless build/process files are
+review prompts. Candidate equality still does not prove complete reachability.
+
+Source reads require nofollow regular descriptors, at most8MiB per file, with
+bounded reads; FIFOs, links and oversized selected sources HOLD planning.
+Runtime/archive traversal is iterative with at most64 child-directory levels
+and65536entries; excess depth HOLDs with scratch retained, rather than losing
+result finalization through recursive stack exhaustion. A full archive digest
+is absent when preservation is incomplete. Unknown /proc reads HOLD; ENOENT and
+ESRCH are vanished processes. Inspection literals are inserted in one pass.
+
+The compatible process_group_quiescent field refers only to the original PGID;
+quiescence_scope states this explicitly and global_descendant_quiescence_proven
+is always false. Descendants that escape via setsid or tmux daemonization are
+not contained by this helper. Their real fixture cleanup/isolation remains an
+unwaived stage-admission obligation, together with the complete source-backed
+constructor inventory and transient-socket measurement limits above. No scanner
+stage has been run or admitted by these repairs.
