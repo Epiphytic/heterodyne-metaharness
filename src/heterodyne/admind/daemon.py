@@ -528,7 +528,14 @@ class Admind:
     def latch(self, why: str) -> None:
         """`why` is built by admind from numbers and allowlisted change names, never from peer text."""
         if not self.latched():
-            self.store.set("latched", why)
+            with self.store.transaction():
+                self.store.set("latched", why)
+                # A latch is final for already-retained consent even if rearm happens before the
+                # next retry tick. Do not manufacture any HOLD proof for ordinary in-flight children.
+                for ask_id, mid, due in self.store.maintenance_pending():
+                    attempt = self.store.current_attempt(ask_id)
+                    if attempt is not None and attempt.message_id == mid:
+                        self.store.defer_maintenance(attempt, due, reason="latched")
             self.audit.write("guard", action="latch", reason=why)
 
     def may_post(self) -> bool:
@@ -1350,6 +1357,7 @@ class Admind:
                 if not unauthorised:
                     if not self.store.issue_decision(a, maintenance_retry=maintenance_retry):
                         self.conflict(a, "deciding")
+                        self.finish(mid, "done", CONFLICT.format(ask_id=a.ask_id, bead=bead), "ask")
                         return
                     result = await ab.decide(a, bead, on_launch)        # step 7
                     if isinstance(result, approvals.MaintenanceHold):
@@ -1357,7 +1365,9 @@ class Admind:
                     else:
                         code, line = result
         except asyncio.CancelledError:
-            raise       # left `deciding`; the startup reconcile settles it (R26)
+            # Ordinary decisions retain R26 readback settlement. An interrupted maintenance retry
+            # keeps its prelaunch uncertainty marker and never regains automatic replay entitlement.
+            raise
         except Exception as exc:  # noqa: BLE001 - fixed words; nothing launched means nothing was written
             if not launched:
                 # approve-bead's own failures carry their word (a spawn OSError is "unavailable"); the
@@ -1366,8 +1376,15 @@ class Admind:
                         else "unavailable" if isinstance(exc, OSError) and audited else "error")
                 stop = ("open", PREFLIGHT_FAILED.format(bead=bead, word=word), word)
         if proven_hold:
-            # Outside the ambiguous-child catch: publication failure must retain the issuing marker.
-            self.hold_maintenance(a, "maintenance")
+            # Outside the ambiguous-child catch. Once this small commit succeeds, overlay/notice
+            # publication failure cannot turn a proven HOLD into an ordinary restart settlement.
+            # A process/storage failure before this commit is still ordinary R26 unknown issuance;
+            # it grants no automatic retry and is not manufactured proof for recovery/retirement.
+            if not self.store.mark_maintenance_issuing(a):
+                self.conflict(a, "deciding")
+                self.finish(mid, "done", CONFLICT.format(ask_id=a.ask_id, bead=bead), "ask")
+                return
+            self.hold_maintenance(a, "latched" if self.latched() else "maintenance")
             return
         if unauthorised:
             if maintenance_retry:

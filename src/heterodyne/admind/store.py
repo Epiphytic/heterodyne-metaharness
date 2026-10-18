@@ -150,7 +150,7 @@ REACTION_PREFIX = "r:"      # a reaction's inbound key is `r:<event id>` (relay 
 MAINTENANCE_RETRY_SECONDS = 30.0
 MAINTENANCE_CAPACITY = 128
 MAINTENANCE_SUSPENDED = frozenset({"authority", "native-conflict", "changed-card", "not-open",
-                                   "not-approval", "not-approver", "gate"})
+                                   "not-approval", "not-approver", "gate", "latched"})
 
 ASK_ACTIVE = ("open", "answered", "deciding", "uncertain")
 # The outbox keys that make a delivered message a card (R7): a card chunk, a chunk of an ask's !details, or
@@ -1060,12 +1060,21 @@ class Store:
                                       (a.ask_id, a.message_id))
                 if cur.rowcount != 1:
                     return False
-            self.db.execute("UPDATE asks SET outcome = 'maintenance-issuing' WHERE ask_id = ?", (a.ask_id,))
+            outcome = "maintenance-issuing" if maintenance_retry else "decision-issuing"
+            self.db.execute("UPDATE asks SET outcome = ?, updated_at = ? WHERE ask_id = ?",
+                            (outcome, now(), a.ask_id))
             return True
 
-    def issue_maintenance_retry(self, a: Attempt) -> bool:
-        """Compatibility seam: consuming a retry also leaves durable uncertainty before issuance."""
-        return self.issue_decision(a, maintenance_retry=True)
+    @_locked
+    def mark_maintenance_issuing(self, a: Attempt) -> bool:
+        """After a proven HOLD, retain that distinction before publishing its overlay and notice."""
+        with self.transaction():
+            row = self.ask(a.ask_id)
+            if row is None or row.status != "deciding" or self.current_attempt(a.ask_id) != a:
+                return False
+            self.db.execute("UPDATE asks SET outcome = 'maintenance-issuing', updated_at = ? "
+                            "WHERE ask_id = ?", (now(), a.ask_id))
+            return True
 
     @_locked
     def recovery_snapshot(self) -> list[tuple[str, str, str]]:

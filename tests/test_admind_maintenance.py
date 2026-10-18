@@ -175,9 +175,9 @@ def test_prelaunch_crash_consumes_only_retry_entitlement(tmp_path: Path) -> None
         u, port = setup(tmp_path)
         try:
             await u.daemon.run_attempt(APPROVE, card_row())
-            assert not u.store.issue_maintenance_retry(replace(APPROVE, message_id="f" * 64))
-            assert u.store.issue_maintenance_retry(APPROVE)
-            assert not u.store.issue_maintenance_retry(APPROVE)
+            assert not u.store.issue_decision(replace(APPROVE, message_id="f" * 64), maintenance_retry=True)
+            assert u.store.issue_decision(APPROVE, maintenance_retry=True)
+            assert not u.store.issue_decision(APPROVE, maintenance_retry=True)
             u.build()
             u.daemon.approve_bead = port
             await u.daemon.reconcile_asks(u.store.recovery_snapshot())
