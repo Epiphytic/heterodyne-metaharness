@@ -194,7 +194,9 @@ def test_decision_argv(tmp_path: Path) -> None:
         assert btq_log(tmp_path)[-1] == [BEAD, "--as=op", "--yes", f"--expect-digest={D}", "--via=marmot",
                                          f"--via-ref={DENY.ref}", "--deny", "--note=too broad"]
         undecide(tmp_path)
-        code, line = await ab.decide(Attempt("k7m2", MID, "approve", "--json", APPROVE.ref, D, None), BEAD)
+        result = await ab.decide(Attempt("k7m2", MID, "approve", "--json", APPROVE.ref, D, None), BEAD)
+        assert isinstance(result, tuple)
+        code, line = result
         assert code == 1 and line.startswith("Approver must be one of")        # one argument, not an option
     asyncio.run(scenario())
 
@@ -204,10 +206,14 @@ def test_decide_quotes_one_redacted_line(tmp_path: Path) -> None:
         ab = fake(tmp_path, decide="fail")
         assert await ab.decide(APPROVE, BEAD) == (1, "refused: something is wrong; nothing written.")
         edit(tmp_path, approvers=[TOKEN + "x" * 400])
-        code, line = await ab.decide(APPROVE, BEAD)
+        result = await ab.decide(APPROVE, BEAD)
+        assert isinstance(result, tuple)
+        code, line = result
         assert code == 1 and TOKEN not in line and "<redacted GitHub token>" in line
         edit(tmp_path, approvers=["y" * 400])
-        code, line = await ab.decide(APPROVE, BEAD)
+        result = await ab.decide(APPROVE, BEAD)
+        assert isinstance(result, tuple)
+        code, line = result
         assert code == 1 and len(line) == approvals.MAX_LINE and line.startswith("Approver must be one of")
     asyncio.run(scenario())
 
