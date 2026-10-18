@@ -10,7 +10,6 @@
     "retirement": "aa860fe7b16cfbe452c7bae4ba18cf285c177a7c",
     "operational_recovery": "6f1c11043bb26395c18e03ed0b5a2c2d85f5eb85"
   },
-  "confirmed_native_approval": "btq-1yedv only6f target scope; no fabricated aa860 approval",
   "proposed_children": [
     {
       "name": "product maintenance runtime preservation and proof coherence",
@@ -95,9 +94,9 @@
   ],
   "source_inputs": {
     "product_admind": {
-      "worktree": "repository-checkout:heterodyne-metaharness-v2-btq-btq-u9e24",
-      "commit": "5a34b9233bd7f5d960047091c08e86bb7e50c6a7",
-      "status": "",
+      "worktree": "repository-checkout:heterodyne-metaharness-v2-btq-btq-yvfun",
+      "commit": "b4b8c75da984126344716566300fb7cad19a35b5",
+      "status": "source blobs verified from immutable Git object; author design incorporation only",
       "files": {
         "src/heterodyne/admind/approvals.py": {
           "sha256": "f92fa647bc79f47fb4bfb47268cce97bb6e0866f8ed02efefc60ec3727126a16",
@@ -135,7 +134,8 @@
           "sha256": "05aa280c52c2f4236e65d995f6e9791c6ac03e8df88179fc687df7d63bfd511a",
           "blob": "798584744a37f90b3f2e426124f9ba0ff909cb20"
         }
-      }
+      },
+      "original_research_commit": "5a34b9233bd7f5d960047091c08e86bb7e50c6a7"
     },
     "queue": {
       "worktree": "repository-checkout:beads-task-queue-btq-btq-y2luw",
@@ -168,7 +168,7 @@
     "no review or human approval claimed",
     "all prior OPEN dispositions retained"
   ],
-  "design_sha256": "e944f5c1731fbd2df8c3eccd9def519a18a64ee6fc5b6fbd923acee3b70b3d2e",
+  "design_sha256": "4f45d90e00d6f1e27627eb665b353cdc6da3cea571f8407a51883875d6f149a2",
   "queue_review_inputs": [
     {
       "repo": "repository-checkout:beads-task-queue-btq-btq-y2luw",
@@ -184,5 +184,26 @@
     }
   ],
   "publication_note": "Local checkout locators are repository-checkout labels. Exact original local inputs retained externally; source and evidence hashes unchanged.",
-  "local_original_sha256": "3bec3f017680768fb6b73d4f1158c9e9339693506fdfd168bada2840ad68cb33"
+  "local_original_sha256": "3bec3f017680768fb6b73d4f1158c9e9339693506fdfd168bada2840ad68cb33",
+  "confirmed_native_approvals": {
+    "retirement": {
+      "id": "btq-m727i",
+      "revision": "aa860fe7b16cfbe452c7bae4ba18cf285c177a7c",
+      "gate_valid": true,
+      "via_ref": "marmot:id:6d6ee9b5359b"
+    },
+    "operational_recovery": {
+      "id": "btq-1yedv",
+      "revision": "6f1c11043bb26395c18e03ed0b5a2c2d85f5eb85",
+      "gate_valid": true,
+      "via_ref": "marmot:id:c3c28e60dd5f"
+    }
+  },
+  "sole_review": {
+    "revision": "74b3b0df5004d7ce19fe55ebab12b668d389a3f3",
+    "verdict": "REVISE",
+    "raw_sha256": "a9d22b4d62eaee3f30610516452f29849c9794a80e21904e786165d989fee2d6",
+    "incorporated_once": true,
+    "second_review": false
+  }
 }

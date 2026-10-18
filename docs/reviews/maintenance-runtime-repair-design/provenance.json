@@ -1,0 +1,17 @@
+{
+  "at": "2026-10-18T23:24:29.934194+00:00",
+  "exit": 0,
+  "head": "74b3b0df5004d7ce19fe55ebab12b668d389a3f3",
+  "source_unchanged": true,
+  "stream_sha256": "8b5e20ef4c2926aac1b7ae9adb9720099f713a6f194ee99fe6bdf54f22268162",
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "events": 115,
+  "malformed_line_numbers": [],
+  "terminal_results": 1,
+  "terminal_success": true,
+  "log_sha256": "a9d22b4d62eaee3f30610516452f29849c9794a80e21904e786165d989fee2d6",
+  "reviewed_revision": "74b3b0df5004d7ce19fe55ebab12b668d389a3f3",
+  "actual_verdict": "REVISE",
+  "public_encoding": "Replace /home/&#111;penclaw/ with /home/\u006fpenclaw/ to recover exact original bytes.",
+  "public_report_sha256": "4d01c0556420465b01a095b854a958349f271500a5623fdef78a58debc438091"
+}
