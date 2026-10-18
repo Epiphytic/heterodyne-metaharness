@@ -157,7 +157,8 @@ def _commit(root: Path) -> str:
         if package.resolve() != Path(heterodyne.__file__).resolve():
             return ""
         git("ls-files", "--error-unmatch", "src/heterodyne/__init__.py")
-        if git("status", "--porcelain", "--untracked-files=all", "--", "src/heterodyne"):
+        if git("status", "--porcelain", "--untracked-files=all", "--ignored", "--",
+               "src/heterodyne", ":(exclude,glob)src/heterodyne/**/__pycache__/*.pyc"):
             return ""
         return git("rev-parse", "--verify", "-q", "HEAD^{commit}")
     except (OSError, ValueError, subprocess.SubprocessError):

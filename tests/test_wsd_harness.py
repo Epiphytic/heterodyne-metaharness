@@ -1108,7 +1108,7 @@ def test_recover_runs_before_the_first_pickup(tmp_path: Path) -> None:
     assert order == ["recover"] and runtime.expires == []          # no pickup has started
     release.set()
     finish(up)
-    assert order[0] == "recover" and order.count("recover") == 1 and "advance" in order
+    assert order[0] == "recover" and order.count("recover") == 1 and "advance" not in order
     assert runtime.expires != []
 
 

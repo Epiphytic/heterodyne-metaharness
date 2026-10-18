@@ -1,8 +1,8 @@
 """wsd's harness ops (plan 4c Task 10): `wsctl harness`'s commands, the digest-pinned install approval (E13,
 E14) and the taint alerts (E17).
 
-`install` fetches and stages the recipe, journals a `staged` row and replies with the staging ID; a worker
-thread then composes the approval bead's text, refuses it if admind's scanner would flag any of it
+`install` fetches and stages the recipe and journals a `staged` row. Its accounted lane
+then composes the approval bead's text, refuses it if admind's scanner would flag any of it
 (`ASK_UNPOSTABLE`), creates the bead and posts it on admind's `ask.sock`. From then on wsd only reads the
 bead: `advance`, on a separate harness timer, runs `approve-bead <bead> --json` and applies E13's predicates
 (`approvals.verdict`). An approved row is published with the digest it was staged with; `recover`, at
@@ -189,11 +189,13 @@ class HarnessOps:
         self.alerts_lock = threading.Lock()
         self.code: tuple[str, int, dict[str, str]] | None = None   # the prune code, when, and what it lists
 
-    # --- install: fetch, stage, then the approval in a worker ---
+    # --- install: fetch, stage, then the approval on the accounted lane ---
 
     def install(self, adapter: str, version: str | None) -> str:
-        """Stage the recipe's install and return its staging ID; the approval is created and posted by a
-        worker thread. A refusal leaves no row."""
+        """Stage and attempt the approval inline on the accounted harness lane.
+
+        Preflight refusal leaves no row; approval failure is journaled for truthful readback.
+        """
         recipe = self.settings.recipes.get(adapter)
         impl = ADAPTERS.get(adapter)
         if recipe is None or impl is None:
@@ -233,24 +235,32 @@ class HarnessOps:
             self.journal.harness_insert(HarnessInstall(staged.id, adapter, staged.digest, manifest.version,
                                                        "", "", "", "staged", "", "", now, now))
             self.journal.harness_event(now, ACTOR_CTL, "install", adapter, install, "staged")
-        worker = threading.Thread(target=self._ask, name=f"harness-ask-{adapter}",
-                                  args=(staged.id, adapter, install, manifest, staged, got))
-        with self.worker_lock:
-            self.workers = [w for w in self.workers if w.is_alive()]
-            self.workers.append(worker)
-            worker.start()
+        # Already running on the daemon's accounted HARNESS lane. No secondary live-effect
+        # worker can escape lane drain or leave an unbounded join behind it.
+        self._ask(staged.id, adapter, install, manifest, staged, got)
         return staged.id
 
     def wait(self) -> None:
-        """Keep the admitting daemon lane running until its approval workers settle.
+        """Compatibility for callers: install now settles its approval attempt inline."""
 
-        The daemon's ordinary bounded drain/Undrained policy covers this wait; no executor or
-        daemon thread can silently outlive shutdown accounting.
-        """
-        with self.worker_lock:
-            workers = tuple(self.workers)
-        for worker in workers:
-            worker.join()
+    def approval_result(self, staging_id: str) -> None:
+        """Only a durably posted approval is acknowledged as posted to the operator."""
+        with self.lock:
+            row = self.journal.harness_install(staging_id)
+            if row is None or row.state != "posted":
+                raise HarnessRefused(ASK_UNPOSTABLE)
+
+    def resolve_selector(self, adapter: str, install: str) -> str:
+        """An opaque list selector resolves only one published install of this adapter."""
+        if not re.fullmatch(r"@[0-9a-f]{12}", install):
+            return install
+        with self.lock:
+            matches = [info.name for info in self.store.list()
+                       if info.adapter == adapter and info.state == "published"
+                       and sc.INSTALL.fullmatch(info.name) and info.name.endswith(install[1:])]
+            if len(matches) != 1:
+                raise HarnessRefused(NOT_PUBLISHED)
+            return matches[0]
 
     def _fetch(self, stack: ExitStack, impl: Adapter, recipe: Recipe, version: str) -> _Fetched:
         """Every artifact fetched and checked, open read-only (closed and removed when `stack` ends)."""
@@ -539,7 +549,7 @@ class HarnessOps:
             for row in approved:
                 try:
                     self._settle(row)
-                except HarnessRefused as exc:
+                except Exception as exc:  # noqa: BLE001 - isolate a row; retain OPEN protection
                     # Preserve OPEN protection without disabling the control socket or unrelated lanes.
                     log.error("install %s: recovery remains unresolved (%s)",
                               _label(row.adapter, row.digest), type(exc).__name__)
@@ -750,8 +760,7 @@ class HarnessOps:
     def taint_current(self, adapter: str, install: str) -> bool:
         if not ALERT_ADAPTER.fullmatch(adapter) or not sc.INSTALL.fullmatch(install):
             return False
-        with self.lock:
-            return verify.tainted(self.taint_dir, adapter, install)
+        return verify.tainted(self.taint_dir, adapter, install)
 
     def tainted(self, adapter: str, install: str) -> None:
         """An install was found tainted (E17): its one alert (until the taint is cleared), and the event."""
@@ -761,7 +770,7 @@ class HarnessOps:
         text = (f"The install {install_label(adapter, install)} is tainted: its tree is not the one its "
                 "manifest describes. Every launch on it refuses, and the beads running on it are held, until "
                 "it is restored and verified again, or removed.")
-        with self.lock, self.alerts_lock:
+        with self.alerts_lock:
             if not verify.tainted(self.taint_dir, adapter, install):
                 return
             at = self.clock()

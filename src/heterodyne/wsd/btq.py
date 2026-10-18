@@ -62,6 +62,9 @@ def load(checkout: Path) -> ModuleType:
             raise BtqUnavailable("btq could not be loaded")
         module = importlib.util.module_from_spec(spec)
         loader.exec_module(module)
+        # This is an isolated in-process module, not the shared queue checkout. Its
+        # supported resolver timeout must be finite for managed approval digest reads.
+        module.__dict__["GIT_TIMEOUT"] = 20.0
     except (OSError, SyntaxError, ImportError) as exc:
         raise BtqUnavailable(f"btq could not be loaded ({type(exc).__name__})") from None
     if AGENT not in getattr(module, "AGENTS", ()) or not hasattr(module, "Queue"):

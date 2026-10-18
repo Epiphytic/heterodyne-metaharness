@@ -64,6 +64,7 @@ from typing import Any
 
 from heterodyne.config import ConfigError
 from heterodyne.harness import selection
+from heterodyne.harness.resources.store_core import INSTALL as INSTALL_NAME
 from heterodyne.harness.selection import InstallPin
 from heterodyne.harness.store import StoreRefused
 from heterodyne.wsd.beads import BeadsAdapter, BeadsUnavailable
@@ -306,7 +307,6 @@ class Wsd:
         """Settle the managed installs (plan 4c T10: before any pickup, so no guard reads a pin meanwhile),
         recover every workstream, then run one startup pickup each (§3.3 step 6 comes after this)."""
         self.harness_recover()
-        self.harness_advance()
         for name in self.parts.schedulers:
             self.recover_one(name)
         return {name: self.pickup_one(name, Trigger(TriggerKind.STARTUP)) for name in self.parts.schedulers}
@@ -353,13 +353,17 @@ class Wsd:
             if h.action == "list":
                 listing = ops.list(h.adapter)
                 where = " (fallback store)" if listing.fallback else ""
-                safe = {install_label(v["adapter"], k): {**v, "version": "withheld (upstream text)"}
-                        for k, v in listing.installs.items()}
+                safe = {f"{install_label(v['adapter'], k)} (entry {i})": {
+                    **v, "version": "withheld (upstream text)",
+                    "selector": "@" + k[-12:] if INSTALL_NAME.fullmatch(k) else "unavailable"}
+                    for i, (k, v) in enumerate(listing.installs.items(), 1)}
                 return CtlReply("ok", f"{len(safe)} install(s){where}", safe)
             if h.action == "install":
                 staging_id = ops.install(adapter, h.version)
-                ops.wait()  # The lane owns the approval worker through its final durable receipt.
-                return CtlReply("ok", f"staged {staging_id}; its approval is being created and posted")
+                ops.approval_result(staging_id)
+                return CtlReply("ok", f"staged {staging_id}; its approval is posted")
+            if h.action in ("verify", "use", "remove"):
+                install = ops.resolve_selector(adapter, install)
             if h.action == "verify":
                 ops.verify(adapter, install)
                 return CtlReply("ok", f"{install_label(adapter, install)} verified")
@@ -727,7 +731,6 @@ class Wsd:
     async def _startup(self) -> None:
         """`startup`, on the lanes: every workstream's recovery, and only then the startup pickups."""
         await self._run(HARNESS_LANE, "recover", self.harness_recover)
-        await self._run(HARNESS_LANE, "advance", self.harness_advance)
         recoveries: list[Coroutine[Any, Any, object]] = [
             self._run(name, "recover", lambda n=name: self.recover_one(n)) for name in self.parts.schedulers]
         await asyncio.gather(*recoveries)
