@@ -611,7 +611,24 @@ class Service:
         """Exact existing readback only; absence grants no execution authority."""
         if not os.path.lexists(path):
             return False
-        return recovery.private_read(path) == raw
+        try:
+            retained = recovery.private_read(path)
+        except Invalid as exc:
+            if str(exc) != "unsafe-file":
+                raise
+            # The publisher alone may repair its own exact link-before-unlink
+            # alias. Return to that path; never accept an unsafe file as complete.
+            return False
+        if retained != raw:
+            return False
+        # An earlier publication may have linked successfully but failed its
+        # directory fsync. Byte equality alone is not a durability receipt.
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+        return True
 
     def capacity(self, updated: bytes, old_size: int = 0) -> bool:
         """Call only inside the existing Store transaction; payload reserve is separate."""

@@ -1,0 +1,24 @@
+{
+  "actual_ordinal": 3,
+  "effort": "medium",
+  "reviewer": "Claude Opus",
+  "author": "Codex",
+  "mode": "cross-model",
+  "review_phrase": "Are there any critical flaws with this, or is this good enough to implement as a PoC?",
+  "actual_result": {
+    "at": "2026-10-19T08:35:44.151559+00:00",
+    "exit": 0,
+    "head": "715d9a63f0b00bcc208ed12edb81284f8688fe44",
+    "source_unchanged": true,
+    "stream_sha256": "60a12342f3c4acfa20820819a37c6f26d3c29866a211a1f79e734bdf1da0d2b2",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "events": 45,
+    "malformed_line_numbers": [],
+    "terminal_results": 1,
+    "terminal_success": true,
+    "log_sha256": "31d802b9160d8264574be5ae06847db08c2488ab19545c914ee305107c27e4f6"
+  },
+  "public_report_sha256": "31d802b9160d8264574be5ae06847db08c2488ab19545c914ee305107c27e4f6",
+  "normalization": "operator-home prefix only; original private report retained",
+  "conclusion": "Not approval; actual R3 found publication alias/durability regression; next actual review needed after author repair"
+}
