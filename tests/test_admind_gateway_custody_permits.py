@@ -56,7 +56,7 @@ def certificate(issued_rig, previous):
         key,
         obj.chain_root,
         obj.boot_id,
-        str(int(prior.issued_boottime_ns) + 1),
+        str(int(prior.initiate_before_boottime_ns)),
     )
     raw = custody.canonical(proof)
     for suffix in ("nonconsumption", "superseded"):

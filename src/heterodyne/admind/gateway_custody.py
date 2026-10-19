@@ -9,6 +9,7 @@ import json
 import os
 import re
 import stat
+import threading
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -25,6 +26,7 @@ Invalid = recovery.Invalid
 MAX_REQUEST = 256 * 1024
 MAX_DESCRIPTOR = 16 * 1024
 MAX_BUNDLE = 32 * 1024
+MAX_TOTAL = 128 * 1024 * 1024
 DAY_NS = 86_400_000_000_000
 WINDOW_NS = 30_000_000_000
 UINT64 = 2**64 - 1
@@ -268,6 +270,7 @@ def renewal(
     if not (
         clock(obj.created_boottime_ns)
         <= clock(previous.issued_boottime_ns)
+        <= clock(previous.initiate_before_boottime_ns)
         <= clock(proof.observed_boottime_ns)
         <= boottime_ns
         < clock(obj.expires_boottime_ns)
@@ -410,6 +413,7 @@ class Status(TypedDict):
     bundle: dict[str, Any]
     notice_key: str
     state: str
+    notice_status: str
 
 
 class Service:
@@ -432,24 +436,37 @@ class Service:
         self.source = source
         self.authority = authority
         self.publication = publication
+        # Serializes only this service's writers; fsync must never hold Store.lock.
+        self.publication_lock = threading.RLock()
 
     def observation(self, key: str, bundle: dict[str, object]) -> Observation:
         if self.source is None:
             raise Invalid("source-unavailable")
         obj = descriptor(canonical(bundle["descriptor"]))
         observed = self.source(key)
+        self.validate_observation(obj, observed)
+        if (
+            observed.original_actor != bundle["original_actor"]
+            or observed.evidence_url != bundle["evidence_url"]
+        ):
+            raise Invalid("source-mismatch")
+        return observed
+
+    @staticmethod
+    def validate_observation(obj: Descriptor, observed: Observation) -> None:
         if (
             observed.descriptor != canonical(obj)
-            or observed.original_actor != bundle["original_actor"]
-            or observed.evidence_url != bundle["evidence_url"]
             or observed.boot_id != obj.boot_id
             or type(observed.boottime_ns) is not int
             or not clock(obj.created_boottime_ns) <= observed.boottime_ns < clock(obj.expires_boottime_ns)
         ):
             raise Invalid("source-mismatch")
-        return observed
 
     def issue_permit(self, req: GatewayCustodyPermit, *, uid: int | None) -> bytes:
+        with self.publication_lock:
+            return self._issue_permit(req, uid=uid)
+
+    def _issue_permit(self, req: GatewayCustodyPermit, *, uid: int | None) -> bytes:
         """Retain before publishing; an interrupted call repairs only identical bytes.
 
         New generations require queue-owned EX nonconsumption plus identical
@@ -498,6 +515,18 @@ class Service:
         else:
             encoded = self.new_permit(obj, bundle, observed, previous, proof)
             generation = permit(encoded).permit_generation
+        tombstone_proof = proof
+        tombstone_generation = None if previous is None else previous.permit_generation
+        if proof is None and generation > 1:
+            # A crash may retain generation N before its predecessor tombstone.
+            # Repair only from the original source-owned certificate pair, never
+            # synthesize evidence from the retained permit or local file absence.
+            predecessor = permit(canonical(records[-2]))
+            tombstone_generation = predecessor.permit_generation
+            retained_proofs = cast(list[dict[str, object]], bundle.get("certificates", []))
+            certificate = canonical(retained_proofs[-1])
+            repair = GatewayCustodyPermit(req.proposal_sha256, hashlib.sha256(certificate).hexdigest())
+            tombstone_proof = self.permit_certificate(repair, enrolled, obj, predecessor, observed)
         immutable, current = publication_paths(enrolled, req.proposal_sha256, generation)
         if self.publication() != enrolled:
             raise Invalid("publication-drift")
@@ -508,19 +537,23 @@ class Service:
         # Serialize pointer publication with every local consent/permit writer.
         # Policy/source callbacks remain outside Store locks. A crash after commit
         # retains the candidate for exact repair; it never creates another permit.
-        with self.store.lock:
+        with self.publication_lock:
             with self.store.transaction():
                 if self.store.db.execute(query, (req.proposal_sha256,)).fetchone() != row:
                     raise Invalid("proposal-changed")
-                total = self.store.db.execute(
-                    "SELECT coalesce(sum(length(bundle)),0) FROM gateway_custody_proposals"
-                ).fetchone()[0]
-                if len(updated) > MAX_BUNDLE or total - len(row[0]) + len(updated) > 128 * 1024 * 1024:
+                if not self.capacity(updated, len(row[0])):
                     raise Invalid("bundle-capacity")
                 self.store.db.execute(
                     "UPDATE gateway_custody_proposals SET bundle=? WHERE hash=?",
                     (updated, req.proposal_sha256),
                 )
+            if tombstone_proof is not None and tombstone_generation is not None:
+                # Copy authentic queue-owned certificate bytes, never invent evidence
+                # and never destroy the immutable original generation.
+                tombstone = immutable.parent / f"{tombstone_generation}.superseded.json"
+                recovery.publish(tombstone, tombstone_proof)
+                if recovery.private_read(tombstone) != tombstone_proof:
+                    raise Invalid("publication-readback")
             recovery.publish(immutable, encoded)
             if recovery.private_read(immutable) != encoded:
                 raise Invalid("publication-readback")
@@ -528,6 +561,17 @@ class Service:
             if recovery.private_read(current) != encoded:
                 raise Invalid("publication-readback")
         return encoded
+
+    def capacity(self, updated: bytes, old_size: int = 0) -> bool:
+        """Call only inside the existing Store transaction; payload reserve is separate."""
+        total = self.store.db.execute(
+            "SELECT coalesce(sum(length(bundle)),0) FROM gateway_custody_proposals"
+        ).fetchone()[0]
+        return len(updated) <= MAX_BUNDLE and total - old_size + len(updated) <= MAX_TOTAL
+
+    def notice_status(self, key: str) -> str:
+        row = self.store.db.execute("SELECT status FROM outbox WHERE key=?", (key + ":0",)).fetchone()
+        return "missing" if row is None else str(row[0])
 
     @staticmethod
     def new_permit(
@@ -620,6 +664,7 @@ class Service:
                 "bundle": json.loads(bytes(row[0])),
                 "notice_key": str(row[1]),
                 "state": str(row[2]),
+                "notice_status": self.notice_status(str(row[1])),
             }
 
     def register(self, obj: Descriptor, *, uid: int | None, max_chars: int) -> str:
@@ -628,13 +673,7 @@ class Service:
         if self.source is None:
             raise Invalid("source-unavailable")
         observed = self.source(digest(obj))
-        if (
-            observed.descriptor != canonical(obj)
-            or observed.boot_id != obj.boot_id
-            or type(observed.boottime_ns) is not int
-            or not clock(obj.created_boottime_ns) <= observed.boottime_ns < clock(obj.expires_boottime_ns)
-        ):
-            raise Invalid("source-mismatch")
+        self.validate_observation(obj, observed)
         text = notice(
             obj,
             original_actor=observed.original_actor,
@@ -660,7 +699,7 @@ class Service:
             self.store.db.execute(REGISTRATION_SCHEMA)
         with self.store.transaction():
             old = self.store.db.execute(
-                "SELECT bundle FROM gateway_custody_proposals WHERE hash=?", (key,)
+                "SELECT bundle,notice_key FROM gateway_custody_proposals WHERE hash=?", (key,)
             ).fetchone()
             if old is not None:
                 prior = json.loads(bytes(old[0]))
@@ -670,19 +709,22 @@ class Service:
                     if field != "notice_created_at"
                 ):
                     raise Invalid("immutable-proposal")
+                delivery = self.notice_status(str(old[1]))
+                if delivery in ("failed", "missing"):
+                    # No safe non-delivery evidence exists: retain exact row and HOLD,
+                    # never auto-resend an ambiguous native notice.
+                    raise Invalid("notice-" + delivery)
                 return key
             if self.store.db.execute(
                 "SELECT 1 FROM gateway_custody_proposals WHERE token=? OR proposal=?",
                 (key[:24], obj.proposal),
             ).fetchone():
                 raise Invalid("proposal-collision")
-            count, total = self.store.db.execute(
-                "SELECT count(*),coalesce(sum(length(bundle)),0) FROM gateway_custody_proposals"
-            ).fetchone()
+            count = self.store.db.execute("SELECT count(*) FROM gateway_custody_proposals").fetchone()[0]
             per_event = self.store.db.execute(
                 "SELECT count(*) FROM gateway_custody_proposals WHERE event=?", (obj.event,)
             ).fetchone()[0]
-            if count >= 4096 or per_event >= 16 or total + len(bundle) > 128 * 1024 * 1024:
+            if count >= 4096 or per_event >= 16 or not self.capacity(bundle):
                 raise Invalid("proposal-capacity")
             # Custody owns its rate history and fixed outbox namespace. Generic
             # notice pruning/capacity cannot hide or consume custody obligations.
@@ -692,8 +734,9 @@ class Service:
                 ((at - timedelta(hours=1)).isoformat(),),
             ).fetchone()[0]
             pending = self.store.db.execute(
-                "SELECT count(*) FROM gateway_custody_proposals AS p WHERE EXISTS "
-                "(SELECT 1 FROM outbox AS o WHERE o.key=p.notice_key||':0' AND o.status='pending')"
+                "SELECT count(*) FROM gateway_custody_proposals AS p WHERE NOT EXISTS "
+                "(SELECT 1 FROM outbox AS o WHERE o.key=p.notice_key||':0' AND o.status='sent' "
+                "AND o.message_id IS NOT NULL)"
             ).fetchone()[0]
             if recent >= 32 or pending >= 256:
                 raise Invalid("notice-capacity")
@@ -739,47 +782,80 @@ class Service:
             ).fetchone()
             if row is None:
                 raise Invalid("token")
-        key, raw, notice_key, state = row
+        key, raw = row[:2]
         bundle = json.loads(bytes(raw))
         commands = bundle.get("commands", {})
         previous = commands.get(event_id)
         if previous is not None:
             if previous["event"] == event:
                 return str(previous["outcome"])
-            # A contradiction to a retained native ID cannot leave unissued
-            # authority usable, including when current policy is unavailable.
-            with self.store.transaction():
-                self.store.db.execute(
-                    "UPDATE gateway_custody_proposals SET state='revoked' WHERE hash=?", (key,)
-                )
+            self._block_conflict(key, event)
             raise Invalid("replay-mismatch")
         policy = self.authority(account, group, sender)
         if policy is None:
             raise Invalid("authority")
         _hash(policy)
-        obj = descriptor(canonical(bundle["descriptor"]))
         if action == "settle":
-            if self.source is None:
-                raise Invalid("source-unavailable")
-            observed = self.source(key)
-            if (
-                observed.descriptor != canonical(obj)
-                or observed.original_actor != bundle["original_actor"]
-                or observed.evidence_url != bundle["evidence_url"]
-                or observed.boot_id != obj.boot_id
-                or type(observed.boottime_ns) is not int
-                or not clock(obj.created_boottime_ns) <= observed.boottime_ns < clock(obj.expires_boottime_ns)
-            ):
-                raise Invalid("source-mismatch")
+            self.observation(key, bundle)
         if self.authority(account, group, sender) != policy:
             raise Invalid("authority-drift")
+        outcome, capacity_hold, conflict = self._retain_command(row, event, event_id, policy, action)
+        if conflict:
+            raise Invalid("replay-mismatch")
+        if capacity_hold:
+            raise Invalid("bundle-capacity")
+        return outcome
+
+    def _block_conflict(self, key: str, event: dict[str, str | None]) -> None:
+        """Retain bounded exact diagnostics and block only unissued mutable authority."""
+        with self.publication_lock, self.store.transaction():
+            current = self.store.db.execute(
+                "SELECT bundle,state FROM gateway_custody_proposals WHERE hash=?", (key,)
+            ).fetchone()
+            if current[1] == "terminal":
+                raise Invalid("replay-mismatch")
+            retained = json.loads(bytes(current[0]))
+            conflicts = retained.get("conflicts", [])
+            if event not in conflicts:
+                retained["conflicts"] = [*conflicts, event]
+            encoded = canonical(retained)
+            if self.capacity(encoded, len(current[0])):
+                self.store.db.execute(
+                    "UPDATE gateway_custody_proposals SET bundle=? WHERE hash=?", (encoded, key)
+                )
+            self.store.db.execute(
+                "UPDATE gateway_custody_proposals SET state='revoked' "
+                "WHERE hash=? AND state IN ('awaiting-consent','consented')",
+                (key,),
+            )
+
+    def _retain_command(
+        self,
+        row: tuple[Any, ...],
+        event: dict[str, str | None],
+        event_id: str,
+        policy: str,
+        action: str,
+    ) -> tuple[str, bool, bool]:
+        """Serialize native command custody against publication; no external callbacks."""
+        key, raw, notice_key, state = row
+        bundle = json.loads(bytes(raw))
+        target = event["reply_to"]
         capacity_hold = False
-        with self.store.transaction():
+        with self.publication_lock, self.store.transaction():
             current = self.store.db.execute(
                 "SELECT hash,bundle,notice_key,state FROM gateway_custody_proposals WHERE hash=?", (key,)
             ).fetchone()
             if current != row:
-                raise Invalid("proposal-changed")
+                if action == "settle" or current is None or current[2] != notice_key:
+                    raise Invalid("proposal-changed")
+                # Rebase only an authenticated contrary event on the exact same
+                # immutable proposal/thread. It must not disappear in a settle race.
+                latest = json.loads(bytes(current[1]))
+                if latest["descriptor"] != bundle["descriptor"] or latest["notice"] != bundle["notice"]:
+                    raise Invalid("proposal-changed")
+                bundle, raw, state = latest, current[1], current[3]
+
             deliveries = self.store.db.execute(
                 "SELECT message_id,text FROM outbox WHERE key=? AND status='sent'",
                 (notice_key + ":0",),
@@ -791,31 +867,57 @@ class Service:
                 or deliveries[0][1] != bundle["notice"]
             ):
                 raise Invalid("thread-unmapped")
-            if state == "awaiting-consent" and action == "settle":
-                outcome, after = "consented", "consented"
-                bundle["decision"] = event | {"policy_sha256": policy}
-            elif state in ("awaiting-consent", "consented"):
-                outcome, after = "revoked", "revoked"
-            else:
-                outcome, after = "held", state
-            commands[event_id] = {"event": event, "outcome": outcome, "policy_sha256": policy}
-            bundle["commands"] = commands
+            if state == "terminal":
+                return "held", False, False
+            outcome, after, conflict = self._record_command(bundle, state, event, event_id, policy, action)
             updated = canonical(bundle)
-            total = self.store.db.execute(
-                "SELECT coalesce(sum(length(bundle)),0) FROM gateway_custody_proposals"
-            ).fetchone()[0]
-            if len(updated) > MAX_BUNDLE or total - len(raw) + len(updated) > 128 * 1024 * 1024:
+            if not self.capacity(updated, len(raw)):
                 # Capacity may refuse a new receipt, never preserve usable consent
                 # after an authenticated contrary command. Retain the old bytes.
-                self.store.db.execute(
-                    "UPDATE gateway_custody_proposals SET state='revoked' WHERE hash=?", (key,)
-                )
+                if action in ("decline", "revoke") or conflict:
+                    self.store.db.execute(
+                        "UPDATE gateway_custody_proposals SET state='revoked' "
+                        "WHERE hash=? AND state IN ('awaiting-consent','consented')",
+                        (key,),
+                    )
                 capacity_hold = True
             else:
                 self.store.db.execute(
                     "UPDATE gateway_custody_proposals SET bundle=?,state=? WHERE hash=?",
                     (updated, after, key),
                 )
-        if capacity_hold:
-            raise Invalid("bundle-capacity")
-        return outcome
+        return outcome, capacity_hold, conflict
+
+    @staticmethod
+    def _record_command(
+        bundle: dict[str, Any],
+        state: str,
+        event: dict[str, str | None],
+        event_id: str,
+        policy: str,
+        action: str,
+    ) -> tuple[str, str, bool]:
+        """Derive a closed state transition; caller proved current native context."""
+        commands = bundle.get("commands", {})
+        previous = commands.get(event_id)
+        conflict = previous is not None and previous["event"] != event
+        if previous is not None and not conflict:
+            return str(previous["outcome"]), state, False
+        if conflict:
+            outcome, after = "revoked", "revoked"
+            conflicts = bundle.get("conflicts", [])
+            if event not in conflicts:
+                bundle["conflicts"] = [*conflicts, event]
+        elif state == "awaiting-consent" and action == "settle":
+            outcome, after = "consented", "consented"
+            bundle["decision"] = event | {"policy_sha256": policy}
+        elif state == "consented" and action == "settle":
+            outcome, after = "consented", "consented"
+        elif state in ("awaiting-consent", "consented"):
+            outcome, after = "revoked", "revoked"
+        else:
+            outcome, after = "held", state
+        if not conflict:
+            commands[event_id] = {"event": event, "outcome": outcome, "policy_sha256": policy}
+        bundle["commands"] = commands
+        return outcome, after, conflict

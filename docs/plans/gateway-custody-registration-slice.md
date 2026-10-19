@@ -23,3 +23,12 @@ The separate same-UID gateway-custody.sock accepts only the closed register/stat
 - Configured typing and disposable compatibility tests are evidence only. Quality-delta reports remain OPEN/unwaived, including complexity, duplication, API surface and changed daemon hotspots. No baseline reset or acknowledgment is used.
 
 All original tracked test files remain unchanged. Two original untracked custody test modules remain byte-identical; the newly added registration module has one explicitly authorized oracle correction: generic notice exhaustion must allow independently bounded custody registration. Its predecessor bytes/hash, exact diff and remaining assertion inventory are retained externally. New tests cover both quota directions. All RED, intermediate errors and predecessor typing diagnostics remain disclosed. No native communications, service change, installer execution, approval manufacture, deployment or model effect occurred.
+
+
+## Actual first HIGH repair boundary
+
+The first actual FULL HIGH review of signed f5c24bdb9589cc044a6ab6f008a951d146c0d9d7 reported ten findings; no approval was given. Exact report/provenance and all ten author dispositions are in docs/reviews/p4iwn-r1-*. This repair preserves the original decision through agreeing settlements, retains authenticated contrary commands across a CAS race, makes terminal rows immutable, requires post-window authentic renewal certificate pairs and retained product tombstones, exposes failed notices as recovery HOLD, counts all undelivered notices, moves fsync off the shared Store lock, and keeps custody routing independent of the model lock. It does not claim any production qualification or complete P4.
+
+The original shared contrary-command fixture incorrectly included agreeing settle; only that parameter was removed. The positive renewal fixtures now observe the old initiation window expiry and advance their synthetic current clock. Original bytes/hashes and exact diff are privately retained; all unrelated assertions remain intact. These are approved synthetic fixture corrections, not native evidence.
+
+Failed or missing notice recovery remains OPEN: duplicate registration refuses explicitly and status exposes retained outbox state. No automatic resend, slot reuse, deletion or absence-as-non-delivery is authorized. Production native readback/consumer ACK, actual queue integration, source enrollment and the physical separate 256KiB reserve remain required.

@@ -48,7 +48,7 @@ def test_first_native_command_retains_decision_and_idempotent_receipt(rig):
     assert len(row["bundle"]["commands"]) == 1
 
 
-@pytest.mark.parametrize("action", ["decline", "revoke", "settle"])
+@pytest.mark.parametrize("action", ["decline", "revoke"])
 def test_contrary_command_holds_unissued_authority_without_replacing_decision(rig, action):
     store, key, service, _ = ready(rig)
     answer(service, key)

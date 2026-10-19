@@ -2620,7 +2620,7 @@ class Admind:
                              text=own_text(ev.message.text))
             return
         if gateway_custody.command(ev.message.text) is not None:
-            await self.custody_message(ev)
+            self.custody_work.put_nowait(ev)
             return
         if (recovery.COMMAND.fullmatch(ev.message.text) is not None
                 and MESSAGE_ID.fullmatch(mid)):

@@ -190,7 +190,7 @@ class JsonSocketServer[Req, Rep: msgspec.Struct]:
                     from heterodyne.admind import gateway_custody
 
                     req = cast(Req, gateway_custody.decode(
-                        line, cast(type[gateway_custody.Request], gateway_custody.Request)))
+                        line.rstrip(b"\n"), cast(type[gateway_custody.Request], gateway_custody.Request)))
                 elif self.kind == "maintenance-recovery":
                     from heterodyne.admind import recovery
 

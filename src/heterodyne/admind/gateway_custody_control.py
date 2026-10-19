@@ -56,9 +56,11 @@ def independent(
             pending.cancel()
             raise custody.Invalid("authority-unavailable") from None
 
-    return custody.Service(
+    bound = custody.Service(
         service.store, source=service.source, publication=service.publication, authority=observe
     )
+    bound.publication_lock = service.publication_lock
+    return bound
 
 
 def perform(service: custody.Service, req: custody.Request, *, uid: int | None, max_chars: int) -> Reply:

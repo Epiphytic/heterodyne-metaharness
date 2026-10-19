@@ -177,7 +177,7 @@ def renewal_fixture():
         descriptor_sha256=custody.digest(obj),
         chain_root=obj.chain_root,
         boot_id=U,
-        observed_boottime_ns="9",
+        observed_boottime_ns="30000000009",
     )
     return obj, previous, proof
 
@@ -185,7 +185,7 @@ def renewal_fixture():
 def test_renewal_binds_both_certificates_to_original_proposal():
     obj, previous, proof = renewal_fixture()
     raw = custody.canonical(proof)
-    result = custody.renewal(obj, previous, raw, raw, boot_id=U, boottime_ns=10)
+    result = custody.renewal(obj, previous, raw, raw, boot_id=U, boottime_ns=30000000010)
     assert msgspec.to_builtins(result) == proof
 
 
@@ -207,7 +207,7 @@ def test_renewal_rejects_misbound_certificate(field, value):
     obj, previous, proof = renewal_fixture()
     raw = custody.canonical(proof | {field: value})
     with pytest.raises(custody.Invalid):
-        custody.renewal(obj, previous, raw, raw, boot_id=U, boottime_ns=10)
+        custody.renewal(obj, previous, raw, raw, boot_id=U, boottime_ns=30000000010)
 
 
 def test_renewal_never_infers_absence_from_one_certificate_or_reboot():
