@@ -193,8 +193,12 @@ def test_get_unavailable_preserves_readable_receipt_and_stops_reconcile(tmp_path
             make_settings(tmp_path),
             argparse.Namespace(receipts=manifest, limit=20, apply=True, continuation=None),
         )
-        assert result["results"] == [{"ask_id": "abcd", "outcome": "unavailable"}]
-        assert str(result["continuation"]).endswith(":0")
+        if damage == "missing-ask":
+            assert result["results"] == [{"ask_id": "abcd", "outcome": "already-applied"}]
+            assert str(result["continuation"]).endswith(":1")
+        else:
+            assert result["results"] == [{"ask_id": "abcd", "outcome": "unavailable"}]
+            assert str(result["continuation"]).endswith(":0")
         assert calls == ["Get"]
         if damage == "missing-ask":
             assert reply.view["receipt"] == original

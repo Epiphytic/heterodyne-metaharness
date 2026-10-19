@@ -631,6 +631,15 @@ class Lifecycle:
                     raise Invalid("pending-conflict")
                 if self.notice_state(str(old[0]), check_expiry=False)[0] not in ("pending", "delivered"):
                     raise Invalid("notice-owner-unavailable")
+                consumed = set(req.declaration.binding.consumed_answers)
+                senders = [
+                    self.store.inbound_sender(answer.message_id)
+                    for answer in self.store.answers(req.ask_id)
+                    if answer.message_id in consumed
+                ]
+                authority = self.notice_authority()
+                if not senders or not all(senders) or authority is None or not set(senders) <= authority:
+                    raise Invalid("notice-owner-unavailable")
                 self.retire(req.ask_id, str(old[1]), "operator-withdrawal")
             elif req.replace_intent is not None:
                 raise Invalid("stale-intent")

@@ -731,7 +731,9 @@ class Admind:
                     tg.create_task(self.guarded(supervised(name, loop, self.audit)))
                 # Verification is independent of whether producers are enabled.
                 from heterodyne.admind.fulfillment_projection import worker
-                tg.create_task(self.guarded(worker(self.store)))
+                tg.create_task(self.guarded(supervised(
+                    "fulfillment-verification", lambda: worker(self.store), self.audit, base=30, cap=30
+                )))
                 tg.create_task(self.guarded(self.reconcile_asks(snapshot)))
         except BaseException:
             self.shutting_down = True
@@ -912,17 +914,22 @@ class Admind:
             if isinstance(req, fulfillment.Inspect):
                 return fulfillment.Reply("ok", "intent diagnostics", lifecycle.inspect())
             if isinstance(req, fulfillment.Get):
-                view = lifecycle.view(req.ask_id)
-                if view["binding"] is None:
-                    return fulfillment.Reply("unavailable", "binding-unavailable", view)
-                pending = view["pending"]
-                message = (
-                    "lifecycle"
-                    if pending is None
-                    else "notice-"
-                    + lifecycle.notice_state(str(cast(dict[str, object], pending)["intent_id"]))[0]
-                )
-                return fulfillment.Reply("ok", message, view)
+                with self.store.transaction(read_only=True):
+                    view = lifecycle.view(req.ask_id)
+                    if view["binding"] is None:
+                        return fulfillment.Reply("unavailable", "binding-unavailable", view)
+                    try:
+                        lifecycle.require_projection()
+                    except fulfillment.Invalid as exc:
+                        return fulfillment.Reply("unavailable", str(exc), view)
+                    pending = view["pending"]
+                    message = (
+                        "lifecycle"
+                        if pending is None
+                        else "notice-"
+                        + lifecycle.notice_state(str(cast(dict[str, object], pending)["intent_id"]))[0]
+                    )
+                    return fulfillment.Reply("ok", message, view)
             if isinstance(req, fulfillment.Apply):
                 return lifecycle.apply(
                     req.receipt, uid=peer.uid if peer.uid is not None else -1, pid=peer.pid
@@ -934,11 +941,13 @@ class Admind:
             with self.store.transaction():
                 return lifecycle.retire(req.ask_id, req.expect_intent, req.reason)
         except fulfillment.Invalid as exc:
-            if isinstance(req, fulfillment.Get):
+            if isinstance(req, fulfillment.Get) and str(exc) != "missing":
                 return fulfillment.Reply("unavailable", "binding-unavailable")
             return fulfillment.Reply("refused", str(exc))
         except (msgspec.DecodeError, UnicodeError, TypeError, ValueError):
-            return fulfillment.Reply("unavailable", "binding-unavailable")
+            if isinstance(req, fulfillment.Get):
+                return fulfillment.Reply("unavailable", "binding-unavailable")
+            raise
         except sqlite3.Error:
             return fulfillment.Reply("unavailable", "store unavailable")
 

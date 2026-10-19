@@ -1,0 +1,74 @@
+{
+  "review_sha256": "e2a368d389ecb55488db82436bca6e9ae2666f4d8b823cb711c784fb927055bc",
+  "review_result": "Actual SECOND FULL HIGH REVISE, ten candidates deduplicated but not separately verified by reviewer; no invented clearance",
+  "design_revision": "f8a80b8fad51c0be015a797e11f4a968f90c4bfb",
+  "source_parent": "974a3f48874bd59c20286a6debbe2855b241c12d",
+  "findings": [
+    {
+      "number": 1,
+      "original": "1. `src/heterodyne/admind/store.py:1324`: The new post-commit dirty check and verification_changed() call run inside the same try block as COMMIT, so if they raise after a successful commit, the caller sees a committed transaction as failed (the guarded ROLLBACK quietly does nothing).\n\n   Failure scenario: Any writer, e.g. finish(), commits. Then the extra autocommit SELECT on sqlite_master or fulfillment_dirty raises sqlite3.OperationalError (busy/IO/schema-changed). The exception reaches the caller even though inbound status and the reply were already committed. Paths like the !fulfill handler then run their 'store unavailable' fallback and queue a second reply. Separately, every daemon write transaction now pays two extra queries, even on unmigrated stores with ENABLED=False.",
+      "disposition": "FIXED",
+      "response": "Store transaction commits before advisory wake; connection-local TEMP dirty hooks record only writes in the committing transaction, and wake failure cannot reclassify the commit. No post-COMMIT SQL queries remain. Rollback and unrelated-backlog commit regressions preserve outcome and notification behavior."
+    },
+    {
+      "number": 2,
+      "original": "2. `src/heterodyne/admind/fulfillment_projection.py:443`: Store.transaction wakes the verifier whenever any fulfillment_dirty row exists, not only when this commit inserted one, so the wake cuts short both the 30s failure backoff and the 1s gap between passes.\n\n   Failure scenario: The projection gets damaged (e.g. a trigger dropped) while dirty rows remain. Every verify_pass now raises fulfillment-projection-unavailable, so the worker sets delay=30. But each unrelated daemon commit (outbox send, inbound claim, touch) still sees dirty rows and sets wake, so a failing pass of about 25 schema queries runs on every commit. That breaks the ADR's 'never spin / fixed 30-second backoff' rule. A backlog does the same to the 1s spacing.",
+      "disposition": "FIXED",
+      "response": "Mandatory one-second healthy spacing and fixed thirty-second failure backoff cannot be shortened by coalesced notifications. Only actual dirty insertion/update on this Store connection wakes, and external legacy writers remain covered by the thirty-second idle poll."
+    },
+    {
+      "number": 3,
+      "original": "3. `src/heterodyne/admind/daemon.py:937`: Every Invalid raised during Get, including binding()'s ordinary 'missing' refusal for a nonexistent ask with no receipt, is now returned as unavailable/binding-unavailable instead of the predecessor's typed refusal.\n\n   Failure scenario: A reconcile manifest has a receipt for an ask ID that has no row and no receipt in this store. Get used to return refused/'missing', which refusal_outcome mapped to 'unsupported', and reconcile moved on. Now plan() returns 'unavailable', reconcile breaks and the continuation offset never passes that entry, so every later entry is blocked for good. This contradicts ADR section 3: 'a valid server refusal maps to its existing typed outcome and advances'.",
+      "disposition": "FIXED",
+      "response": "Ordinary Get missing with no immutable receipt remains refused/missing, retaining unsupported/advance behavior. Malformed or unavailable binding remains unavailable."
+    },
+    {
+      "number": 4,
+      "original": "4. `src/heterodyne/admind/fulfillment_cli.py:166`: plan() returns refusal_outcome whenever result != 'ok', so an unavailable/binding-unavailable Get whose view still carries the readable immutable receipt is never checked against the request digest.\n\n   Failure scenario: A receipt was applied earlier, and then its ask's binding can no longer be rebuilt (ask row missing, more than 50 answers, or receipt over 128 KiB where measure() refuses). Re-running reconcile with the identical receipt should report already-applied, because the ADR says 'reconcile checks immutable receipt identity before requiring a fresh binding'. Instead it reports 'unavailable' and stops at that entry on every run.",
+      "disposition": "FIXED WITH AUTHORIZED ORACLE CORRECTION",
+      "response": "CLI plan checks readable immutable request identity before requiring a successful fresh binding. Matching identity is already-applied; mismatch is conflict. Controller explicitly authorized only the missing-ask case in the named existing test to expect already-applied and cursor :1; malformed receipt remains unavailable/:0. Exact original bytes and mechanical/AST differences are retained privately."
+    },
+    {
+      "number": 5,
+      "original": "5. `src/heterodyne/admind/fulfillment.py:632`: Replacement only proves the OLD intent's owners are current. The successor notice's owners, computed later from the new declaration's consumed answers, can be unknown or revoked, and the code still creates a quarantined or suppressed successor instead of refusing with notice-owner-unavailable.\n\n   Failure scenario: The old pending intent is owned by a current operator. propose(replace_intent=old_digest) sends a declaration consuming an answer whose inbound.sender_key is NULL, or belongs to a revoked operator. The check passes, retire() drops the good intent, and line 695 computes owners=(), so a new quarantined notice is queued. The ADR requires 'freshly proven current ownership' for the replacement.",
+      "disposition": "FIXED",
+      "response": "Replacement proves both the old intent and the new consumed answers have durable current owners before retiring or publishing anything. Unknown and revoked successor-owner regressions retain the original pending intent and create no successor."
+    },
+    {
+      "number": 6,
+      "original": "6. `src/heterodyne/admind/daemon.py:923`: The Get handler calls lifecycle.notice_state() after view() has returned, outside any store lock or read snapshot. notice_state/delivery run raw self.store.db.execute calls on the shared connection while the always-on verifier thread may hold store.lock with BEGIN IMMEDIATE open on that same connection.\n\n   Failure scenario: The verifier's write phase holds the RLock on the executor thread and has a transaction open on store.db. Meanwhile a Get on the event loop runs unlocked SELECTs on the outbox/intents rows through the same connection. Those reads land inside the worker's uncommitted transaction, which breaks the Store's 'serialized by self.lock' rule. The view and the notice message also come from different snapshots, so a just-retired intent shows up as pending with message notice-unavailable.",
+      "disposition": "FIXED",
+      "response": "Get view, projection check, and notice-state observation share one Store read transaction under the reentrant Store lock. The observation regression proves the notice query joins that transaction."
+    },
+    {
+      "number": 7,
+      "original": "7. `src/heterodyne/admind/daemon.py:734`: The verification worker starts unconditionally (even with ENABLED=False) and is not wrapped in supervised() like every other daemon loop, so any exception outside its narrow catch list (Invalid/DecodeError/sqlite3/OSError/ValueError/RuntimeError) tears down the TaskGroup and stops the daemon.\n\n   Failure scenario: A KeyError, AttributeError, OverflowError or MemoryError escapes verify_pass's write phase or cursor logic on a malformed meta/cursor row. guarded() re-raises it, the TaskGroup cancels inbound, outbox and the other loops, and admind exits. On restart the same durable row triggers it again. A disabled feature can now crash-loop the production daemon.",
+      "disposition": "FIXED CONTAINMENT; ENABLED CLAIM PARTIALLY REBUTTED",
+      "response": "Verification pass exceptions including KeyError are contained with a fixed non-payload diagnostic and thirty-second retry; the daemon also supervises the loop with base/cap thirty seconds. Approved ADR section 4.3 and the retained disabled-producer regression require verification independent of producer ENABLED, so that independence is preserved. No activation is performed."
+    },
+    {
+      "number": 8,
+      "original": "8. `src/heterodyne/admind/fulfillment.py:469`: view() makes eligible depend on the projection being valid, but returns result 'ok' with lifecycle 'unfulfilled'. Reconcile therefore can't tell 'projection unavailable/migration required' (a HOLD) from a genuinely unsupported ask.\n\n   Failure scenario: On an unmigrated store or one with a damaged projection, every eligible receipt's Get returns ok/eligible=false, plan() returns 'unsupported', and reconcile advances its continuation past all entries without attempting Apply. Once the projection is repaired, the operator's continuation has already skipped receipts that were never applied. The ADR treats projection damage as a fulfillment-mutation HOLD (unavailable), not as a terminal refusal.",
+      "disposition": "FIXED",
+      "response": "Get returns unavailable with the explicit migration/projection refusal when no fresh validated projection is available, retaining the readable immutable receipt/view. New bindings on unmigrated or damaged stores HOLD; inspection does not migrate. A readable identical receipt still wins by finding 4."
+    },
+    {
+      "number": 9,
+      "original": "9. `src/heterodyne/admind/daemon.py:940`: The new except clause turns any msgspec.DecodeError/UnicodeError/TypeError/ValueError from any fulfillment request type (Apply, Propose, Dispose) into Reply('unavailable', 'binding-unavailable'). That includes Store.transaction's new ValueError('read-only-transaction') and ordinary programming errors.\n\n   Failure scenario: Propose with a pending intent whose created_at fails datetime.fromisoformat, or an Apply that hits an internal TypeError, now replies 'binding-unavailable' for a request that isn't a binding read. That hides bugs that used to surface through the server's failed handler, and gives operators a wrong, unrelated diagnostic code.",
+      "disposition": "FIXED",
+      "response": "Decode/Unicode/type/value containment is restricted to Get. A programming TypeError from Apply propagates to the existing server failed boundary rather than being mislabeled binding-unavailable."
+    },
+    {
+      "number": 10,
+      "original": "10. `src/heterodyne/admind/fulfillment_projection.py:811`: fq2_asks_update always runs bump(OLD.ask_id)+bump(NEW.ask_id), and fq2_answers_update runs answer_bumps()+bump(OLD)+bump(NEW), so an ordinary same-ID update bumps the generation 2-3 times and repeats every invalidation statement, unlike the ADR's 'BUMP distinct OLD/NEW ask_id'.\n\n    Failure scenario: Each status or answer edit on a fulfilled ask runs 8-12 trigger statements instead of 4 and advances the generation by 2-3. Because this literal DDL is hash-pinned and becomes compatibility-frozen once migrated, fixing it after deployment needs a repair/epoch migration. It should be corrected before any store is migrated.",
+      "disposition": "FIXED BEFORE DEPLOYMENT",
+      "response": "Literal trigger SQL builds distinct OLD/NEW/unique-key-victim sets before bumping. Ordinary ask and answer updates increment a generation once; existing replacement/old-writer tests remain. Changed literal DDL is not silently accepted by an already migrated predecessor: mismatch remains HOLD and requires an authorized deployment/repair procedure."
+    }
+  ],
+  "residuals": [
+    "No migration, activation, deployment, native effects or model review by author.",
+    "Predecessor migrated literal DDL mismatch remains HOLD; no automatic repair or epoch rewrite.",
+    "R1 detailed migration diagnostic and repeated validation/inspection query debt remain OPEN UNWAIVED.",
+    "Quality and existing baseline formatting debt remain UNWAIVED."
+  ]
+}

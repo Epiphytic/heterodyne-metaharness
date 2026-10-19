@@ -163,10 +163,8 @@ def refusal_outcome(reply: f.Reply) -> str:
 
 
 def plan(receipt: f.Completion, reply: f.Reply) -> str:
-    if reply.result != "ok" or reply.view is None:
-        return refusal_outcome(reply)
     view = reply.view
-    stored = view.get("receipt")
+    stored = None if view is None else view.get("receipt")
     if stored is not None:
         return (
             "already-applied"
@@ -174,6 +172,8 @@ def plan(receipt: f.Completion, reply: f.Reply) -> str:
             == f.digest("application", f.builtins(receipt))
             else "conflict"
         )
+    if reply.result != "ok" or view is None:
+        return refusal_outcome(reply)
     if view["lifecycle"] == "conflict":
         return "conflict"
     actual = cast(dict[str, object], view["binding"])

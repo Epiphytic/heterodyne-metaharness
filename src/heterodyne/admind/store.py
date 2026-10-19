@@ -402,6 +402,8 @@ class Store:
 
         from heterodyne.admind.fulfillment import Lifecycle
         self.fulfillment = Lifecycle(self)
+        self._verification_dirty = False
+        self.configure_verification_notifications()
         try:
             self.fulfillment.migrate()
             self.db.executescript(OPERATION_SCHEMA)
@@ -1299,6 +1301,31 @@ class Store:
                               (before,))
         return cur.rowcount
 
+    def configure_verification_notifications(self) -> None:
+        """Connection-local hooks observe new dirty writes, without changing durable DDL.
+
+        External/legacy connections have no hooks and remain covered by the bounded idle poll.
+        The callback records only a bit; notification happens after the outer commit succeeds.
+        """
+        def dirty() -> int:
+            self._verification_dirty = True
+            return 0
+
+        self.db.create_function("fulfillment_dirty_changed", 0, dirty)
+        if self.db.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='fulfillment_dirty'"
+        ).fetchone():
+            self.db.execute(
+                "CREATE TEMP TRIGGER IF NOT EXISTS fulfillment_dirty_insert_notify "
+                "AFTER INSERT ON main.fulfillment_dirty BEGIN "
+                "SELECT fulfillment_dirty_changed(); END"
+            )
+            self.db.execute(
+                "CREATE TEMP TRIGGER IF NOT EXISTS fulfillment_dirty_update_notify "
+                "AFTER UPDATE ON main.fulfillment_dirty BEGIN "
+                "SELECT fulfillment_dirty_changed(); END"
+            )
+
     @contextlib.contextmanager
     def transaction(self, *, read_only: bool = False, notify_fulfillment: bool = True) -> Generator[None]:
         """Run the block's store calls as one SQLite transaction: all of them commit, or (on any
@@ -1316,22 +1343,13 @@ class Store:
                 finally:
                     self._depth -= 1
                 return
+            self._verification_dirty = False
             self.db.execute("BEGIN" if read_only else "BEGIN IMMEDIATE")
             self._depth = 1
             self._read_only = read_only
             try:
                 yield
                 self.db.execute("COMMIT")
-                if (
-                    not read_only
-                    and notify_fulfillment
-                    and hasattr(self, "fulfillment")
-                    and self.db.execute(
-                        "SELECT 1 FROM sqlite_master WHERE name='fulfillment_dirty'"
-                    ).fetchone()
-                    and self.db.execute("SELECT 1 FROM fulfillment_dirty LIMIT 1").fetchone()
-                ):
-                    self.fulfillment.verification_changed()
             except BaseException:
                 if self.db.in_transaction:
                     self.db.execute("ROLLBACK")
@@ -1339,6 +1357,11 @@ class Store:
             finally:
                 self._depth = 0
                 self._read_only = False
+            if not read_only and notify_fulfillment and self._verification_dirty:
+                # A wake is advisory. Neither a failed callback nor a stopped loop may turn a
+                # successful commit into a reported writer failure. Polling preserves liveness.
+                with contextlib.suppress(Exception):
+                    self.fulfillment.verification_changed()
 
     @_locked
     def relay_alert(self, name: bytes, key: str, text: str) -> bool:

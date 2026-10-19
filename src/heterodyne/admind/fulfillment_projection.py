@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import hashlib
+import logging
 import secrets
 import sqlite3
 import time
@@ -38,17 +39,24 @@ TABLES = (
 )
 
 
-def bump(key: str) -> str:
-    """SQL is assembled exclusively from the finite trigger definitions below, never input."""
-    exists = f"{key} IS NOT NULL AND EXISTS(SELECT 1 FROM ask_fulfillments WHERE ask_id={key})"  # noqa: S608 - finite literal SQL identifiers only
-    return (
-        f" INSERT INTO fulfillment_generations SELECT {key},0 WHERE {exists} "  # noqa: S608 - finite literal SQL identifiers only
-        "ON CONFLICT(ask_id) DO UPDATE SET generation=generation+1;"
-        f" UPDATE ask_fulfillments SET valid=0 WHERE ask_id={key};"
-        f" DELETE FROM fulfillment_verifications WHERE ask_id={key};"
-        f" INSERT INTO fulfillment_dirty SELECT ask_id,generation FROM fulfillment_generations "
-        f"WHERE ask_id={key} AND {exists} ON CONFLICT(ask_id) DO UPDATE SET generation=excluded.generation;"
+def bump_keys(keys: str) -> str:
+    """Invalidate the finite distinct OLD/NEW/victim key set exactly once per trigger."""
+    eligible = (
+        f"SELECT ask_id FROM ({keys}) AS targets WHERE ask_id IS NOT NULL "  # noqa: S608 - literal DDL only
+        "AND EXISTS(SELECT 1 FROM ask_fulfillments f WHERE f.ask_id=targets.ask_id)"
     )
+    return (
+        f" INSERT INTO fulfillment_generations SELECT ask_id,0 FROM ({eligible}) WHERE true "  # noqa: S608
+        "ON CONFLICT(ask_id) DO UPDATE SET generation=generation+1;"
+        f" UPDATE ask_fulfillments SET valid=0 WHERE ask_id IN ({eligible});"
+        f" DELETE FROM fulfillment_verifications WHERE ask_id IN ({eligible});"
+        " INSERT INTO fulfillment_dirty SELECT ask_id,generation FROM fulfillment_generations "
+        f"WHERE ask_id IN ({eligible}) ON CONFLICT(ask_id) DO UPDATE SET generation=excluded.generation;"
+    )
+
+
+def bump(key: str) -> str:
+    return bump_keys(f"SELECT {key} AS ask_id")
 
 
 def trigger(name: str, event: str, body: str) -> str:
@@ -63,18 +71,12 @@ VICTIMS = (
 )
 
 
-def answer_bumps() -> str:
-    # INSERT/UPDATE OR REPLACE may displace both unique-key victims. BEFORE triggers retain them.
-    return (
-        " INSERT INTO fulfillment_generations SELECT DISTINCT ask_id,0 FROM ask_answers "  # noqa: S608 - finite literal SQL identifiers only
-        "WHERE (message_id=NEW.message_id OR (ask_id=NEW.ask_id AND seq=NEW.seq)) "
-        "AND EXISTS(SELECT 1 FROM ask_fulfillments f WHERE f.ask_id=ask_answers.ask_id) "
-        "ON CONFLICT(ask_id) DO UPDATE SET generation=generation+1;"
-        f" UPDATE ask_fulfillments SET valid=0 WHERE ask_id IN ({VICTIMS});"
-        f" DELETE FROM fulfillment_verifications WHERE ask_id IN ({VICTIMS});"
-        " INSERT INTO fulfillment_dirty SELECT ask_id,generation FROM fulfillment_generations "
-        f"WHERE ask_id IN ({VICTIMS}) ON CONFLICT(ask_id) DO UPDATE SET generation=excluded.generation;"
-    )
+def answer_bumps(*, update: bool = False) -> str:
+    # UNION deduplicates NEW, OLD and both REPLACE uniqueness victims before any mutation.
+    keys = f"SELECT NEW.ask_id AS ask_id UNION {VICTIMS}"
+    if update:
+        keys += " UNION SELECT OLD.ask_id"
+    return bump_keys(keys)
 
 
 HISTORY = " SELECT RAISE(ABORT,'fulfillment-history-protected');"
@@ -83,14 +85,14 @@ TRIGGERS = (
     trigger(
         "fq2_asks_update",
         "BEFORE UPDATE OF " + ASK_FIELDS + " ON asks",
-        bump("OLD.ask_id") + bump("NEW.ask_id"),
+        bump_keys("SELECT OLD.ask_id AS ask_id UNION SELECT NEW.ask_id"),
     ),
     trigger("fq2_asks_delete", "BEFORE DELETE ON asks", bump("OLD.ask_id")),
-    trigger("fq2_answers_insert", "BEFORE INSERT ON ask_answers", answer_bumps() + bump("NEW.ask_id")),
+    trigger("fq2_answers_insert", "BEFORE INSERT ON ask_answers", answer_bumps()),
     trigger(
         "fq2_answers_update",
         "BEFORE UPDATE ON ask_answers",
-        answer_bumps() + bump("OLD.ask_id") + bump("NEW.ask_id"),
+        answer_bumps(update=True),
     ),
     trigger("fq2_answers_delete", "BEFORE DELETE ON ask_answers", bump("OLD.ask_id")),
     trigger("fq2_receipt_insert", "AFTER INSERT ON ask_fulfillments", bump("NEW.ask_id")),
@@ -149,7 +151,10 @@ def migrate(store: Store, *, apply: bool = False) -> dict[str, object]:
     with store.lock:
         if store.db.in_transaction:  # migration cannot join an existing read/write transaction
             raise f.Invalid("migration-transaction-active")
-        return migrate_connection(store.db, apply=apply)
+        result = migrate_connection(store.db, apply=apply)
+        if apply:
+            store.configure_verification_notifications()
+        return result
 
 
 def migrate_connection(db: sqlite3.Connection, *, apply: bool = False) -> dict[str, object]:
@@ -437,10 +442,18 @@ async def worker(store: Store) -> None:
             except asyncio.CancelledError:
                 await future
                 raise
-            except (f.Invalid, msgspec.DecodeError, sqlite3.Error, OSError, ValueError, RuntimeError):
-                delay = 30
+            except Exception:  # noqa: BLE001 - bounded background-pass boundary, cancellation above
+                # No retained payload/exception text enters the diagnostic.
+                logging.getLogger(__name__).warning("fulfillment-verification-unavailable")
+                # A malformed retained row must not terminate the daemon or bypass fixed backoff.
+                await asyncio.sleep(30)
+                continue
+            # Notifications coalesce during the mandatory gap; they cannot bypass it.
+            await asyncio.sleep(1)
+            if count:
+                continue
             try:
-                await asyncio.wait_for(wake.wait(), timeout=delay)
+                await asyncio.wait_for(wake.wait(), timeout=delay - 1)
             except TimeoutError:
                 pass
     finally:
