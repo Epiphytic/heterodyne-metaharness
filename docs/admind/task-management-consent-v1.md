@@ -31,8 +31,10 @@ fields in addition to the ordinary local `poster`, `title` and `body`:
 The metadata is a closed object; missing/extra keys, unsupported versions or
 partial opt-in refuse. `links`, `pr_url`, `head_sha` and `bead` must be absent or
 empty. Native kind stays `question`. Do not send raw JSON as title or body.
-The title and multiline body must be literal plain text: no Markdown formatting,
-control/bidi characters, unsafe secret-like strings, or lossy sanitizer output.
+The title and multiline body use a deliberately narrow printable-ASCII literal
+representation (body newlines only). Non-ASCII, combining marks, HTML/entity
+syntax, renderer-owned prefixes, embedded URLs, Markdown, control characters and
+secret-like strings refuse the whole request unchanged; no lossy sanitizer is used.
 Audit URLs must pass the existing public-link validation and be immutable GitHub
 blob links; percent escapes are refused. Refused facts must be corrected at the
 producer, never shortened or disguised by the renderer.
@@ -61,6 +63,12 @@ Default CLI readback retains the exact legacy v1 decoder. A v2-capable reader al
 accepts genuine v1 results, but consumers must compare the requested version and
 presentation, never treat a v1 response as a v2 request acknowledgment.
 
+With explicit `--version 2`, CLI refusals use the typed v2 reply domain and
+`ask.binding.v2 unavailable`. That identifies the requested local decoding domain;
+it does not prove the peer supports v2. The existing socket request is unchanged
+and carries no version selector. Only a complete returned `EnvelopeV2` establishes
+a successful v2 read; a refusal never supplies evidence or authorizes fallback.
+
 A successful v2 reply is `AskBindingReplyV2` with `binding: EnvelopeV2`.
 `binding.version` is integer 2. `binding.inputs` retains every v1 render input and
 adds the exact `presentation`, `render_version` and closed `management` metadata.
@@ -72,7 +80,8 @@ accepted. Pending/altered/truncated/unreproducible parts refuse as before.
 
 The queue child must require native delivered status, exact metadata and descriptor
 binding, a complete current-policy authenticated literal-A/accepted-positive
-history and no contrary answer. Existing negative reactions map to `none`, and
+history and no contrary answer. Literal B records B; denial words and negative reactions record `none` (none of
+these), not B. Both leave the request held, as the card legend states, and
 ambiguous/contrary history must remain held. The presentation and title provide no
 authority. This product component preserves the answer parser; it does not apply
 management policy. `!details` exposes the existing full accepted grammar without

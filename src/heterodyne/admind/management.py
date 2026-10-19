@@ -5,7 +5,6 @@ All persisted metadata participates in reproduction and the binding-v2 input dig
 """
 
 import re
-import unicodedata
 from typing import Literal
 
 import msgspec
@@ -20,12 +19,14 @@ CHOICES = ["Perform this exact change", "Leave unchanged and held"]
 MAX_LINES = 36
 MAX_CHARS = 3200
 # Renderer-owned lines may not be injected as purported task facts.
-_MARKDOWN = re.compile(r"[`*_~|\\\[\]<>]|(?m:^\s*[#!>]|^ {4}|^\s*[-=]{3,}\s*$)")
+_MARKDOWN = re.compile(r"[`*_~|&\\\[\]<>]|(?m:^\s*[#!>]|^ {4}|^\s*[-=]{3,}\s*$)")
 _RESERVED = re.compile(
-    r"(?im:^\s*(?:APPROVAL\s*:|QUESTION\s*:|Audit details\s*:|Request\s*:|"
-    r"[A-Z]\s*=|Ask\s|Reply\s|Only a verified management binding|"
-    r"Any other reply or contrary answer|Accepted approval words:|Denial words:|Positive reactions:))"
+    r"(?im:^\s*(?:APPROVAL\s*:|QUESTION\s*:|Audit\s+details\s*:|Request\s*:|"
+    r"(?:Option\s+)?[A-Z]\s*(?:=|/)|Ask\s|Reply\s|Only a verified management binding|"
+    r"deny\s*/|Any other reply or contrary answer|Accepted approval words:|"
+    r"Denial words:|Positive reactions:))"
 )
+_URL = re.compile(r"(?i:(?:[a-z][a-z0-9+.-]*://|www\.|(?:https?|ftp|mailto|tel|data|javascript):))")
 REFUSED = "task-management-consent-v1 management card refused: unsafe, invalid or over budget"
 
 
@@ -48,16 +49,12 @@ def present(row: AskRow) -> bool:
 
 
 def literal(text: str, *, multiline: bool = False) -> bool:
-    """Plain literals only; no format/control/bidi instructions or lossy sanitization."""
+    """Printable ASCII facts only; refuse unsupported text unchanged, never sanitize."""
     return (
         not _MARKDOWN.search(text)
         and not _RESERVED.search(text)
-        and "\u0336" not in text
-        and all(
-            (c == "\n" and multiline)
-            or unicodedata.category(c) not in {"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"}
-            for c in text
-        )
+        and not _URL.search(text)
+        and all((c == "\n" and multiline) or " " <= c <= "~" for c in text)
         and redact(text) == text
     )
 
@@ -131,7 +128,8 @@ def lines(row: AskRow) -> list[str]:
         f"Request: {meta.request_id[:12]}; facts: {meta.descriptor_sha256[:12]}",
         "A = Perform this exact change (recommended)",
         "B = Leave unchanged and held",
-        "A / approved / 👍 ✅ ❤ ♥ = approve; B / deny / 👎 ❌ = leave held.",
+        "A / approved / 👍 ✅ ❤ ♥ = approve; B = leave held.",
+        "deny / 👎 ❌ = none of these; request stays held.",
         "Any other reply or contrary answer holds this request; a later A cannot override it.",
         f"Reply A or B, or !answer {row.ask_id} A|B.",
         "Only a verified management binding authorizes this change.",

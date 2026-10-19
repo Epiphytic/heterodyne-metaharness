@@ -324,11 +324,13 @@ def ask_command(s: AdmindSettings, args: argparse.Namespace) -> int:
 
 def ask_binding_command(s: AdmindSettings, ask_id: str, *, version: int = 1) -> int:
     """Only the daemon reads native state. The client cannot supply policy, files or answer evidence."""
+    reply_class = binding.AskBindingReplyV2 if version == 2 else binding.AskBindingReply
+    unavailable = f"ask.binding.v{version} unavailable"
     req = asks.AskBinding(ask_id)
     why = asks.check(req)
     if why is not None:
-        print(msgspec.json.encode(binding.AskBindingReply(
-            "refused", "ask.binding.v1 unavailable", code="invalid-state")).decode())
+        print(msgspec.json.encode(reply_class(
+            "refused", unavailable, code="invalid-state")).decode())
         return 1
     async def request() -> binding.AskBindingReply | binding.AskBindingReplyV2:
         reply_type = binding.WireBindingReply if version == 2 else binding.AskBindingReply
@@ -345,18 +347,18 @@ def ask_binding_command(s: AdmindSettings, ask_id: str, *, version: int = 1) -> 
     try:
         reply = asyncio.run(request())
     except ctl.CtlInvalidReply:
-        reply = binding.AskBindingReply("refused", "ask.binding.v1 unavailable", code="invalid-reply")
+        reply = reply_class("refused", unavailable, code="invalid-reply")
     except (ctl.CtlResponseTimeout, TimeoutError):
-        reply = binding.AskBindingReply("refused", "ask.binding.v1 unavailable", code="response-timeout")
+        reply = reply_class("refused", unavailable, code="response-timeout")
     except ctl.CtlUnavailable:
-        reply = binding.AskBindingReply("refused", "ask.binding.v1 unavailable", code="transport-unavailable")
+        reply = reply_class("refused", unavailable, code="transport-unavailable")
     if (reply.ask is not None or reply.asks is not None
             or (reply.result == "ok" and (reply.binding is None or reply.code is not None
                                           or reply.binding.inputs.ask_id != asks.normalise_id(ask_id)))
             or (reply.result != "ok" and (reply.code is None or reply.binding is not None))):
-        reply = binding.AskBindingReply("refused", "ask.binding.v1 unavailable", code="invalid-reply")
+        reply = reply_class("refused", unavailable, code="invalid-reply")
     elif reply.result != "ok":
-        reply = binding.AskBindingReply("refused", "ask.binding.v1 unavailable", code=reply.code)
+        reply = reply_class("refused", unavailable, code=reply.code)
     print(msgspec.json.encode(reply).decode())
     return EX_UNAVAILABLE if reply.code == "transport-unavailable" else (0 if reply.result == "ok" else 1)
 

@@ -265,12 +265,12 @@ def stored_inputs(row: AskRow, chunk_chars: int) -> RenderInputs | RenderInputsV
                           row.question_form, choices, recommended, specs,
                           row.pr_url, row.head_sha, row.bead, row.digest, row.refreshed_from,
                           chunk_chars, approval_inputs(row) if row.kind == "approval" else None)
-    validate_stored_request(row, inputs, metadata)
     if metadata is not None:
         inputs = RenderInputsV2(**msgspec.structs.asdict(inputs), presentation=management.TAG,
                                 render_version=2, management=metadata)
     if len(canonical(inputs)) > MAX_INPUT_BYTES:
         raise Refusal("oversized")
+    validate_stored_request(row, inputs, metadata)
     return inputs
 
 

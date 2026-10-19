@@ -1367,12 +1367,12 @@ class Admind:
         bumped: list[str] = []
         skipped: list[tuple[str, str]] = []
         for row in self.store.remindable_asks():
+            if row.last_activity_at is None or datetime.fromisoformat(row.last_activity_at) > due:
+                continue
             try:
                 asks.management.stored(row)
             except asks.management.Refusal:
                 skipped.append((row.ask_id, "management card refused"))
-                continue
-            if row.last_activity_at is None or datetime.fromisoformat(row.last_activity_at) > due:
                 continue
             if self.store.reminder_pending(row.ask_id):
                 skipped.append((row.ask_id, "pending delivery"))
