@@ -1,0 +1,66 @@
+{
+  "review_round": 6,
+  "effort": "medium",
+  "reviewed_head": "ca8b5bee9a90cce589cb0cf091200ae866c1bd16",
+  "verdict": "PoC candidate; no critical flaw",
+  "findings": [
+    {
+      "number": 1,
+      "state": "OPEN_UNWAIVED",
+      "finding": "Health registration can post for alive/unknown owners or states that executor will refuse.",
+      "activation_blocker": true
+    },
+    {
+      "number": 2,
+      "state": "OPEN_UNWAIVED",
+      "finding": "Health consent omits state/failure-marker facts and retains misleading generic unknown wording.",
+      "activation_blocker": true
+    },
+    {
+      "number": 3,
+      "state": "OPEN_UNWAIVED",
+      "finding": "Semantic owner/ordinal/intent checks need stronger negative tests.",
+      "activation_blocker": false
+    },
+    {
+      "number": 4,
+      "state": "OPEN_UNWAIVED",
+      "finding": "Coverage hash/policy/source/profile refusal paths need additional negative tests.",
+      "activation_blocker": false
+    },
+    {
+      "number": 5,
+      "state": "OPEN_UNWAIVED",
+      "finding": "Backup schema validation is copied across queue and product; source-bound target interface remains future work.",
+      "activation_blocker": false
+    },
+    {
+      "number": 6,
+      "state": "OPEN_UNWAIVED",
+      "finding": "Duplicate UUID validation helper.",
+      "activation_blocker": false
+    },
+    {
+      "number": 7,
+      "state": "OPEN_UNWAIVED",
+      "finding": "Service verbosity/churn debt; pure validator extraction remains future work.",
+      "activation_blocker": false
+    },
+    {
+      "number": 8,
+      "state": "OPEN_UNWAIVED",
+      "finding": "Duplicate health-null-root flow in new and existing test.",
+      "activation_blocker": false
+    },
+    {
+      "number": 9,
+      "state": "OPEN_UNWAIVED",
+      "finding": "Existing r2 health test depends on test module fixture import.",
+      "activation_blocker": false
+    }
+  ],
+  "prior_r5_findings": "all8OPEN_UNWAIVED",
+  "quality_debt": "OPEN_UNWAIVED",
+  "deployment": false,
+  "activation": false
+}
