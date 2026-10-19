@@ -1,0 +1,16 @@
+{
+  "at": "2026-10-19T16:33:41.905196+00:00",
+  "exit": 0,
+  "head": "5db4c0c27c51b4e3db5a5dee8ab94ef25d3af156",
+  "source_unchanged": true,
+  "files": {
+    "docs/designs/2026-10-19-admind-reader-first-deployment.md": "783c554fc076b89fc0b83018a03ae639dab1ca0c6e48bb289e9fec750e769170"
+  },
+  "stream_sha256": "a7c5fdf0ca4440d062e5ec4e78a3c15812b8b0903674a0ea5636b548eaf31f17",
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "events": 130,
+  "malformed_line_numbers": [],
+  "terminal_results": 1,
+  "terminal_success": true,
+  "log_sha256": "8305298065c53e49a16fc901c894a0130f621226765d3f5756a92687958dab48"
+}
