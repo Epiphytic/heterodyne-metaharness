@@ -21,11 +21,14 @@ import socket
 import stat
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 import msgspec
 
 from heterodyne.fsutil import private_dir
+from heterodyne.wsd.maintenance_protocol import Request as MaintenanceRequest
+from heterodyne.wsd.maintenance_protocol import decode as decode_maintenance
+from heterodyne.wsd.scheduled import ScheduledWakeRequest, decode_wake
 
 MAX_REQUEST = 4096
 MAX_REPLY = 1 << 20         # 1 MiB; status leaves finished beads out unless asked, to stay well inside it
@@ -76,7 +79,8 @@ def _harness_refusal(h: HarnessRequest) -> str:
 
 class CtlRequest(msgspec.Struct, frozen=True):
     op: Literal[
-        "tick", "status", "pause", "resume", "reload", "unlanded", "resolve", "sandbox-settle", "harness"
+        "tick", "status", "pause", "resume", "reload", "unlanded", "resolve", "sandbox-settle",
+        "harness", "scheduled-hold",
     ]
     job: Literal["pickup", "reconcile"] | None = None      # tick only
     ws: str | None = None       # None: every workstream (tick and status); pause, resume, unlanded and
@@ -104,6 +108,8 @@ class CtlNoReply(CtlUnavailable):
 
 
 Handler = Callable[[CtlRequest], Awaitable[CtlReply]]
+ScheduledHandler = Callable[[ScheduledWakeRequest], Awaitable[CtlReply]]
+MaintenanceHandler = Callable[[MaintenanceRequest], Awaitable[CtlReply]]
 
 
 def refusal(req: CtlRequest) -> str:
@@ -127,8 +133,8 @@ def refusal(req: CtlRequest) -> str:
         return "resolve needs a session, a generation and an action"
     if req.op == "resolve" and req.action != "discard" and req.tip is None:
         return f"resolve --{req.action} needs the tip it confirms"
-    if req.op == "reload" and req.ws is not None:
-        return "reload takes no workstream; it reloads them all"
+    if req.op in ("reload", "scheduled-hold") and req.ws is not None:
+        return f"{req.op} takes no workstream"
     if req.all and req.op != "status":
         return "only status takes all"
     if (req.op == "harness") != (req.harness is not None):
@@ -145,9 +151,12 @@ class SocketPathTaken(FileExistsError):
 
 
 class CtlServer:
-    def __init__(self, path: Path, handler: Handler) -> None:
+    def __init__(self, path: Path, handler: Handler, *,
+                 scheduled_handler: ScheduledHandler | None = None) -> None:
         self.path = path
         self.handler = handler
+        self.scheduled_handler = scheduled_handler
+        self.maintenance_handler: MaintenanceHandler | None = None
         self.server: asyncio.Server | None = None
         self.created: tuple[int, int] | None = None
         self.closing = False
@@ -207,16 +216,39 @@ class CtlServer:
                 line = await asyncio.wait_for(reader.readline(), READ_SECONDS)
                 if len(line.rstrip(b"\n")) > MAX_REQUEST:
                     raise ValueError("request too long")
-                req = msgspec.json.decode(line, type=CtlRequest)
+                raw: object = msgspec.json.decode(line)
+                if (isinstance(raw, dict)
+                        and cast(dict[str, object], raw).get("op") == "scheduled-wake"):
+                    if not line.endswith(b"\n"):
+                        raise ValueError("incomplete scheduled request frame")
+                    req = decode_wake(line[:-1])
+                elif (isinstance(raw, dict)
+                      and cast(dict[str, object], raw).get("op") in ("effect-wake", "paired-backup")):
+                    if not line.endswith(b"\n"):
+                        raise ValueError("incomplete maintenance frame")
+                    req = decode_maintenance(line[:-1])
+                else:
+                    req = msgspec.json.decode(line, type=CtlRequest)
             except (TimeoutError, ValueError, msgspec.DecodeError):
                 reply = CtlReply("refused", "malformed request")
             else:
-                why = "wsd is stopping; nothing more was started" if self.closing else refusal(req)
+                why = ("wsd is stopping; nothing more was started" if self.closing else
+                       refusal(req) if isinstance(req, CtlRequest) else "")
                 if why:
                     reply = CtlReply("refused", why)
                 else:
                     try:
-                        reply = await self.handler(req)
+                        if isinstance(req, CtlRequest):
+                            reply = await self.handler(req)
+                        elif isinstance(req, MaintenanceRequest):
+                            if self.maintenance_handler is None:
+                                reply = CtlReply("refused", "maintenance admission is unavailable")
+                            else:
+                                reply = await self.maintenance_handler(req)
+                        elif self.scheduled_handler is None:
+                            reply = CtlReply("refused", "scheduled admission is unavailable")
+                        else:
+                            reply = await self.scheduled_handler(req)
                     except Exception as exc:  # noqa: BLE001 - fixed wording; the type is enough
                         reply = CtlReply("failed", f"wsd hit an internal error ({type(exc).__name__})")
             writer.write(frame(reply))

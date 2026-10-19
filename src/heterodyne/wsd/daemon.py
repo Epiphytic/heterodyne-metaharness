@@ -56,11 +56,15 @@ import dataclasses
 import logging
 import os
 import threading
+import time
+import uuid
 from collections import deque
 from collections.abc import Callable, Coroutine, Hashable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+
+import msgspec
 
 from heterodyne.config import ConfigError
 from heterodyne.harness import selection
@@ -71,9 +75,13 @@ from heterodyne.wsd.beads import BeadsAdapter, BeadsUnavailable
 from heterodyne.wsd.btq import QueueFactory
 from heterodyne.wsd.checkpoints import Checkpoint, nothing
 from heterodyne.wsd.ctl import CtlReply, CtlRequest, CtlServer, HarnessRequest, refusal
+from heterodyne.wsd.effect_owner import EffectOwner
 from heterodyne.wsd.gate import ClaimGate
 from heterodyne.wsd.harness import HarnessOps, HarnessRefused, Pruning, install_label
+from heterodyne.wsd.health import HealthSnapshot, Origin
+from heterodyne.wsd.health import publish as publish_health
 from heterodyne.wsd.journal import Journal, JournalBusy, ResolvedEnd
+from heterodyne.wsd.maintenance_protocol import EffectWake, PairedBackup
 from heterodyne.wsd.recovery import Recovered, recover
 from heterodyne.wsd.runtime import (
     Action,
@@ -85,6 +93,10 @@ from heterodyne.wsd.runtime import (
     RuntimeUnavailable,
     UnlandedView,
 )
+from heterodyne.wsd.schedule_manifest import ScheduleManifest
+from heterodyne.wsd.schedule_manifest import load as load_manifest
+from heterodyne.wsd.schedule_origins import Origins
+from heterodyne.wsd.scheduled import ScheduledWakeRequest
 from heterodyne.wsd.scheduler import Outcome, Scheduler, Trigger, TriggerKind
 from heterodyne.wsd.settings import WsdSettings, resolve, restart_fields, restart_view
 from heterodyne.wsd.states import BeadState, WsState
@@ -141,6 +153,9 @@ class Lane:
         self.jobs: set[cf.Future[object]] = set()       # queued or running
         self.closed = False
         self.worker: threading.Thread | None = None
+        self.origins: dict[cf.Future[object], Origins] = {}
+        self.running_origins: dict[Hashable, Origins] = {}
+        self.latest_origins: dict[Hashable, Origins] = {}
 
     def submit(self, key: Hashable, fn: Callable[[], object]) -> cf.Future[object]:
         """Queue `fn`, or return the job queued under `key` that has not started. Raises Stopping once
@@ -162,6 +177,43 @@ class Lane:
             self.ready.notify()
             return fut
 
+    def scheduled(self, key: Hashable, fn: Callable[[], object],
+                  request_id: str) -> tuple[cf.Future[object], bool]:
+        """Associate before publication, under one lock; dequeue freezes this exact association."""
+        with self.lock:
+            if self.closed:
+                raise Stopping
+            fut = self.queued.get(key)
+            joined = fut is not None
+            if fut is None:
+                fut = cf.Future[object]()
+                self.pending.append((fut, key, fn))
+                self.queued[key] = fut
+                self.jobs.add(fut)
+                self.origins[fut] = Origins()
+                fut.add_done_callback(self._forget)
+            self.origins[fut].add(request_id)
+            if self.worker is None:
+                self.worker = threading.Thread(target=self._work, name=f"wsd-lane-{self.name}")
+                self.worker.start()
+            self.ready.notify()
+            return fut, joined
+
+    def origin_snapshot(self) -> dict[str, dict[str, dict[str, object]]]:
+        with self.lock:
+            result: dict[str, dict[str, dict[str, object]]] = {}
+            for kind in ("scheduled-pickup", "scheduled-reconcile"):
+                key = (kind, None)
+                phases: dict[str, dict[str, object]] = {}
+                queued = self.queued.get(key)
+                if queued is not None and queued in self.origins:
+                    phases["queued"] = self.origins[queued].summary()
+                for phase, source in (("running", self.running_origins), ("latest", self.latest_origins)):
+                    if key in source:
+                        phases[phase] = source[key].summary()
+                result[kind] = phases
+            return result
+
     def _forget(self, fut: cf.Future[object]) -> None:
         with self.lock:
             self.jobs.discard(fut)
@@ -177,7 +229,11 @@ class Lane:
                 if not self.pending:
                     continue
                 fut, key, fn = self.pending.popleft()
-                del self.queued[key]        # started: a later request queues a new job
+                del self.queued[key]
+                origin = self.origins.pop(fut, None)
+                if origin is not None:
+                    self.running_origins[key] = origin
+                # started: a later request queues a new job
                 if not fut.set_running_or_notify_cancel():
                     continue
             try:
@@ -186,6 +242,12 @@ class Lane:
                 fut.set_exception(exc)
             else:
                 fut.set_result(result)
+            finally:
+                if origin is not None:
+                    with self.lock:
+                        self.running_origins.pop(key, None)
+                        origin.completed_at = time.monotonic()
+                        self.latest_origins[key] = origin
 
     def close(self) -> set[cf.Future[object]]:
         """Admit nothing more, cancel every job not started, and return the one still running (if any)."""
@@ -194,6 +256,7 @@ class Lane:
             cancelled = [fut for fut, _, _ in self.pending]
             self.pending.clear()
             self.queued.clear()
+            self.origins.clear()
             running = {f for f in self.jobs if f not in cancelled}
             self.ready.notify_all()
         for fut in cancelled:
@@ -250,6 +313,19 @@ class Wsd:
         self.lanes = {
             name: Lane(name, self.shutdown) for name in [STATUS_LANE, HARNESS_LANE, *parts.schedulers]
         }
+        self.manifest: ScheduleManifest | None = None
+        self.admission_ready = False
+        self.maintenance = False
+        self.fatal: asyncio.Future[None] | None = None
+        self.process_id = str(uuid.uuid4())
+        self.health_sequence = 0
+        self.recovery_status: Literal["in_progress", "complete", "failed"] = "in_progress"
+        self.recovery_started = time.monotonic()
+        self.listener_ready_at: float | None = None
+        self.last_scheduled: dict[str, float] = {}
+        self.health_task: asyncio.Task[None] | None = None
+        self.effects: EffectOwner | None = None
+        self.backup_pending: asyncio.Task[CtlReply] | None = None
         self.wanted_pause: dict[str, bool] = {}     # the last pause or resume asked, per workstream
         self.wakes: dict[str, asyncio.TimerHandle] = {}     # the armed quota wake, per workstream
         self.waking: set[asyncio.Task[None]] = set()        # wake pickups not yet finished
@@ -319,6 +395,8 @@ class Wsd:
             raise
 
     def harness_advance(self) -> None:
+        if self.maintenance:
+            return
         try:
             self.parts.harness.advance(utc_now())
         except Exception as exc:  # noqa: BLE001 - retain rows and retry on the next harness tick
@@ -523,6 +601,90 @@ class Wsd:
                 raise Stopping from None
             raise
 
+    def _trip_fatal(self, exc: BaseException) -> None:
+        self.admission_ready = False
+        if self.fatal is not None and not self.fatal.done():
+            self.fatal.set_exception(exc)
+
+    def _scheduled_result(self, future: cf.Future[object]) -> None:
+        try:
+            future.result()
+        except (JobFailed, Stopping, cf.CancelledError):
+            pass
+        except BaseException as exc:  # fatal propagation is the whole purpose of this callback
+            self._trip_fatal(exc)
+
+    async def scheduled(self, request: ScheduledWakeRequest) -> CtlReply:
+        """Admission is atomic with respect to all lane starts; no await inside the batch."""
+        manifest = self.manifest
+        reason = ("owner_mismatch" if self.s.timer_owner != "systemd" else
+                  "manifest_mismatch" if manifest is None else
+                  "manifest_mismatch" if request.installation_id != manifest.installation_id else
+                  "generation_mismatch" if request.generation != manifest.generation else
+                  "unsupported_job" if request.job not in manifest.jobs else
+                  "stopping" if self.stopping or not self.admission_ready else
+                  "maintenance" if self.maintenance else "none")
+        joined = 0
+        targets = len(manifest.workstreams) if manifest is not None else 0
+        if reason == "none" and manifest is not None:
+            loop = asyncio.get_running_loop()
+            with self.shutdown:
+                if any(name not in self.lanes or self.lanes[name].closed for name in manifest.workstreams):
+                    reason = "stopping"
+                else:
+                    try:
+                        for name in manifest.workstreams:
+                            job = self._backstop if request.job == "pickup" else self.reconcile_one
+                            future, did_join = self.lanes[name].scheduled(
+                                ("scheduled-" + request.job, None),
+                                lambda n=name, j=job: self._guarded(j, n), request.request_id)
+                            joined += int(did_join)
+                            if not did_join:
+                                self._arm_on(name, future)
+                                future.add_done_callback(
+                                    lambda f: loop.call_soon_threadsafe(self._scheduled_result, f))
+                    except BaseException as exc:
+                        self._trip_fatal(exc)
+                        raise
+        queued = reason == "none"
+        if queued:
+            self.last_scheduled[request.job] = time.monotonic()
+        fields = {"version": "1", "request_id": request.request_id,
+                  "status": "queued" if queued else "refused", "reason": reason,
+                  "targets": str(targets if queued else 0), "joined": str(joined if queued else 0)}
+        return CtlReply("ok" if queued else "refused", "scheduled admission", {"scheduled": fields})
+
+    async def maintenance_request(self, request: EffectWake | PairedBackup) -> CtlReply:
+        def reply(status: str, reason: str) -> CtlReply:
+            return CtlReply("refused" if status == "refused" else "ok", "maintenance admission",
+                            {"maintenance": {"request_id": request.request_id,
+                                             "status": status, "reason": reason}})
+        manifest = self.manifest
+        if (manifest is None or request.installation_id != manifest.installation_id
+                or request.generation != manifest.generation or self.stopping or not self.admission_ready
+                or self.maintenance):
+            return reply("refused", "not_ready")
+        if isinstance(request, EffectWake):
+            # Plan 8 early implementation has no approved live producer registry.
+            return reply("refused", "producer_disabled")
+        if ("backup_bundle" not in manifest.jobs or request.owner_hash != manifest.backup_owner_hash
+                or self.effects is None or self.effects.cache.state == "error"):
+            return reply("refused", "owner_unavailable")
+        if self.backup_pending is not None and not self.backup_pending.done():
+            return reply("refused", "busy")
+        effects = self.effects
+        async def admit() -> CtlReply:
+            status = await asyncio.wrap_future(effects.backup(
+                request.cycle_sequence,request.native_status,self.s.state_dir / "paired-backups",
+                (self.s.journal,self.s.state_dir / "schedule-effects.db")))
+            if status in ("queued", "joined", "completed"):
+                return reply(status, "none")
+            reason = {"failed": "local_failed", "partial": "local_partial",
+                      "result_unavailable": "result_unavailable"}.get(status, "unresolved")
+            return reply("refused", reason)
+        self.backup_pending = asyncio.create_task(admit())
+        return await asyncio.shield(self.backup_pending)
+
     # --- quota wakes (AU-5 §3.6) ---
 
     def _arm_on(self, name: str, fut: cf.Future[Any]) -> None:
@@ -581,6 +743,13 @@ class Wsd:
             return CtlReply("refused", "wsd is stopping; nothing more was started")
 
     async def _dispatch(self, req: CtlRequest) -> CtlReply:
+        if req.op == "scheduled-hold":
+            if self.s.timer_owner != "systemd" or self.stopping:
+                return CtlReply("refused", "external scheduling is not serving")
+            # Serialized on the serving loop, before any await: subsequent external
+            # requests see the hold. Admitted work still requires normal stop/drain.
+            self.maintenance = True
+            return CtlReply("ok", "scheduled admission held until daemon restart")
         if req.op == "status":
             ws, everything = req.ws, req.all
             return CtlReply("ok", "status", await self._run(STATUS_LANE, ("status", ws, everything),
@@ -739,10 +908,63 @@ class Wsd:
             for name in self.parts.schedulers]
         await asyncio.gather(*pickups)
 
+    async def _publish_health(self, boot: str) -> None:
+        manifest = self.manifest
+        if manifest is None:
+            return
+        self.health_sequence += 1
+        lanes = {name: msgspec.convert(lane.origin_snapshot(), type=dict[str, dict[str, Origin]])
+                 for name, lane in self.lanes.items() if name in self.parts.schedulers}
+        if self.effects is not None:
+            self.effects.refresh()
+        snapshot = HealthSnapshot(
+            1, manifest.installation_id, manifest.generation, self.process_id, boot.strip(),
+            time.time(), time.monotonic(), self.health_sequence, self.s.timer_owner,
+            self.s.backstop_seconds, self.s.reconcile_seconds,
+            self.recovery_status, self.recovery_started, self.admission_ready, self.listener_ready_at,
+            self.last_scheduled.get("pickup"), self.last_scheduled.get("reconcile"),
+            self.effects.cache.state if self.effects is not None else "unready", lanes,
+            effect_observed_at=self.effects.cache.observed_at if self.effects else 0,
+            effect_revision=self.effects.cache.revision if self.effects else 0,
+            effect_backup_state=self.effects.cache.backup_state if self.effects else "unavailable",
+            effect_held=self.effects.cache.held if self.effects else 0,
+            effect_uncertain=self.effects.cache.uncertain if self.effects else 0,
+            effect_oldest_age=self.effects.cache.oldest_age if self.effects else None)
+        writing = asyncio.create_task(asyncio.to_thread(
+            publish_health, self.s.state_dir / "health.json", snapshot))
+        try:
+            try:
+                await asyncio.shield(writing)
+            except asyncio.CancelledError:
+                # Cancellation cannot stop an OS write. Fence it before a final failed snapshot.
+                with contextlib.suppress(OSError, ValueError):
+                    await writing
+                raise
+        except (OSError, ValueError):
+            pass  # observer sees the last snapshot become stale; core never waits on alert delivery
+
+    async def _heartbeat(self) -> None:
+        """Capture on-loop, publish off-loop; never overlap periodic copies."""
+        if self.manifest is None:
+            return
+        boot = await asyncio.to_thread(Path("/proc/sys/kernel/random/boot_id").read_text)
+        while True:
+            await self._publish_health(boot)
+            await asyncio.sleep(30)
+
     async def serve(self, stop: asyncio.Event) -> None:
         """Run until `stop` is set or a timer dies. Returns (or raises) only once no job is running, or
         raises Undrained if some still are after DRAIN_SECONDS. A stop during startup goes straight to
         the drain; the socket and the timers never start after it."""
+        self.fatal = asyncio.get_running_loop().create_future()
+        if self.s.timer_owner == "systemd":
+            self.manifest = load_manifest(self.s)
+        else:
+            self.manifest = None
+        if self.manifest is not None:
+            self.effects = EffectOwner(self.s.state_dir / "schedule-effects.db",
+                                       self.manifest.installation_id,self.manifest.generation,self.manifest.backup_owner_hash)
+        self.health_task = asyncio.create_task(self._heartbeat())
         starting = asyncio.create_task(self._startup())
         stopped = asyncio.create_task(stop.wait())
         try:
@@ -752,31 +974,54 @@ class Wsd:
                 task.cancel()
             await asyncio.gather(starting, stopped, return_exceptions=True)
         failed = None if starting.cancelled() else starting.exception()
+        self.recovery_status = ("in_progress" if starting.cancelled() else
+                                "failed" if failed is not None else "complete")
+
         if starting.cancelled() or failed is not None or stop.is_set():
-            await self._cancel_wakes()
-            await self._drain()
+            try:
+                await self._cancel_wakes()
+                await self._drain()
+            finally:
+                self.health_task.cancel()
+                await asyncio.gather(self.health_task, return_exceptions=True)
+                if failed is not None and self.manifest is not None:
+                    # No periodic writer remains; publish the actual terminal recovery state.
+                    with contextlib.suppress(OSError, ValueError):
+                        boot = await asyncio.to_thread(Path("/proc/sys/kernel/random/boot_id").read_text)
+                        await self._publish_health(boot)
+                if self.effects is not None:
+                    await asyncio.to_thread(self.effects.close)
             if failed is not None:
                 raise failed
             return
         server = CtlServer(self.s.socket, self.handle)
+        server.scheduled_handler = self.scheduled
+        server.maintenance_handler = self.maintenance_request
         timers: list[asyncio.Task[None]] = []
         stopping = asyncio.create_task(stop.wait())
         try:
             await server.start()        # inside: a socket that fails to start still closes every lane
             if stop.is_set():
                 return                  # stopped while the socket started: no timer starts
+            self.admission_ready = True
+            self.listener_ready_at = time.monotonic()
             timers = [asyncio.create_task(self._every(name, seconds, kind, job))
-                      for name in self.parts.schedulers
+                      for name in self.parts.schedulers if self.s.timer_owner == "internal"
                       for seconds, kind, job in ((self.s.backstop_seconds, "pickup", self._backstop),
                                                  (self.s.reconcile_seconds, "reconcile", self.reconcile_one))]
             timers.append(asyncio.create_task(self._harness_every()))
-            await asyncio.wait([stopping, *timers], return_when=asyncio.FIRST_COMPLETED)
+            await asyncio.wait([stopping, self.fatal, *timers], return_when=asyncio.FIRST_COMPLETED)
+            if self.fatal.done():
+                self.fatal.result()
             for task in timers:
                 if task.done():
                     task.result()       # a timer only ends by raising: wsd must not run on without it
         finally:
+            self.admission_ready = False
             self._cancel_queued()       # before any await: from here no request, timer or queued job starts
             server.stop_accepting()
+            self.health_task.cancel()
+            await asyncio.gather(self.health_task, return_exceptions=True)
             for task in (stopping, *timers):
                 task.cancel()
             await asyncio.gather(stopping, *timers, return_exceptions=True)
@@ -785,6 +1030,8 @@ class Wsd:
                 await self._drain()
             finally:
                 await server.close()    # the handlers waiting on drained jobs have their replies now
+                if self.effects is not None:
+                    await asyncio.to_thread(self.effects.close)
 
     def _cancel_queued(self) -> set[cf.Future[object]]:
         """Stop admitting, cancel every job not yet started, and return those still running: on every lane

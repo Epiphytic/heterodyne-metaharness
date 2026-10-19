@@ -1,0 +1,20 @@
+{
+  "review_round": 9,
+  "effort": "medium",
+  "mechanism": "Claude built-in /code-review",
+  "question": "Are there any critical flaws with this, or is this good enough to implement as a PoC?",
+  "start_at": "2026-10-19T12:12:22.467873+00:00",
+  "finished_at": "2026-10-19T12:17:16.309673+00:00",
+  "exit": 0,
+  "source_unchanged": true,
+  "raw_sha256": "6ea2b18bf14f3c7c48f0fd1ba15ebc1b639de2b39b53c3d7704b3ae019b5aec2",
+  "stream_sha256": "cfe54c495b950ec14acc856105cd6074a966af20f540e4a4ec855e09f20669ce",
+  "original_start_sha256": "be7e3923fb90c9b88ba394b6e8b066f1a2375f236529b95d79bbfe2eefa75f50",
+  "original_result_sha256": "6a280d86e1d9db133cc4ea980337170ce129de083d349cec7a38910ac33737a2",
+  "public_raw": "byte-identical; no normalization",
+  "frozen_candidate_count": 360,
+  "frozen_candidate_all_equal": true,
+  "head": "438e63bf6872cf4d73f31b5f09a2d17dc802ab87",
+  "merge_head": "e212ff569ebb7b62ace8003ef7d56229c6b8010e",
+  "frozen_candidate_manifest_sha256": "69311834ac686bbeceaa20f462b95da45c6d797d17e52786c9653fc0fd7774dc"
+}

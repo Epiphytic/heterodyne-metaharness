@@ -50,6 +50,7 @@ def env(d: Path) -> dict[str, str]:
 
 def test_resolve_defaults_and_workstreams(cfg: Path) -> None:
     s = resolve(env(cfg))
+    assert s.timer_owner == "internal"
     assert (s.backstop_seconds, s.reconcile_seconds, s.inbox_attempts_before_human) == (60.0, 300.0, 3)
     assert s.state_dir == cfg / ".local" / "state" / "heterodyne" / "wsd"
     assert s.btq_locations == {"dolt_port": "3307", "credentials": str(cfg / "btq-credentials.json")}
@@ -135,3 +136,38 @@ def test_the_credential_locks_live_in_the_state_dir(cfg: Path) -> None:
     s = resolve(env(cfg))
     assert s.credlock_dir == s.state_dir / "credlocks"
     assert s.credlock_dir != s.lock_dir
+
+
+@pytest.mark.parametrize("owner", ['"other"', '"Systemd"', 'true', '1', '[]'])
+def test_timer_owner_is_explicit_and_closed(cfg: Path, owner: str) -> None:
+    write(cfg, "config.toml", (cfg / "config.toml").read_text()
+          + f"[wsd]\ntimer_owner = {owner}\n")
+    with pytest.raises(ConfigError, match="timer_owner"):
+        resolve(env(cfg))
+
+
+def test_systemd_owner_preserves_effective_cadences_and_requires_restart(cfg: Path) -> None:
+    before = resolve(env(cfg))
+    write(cfg, "config.toml", (cfg / "config.toml").read_text()
+          + '[wsd]\ntimer_owner = "systemd"\nbackstop_seconds = 20\n')
+    after = resolve(env(cfg))
+    assert after.timer_owner == "systemd"
+    assert (after.backstop_seconds, after.reconcile_seconds) == (20.0, 300.0)
+    assert set(restart_fields(restart_view(before), restart_view(after))) == {
+        "timer_owner", "backstop_seconds"}
+
+
+@pytest.mark.parametrize("key", ["backstop_seconds", "reconcile_seconds"])
+@pytest.mark.parametrize("value", ["0.5", "20.5", "true", "0", "86401"])
+def test_systemd_owner_refuses_nonintegral_or_out_of_range_cadence(
+        cfg: Path, key: str, value: str) -> None:
+    write(cfg, "config.toml", (cfg / "config.toml").read_text()
+          + f'[wsd]\ntimer_owner = "systemd"\n{key} = {value}\n')
+    with pytest.raises(ConfigError, match=key):
+        resolve(env(cfg))
+
+
+def test_internal_owner_retains_fractional_cadence(cfg: Path) -> None:
+    write(cfg, "config.toml", (cfg / "config.toml").read_text()
+          + '[wsd]\ntimer_owner = "internal"\nbackstop_seconds = 0.5\n')
+    assert resolve(env(cfg)).backstop_seconds == 0.5

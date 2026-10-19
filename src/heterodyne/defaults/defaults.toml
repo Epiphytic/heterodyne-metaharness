@@ -48,6 +48,7 @@ relays = []
 
 # The workstream daemon (§4.3, §9). Host only; [integrations.beads] says where btq and the queue are.
 [wsd]
+timer_owner = "internal"
 backstop_seconds = 60
 reconcile_seconds = 300
 launch_failures_before_human = 2
