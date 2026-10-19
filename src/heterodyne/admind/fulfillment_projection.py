@@ -211,10 +211,11 @@ def migrate_connection(db: sqlite3.Connection, *, apply: bool = False) -> dict[s
 
 
 SUPPRESSED = (
-    "EXISTS(SELECT 1 FROM ask_fulfillments f JOIN fulfillment_generations g "
+    "EXISTS(SELECT 1 FROM ask_fulfillments f JOIN fulfillment_generations g "  # noqa: S608 - fixed local predicate
     "ON g.ask_id=f.ask_id JOIN fulfillment_verifications v ON v.ask_id=f.ask_id "
     "JOIN fulfillment_projection_meta m ON m.singleton=1 "
-    "WHERE f.ask_id=asks.ask_id AND f.valid=1 AND v.state='valid' "
+    "WHERE f.ask_id=asks.ask_id AND (" + f.LEGACY_PRESENTATION + ") "
+    "AND f.valid=1 AND v.state='valid' "
     "AND v.epoch=m.epoch AND v.generation=g.generation)"
 )
 FALLBACK = (
@@ -232,6 +233,7 @@ def capacity_predicate(db: sqlite3.Connection) -> str:
 
 
 def bounded_binding(db: sqlite3.Connection, ask_id: str) -> dict[str, object]:
+    f.require_legacy_presentation(db, ask_id)
     fields = "kind,poster,title,body,pr_url,head_sha,bead,digest,question_form,choices,links,created_at"
     row = db.execute(f"SELECT {fields} FROM asks WHERE ask_id=?", (ask_id,)).fetchone()  # noqa: S608 - finite literal SQL identifiers only
     if row is None:

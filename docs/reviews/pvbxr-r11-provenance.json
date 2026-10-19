@@ -1,0 +1,24 @@
+{
+  "actual_ordinal": 11,
+  "effort": "medium",
+  "reviewer": "Claude Opus",
+  "author": "Codex",
+  "mode": "cross-model",
+  "review_phrase": "Are there any critical flaws with this, or is this good enough to implement as a PoC?",
+  "actual_result": {
+    "at": "2026-10-19T08:50:05.476139+00:00",
+    "exit": 0,
+    "head": "04f2622567067d57e0be79d785001f2c9bf8d08b",
+    "source_unchanged": true,
+    "stream_sha256": "c662ab1f7c8402aa0f9b2964c3916500ffba3eb3b10ff0047b0b7424e7e854e0",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "events": 37,
+    "malformed_line_numbers": [],
+    "terminal_results": 1,
+    "terminal_success": true,
+    "log_sha256": "68189645627783a74c891702ccfec94b0190f15fabd69b641c617343b3014aac"
+  },
+  "public_report_sha256": "68189645627783a74c891702ccfec94b0190f15fabd69b641c617343b3014aac",
+  "normalization": "operator-home prefix only; original private bytes retained",
+  "conclusion": "No new critical flaw; fixture compatible and safe; PoC can go ahead; all previous native and deployment holds remain."
+}

@@ -21,8 +21,9 @@ from typing import Literal, cast
 
 import msgspec
 
-from heterodyne.admind import approvals, asks, chunk
+from heterodyne.admind import approvals, asks, chunk, management
 from heterodyne.admind import links as ask_links
+from heterodyne.admind.management import Metadata as ManagementMetadata
 from heterodyne.admind.redact import redact
 from heterodyne.admind.settings import Operator
 from heterodyne.admind.store import AskRow, Store
@@ -73,6 +74,12 @@ class RenderInputs(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     refreshed_from: str | None
     chunk_chars: int
     approval_counts: tuple[int, int] | None
+
+
+class RenderInputsV2(RenderInputs, frozen=True, forbid_unknown_fields=True):
+    presentation: Literal["task-management-consent-v1"]
+    render_version: Literal[2]
+    management: ManagementMetadata
 
 
 class CardPart(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -135,10 +142,62 @@ class Envelope(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     boot_id: str
 
 
+class EnvelopeV2(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    version: Literal[2]
+    inputs: RenderInputsV2
+    status: str
+    outcome: str | None
+    decided_by: str | None
+    current_attempt: str | None
+    render_input_sha256: str
+    delivered: bool
+    delivery_source: Literal["original", "repeat"]
+    card_parts: list[CardPart]
+    truncated: Literal[False]
+    answers: list[BoundAnswer]
+    answer_history_complete: Literal[True]
+    decision_attempts: list[DecisionAttempt]
+    decision_history_complete: Literal[True]
+    policy: list[PolicyPrincipal]
+    policy_sha256: str
+    read_at_boottime_ns: int
+    boot_id: str
+
+
 class AskBindingReply(asks.AskReply, frozen=True, forbid_unknown_fields=True):
     """Only this new operation extends the old reply shape; original responses are unchanged."""
     code: RefusalCode | None = None
     binding: Envelope | None = None
+
+
+class AskBindingReplyV2(asks.AskReply, frozen=True, forbid_unknown_fields=True):
+    code: RefusalCode | None = None
+    binding: EnvelopeV2 | None = None
+
+
+class WireBindingReply(asks.AskReply, frozen=True, forbid_unknown_fields=True):
+    """Bounded transport only; decode closed versioned schema before exposing evidence."""
+    code: RefusalCode | None = None
+    binding: msgspec.Raw = msgspec.Raw(b"null")
+
+
+def decode_reply(peer: WireBindingReply | AskBindingReply | AskBindingReplyV2
+                 ) -> AskBindingReply | AskBindingReplyV2:
+    if isinstance(peer, AskBindingReply | AskBindingReplyV2):
+        return peer
+    raw = msgspec.json.encode(peer)
+    if bytes(peer.binding) == b"null":
+        return msgspec.json.decode(raw, type=AskBindingReply)
+    version = msgspec.json.decode(peer.binding, type=_Version).version
+    if version == 1:
+        return msgspec.json.decode(raw, type=AskBindingReply)
+    if version == 2:
+        return msgspec.json.decode(raw, type=AskBindingReplyV2)
+    raise ValueError("unsupported binding version")
+
+
+class _Version(msgspec.Struct):
+    version: int
 
 
 def canonical(value: object) -> bytes:
@@ -181,7 +240,8 @@ def policy_snapshot(load: Callable[[], tuple[Operator, ...]]) -> list[PolicyPrin
         raise Refusal("policy-unavailable") from None
 
 
-def stored_inputs(row: AskRow, chunk_chars: int) -> RenderInputs:
+def stored_inputs(row: AskRow, chunk_chars: int) -> RenderInputs | RenderInputsV2:
+    metadata = management.stored(row)
     if row.kind not in ("question", "merge", "approval") or row.status not in STATES:
         raise Refusal("invalid-state")
     if row.kind != "approval" and len(row.body) > MAX_INPUT_CHARS:
@@ -205,20 +265,25 @@ def stored_inputs(row: AskRow, chunk_chars: int) -> RenderInputs:
                           row.question_form, choices, recommended, specs,
                           row.pr_url, row.head_sha, row.bead, row.digest, row.refreshed_from,
                           chunk_chars, approval_inputs(row) if row.kind == "approval" else None)
+    if metadata is not None:
+        inputs = RenderInputsV2(**msgspec.structs.asdict(inputs), presentation=management.TAG,
+                                render_version=2, management=metadata)
     if len(canonical(inputs)) > MAX_INPUT_BYTES:
         raise Refusal("oversized")
-    validate_stored_request(row, inputs)
+    validate_stored_request(row, inputs, metadata)
     return inputs
 
 
-def validate_stored_request(row: AskRow, inputs: RenderInputs) -> None:
+def validate_stored_request(row: AskRow, inputs: RenderInputs,
+                            metadata: management.Metadata | None = None) -> None:
     """Reuse native request validation and redaction without changing persisted card bytes."""
     if row.kind == "approval":
         if any(value is not None for value in (row.question_form, row.choices, row.links)):
             raise Refusal("invalid-state")
         return
     request = asks.AskPost(inputs.kind, row.title, row.body, row.pr_url, row.head_sha, row.bead,
-                           row.poster, inputs.form, inputs.choices, inputs.recommended, inputs.links)
+                           row.poster, inputs.form, inputs.choices, inputs.recommended, inputs.links,
+                           row.presentation, row.render_version, metadata)
     if asks.check(request) is not None:
         raise Refusal("invalid-state")
     context = asks.context(row)
@@ -435,7 +500,7 @@ def _native_outcome(row: AskRow, current: str | None, attempts: list[DecisionAtt
 
 
 def _snapshot_envelope(db: sqlite3.Connection, ask_id: str, chunk_chars: int,
-                       policy: list[PolicyPrincipal]) -> Envelope:
+                       policy: list[PolicyPrincipal]) -> Envelope | EnvelopeV2:
     try:
         captured = Store.snapshot_ask(db, ask_id, MAX_INPUT_BYTES)
     except OverflowError:
@@ -448,13 +513,17 @@ def _snapshot_envelope(db: sqlite3.Connection, ask_id: str, chunk_chars: int,
     answers, attempts = histories(db, ask_id, {p.name: p.sender_key for p in policy})
     _native_outcome(row, current, attempts)
     at, boot = clock()
+    if isinstance(inputs, RenderInputsV2):
+        return EnvelopeV2(2, inputs, row.status, row.outcome, row.decided_by, current,
+                          sha256(inputs), delivered, "repeat" if repeated else "original", parts, False,
+                          answers, True, attempts, True, policy, sha256(policy), at, boot)
     return Envelope(1, inputs, row.status, row.outcome, row.decided_by, current,
                     sha256(inputs), delivered, "repeat" if repeated else "original", parts, False,
                     answers, True, attempts, True, policy, sha256(policy), at, boot)
 
 
 def read(store: Store, ask_id: str, chunk_chars: int,
-         load_policy: Callable[[], tuple[Operator, ...]]) -> AskBindingReply:
+         load_policy: Callable[[], tuple[Operator, ...]]) -> AskBindingReply | AskBindingReplyV2:
     """Worker-only read: one independent WAL snapshot, no post lock or live Store lock."""
     try:
         if asks.normalise_id(ask_id) != ask_id:
@@ -464,7 +533,10 @@ def read(store: Store, ask_id: str, chunk_chars: int,
             result = _snapshot_envelope(db, ask_id, chunk_chars, policy)
         if policy_snapshot(load_policy) != policy:
             raise Refusal("policy-unavailable")
-        reply = AskBindingReply("ok", "ask.binding.v1 complete", binding=result)
+        if isinstance(result, EnvelopeV2):
+            reply = AskBindingReplyV2("ok", "ask.binding.v2 complete", binding=result)
+        else:
+            reply = AskBindingReply("ok", "ask.binding.v1 complete", binding=result)
         if len(msgspec.json.encode(reply)) > MAX_BYTES:
             raise Refusal("oversized")
         return reply

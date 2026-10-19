@@ -1,0 +1,24 @@
+{
+  "actual_ordinal": 10,
+  "effort": "medium",
+  "reviewer": "Claude Opus",
+  "author": "Codex",
+  "mode": "cross-model",
+  "review_phrase": "Are there any critical flaws with this, or is this good enough to implement as a PoC?",
+  "result": {
+    "at": "2026-10-19T08:39:03.308688+00:00",
+    "exit": 0,
+    "head": "661875025bea368fc3da251818ea7851630a6d7c",
+    "source_unchanged": true,
+    "stream_sha256": "bae7bdb7e2752db8e180b444b29dea4f1d7ef7ee85b3767adee54766b5da38cc",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "events": 31,
+    "malformed_line_numbers": [],
+    "terminal_results": 1,
+    "terminal_success": true,
+    "log_sha256": "26d6cdcd341f4cce02b6babc4b61749c8999835a8a0a4aeef7ef15c0a089f5f3"
+  },
+  "public_report_sha256": "26d6cdcd341f4cce02b6babc4b61749c8999835a8a0a4aeef7ef15c0a089f5f3",
+  "normalization": "operator-home prefix only; private originals retained; not native profile proof",
+  "conclusion": "No critical flaw in narrow verifier cancellation fix; all seven findings OPEN UNWAIVED; no broader shutdown/native/deployment clearance"
+}
