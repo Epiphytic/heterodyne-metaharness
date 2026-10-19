@@ -128,8 +128,9 @@ def lines(row: AskRow) -> list[str]:
     result = [
         "APPROVAL: Task management",
         f"Ask {row.ask_id} · operation consent · posted by {row.poster} (a local process; unverified)",
-        row.title,
-        *row.body.split("\n"),
+        # Every admitted producer line stays distinct from renderer-owned answer instructions.
+        "Local facts (unverified; answer instructions below):",
+        *[f"| {fact}" for fact in (row.title, *row.body.split("\n"))],
         f"Audit details: {meta.audit_url}",
         f"Request: {meta.request_id[:12]}; facts: {meta.descriptor_sha256[:12]}",
         "A = Perform this exact change (recommended)",
@@ -152,9 +153,6 @@ def parts(row: AskRow, chunk_chars: int, *, details: bool = False) -> list[str]:
     text = lines(row)
     if details:
         text += [
-            "Accepted approval words: approve, approved, yes, y, ok, okay, lgtm.",
-            "Denial words: deny, denied, reject, rejected (optional reason); no or n alone.",
-            "Positive reactions: 👍 (all skin tones), ✅, ❤, ♥; negative: 👎 (all skin tones), ❌.",
             "Existing reply punctuation and emoji variation-selector handling are unchanged.",
         ]
     # Treat every fact as atomic: splitting a material literal is never a substitute for refusal.

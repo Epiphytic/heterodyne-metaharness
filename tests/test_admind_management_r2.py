@@ -51,7 +51,8 @@ def test_unsafe_facts_refuse_before_storage(daemon, fact, field):
 
 def test_ascii_facts_preserved_without_sanitization(daemon):
     row = daemon.store.ask(post(daemon).ask.summary.ask_id)
-    assert BODY in "\n".join(management.lines(row))
+    facts = [line[2:] for line in management.lines(row) if line.startswith("| ")]
+    assert facts == [row.title, *BODY.split("\n")]
 
 
 def test_legacy_oversize_precedes_invalid_request(daemon, monkeypatch):
