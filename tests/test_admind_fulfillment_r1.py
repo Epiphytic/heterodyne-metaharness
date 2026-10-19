@@ -22,7 +22,7 @@ def propose(store):
 
 
 def test_reaction_native_answer_reference_can_be_consumed(store):
-    seed(store)
+    seed(store, projection=True)
     with store.transaction():
         store.db.execute("DELETE FROM ask_answers WHERE ask_id='abcd'")
         store.add_answer("abcd", "answer", "Liam", "r:" + "f" * 64, "👍", "A")
@@ -31,7 +31,7 @@ def test_reaction_native_answer_reference_can_be_consumed(store):
 
 @pytest.mark.parametrize("route", ["controller", "cancel", "supersede", "new-answer"])
 def test_obsolete_pending_intent_releases_slot_and_retains_notice(store, route):
-    seed(store)
+    seed(store, projection=True)
     intent = propose(store).view["intent_id"]
     with store.transaction():
         if route == "controller":
@@ -56,7 +56,7 @@ def test_obsolete_pending_intent_releases_slot_and_retains_notice(store, route):
 
 
 def test_merge_completion_requires_terminal_evidence(store):
-    seed(store, kind="merge")
+    seed(store, kind="merge", projection=True)
     with pytest.raises(f.Invalid, match="merge-evidence"):
         apply(store)
     receipt = msgspec.structs.replace(
@@ -66,7 +66,7 @@ def test_merge_completion_requires_terminal_evidence(store):
 
 
 def test_expired_identical_proposal_requires_explicit_replacement(store):
-    seed(store)
+    seed(store, projection=True, owned=True)
     first = propose(store)
     store.db.execute("UPDATE ask_fulfillment_intents SET created_at='2020-01-01T00:00:00+00:00'")
     with pytest.raises(f.Invalid, match="stale-intent"):
@@ -80,7 +80,7 @@ def test_expired_identical_proposal_requires_explicit_replacement(store):
 
 @pytest.mark.parametrize("valid", [0, 1])
 def test_fulfillment_or_conflict_is_not_eligible(store, valid):
-    seed(store)
+    seed(store, projection=True)
     apply(store)
     store.db.execute("UPDATE ask_fulfillments SET valid=?", (valid,))
     assert store.fulfillment.view("abcd")["eligible"] is False
@@ -102,7 +102,7 @@ def test_unsigned_uid_gid_kernel_credentials():
 
 @pytest.mark.parametrize("method", ["binding", "stored", "protected"])
 def test_lifecycle_reads_wait_for_other_thread_transaction(store, method):
-    seed(store)
+    seed(store, projection=True)
     entered = threading.Event()
     release = threading.Event()
 
@@ -140,7 +140,7 @@ def test_daemon_notices_use_central_redaction_wake_and_durable_ownership(tmp_pat
 
     u = Unit(tmp_path)
     try:
-        seed(u.store)
+        seed(u.store, projection=True)
         monkeypatch.setattr(f, "ENABLED", True)
         observed = []
         post = u.daemon.post
@@ -179,7 +179,7 @@ def test_inbound_confirmation_atomic_and_fixed_unavailable(tmp_path, monkeypatch
 
     u = Unit(tmp_path)
     try:
-        seed(u.store)
+        seed(u.store, projection=True, owned=True)
         proposed = propose(u.store)
         assert proposed.view is not None
         target = deliver(u.store, proposed.view["intent_id"])
@@ -225,7 +225,7 @@ def test_inbound_confirmation_atomic_and_fixed_unavailable(tmp_path, monkeypatch
 
 
 def test_merge_operator_declaration_also_requires_evidence(store):
-    seed(store, kind="merge")
+    seed(store, kind="merge", projection=True)
     with pytest.raises(f.Invalid, match="merge-evidence"):
         propose(store)
     assert store.db.execute("SELECT COUNT(*) FROM ask_fulfillment_intents").fetchone()[0] == 0
@@ -233,7 +233,7 @@ def test_merge_operator_declaration_also_requires_evidence(store):
 
 def test_guard_maintenance_receipt_survives_fulfillment_settlement_refusal(store, monkeypatch):
     # A fulfilled overlay must be checked before *any* mutation of the guard attempt overlay.
-    seed(store, kind="approval", status="open")
+    seed(store, kind="approval", status="open", projection=True)
     store.db.execute("UPDATE asks SET status='deciding',attempt='attempt' WHERE ask_id='abcd'")
     store.db.execute("INSERT INTO ask_maintenance VALUES ('abcd','attempt',42)")
     monkeypatch.setattr(store.fulfillment, "protected", lambda _ask: True)
@@ -254,9 +254,9 @@ def test_guard_maintenance_receipt_survives_fulfillment_settlement_refusal(store
 
 
 def test_projection_joins_do_not_call_per_row_protected(store, monkeypatch):
-    seed(store)
+    seed(store, projection=True)
     apply(store)
-    seed(store, ask_id="abce", status="open")
+    seed(store, ask_id="abce", status="open", projection=True)
 
     def forbidden(_ask):
         raise AssertionError("per-row lifecycle lookup")

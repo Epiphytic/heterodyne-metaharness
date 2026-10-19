@@ -1,0 +1,78 @@
+{
+  "schema": "public-repair-evidence-subset.v1",
+  "publication_scope": "Selected recorded results, not a byte-identical copy of the full author freeze. Complete original remains retained privately; no evidence values are rewritten.",
+  "original_artifact": "x84mg-r2-repair/freeze.json",
+  "original_sha256": "61a1d5f29fe07e98260a482d47ae4a3503475aa2de7e8fa8b0b24c9666cd3eb3",
+  "omitted_sections": [
+    "checks command inventory",
+    "evidence_files complete auxiliary log-digest inventory",
+    "absolute private worktree/review/disposition paths"
+  ],
+  "head_before_controller_signature": "974a3f48874bd59c20286a6debbe2855b241c12d",
+  "approved_design": {
+    "commit": "f8a80b8fad51c0be015a797e11f4a968f90c4bfb",
+    "path": "docs/adr/2026-10-18-fulfilled-question-activation.md"
+  },
+  "tests": {
+    "affected": {
+      "passed": 453,
+      "seconds": 62.11,
+      "modules": 9,
+      "skips": 0,
+      "log": "affected-green.log"
+    },
+    "final_focused": {
+      "passed": 17,
+      "seconds": 0.71,
+      "log": "final-focused.log"
+    },
+    "predecessor_regressions": {
+      "failed": 13,
+      "log": "predecessor-corrected-red.log",
+      "export": "git archive HEAD src; explicit PYTHONPATH predecessor source",
+      "earlier_fixture_errors_retained": [
+        "predecessor-red.log",
+        "initial-green.log"
+      ]
+    }
+  },
+  "typing_summary": {
+    "filesAnalyzed": 403,
+    "errorCount": 0,
+    "warningCount": 0,
+    "informationCount": 0,
+    "timeInSec": 14.699
+  },
+  "format_residual": {
+    "candidate_unformatted": [
+      "src/heterodyne/admind/daemon.py",
+      "src/heterodyne/admind/store.py"
+    ],
+    "both_also_fail_at_parent": true,
+    "proof": "baseline-format.json",
+    "unwaived": true
+  },
+  "quality": {
+    "exit": 2,
+    "tag": "<quality-delta baseline=\"git-HEAD\" regressions=\"40\" minor=\"9\" acked=\"0\" preexisting-worse=\"24\" new-symbol=\"16\" gating=\"15\" at=\"974a3f488+dirty\">",
+    "log": "quality-delta-final.log",
+    "all_unwaived": true
+  },
+  "oracles": {
+    "original_test_files": 255,
+    "unchanged_bytes": 254,
+    "sole_change": "tests/test_admind_fulfillment_activation_r1.py",
+    "proof": "oracle-proof.json",
+    "all_file_hashes": "all-original-test-files.json",
+    "archive": "original/test_admind_fulfillment_activation_r1.py",
+    "diff": "authorized-oracle-diff.patch",
+    "authorization": "Explicit parent root authorization: only missing-ask readable immutable matching receipt already-applied/:1; malformed-receipt unavailable/:0 and all other assertions retained; approved ADR receipt-first/R2#4."
+  },
+  "limits": [
+    "No live migration, activation, deployment, native or model calls; no queue writes or commit.",
+    "Producer ENABLED independence is required by ADR; verifier containment/backoff fixed without disabling verifier.",
+    "Literal trigger DDL correction is predeployment; predecessor-migrated mismatched DDL remains HOLD, no automatic repair or epoch rewrite.",
+    "Prior detailed migration diagnostic/query debt, formatting debt and quality findings remain UNWAIVED."
+  ],
+  "publication_reason": "Redundant complete freeze inventory triggered the repository scanner on nonsecret log digests. It is omitted rather than encoded, suppressed or allowlisted. Primary test/type/failure/oracle evidence remains published separately."
+}

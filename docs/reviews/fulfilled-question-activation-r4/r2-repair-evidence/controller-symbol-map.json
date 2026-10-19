@@ -1,0 +1,66 @@
+[
+  {
+    "file": "store.py",
+    "symbols": [
+      "Store.__init__",
+      "Store.transaction",
+      "Store.configure_verification_notifications"
+    ],
+    "findings": [
+      1,
+      2
+    ],
+    "purpose": "Connection-local dirty-write notifications, commit outcome independent of advisory wake; no postcommit SQL."
+  },
+  {
+    "file": "fulfillment_projection.py",
+    "symbols": [
+      "bump",
+      "answer_bumps",
+      "TRIGGERS",
+      "migrate",
+      "worker"
+    ],
+    "findings": [
+      2,
+      7,
+      10
+    ],
+    "purpose": "Distinct per-ask trigger bump; fixed healthy/failure spacing; contain unexpected pass errors."
+  },
+  {
+    "file": "fulfillment_cli.py",
+    "symbols": [
+      "plan"
+    ],
+    "findings": [
+      4
+    ],
+    "purpose": "Immutable receipt identity before fresh binding success."
+  },
+  {
+    "file": "fulfillment.py",
+    "symbols": [
+      "Lifecycle.propose"
+    ],
+    "findings": [
+      5
+    ],
+    "purpose": "Current durable successor owners proven before old intent retirement."
+  },
+  {
+    "file": "daemon.py",
+    "symbols": [
+      "Admind.run",
+      "Admind.on_fulfillment"
+    ],
+    "findings": [
+      3,
+      6,
+      7,
+      8,
+      9
+    ],
+    "purpose": "Supervised verifier; Get shared snapshot with projection/refusal containment; non-Get programming errors propagate."
+  }
+]

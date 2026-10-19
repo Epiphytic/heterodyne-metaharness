@@ -20,11 +20,18 @@ MID = "a" * 64
 @pytest.fixture
 def store(tmp_path):
     result = Store(tmp_path / "state" / "store.db")
+    from heterodyne.admind.fulfillment_projection import migrate
+
+    migrate(result, apply=True)  # Explicit disposable-fixture deployment, never constructor migration.
     yield result
     result.close()
 
 
-def seed(store, ask_id="abcd", *, status="answered", kind="question"):
+def seed(store, ask_id="abcd", *, status="answered", kind="question", projection=False, owned=False):
+    if projection:
+        from heterodyne.admind.fulfillment_projection import migrate
+
+        migrate(store, apply=True)  # Explicit isolated-fixture activation.
     row = AskRow(
         ask_id,
         kind,
@@ -47,6 +54,11 @@ def seed(store, ask_id="abcd", *, status="answered", kind="question"):
         store.insert_ask(row, 42)
         if status == "answered":
             store.add_answer(ask_id, "answer", "Liam", hashlib.sha256(ask_id.encode()).hexdigest(), "A", "A")
+    if owned:
+        from fakes.settings import OPERATOR_HEX
+
+        store.claim_inbound(hashlib.sha256(ask_id.encode()).hexdigest(), sender_key=OPERATOR_HEX)
+        store.fulfillment.notice_authority = lambda: {OPERATOR_HEX}  # Synthetic current-policy fixture.
     return row
 
 
@@ -91,7 +103,7 @@ def deliver(store, intent):
 
 
 def test_release_capacity_preserves_original_dto_and_hourly_budget(store):
-    row = seed(store)
+    row = seed(store, projection=True)
     before = msgspec.json.encode(asks.view(row, False, store.answers(row.ask_id)))
     assert len(store.capacity_asks()) == 1
     posted = store.ask_posted_since("2020")
@@ -107,14 +119,14 @@ def test_release_capacity_preserves_original_dto_and_hourly_budget(store):
 
 
 def test_exact_retry_conflict_and_shared_core(store):
-    seed(store)
+    seed(store, projection=True)
     receipt = completion(store)
     first = apply(store, receipt)
     assert apply(store, receipt).view == first.view
     assert apply(store, receipt).result == "already-applied"
-    seed(store, "bcde")
+    seed(store, "bcde", projection=True)
     assert apply(store, completion(store, "bcde")).result == "applied"
-    seed(store, "cdef")
+    seed(store, "cdef", projection=True)
     changed = msgspec.structs.replace(completion(store, "cdef"), terminal_result_sha256="e" * 64)
     with pytest.raises(f.Invalid, match="operation-conflict"):
         apply(store, changed)
@@ -132,7 +144,7 @@ def test_exact_retry_conflict_and_shared_core(store):
     ],
 )
 def test_wrong_exact_binding_refuses(store, field, value):
-    seed(store)
+    seed(store, projection=True)
     receipt = completion(store)
     changed = msgspec.structs.replace(
         receipt, binding=msgspec.structs.replace(receipt.binding, **{field: value})
@@ -147,7 +159,7 @@ def test_wrong_exact_binding_refuses(store, field, value):
     ["open", "deciding", "uncertain", "approved", "denied", "stale", "superseded", "cancelled", "blocked"],
 )
 def test_ineligible_status_never_fulfilled(store, status):
-    seed(store, status=status)
+    seed(store, status=status, projection=True)
     b = msgspec.structs.replace(binding(store), consumed_answers=[MID])
     receipt = f.Completion("operation-completion-v1", b, "controller", "op", "completed", "d" * 64, [])
     with pytest.raises(f.Invalid):
@@ -155,7 +167,7 @@ def test_ineligible_status_never_fulfilled(store, status):
 
 
 def test_wrong_uid_and_nonterminal_schema(store):
-    seed(store)
+    seed(store, projection=True)
     with pytest.raises(f.Invalid, match="unverified-peer"):
         store.fulfillment.apply(completion(store), uid=os.getuid() + 1, pid=123)
     raw = msgspec.json.encode(completion(store)).replace(b'"completed"', b'"issued"')
@@ -164,7 +176,7 @@ def test_wrong_uid_and_nonterminal_schema(store):
 
 
 def test_atomic_rollback_before_commit(store, monkeypatch):
-    seed(store)
+    seed(store, projection=True)
 
     def crash(*args, **kwargs):
         raise RuntimeError("simulated crash")
@@ -180,7 +192,7 @@ def test_atomic_rollback_before_commit(store, monkeypatch):
 def test_restart_rebuilds_conflict_after_old_writer_new_answer(tmp_path):
     path = tmp_path / "db"
     store = Store(path)
-    seed(store)
+    seed(store, projection=True)
     receipt = completion(store)
     apply(store, receipt)
     identity = store.get("ask_store_id")
@@ -193,20 +205,22 @@ def test_restart_rebuilds_conflict_after_old_writer_new_answer(tmp_path):
         old.execute("UPDATE asks SET status='cancelled' WHERE ask_id='abcd'")
     restored = Store(path)
     try:
-        restored.fulfillment.rebuild()  # daemon startup/roll-forward, not each routine CLI open
+        restored.fulfillment.rebuild()  # Startup validation stays bounded; worker verifies separately.
+        from heterodyne.admind.fulfillment_projection import verify_pass
+
+        verify_pass(restored)
         assert restored.get("ask_store_id") == identity
         assert restored.fulfillment.view("abcd")["lifecycle"] == "conflict"
         assert len(restored.capacity_asks()) == 1
         row = restored.ask("abcd")
         assert row is not None and row.status == "cancelled"
-        with pytest.raises(f.Invalid, match="conflict"):
-            apply(restored, receipt)
+        assert apply(restored, receipt).result == "already-applied"
     finally:
         restored.close()
 
 
 def test_store_mutation_guards_preserve_answer_and_status(store):
-    seed(store)
+    seed(store, projection=True)
     apply(store)
     with pytest.raises(ValueError, match="already fulfilled"):
         store.add_answer("abcd", "answer", "Liam", "f" * 64, "B")
@@ -216,7 +230,7 @@ def test_store_mutation_guards_preserve_answer_and_status(store):
 
 
 def test_concurrent_exact_apply_is_once(store):
-    seed(store)
+    seed(store, projection=True)
     receipt = completion(store)
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(lambda _: apply(store, receipt).result, range(2)))
@@ -225,7 +239,7 @@ def test_concurrent_exact_apply_is_once(store):
 
 
 def test_operator_route_no_machine_receipt_and_duplicate(store):
-    seed(store)
+    seed(store, projection=True, owned=True)
     result = store.fulfillment.propose(
         f.Propose("abcd", declaration(store)), uid=os.getuid(), chunk_chars=350
     )
@@ -245,7 +259,7 @@ def test_operator_route_no_machine_receipt_and_duplicate(store):
 
 
 def test_stale_replace_dispose_and_delivered_tombstone(store):
-    seed(store)
+    seed(store, projection=True, owned=True)
     req = f.Propose("abcd", declaration(store))
     first = store.fulfillment.propose(req, uid=os.getuid(), chunk_chars=350)
     deliver(store, first.view["intent_id"])
@@ -260,7 +274,7 @@ def test_stale_replace_dispose_and_delivered_tombstone(store):
 
 
 def test_pending_bounds_no_hourly_or_active_cap_dependency(store):
-    seed(store)
+    seed(store, projection=True)
     proposal = f.Propose("abcd", declaration(store))
     first = store.fulfillment.propose(proposal, uid=os.getuid(), chunk_chars=1000)
     assert store.fulfillment.propose(proposal, uid=os.getuid(), chunk_chars=1000).view == first.view
@@ -301,7 +315,7 @@ def test_canonical_golden_and_store_identity(store):
 def test_conflicted_receipt_blocks_attempt_before_any_write(store):
     from heterodyne.admind.approvals import Attempt
 
-    seed(store)
+    seed(store, projection=True)
     apply(store)
     store.db.execute("UPDATE asks SET status='open' WHERE ask_id='abcd'")
     attempt = Attempt("abcd", "f" * 64, "approve", "Liam", "ref", "digest", None)
@@ -311,7 +325,7 @@ def test_conflicted_receipt_blocks_attempt_before_any_write(store):
 
 
 def test_confirmation_notice_has_request_and_consumed_context(store):
-    seed(store)
+    seed(store, projection=True)
     result = store.fulfillment.propose(
         f.Propose("abcd", declaration(store)), uid=os.getuid(), chunk_chars=300
     )
@@ -326,7 +340,7 @@ def test_confirmation_notice_has_request_and_consumed_context(store):
 
 @pytest.mark.parametrize("change", ["secret", "oversized", "too-many-lines"])
 def test_unsafe_confirmation_material_refuses_atomically(store, change):
-    seed(store)
+    seed(store, projection=True)
     value = "sk-" + "Q" * 30 if change == "secret" else "x" * 3600 if change == "oversized" else "line\n" * 41
     store.db.execute("UPDATE asks SET body=? WHERE ask_id='abcd'", (value,))
     req = f.Propose("abcd", declaration(store))
@@ -341,7 +355,7 @@ def test_pending_cap_does_not_block_apply_or_dispose(store):
 
     ids = ["".join(chars) for chars in itertools.islice(itertools.product("abcdefgh", repeat=4), 41)]
     for ask_id in ids:
-        seed(store, ask_id)
+        seed(store, ask_id, projection=True)
     for ask_id in ids[:40]:
         store.fulfillment.propose(
             f.Propose(ask_id, declaration(store, ask_id)), uid=os.getuid(), chunk_chars=1000
@@ -360,7 +374,7 @@ def test_backup_preserves_identity_and_receipt(tmp_path):
     backup = tmp_path / "backup" / "db"
     backup.parent.mkdir()
     try:
-        seed(source)
+        seed(source, projection=True)
         receipt = completion(source)
         first = apply(source, receipt)
         with sqlite3.connect(backup) as target:
@@ -379,7 +393,7 @@ def test_backup_preserves_identity_and_receipt(tmp_path):
 def test_unknown_schema_migration_leaves_original_data(tmp_path):
     path = tmp_path / "state" / "db"
     original = Store(path)
-    seed(original)
+    seed(original, projection=True)
     original.set("ask_fulfillment_schema", "future")
     original.close()
     with pytest.raises(f.Invalid, match="unsupported-schema"):
@@ -397,7 +411,7 @@ def test_daemon_local_capability_uid_latch_and_work_lock(tmp_path, monkeypatch):
 
     u = Unit(tmp_path)
     try:
-        seed(u.store)
+        seed(u.store, projection=True)
         request = f.Apply(completion(u.store))
         assert (
             run(u.daemon.on_fulfillment(request, ctl.Peer(123, os.getuid(), os.getgid()))).result
@@ -432,7 +446,7 @@ def test_real_inbound_confirmation_uses_normal_auth_gates(tmp_path, monkeypatch,
 
     u = Unit(tmp_path)
     try:
-        seed(u.store)
+        seed(u.store, projection=True, owned=True)
         proposed = u.store.fulfillment.propose(
             f.Propose("abcd", declaration(u.store)), uid=os.getuid(), chunk_chars=350
         )
@@ -465,7 +479,7 @@ def test_reconcile_lost_reply_queries_before_retry_and_continuation_is_exact(sto
     from heterodyne.admind import ctl
     from heterodyne.admind import fulfillment_cli as cli
 
-    seed(store)
+    seed(store, projection=True)
     receipt = completion(store)
     path = tmp_path / "receipts.json"
     path.write_bytes(f.canonical([f.builtins(receipt)]))
@@ -505,7 +519,7 @@ def test_existing_socket_serves_both_strict_dtos_with_kernel_uid(tmp_path, monke
     from heterodyne.admind import ctl
 
     u = Unit(tmp_path)
-    seed(u.store)
+    seed(u.store, projection=True)
     monkeypatch.setattr(f, "ENABLED", True)
 
     async def body():
@@ -552,7 +566,7 @@ def test_existing_socket_serves_both_strict_dtos_with_kernel_uid(tmp_path, monke
 def test_real_cli_parser_and_fixed_errors(store, tmp_path, monkeypatch, capsys):
     from heterodyne.admind import cli, fulfillment_cli
 
-    seed(store)
+    seed(store, projection=True)
     receipt = tmp_path / "receipt.json"
     receipt.write_bytes(f.canonical(f.builtins(completion(store))))
     args = cli.build_parser().parse_args(["ask", "fulfillment", "apply", "--receipt", str(receipt), "--json"])
@@ -571,7 +585,7 @@ def test_answer_first_stales_receipt_and_apply_first_refuses_answer(tmp_path):
 
     u = Unit(tmp_path)
     try:
-        seed(u.store)
+        seed(u.store, projection=True)
         stale = completion(u.store)
         run(u.say("!answer abcd Additional actual answer"))
         assert len(u.store.answers("abcd")) == 2
