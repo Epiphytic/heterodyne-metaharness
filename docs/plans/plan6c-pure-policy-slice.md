@@ -101,3 +101,40 @@ Reminder immutable copy identity continues to bind the exact source revision as 
 lifetime cap across revision and ask-ID refresh. The owner must durably compare-and-commit consumption
 with admission BEFORE reservation, retain it after uncertainty/loss, and authenticate original logical
 lineage. Copy-request dedup alone is not a lifetime budget. This slice installs no budget Store or timer.
+
+
+## Actual second HIGH repair boundary
+
+The second FULL HIGH review found ten issues and explicitly no APPROVE token. Exact raw report,
+provenance and ordered author dispositions are in docs/reviews/plan6c-r2-*; these repairs are not a
+review or clearance. The first review history and every unresolved downstream gate remain intact.
+
+A correlated contradictory receipt never disappears through an exception. The original attempt retains
+its accepted proof/receipt, its dispatch-mark provenance, bounded raw IDs and a sticky contradictory
+flag. Late receipts are matched against the exact retained ordinal; a prior-proof contradiction holds
+the entire copy, including after a later attempt confirms. Cancellation/supersession history stays
+retained. This is bounded diagnosis, not permission to replay or proof of a native effect. Foreign
+headers cannot add IDs. Receipt claims now include the ordinal (missing ordinal cannot establish an
+exclusive claim). Constructors cannot relabel a retained marked attempt using a bare absence proof.
+The future durable owner must preserve all provenance; arbitrary fabricated DTOs are not authenticated.
+
+Continuation reservation requires explicit Gates.parent: the confirmed part0 of the same copy and
+owner, with exact reply target and no unresolved contradiction. Aggregate completion independently
+checks this relationship. Source-token, registration epoch and reply-target currentness changes are
+held rather than terminal policy refusal. Every exception site passes an explicit closed error code;
+no code is extracted from diagnostic text. Repeated receipt header matching has one implementation.
+
+Computed FrozenCopy.source_token is now init=False and recomputes on replacement from the exact
+current Source. An actual owner token may instead be supplied explicitly as source_token_override;
+this intentionally changes the dormant pure constructor keyword. Neither value is authentication.
+Recovery requests now refuse unsupported-policy until a genuine independently sealed recovery epoch
+contract exists. Reminder reservation/dispatch also refuse unsupported-policy: the illustrative pure
+ReminderBudget cannot establish a durable atomic lifetime reservation. Those operational capabilities
+remain unimplemented, not silently left to an optional caller convention.
+
+The controller authorized two narrow predecessor-test changes: exact same-copy parent context in the
+shared synthetic reservation fixture and replacing one newly added exception-only conflict oracle with
+retained contradiction/HOLD assertions. All unrelated original assertion ASTs remain exact; predecessor
+bytes/hashes and fixture/oracle diffs are retained externally. No native owner, source, timer, transport,
+Store migration, deployment, model or production authority was introduced. This remains incomplete
+Plan6C source with all operational adapters and qualification independently gated.

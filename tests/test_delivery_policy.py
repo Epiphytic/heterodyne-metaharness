@@ -32,7 +32,11 @@ def state(index=0, opened=100.0, frozen=None):
 
 def reserved(s=None, now=100.0):
     current = s or state()
-    return d.reserve(current, now, d.Gates(True, True, True, current.binding))
+    root = None
+    if current.index:
+        root = d.mark_dispatch(reserved(state(frozen=current.copy)))
+        root = d.accept_receipt(root, receipt(root))
+    return d.reserve(current, now, d.Gates(True, True, True, current.binding, root))
 
 
 def proof(s, kind: d.ProofKind = "prewrite-refusal"):
@@ -298,8 +302,10 @@ def test_terminal_receipt_is_idempotent_and_conflict_does_not_erase_evidence():
     dispatched = d.mark_dispatch(reserved())
     result = d.accept_receipt(dispatched, receipt(dispatched))
     assert d.accept_receipt(result, receipt(dispatched)) is result
-    with pytest.raises(d.PolicyError, match="integrity"):
-        d.accept_receipt(result, receipt(dispatched, ("e" * 64,)))
+    conflict = d.accept_receipt(result, receipt(dispatched, ("e" * 64,)))
+    assert conflict.attempt.contradicted
+    assert conflict.attempt.raw_ids == ("f" * 64, "e" * 64)
+    assert d.part_status(conflict) == "uncertain-held"
     assert result.attempt.message_id == "f" * 64
 
 
