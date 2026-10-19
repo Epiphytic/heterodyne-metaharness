@@ -15,15 +15,24 @@ def request(**changes):
 
 
 def copy(parts=("first", "second"), **changes):
-    return d.FrozenCopy(request(), "c" * 32, "canonical-v1", parts, 200, 16384, **changes)
+    req = request()
+    route = changes.get("route")
+    if route is not None:
+        req = replace(req, source=replace(req.source, canonical_id=route.ask_id))
+        if route.kind != "ask":
+            req = replace(
+                req, reason="join" if route.kind == "askr" else "reissue", occurrence=route.request_id
+            )
+    return d.FrozenCopy(req, "c" * 32, "canonical-v1", parts, 200, 16384, **changes)
 
 
 def state(index=0, opened=100.0, frozen=None):
-    return d.PartState(frozen or copy(), "1" * 32, index, opened)
+    return d.PartState(frozen or copy(), "1" * 32, index, opened, reply_target="f" * 64 if index else None)
 
 
 def reserved(s=None, now=100.0):
-    return d.reserve(s or state(), now, d.Gates(True, True, True))
+    current = s or state()
+    return d.reserve(current, now, d.Gates(True, True, True, current.binding))
 
 
 def proof(s, kind: d.ProofKind = "prewrite-refusal"):
@@ -38,6 +47,7 @@ def receipt(s, ids=("f" * 64,), **changes):
         s.native_key,
         s.text_hash,
         ids,
+        s.attempt.binding,
     )
     return replace(value, **changes)
 

@@ -26,7 +26,10 @@ uncertainty, or exact receipt settlement. It retains at most three attempt recor
 initial eligibility +0/+5/+30 seconds. It does not sleep, schedule a timer or perform a send. WSD keys
 bind the full frozen copy/part; canonical keys preserve ask:/askr:/askd: grammar and never contain an
 attempt ordinal. Reserved-no-dispatch is accepted only for a still-reserved attempt; after a dispatch
-mark, this partial reducer accepts only a definitive matching receipt to settle uncertainty. It never
+mark, an explicit correlated prewrite-refusal fact may settle only if writer.write was positively
+not invoked and its exact frozen attempt binding matches. A bare proof cannot do this, and an already
+uncertain attempt remains receipt-only in this partial slice. The complete accepted proof or receipt
+is retained on its attempt. The reducer never
 uses a generic transport error, not_found, elapsed time or restart as non-dispatch evidence.
 
 A receipt must match the exact attempt, account, group, native key and text hash and return exactly one
@@ -52,5 +55,49 @@ remain unimplemented by this slice. No live proof or full-Plan6C PASS is claimed
 Offline contract tests are `tests/test_delivery_policy.py`; they exercise exact conflicts/bounds,
 identity binding, stable keys, bounded deadlines, source/trust/parent gates, no replay of uncertainty,
 cancellation and full-copy receipts. Isolated mutation evidence is retained outside the source tree.
-The original tests and production source remain unchanged. Full code review and all downstream genuine
+Production source outside this module remains unchanged. Root authorized narrowly strengthening the
+original shared synthetic fixtures to supply exact parent/source/trust bindings and matching canonical
+route occurrences. Every original assertion is preserved; exact predecessor bytes and fixture diff are
+retained in private repair evidence. Full code review and all downstream genuine
 integration/deployment approvals remain separate gates.
+
+
+## First HIGH repair boundary
+
+The actual FIRST FULL HIGH review returned ten findings and explicitly no APPROVE token. Exact report,
+provenance and ordered dispositions are published in `docs/reviews/plan6c-r1-*`; no second review has
+been run by the author. This remains an incomplete pure source slice, not full Plan6C or live clearance.
+
+Canonical route values must name the actual frozen canonical source ID; initial/update use ask:, and
+join/reissue use the exact inbound occurrence in askr:/askd:. Other combinations refuse. Existing legacy
+keys necessarily omit revision. Therefore admission must atomically enforce BOTH immutable request-key
+dedup (`check_duplicate`) AND native-key-index collision checking (`check_native_collision`). A changed
+revision reusing a retained ask ID cannot be admitted under its old native key. The future canonical
+source owner must provide genuine refresh lineage/new ask IDs; this pairwise pure check does not
+allocate them. Recovery askr epoch/request linkage is deliberately unsupported until the actual retained
+owner contract is implemented; no sealed epoch or inbound authority is invented here.
+
+Every reservation now requires an explicit `AttemptBinding` in its gates; receipt correlation and retry
+history retain reply target, frozen source token, registration epoch and complete immutable copy digest.
+A continuation cannot reserve without a concrete confirmed root ID. The source-token default is an
+exact structural source digest for disposable pure fixtures, not a source-owner authentication token.
+A real owner must supply its actual immutable token and qualify all binding/currentness facts. Gates
+with missing bindings cannot reserve. Supersession never hides unresolved dispatch or duplicate receipts.
+
+`PolicyError.tag`/`.code` expose the closed d4 held/refused vocabulary; diagnostic strings are not a wire
+protocol. A not-yet-due reservation is a contention hold without altering the approved 0/5/30 schedule.
+Malformed/missing receipt DTOs or non-tuple ID fields produce invalid-receipt uncertainty rather than
+implicit conversion or a generic decoder exception. A real closed wire decoder must explicitly validate
+and convert its JSON array into the immutable tuple before constructing the typed DTO. Foreign headers
+never contribute IDs to this attempt. Raw diagnosis is append-only up to a 64-entry/16KiB prefix, and
+uncertainty kinds form a bounded ordered history; both survive a later exact positive receipt.
+
+Frozen parts/text/native-key hashes are computed once per FrozenCopy. State transitions reuse cached
+values and do not serialize/re-hash the whole payload. Reason/phase/proof/uncertainty/profile runtime
+validation reads the Literal definitions with get_args.
+
+Reminder immutable copy identity continues to bind the exact source revision as approved. The separate
+`CopyRequest.reminder_key` and pure `ReminderBudget`/`consume_reminder` model the one-per-logical-decision
+lifetime cap across revision and ask-ID refresh. The owner must durably compare-and-commit consumption
+with admission BEFORE reservation, retain it after uncertainty/loss, and authenticate original logical
+lineage. Copy-request dedup alone is not a lifetime budget. This slice installs no budget Store or timer.
