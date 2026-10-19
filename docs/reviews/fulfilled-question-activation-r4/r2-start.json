@@ -1,0 +1,28 @@
+{
+  "at": "2026-10-19T05:49:10.059898+00:00",
+  "head": "974a3f48874bd59c20286a6debbe2855b241c12d",
+  "base": "b4b8c75da984126344716566300fb7cad19a35b5",
+  "cwd": "<operator-home>/.hermes/handoff/2026-10-15/codex/autonomous-resume/x84mg-code-review-r2-high-inputs",
+  "source_cwd": "<operator-home>/repos/heterodyne-metaharness-v2-btq-btq-x84mg",
+  "argv": [
+    "<operator-home>/.nvm/versions/node/v22.22.0/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+    "-p",
+    "--model",
+    "opus",
+    "--effort",
+    "high",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--dangerously-skip-permissions",
+    "--disallowedTools",
+    "Agent,Task",
+    "--add-dir",
+    "<operator-home>/repos/heterodyne-metaharness-v2-btq-btq-x84mg",
+    "--",
+    "/code-review SECOND actual FULL code review using HIGH reasoning. Author Codex. Review cumulative b4b8c75da984126344716566300fb7cad19a35b5..974a3f48874bd59c20286a6debbe2855b241c12d in <operator-home>/repos/heterodyne-metaharness-v2-btq-btq-x84mg. Approved design f8a80b8fad51c0be015a797e11f4a968f90c4bfb:docs/adr/2026-10-18-fulfilled-question-activation.md. Read actual R1 raw and ten ordered dispositions docs/reviews/fulfilled-question-activation-r1-*. Inspect all runtime and original/new test changes. Repair: malformed per-ID receipt isolation; immediate exact-generation apply stamp after insertion invalidation; postcommit verifier wake and no verifier selfwake; disabled producers still verify; exact V1 pending shape and unavailable Get; current ownership required for expired replacement; fair epoch/dirty bounded selection and cursor wrapping; safe SQLite CLI failure/migration_required plan. 137focused+299affected PASS, configured402files0types/0warnings. Real17case predecessor13FAIL4PASS; final18newcases. Four old originals archived external freeze/oracle summary: explicit fixture migration/synthetic durable current-policy sender only where positive needed; THREE authorized assertion supersessions ADR immediate2counts plus matching immutable duplicate already-applied. All other original assertion ASTs retained; old SQLite actual writes and real pinned076/a73 Store methods/rebuild/refresh exercised. All13frozenfile/log hashes root independently verified. Root read full runtime/new tests and original diffs. No installed migration, deployment or activation; ENABLEDFalse; schema8columns retained. #9 detailed CLI reason diagnostics partial OPEN, #10 repeated schema query/dead helpers OPEN; quality89regressions71gating UNWAIVED, same3baselineformatrefusals; no fullclean claim. Judge actual correctness/compatibility/implementability; no PoC-shortcut in this full HIGH round. Read-only actual built-in /code-review no edits/tests/probes/native/queue/services/network. Manual foreign observedstream not reserved-profile proof."
+  ],
+  "prompt": "/code-review SECOND actual FULL code review using HIGH reasoning. Author Codex. Review cumulative b4b8c75da984126344716566300fb7cad19a35b5..974a3f48874bd59c20286a6debbe2855b241c12d in <operator-home>/repos/heterodyne-metaharness-v2-btq-btq-x84mg. Approved design f8a80b8fad51c0be015a797e11f4a968f90c4bfb:docs/adr/2026-10-18-fulfilled-question-activation.md. Read actual R1 raw and ten ordered dispositions docs/reviews/fulfilled-question-activation-r1-*. Inspect all runtime and original/new test changes. Repair: malformed per-ID receipt isolation; immediate exact-generation apply stamp after insertion invalidation; postcommit verifier wake and no verifier selfwake; disabled producers still verify; exact V1 pending shape and unavailable Get; current ownership required for expired replacement; fair epoch/dirty bounded selection and cursor wrapping; safe SQLite CLI failure/migration_required plan. 137focused+299affected PASS, configured402files0types/0warnings. Real17case predecessor13FAIL4PASS; final18newcases. Four old originals archived external freeze/oracle summary: explicit fixture migration/synthetic durable current-policy sender only where positive needed; THREE authorized assertion supersessions ADR immediate2counts plus matching immutable duplicate already-applied. All other original assertion ASTs retained; old SQLite actual writes and real pinned076/a73 Store methods/rebuild/refresh exercised. All13frozenfile/log hashes root independently verified. Root read full runtime/new tests and original diffs. No installed migration, deployment or activation; ENABLEDFalse; schema8columns retained. #9 detailed CLI reason diagnostics partial OPEN, #10 repeated schema query/dead helpers OPEN; quality89regressions71gating UNWAIVED, same3baselineformatrefusals; no fullclean claim. Judge actual correctness/compatibility/implementability; no PoC-shortcut in this full HIGH round. Read-only actual built-in /code-review no edits/tests/probes/native/queue/services/network. Manual foreign observedstream not reserved-profile proof.",
+  "executable_sha256": "bc1aad9982c7b59c7d889ff92595d61cf46e0a6eae074cb551d932a989bcd222",
+  "capture_kind": "manual-foreign-observed-stream-not-reserved-profile-proof"
+}
