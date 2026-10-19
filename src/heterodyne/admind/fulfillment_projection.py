@@ -442,7 +442,12 @@ async def worker(store: Store) -> None:
                 count = await asyncio.shield(future)
                 delay = 1 if count else 30
             except asyncio.CancelledError:
-                await future
+                # Drain the running pass, but preserve shutdown even if it fails.
+                # Otherwise the supervisor retries forever with cancellation pending.
+                try:
+                    await future
+                except Exception:  # noqa: BLE001 - pass failure cannot replace cancellation
+                    logging.getLogger(__name__).warning("fulfillment-verification-failed-during-shutdown")
                 raise
             except Exception:  # noqa: BLE001 - bounded background-pass boundary, cancellation above
                 # No retained payload/exception text enters the diagnostic.
