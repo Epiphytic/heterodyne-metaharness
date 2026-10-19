@@ -1,0 +1,31 @@
+{
+  "task": "btq-x84mg",
+  "actual_invocation": 5,
+  "substantive_review": 4,
+  "aborted_invocations": [
+    3
+  ],
+  "effort": "medium",
+  "reviewer": "Claude Opus",
+  "author": "Codex",
+  "mode": "cross-model",
+  "review_phrase": "Are there any critical flaws with this, or is this good enough to implement as a PoC?",
+  "private_actual_result": {
+    "at": "2026-10-19T08:26:59.720407+00:00",
+    "exit": 0,
+    "head": "fcb646f2cd78b8d6edfd0af99c9b1251eb9e6df8",
+    "source_unchanged": true,
+    "stream_sha256": "1ddd08e2ec063cc689431ca6eace4f8c80d6aef890c92325c4cfba942980e486",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "events": 45,
+    "malformed_line_numbers": [],
+    "terminal_results": 1,
+    "terminal_success": true,
+    "log_sha256": "51d40fa1f33b15d4de451ac89d5b986757ba290fed8ab097083e56f9a9a18b3e"
+  },
+  "public_report_sha256": "51d40fa1f33b15d4de451ac89d5b986757ba290fed8ab097083e56f9a9a18b3e",
+  "normalization": "operator-home prefix only; original private report retained; not native profile proof",
+  "conclusion": "no critical flaw in new readiness fix; offline PoC only; prior R4 findings OPEN UNWAIVED; full CI unresolved",
+  "focused_result": "71 passed in 35.99s; high descriptor regression and r13 replies",
+  "new_full_suite_pass": false
+}

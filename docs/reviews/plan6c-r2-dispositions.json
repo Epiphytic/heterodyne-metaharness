@@ -1,0 +1,77 @@
+{
+  "review": "SECOND FULL HIGH",
+  "actual_result": "10 findings, first9 correctness/design-fidelity and10 cleanup; explicitly not an APPROVE token",
+  "findings": [
+    {
+      "finding": 1,
+      "title": "Conflicting confirmed receipts",
+      "disposition": "REPAIRED IN PARTIAL PURE SLICE; no reviewer clearance or production qualification",
+      "change": "Retain original accepted receipt/message ID and bounded correlated conflicting IDs on same attempt; contradicted flag holds part and aggregate. Exact duplicate cannot erase diagnosis.",
+      "regression": "test_conflicting_confirmed_ids_are_retained_and_aggregate_holds"
+    },
+    {
+      "finding": 2,
+      "title": "Late receipt contradicting positive proof",
+      "disposition": "REPAIRED IN PARTIAL PURE SLICE; no reviewer clearance or production qualification",
+      "change": "Locate original ordinal using one six-field header comparison, retain proof and raw diagnosis there, hold entire copy even after later ordinal confirms. ReceiptClaim includes ordinal; foreign header never contributes IDs.",
+      "regression": "test_late_prior_proof_receipt_stays_on_original_attempt_and_blocks_replay"
+    },
+    {
+      "finding": 3,
+      "title": "Dispatch mark erased by reconstruction",
+      "disposition": "REPAIRED IN PARTIAL PURE SLICE; no reviewer clearance or production qualification",
+      "change": "Retain explicit dispatch_marked provenance. Constructors require marked phases to retain it and require exact correlated write-not-invoked prewrite facts before a marked attempt becomes proven_unissued. Owner may not discard stored provenance; no pure type authenticates a fabricated database.",
+      "regression": "test_reconstruction_cannot_drop_dispatch_mark_with_bare_proof"
+    },
+    {
+      "finding": 4,
+      "title": "Foreign continuation root",
+      "disposition": "REPAIRED IN PARTIAL PURE SLICE; no reviewer clearance or production qualification",
+      "change": "Gates requires exact confirmed same-copy/owner part0 for continuation; validates root native ID and absence of contradictory/lifecycle state. Aggregate independently checks root linkage. Shared disposable fixture supplies synthetic confirmed root.",
+      "regression": "test_wrong_root_never_becomes_complete"
+    },
+    {
+      "finding": 5,
+      "title": "Diagnostic-dependent error codes",
+      "disposition": "REPAIRED IN PARTIAL PURE SLICE; no reviewer clearance or production qualification",
+      "change": "Every PolicyError call site supplies an explicit closed code. Exception never parses diagnostic text; ordinary no-reservation/inflight conditions hold contention, mismatched proof refuses binding-conflict.",
+      "regression": "test_ordinary_contention_has_explicit_code"
+    },
+    {
+      "finding": 6,
+      "title": "Current binding drift terminal refusal",
+      "disposition": "REPAIRED IN PARTIAL PURE SLICE; no reviewer clearance or production qualification",
+      "change": "Gate source-token, epoch and reply-target drift hold source-changed, trust-denied or parent-incomplete respectively. Actual immutable copy digest disagreement remains binding-conflict.",
+      "regression": "test_current_gate_drift_holds_instead_of_terminal_refusal"
+    },
+    {
+      "finding": 7,
+      "title": "Unsupported recovery epoch",
+      "disposition": "REPAIRED IN PARTIAL PURE SLICE; no reviewer clearance or production qualification",
+      "change": "Reject recovery CopyRequest with unsupported-policy until genuine independently sealed epoch owner contract exists. No reconcile-selected recovery identity admitted.",
+      "regression": "test_unsealed_recovery_is_unsupported"
+    },
+    {
+      "finding": 8,
+      "title": "Reminder lifetime budget bypass",
+      "disposition": "REPAIRED IN PARTIAL PURE SLICE; no reviewer clearance or production qualification",
+      "change": "Reserve and mark_dispatch explicitly refuse reminder effects as unsupported-policy. Pure ReminderBudget helper remains illustrative; no durable budget context or alternate authority is invented. Future actual budget owner remains OPEN.",
+      "regression": "test_reminder_cannot_reserve_without_real_durable_owner_budget"
+    },
+    {
+      "finding": 9,
+      "title": "Stale default source token after replace",
+      "disposition": "REPAIRED IN PARTIAL PURE SLICE; no reviewer clearance or production qualification",
+      "change": "Computed source_token is init=False and recalculated from current Source on every construction/replace. Optional source_token_override is explicit owner input; former init source_token keyword intentionally changes in this dormant pure API.",
+      "regression": "test_replace_recomputes_derived_source_token"
+    },
+    {
+      "finding": 10,
+      "title": "Repeated correlation tuple",
+      "disposition": "REPAIRED IN PARTIAL PURE SLICE; no reviewer clearance or production qualification",
+      "change": "Single _correlated(state,attempt,receipt) definition used for match validity and original-ordinal lookup/diagnosis.",
+      "regression": "test_foreign_receipt_cannot_pollute_original_proof_diagnosis"
+    }
+  ],
+  "remaining": "All genuine owner, persistence, native authority, final 6A/6B/Plan5/source integration, recovery and reminder operational ports remain absent/HOLD. Prior quality/qualification debt remains unwaived."
+}

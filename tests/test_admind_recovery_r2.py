@@ -324,23 +324,11 @@ def test_superseded_proposal_late_settle_never_reactivates(tmp_path):
 
 
 def test_finish_health_exact_null_effect_root_certificate(tmp_path):
-    rig = Rig(tmp_path)
+    from test_admind_recovery_health import health
+
+    rig, _, _ = health(tmp_path)
     try:
-        rig.obj = msgspec.structs.replace(
-            rig.obj,
-            mode="finish-health",
-            result="health-restored",
-            effects_root=None,
-            effect_count=0,
-            proof_set_sha256=recovery.sha([]),
-            backup_before_sha256="a" * 64,
-            failure_before_sha256="b" * 64,
-        )
-        rig.key = recovery.sha(rig.obj)
-        rig.enrolled = msgspec.structs.replace(
-            rig.enrolled, descriptor_links={rig.key: next(iter(rig.enrolled.descriptor_links.values()))}
-        )
-        write(rig.root / "enrollment.json", rig.enrolled)
+        assert rig.obj.effects_root is None and rig.obj.effect_count == 0
         rig.deliver()
         rig.message()
         rig.permit()
