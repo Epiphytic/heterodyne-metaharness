@@ -2620,7 +2620,10 @@ class Admind:
                              text=own_text(ev.message.text))
             return
         if gateway_custody.command(ev.message.text) is not None:
-            self.custody_work.put_nowait(ev)
+            try:
+                self.custody_work.put_nowait(ev)
+            except asyncio.QueueFull:
+                self.audit.write("gateway-custody", action="refused", reason="command-capacity")
             return
         if (recovery.COMMAND.fullmatch(ev.message.text) is not None
                 and MESSAGE_ID.fullmatch(mid)):

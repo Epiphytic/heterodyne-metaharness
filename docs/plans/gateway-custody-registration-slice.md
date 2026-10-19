@@ -32,3 +32,13 @@ The first actual FULL HIGH review of signed f5c24bdb9589cc044a6ab6f008a951d146c0
 The original shared contrary-command fixture incorrectly included agreeing settle; only that parameter was removed. The positive renewal fixtures now observe the old initiation window expiry and advance their synthetic current clock. Original bytes/hashes and exact diff are privately retained; all unrelated assertions remain intact. These are approved synthetic fixture corrections, not native evidence.
 
 Failed or missing notice recovery remains OPEN: duplicate registration refuses explicitly and status exposes retained outbox state. No automatic resend, slot reuse, deletion or absence-as-non-delivery is authorized. Production native readback/consumer ACK, actual queue integration, source enrollment and the physical separate 256KiB reserve remain required.
+
+## Actual second HIGH repair boundary
+
+The second actual FULL HIGH reviewed c478e0d399f41f653b04723f66876d9ce1974f9d and reported ten findings, explicitly without approval. Exact report (operator-home prefix normalized only), provenance and all ten ordered verbatim author dispositions are in docs/reviews/p4iwn-r2-*.
+
+Command/conflict diagnostics now have an 8 KiB sub-budget, and receipt admission preserves 8 KiB within the existing 32 KiB bundle for all three closed permits/certificates. This does not implement the separately required physical WAL/index reserve. Saturation holds without deleting history or revoking agreeing consent.
+
+Conflicting replay effects require current authority and actual notice thread. Duplicate registration refuses held or sent-without-native-ID notices without retry. Source BOOTTIME and boot identity enforce notice rate accounting; wall timestamps are presentation only. Legacy/missing/regressed/different-boot stamps count conservatively and may remain unavailable until genuine supported recovery/export; no silent quota reset.
+
+External authority/source callbacks run outside the publication mutex. Final row CAS plus publication stays serialized against revocation. Repeating the exact retained renewal request repairs the same generation from the authentic original queue pair. Complete exact published readback grants no new window and skips unnecessary file writes; partial repair still requires source certificates. Repeated policy/network callbacks remain OPEN cost, and production source/transport, native ACK/queue settlement, failed-notice recovery, physical reserve and intake redelivery remain HOLD. No original tracked tests changed in this repair.

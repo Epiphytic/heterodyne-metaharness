@@ -13,7 +13,7 @@ import threading
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, TypedDict, cast
 
@@ -26,6 +26,11 @@ Invalid = recovery.Invalid
 MAX_REQUEST = 256 * 1024
 MAX_DESCRIPTOR = 16 * 1024
 MAX_BUNDLE = 32 * 1024
+# Bound routine diagnostics independently and reserve 8 KiB of every bundle
+# for all three closed permits and two certificates. Descriptor/notice/decision
+# must fit the remaining bytes; physical WAL/index reserve is a separate gate.
+MAX_COMMAND_BYTES = 8 * 1024
+PERMIT_RESERVE = 8 * 1024
 MAX_TOTAL = 128 * 1024 * 1024
 DAY_NS = 86_400_000_000_000
 WINDOW_NS = 30_000_000_000
@@ -463,8 +468,7 @@ class Service:
             raise Invalid("source-mismatch")
 
     def issue_permit(self, req: GatewayCustodyPermit, *, uid: int | None) -> bytes:
-        with self.publication_lock:
-            return self._issue_permit(req, uid=uid)
+        return self._issue_permit(req, uid=uid)
 
     def _issue_permit(self, req: GatewayCustodyPermit, *, uid: int | None) -> bytes:
         """Retain before publishing; an interrupted call repairs only identical bytes.
@@ -503,31 +507,65 @@ class Service:
         observed = self.observation(req.proposal_sha256, bundle)
         records = cast(list[dict[str, object]], bundle.get("permits", []))
         previous = permit(canonical(records[-1])) if records else None
-        proof: bytes | None = None
-        proof = self.permit_certificate(req, enrolled, obj, previous, observed)
-        prefix = enrolled.queue_root / req.proposal_sha256
-        if previous is not None and proof is None:
-            if os.path.lexists(Path(f"{prefix}.superseded-{previous.permit_generation}.json")):
-                raise Invalid("permit-superseded")
-            # Readback/repair never grants a new window or bypasses original expiry.
+        immutable = current = None
+        tombstone_proof = None
+        tombstone_generation = None
+        retained_proofs = cast(list[dict[str, object]], bundle.get("certificates", []))
+        retained_proof = canonical(retained_proofs[-1]) if retained_proofs else None
+        # A request naming the already retained predecessor proof retries the same
+        # candidate. It cannot accidentally ask for generation N+1.
+        retry = previous is not None and (
+            req.nonconsumption_sha256 is None
+            or (
+                retained_proof is not None
+                and req.nonconsumption_sha256 == hashlib.sha256(retained_proof).hexdigest()
+            )
+        )
+        complete = False
+        if retry and previous is not None:
             encoded = canonical(previous)
             generation = previous.permit_generation
+            immutable, current = publication_paths(enrolled, req.proposal_sha256, generation)
+            complete = self._published(immutable, encoded) and self._published(current, encoded)
+            if generation > 1:
+                tombstone_generation = generation - 1
+                tombstone_proof = retained_proof
+                complete = (
+                    complete
+                    and retained_proof is not None
+                    and self._published(
+                        immutable.parent / f"{generation - 1}.superseded.json", retained_proof
+                    )
+                )
+            if not complete or generation == 1:
+                if generation > 1:
+                    # Incomplete publication needs the original queue observation,
+                    # validated at the retained candidate's issuance time. No new
+                    # 30-second window is created by repairing identical bytes.
+                    predecessor = permit(canonical(records[-2]))
+                    repair = GatewayCustodyPermit(
+                        req.proposal_sha256, hashlib.sha256(cast(bytes, retained_proof)).hexdigest()
+                    )
+                    historical = Observation(
+                        observed.descriptor,
+                        observed.original_actor,
+                        observed.evidence_url,
+                        observed.boot_id,
+                        clock(previous.issued_boottime_ns),
+                    )
+                    tombstone_proof = self.permit_certificate(repair, enrolled, obj, predecessor, historical)
+                else:
+                    self.permit_certificate(req, enrolled, obj, previous, observed)
+                    prefix = enrolled.queue_root / req.proposal_sha256
+                    if os.path.lexists(Path(f"{prefix}.superseded-1.json")):
+                        raise Invalid("permit-superseded")
         else:
+            proof = self.permit_certificate(req, enrolled, obj, previous, observed)
             encoded = self.new_permit(obj, bundle, observed, previous, proof)
             generation = permit(encoded).permit_generation
-        tombstone_proof = proof
-        tombstone_generation = None if previous is None else previous.permit_generation
-        if proof is None and generation > 1:
-            # A crash may retain generation N before its predecessor tombstone.
-            # Repair only from the original source-owned certificate pair, never
-            # synthesize evidence from the retained permit or local file absence.
-            predecessor = permit(canonical(records[-2]))
-            tombstone_generation = predecessor.permit_generation
-            retained_proofs = cast(list[dict[str, object]], bundle.get("certificates", []))
-            certificate = canonical(retained_proofs[-1])
-            repair = GatewayCustodyPermit(req.proposal_sha256, hashlib.sha256(certificate).hexdigest())
-            tombstone_proof = self.permit_certificate(repair, enrolled, obj, predecessor, observed)
-        immutable, current = publication_paths(enrolled, req.proposal_sha256, generation)
+            tombstone_proof = proof
+            tombstone_generation = None if previous is None else previous.permit_generation
+            immutable, current = publication_paths(enrolled, req.proposal_sha256, generation)
         if self.publication() != enrolled:
             raise Invalid("publication-drift")
         self.observation(req.proposal_sha256, bundle)
@@ -543,24 +581,37 @@ class Service:
                     raise Invalid("proposal-changed")
                 if not self.capacity(updated, len(row[0])):
                     raise Invalid("bundle-capacity")
-                self.store.db.execute(
-                    "UPDATE gateway_custody_proposals SET bundle=? WHERE hash=?",
-                    (updated, req.proposal_sha256),
-                )
+                if updated != bytes(row[0]):
+                    self.store.db.execute(
+                        "UPDATE gateway_custody_proposals SET bundle=? WHERE hash=?",
+                        (updated, req.proposal_sha256),
+                    )
+            if complete:
+                return encoded
             if tombstone_proof is not None and tombstone_generation is not None:
                 # Copy authentic queue-owned certificate bytes, never invent evidence
                 # and never destroy the immutable original generation.
                 tombstone = immutable.parent / f"{tombstone_generation}.superseded.json"
-                recovery.publish(tombstone, tombstone_proof)
+                if not self._published(tombstone, tombstone_proof):
+                    recovery.publish(tombstone, tombstone_proof)
                 if recovery.private_read(tombstone) != tombstone_proof:
                     raise Invalid("publication-readback")
-            recovery.publish(immutable, encoded)
+            if not self._published(immutable, encoded):
+                recovery.publish(immutable, encoded)
             if recovery.private_read(immutable) != encoded:
                 raise Invalid("publication-readback")
-            recovery.replace_current(current, encoded)
+            if not self._published(current, encoded):
+                recovery.replace_current(current, encoded)
             if recovery.private_read(current) != encoded:
                 raise Invalid("publication-readback")
         return encoded
+
+    @staticmethod
+    def _published(path: Path, raw: bytes) -> bool:
+        """Exact existing readback only; absence grants no execution authority."""
+        if not os.path.lexists(path):
+            return False
+        return recovery.private_read(path) == raw
 
     def capacity(self, updated: bytes, old_size: int = 0) -> bool:
         """Call only inside the existing Store transaction; payload reserve is separate."""
@@ -684,6 +735,8 @@ class Service:
         bundle = canonical(
             {
                 "notice_created_at": at.isoformat(),
+                "notice_boot_id": observed.boot_id,
+                "notice_boottime_ns": str(observed.boottime_ns),
                 "descriptor": obj,
                 "original_actor": observed.original_actor,
                 "evidence_url": observed.evidence_url,
@@ -706,11 +759,14 @@ class Service:
                 if any(
                     prior.get(field) != value
                     for field, value in json.loads(bundle).items()
-                    if field != "notice_created_at"
+                    if field not in ("notice_created_at", "notice_boot_id", "notice_boottime_ns")
                 ):
                     raise Invalid("immutable-proposal")
                 delivery = self.notice_status(str(old[1]))
-                if delivery in ("failed", "missing"):
+                mapped = self.store.db.execute(
+                    "SELECT message_id FROM outbox WHERE key=?", (str(old[1]) + ":0",)
+                ).fetchone()
+                if delivery not in ("pending", "sent") or (delivery == "sent" and mapped[0] is None):
                     # No safe non-delivery evidence exists: retain exact row and HOLD,
                     # never auto-resend an ambiguous native notice.
                     raise Invalid("notice-" + delivery)
@@ -728,11 +784,19 @@ class Service:
                 raise Invalid("proposal-capacity")
             # Custody owns its rate history and fixed outbox namespace. Generic
             # notice pruning/capacity cannot hide or consume custody obligations.
-            recent = self.store.db.execute(
-                "SELECT count(*) FROM gateway_custody_proposals "
-                "WHERE json_extract(bundle,'$.notice_created_at')>=?",
-                ((at - timedelta(hours=1)).isoformat(),),
-            ).fetchone()[0]
+            # Wall time is presentation only. Unknown/legacy/rebooted provenance
+            # conservatively occupies a rate slot; no inferred hour rollover.
+            stamps = self.store.db.execute(
+                "SELECT json_extract(bundle,'$.notice_boot_id'),"
+                "json_extract(bundle,'$.notice_boottime_ns') FROM gateway_custody_proposals"
+            ).fetchall()
+            recent = sum(
+                boot != observed.boot_id
+                or not isinstance(stamp, str)
+                or CLOCK.fullmatch(stamp) is None
+                or not 3_600_000_000_000 <= observed.boottime_ns - int(stamp)
+                for boot, stamp in stamps
+            )
             pending = self.store.db.execute(
                 "SELECT count(*) FROM gateway_custody_proposals AS p WHERE NOT EXISTS "
                 "(SELECT 1 FROM outbox AS o WHERE o.key=p.notice_key||':0' AND o.status='sent' "
@@ -789,8 +853,7 @@ class Service:
         if previous is not None:
             if previous["event"] == event:
                 return str(previous["outcome"])
-            self._block_conflict(key, event)
-            raise Invalid("replay-mismatch")
+
         policy = self.authority(account, group, sender)
         if policy is None:
             raise Invalid("authority")
@@ -805,29 +868,6 @@ class Service:
         if capacity_hold:
             raise Invalid("bundle-capacity")
         return outcome
-
-    def _block_conflict(self, key: str, event: dict[str, str | None]) -> None:
-        """Retain bounded exact diagnostics and block only unissued mutable authority."""
-        with self.publication_lock, self.store.transaction():
-            current = self.store.db.execute(
-                "SELECT bundle,state FROM gateway_custody_proposals WHERE hash=?", (key,)
-            ).fetchone()
-            if current[1] == "terminal":
-                raise Invalid("replay-mismatch")
-            retained = json.loads(bytes(current[0]))
-            conflicts = retained.get("conflicts", [])
-            if event not in conflicts:
-                retained["conflicts"] = [*conflicts, event]
-            encoded = canonical(retained)
-            if self.capacity(encoded, len(current[0])):
-                self.store.db.execute(
-                    "UPDATE gateway_custody_proposals SET bundle=? WHERE hash=?", (encoded, key)
-                )
-            self.store.db.execute(
-                "UPDATE gateway_custody_proposals SET state='revoked' "
-                "WHERE hash=? AND state IN ('awaiting-consent','consented')",
-                (key,),
-            )
 
     def _retain_command(
         self,
@@ -868,10 +908,19 @@ class Service:
             ):
                 raise Invalid("thread-unmapped")
             if state == "terminal":
+                previous = cast(dict[str, Any], bundle.get("commands", {})).get(event_id)
+                if previous is not None and previous["event"] != event:
+                    raise Invalid("replay-mismatch")
                 return "held", False, False
             outcome, after, conflict = self._record_command(bundle, state, event, event_id, policy, action)
             updated = canonical(bundle)
-            if not self.capacity(updated, len(raw)):
+            diagnostics = canonical({name: bundle.get(name, {}) for name in ("commands", "conflicts")})
+            without_permits = {k: v for k, v in bundle.items() if k not in ("permits", "certificates")}
+            if (
+                len(diagnostics) > MAX_COMMAND_BYTES
+                or len(canonical(without_permits)) > MAX_BUNDLE - PERMIT_RESERVE
+                or not self.capacity(updated, len(raw))
+            ):
                 # Capacity may refuse a new receipt, never preserve usable consent
                 # after an authenticated contrary command. Retain the old bytes.
                 if action in ("decline", "revoke") or conflict:
