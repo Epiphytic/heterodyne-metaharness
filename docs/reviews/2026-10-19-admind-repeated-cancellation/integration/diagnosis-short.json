@@ -1,0 +1,18 @@
+{
+  "argv": [
+    "/tmp/7hokw-ci-python312/bin/python",
+    "-m",
+    "pytest",
+    "-x",
+    "-vv",
+    "--tb=short",
+    "tests/test_admind_approval_purpose.py::test_a_posted_card_and_its_repeat_carry_the_label",
+    "--basetemp=/tmp/x84dg",
+    "-o",
+    "faulthandler_timeout=30"
+  ],
+  "exit": 0,
+  "seconds": 4.578201876953244,
+  "source": "b4bebc6990110e42300137de57f91c84b71f63a7",
+  "PYTHONPATH": "<operator-home>/repos/heterodyne-metaharness-v2-btq-btq-x84mg/src:<operator-home>/repos/heterodyne-metaharness-v2-btq-btq-x84mg/tests"
+}

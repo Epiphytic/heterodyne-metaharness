@@ -1,0 +1,13 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0 -- /tmp/7hokw-ci-python312/bin/python
+cachedir: .pytest_cache
+hypothesis profile 'default'
+rootdir: <operator-home>/repos/heterodyne-metaharness-v2-btq-btq-x84mg
+configfile: pyproject.toml
+plugins: hypothesis-6.168.3, xdist-3.8.0
+collecting ... collected 2 items
+
+tests/test_admind_approval_purpose.py::test_a_posted_card_and_its_repeat_carry_the_label[design-APPROVAL: design] PASSED [ 50%]
+tests/test_admind_approval_purpose.py::test_a_posted_card_and_its_repeat_carry_the_label[None-APPROVAL: purpose not set] PASSED [100%]
+
+============================== 2 passed in 4.38s ===============================

@@ -9,3 +9,5 @@ All other historical findings remain OPEN and unwaived. Round 8 also retains fiv
 Code-Review: reviewer=claude-opus author=codex mode=cross-model range=2125775fe0ea2fee004efb076a2a74359d274ecc..working-tree
 
 Published evidence redacts the operator home path to satisfy repository portability checks. Original immutable local evidence hashes and published hashes are recorded in publication-manifest.json; original local artifacts are retained.
+
+After merging current main without product conflicts, the exact checkout passed all97admind test modules:2,760passed in546.86seconds. Explicit PYTHONPATH selected this checkout; short tmpfs basetemp avoided AF_UNIX path limits. Earlier45collectionerrors came from another editable checkout; a corrected-source long-basetemp run was interrupted after243seconds and is not a completed baseline. Independent long/short same-node replay proves the first two failures were socket-path setup errors. These failed attempts/results remain retained; no source change was made to make the full suite pass. Integration logs are published here.

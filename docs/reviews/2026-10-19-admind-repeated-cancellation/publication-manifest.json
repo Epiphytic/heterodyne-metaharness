@@ -101,8 +101,9 @@
   },
   "README.md": {
     "original_sha256": "aa490c3af92f6d63377eb9fd7f5a40575f990e9871d1fef3a61fa86616eab0fb",
-    "published_sha256": "aa490c3af92f6d63377eb9fd7f5a40575f990e9871d1fef3a61fa86616eab0fb",
-    "machine_path_redaction": false
+    "published_sha256": "ad94553729149baa7a18b49c8f847b51ee6643418aa8e0083524ba9fede7b8c0",
+    "machine_path_redaction": false,
+    "publication_only_edit": "Added redaction disclosure and final integration results after original draft; original_sha256 retained as historical draft"
   },
   "types.stdout": {
     "original_sha256": "d0a2bd789bac92c0f0e6877e35af04029cdc44ddcdeab802e30ceb6c44a39a27",
@@ -128,5 +129,60 @@
     "original_sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
     "published_sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
     "machine_path_redaction": false
+  },
+  "integration/all-admind-short.stdout": {
+    "original_sha256": "143ba3c2125bd0b3a483ced521282558297e8b47b0bc560ab15561bdadab215d",
+    "published_sha256": "143ba3c2125bd0b3a483ced521282558297e8b47b0bc560ab15561bdadab215d",
+    "machine_path_redaction": false
+  },
+  "integration/all-admind-short.stderr": {
+    "original_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "published_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "machine_path_redaction": false
+  },
+  "integration/all-admind-short-result.json": {
+    "original_sha256": "f0f820b255807111fd455538fc7b0935afc0d4b1d5e995181bbf371675acf753",
+    "published_sha256": "44ad2b7098ff25d26f3f0b6ed30ce6308639436092d75790b5a920f1fdff1a75",
+    "machine_path_redaction": true
+  },
+  "integration/all-admind-result.json": {
+    "original_sha256": "72af25e64e96207c8aaff417149c0d7939fd27ba0495174edcfaf8b3b36a202e",
+    "published_sha256": "72af25e64e96207c8aaff417149c0d7939fd27ba0495174edcfaf8b3b36a202e",
+    "machine_path_redaction": false
+  },
+  "integration/all-admind-correct-result.json": {
+    "original_sha256": "c0b0c04a8563e032df5a0a922d165d590380f6f016571595182a89413b488b82",
+    "published_sha256": "2cc2c364a5fc5d6b2a00c59e9ca76fbdca8937626df65cb38721749000f74783",
+    "machine_path_redaction": true
+  },
+  "integration/diagnosis-report.md": {
+    "original_sha256": "4fc85a34181c9a1a99e98fa1fb9715a9ca2ed68cfcad446f1e95679a2b8e69d1",
+    "published_sha256": "4fc85a34181c9a1a99e98fa1fb9715a9ca2ed68cfcad446f1e95679a2b8e69d1",
+    "machine_path_redaction": false
+  },
+  "integration/diagnosis-freeze.json": {
+    "original_sha256": "cb53574bd07c7eb36b137f5e4c77e036cfdcbb3fe07e85e4bb8be8531b1ce0e9",
+    "published_sha256": "cb53574bd07c7eb36b137f5e4c77e036cfdcbb3fe07e85e4bb8be8531b1ce0e9",
+    "machine_path_redaction": false
+  },
+  "integration/diagnosis-long.json": {
+    "original_sha256": "ed28cf3ed49286dc12059a56cebce2614ebfe1c83e9bf89a3260d21bec7e5b37",
+    "published_sha256": "5704522c7582db6f7420482074f8450997e183f68dcc1c8ab6880eef21878f56",
+    "machine_path_redaction": true
+  },
+  "integration/diagnosis-short.json": {
+    "original_sha256": "7bf4e4c70263a7f449ea5163c95a6bdaffff1a42a704f6cd0db8a13fd48451a9",
+    "published_sha256": "8cc889e267a5acc4f6965b114bbd2befea56fdaa3439b7a1043939688b9ea473",
+    "machine_path_redaction": true
+  },
+  "integration/diagnosis-long.log": {
+    "original_sha256": "787a5980aae9abd4b7db5278127f08af69ad4d0e5c3826de56f4bcceeb9276d7",
+    "published_sha256": "87459a1e404248da10564392a7bf7251bbb41260bd222bae5c8ff96d4291ffdd",
+    "machine_path_redaction": true
+  },
+  "integration/diagnosis-short.log": {
+    "original_sha256": "2fabea7fd202c0449a2ce137bde927916c1c5a8da51ac9d8167e25927c772ad5",
+    "published_sha256": "1c67243385b95547014349c9be639c0859ce70ee8363439222dbe4567d810b77",
+    "machine_path_redaction": true
   }
 }
