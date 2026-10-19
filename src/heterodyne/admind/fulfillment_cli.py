@@ -94,7 +94,7 @@ def command(settings: AdmindSettings, args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 69
-    except (f.Invalid, OSError, ValueError, msgspec.DecodeError):
+    except (f.Invalid, OSError, ValueError, msgspec.DecodeError, sqlite3.Error):
         print("admind: invalid fulfillment input", file=sys.stderr)
         return 1
 

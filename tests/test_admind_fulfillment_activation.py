@@ -54,8 +54,8 @@ def test_old_sqlite_writer_invalidates_without_new_daemon(tmp_path):
     try:
         seed(store)
         apply(store)
-        assert store.capacity_count() == 1
-        assert verify_pass(store) == 1
+        assert store.capacity_count() == 0
+        assert verify_pass(store) == 0
         assert store.capacity_count() == 0
         before = store.db.execute("SELECT receipt FROM ask_fulfillments").fetchone()
         with sqlite3.connect(store.path) as old:
@@ -197,6 +197,7 @@ def test_worker_pass_bounded_and_progresses(tmp_path):
             apply(
                 store, __import__("msgspec").structs.replace(completion(store, name), operation_id=f"op:{i}")
             )
+        store.db.execute("UPDATE asks SET body=body")  # Genuine legacy trigger invalidation backlog.
         counts = [verify_pass(store) for _ in range(8)]
         assert max(counts) <= 20
         assert sum(counts) == 45
@@ -454,6 +455,8 @@ def test_verification_cas_never_stamps_concurrent_old_writer(tmp_path, monkeypat
     try:
         seed(store)
         apply(store)
+        store.db.execute("UPDATE asks SET body=body")
+        store.db.execute("DELETE FROM fulfillment_verifications")  # Preverification restart fixture.
         monkeypatch.setattr(projection, "bounded_binding", changed)
         projection.verify_pass(store)
         assert store.db.execute("SELECT COUNT(*) FROM fulfillment_verifications").fetchone() == (0,)
@@ -579,6 +582,7 @@ def test_view_requires_current_verified_stamp_and_retains_orphan_receipt(tmp_pat
         seed(store)
         apply(store)
         lifecycle = store.fulfillment
+        store.db.execute("UPDATE asks SET body=body")
         assert lifecycle.view("abcd")["lifecycle"] == "unverified"
         verify_pass(store)
         assert lifecycle.view("abcd")["lifecycle"] == "fulfilled"
@@ -646,6 +650,7 @@ def test_worker_accepts_bounded_heavily_escaped_answer_inventory(tmp_path):
                 "abcd", "answer", "Liam", hashlib.sha256(str(index).encode()).hexdigest(), "\x01" * 16384, "A"
             )
         apply(store)
+        store.db.execute("UPDATE asks SET body=body")
         assert 4_900_000 < measure(store.db, "abcd") < 8_388_608
         assert verify_pass(store) == 1
         assert store.capacity_count() == 0

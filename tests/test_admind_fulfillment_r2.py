@@ -23,7 +23,7 @@ def propose(store):
 
 
 def test_confirmation_notice_inherits_durable_consumed_answer_owner(store):
-    seed(store)
+    seed(store, projection=True)
     owner = "b" * 64
     store.claim_inbound(hashlib.sha256(b"abcd").hexdigest(), sender_key=owner)
     propose(store)
@@ -33,13 +33,13 @@ def test_confirmation_notice_inherits_durable_consumed_answer_owner(store):
 
 
 def test_unproven_consumed_answer_is_quarantined_not_system(store):
-    seed(store)
+    seed(store, projection=True)
     propose(store)
     assert all(row.ownership_kind == "unknown" for row in store.pending())
 
 
 def test_consumption_has_no_false_retirement_tombstone(store):
-    seed(store)
+    seed(store, projection=True, owned=True)
     pending = propose(store)
     intent = pending.view["intent_id"]
     target = deliver(store, intent)
@@ -51,7 +51,7 @@ def test_consumption_has_no_false_retirement_tombstone(store):
 
 
 def test_read_only_view_succeeds_during_foreign_writer(store):
-    seed(store)
+    seed(store, projection=True)
     store.db.execute("PRAGMA busy_timeout=10")
     with sqlite3.connect(store.path, isolation_level=None) as peer:
         peer.execute("BEGIN IMMEDIATE")
@@ -64,7 +64,7 @@ def test_read_only_view_succeeds_during_foreign_writer(store):
 def test_current_schema_open_does_not_rehash_and_startup_rebuild_detects_old_writer(tmp_path, monkeypatch):
     path = tmp_path / "state" / "db"
     source = Store(path)
-    seed(source)
+    seed(source, projection=True)
     apply(source)
     source.close()
     with sqlite3.connect(path) as old:
@@ -77,6 +77,8 @@ def test_current_schema_open_does_not_rehash_and_startup_rebuild_detects_old_wri
         assert calls == []
         monkeypatch.setattr(f.Lifecycle, "refresh", original)
         reopened.fulfillment.rebuild()
+        from heterodyne.admind.fulfillment_projection import verify_pass
+        verify_pass(reopened)  # Explicit bounded worker step after startup validation.
         assert reopened.fulfillment.view("abcd")["lifecycle"] == "conflict"
         assert reopened.capacity_count() == 1
     finally:
@@ -99,7 +101,7 @@ def test_cli_schema_failure_is_fixed_state_error(tmp_path, monkeypatch):
 
 
 def test_reconcile_reports_new_commit_then_existing_receipt(store, tmp_path, monkeypatch):
-    seed(store)
+    seed(store, projection=True)
     path = tmp_path / "receipts.json"
     path.write_bytes(f.canonical([f.builtins(completion(store))]))
     args = argparse.Namespace(receipts=path, limit=20, apply=True, continuation=None)
@@ -149,7 +151,7 @@ def test_fulfill_refusal_store_fault_is_recoverable_and_bug_not_called_store_out
         finish = u.daemon.finish
 
         def finish_or_busy(mid, status, text, tag):
-            if text.startswith("Fulfillment refused:"):
+            if text == "stale-intent":
                 raise sqlite3.OperationalError("private-sentinel")
             finish(mid, status, text, tag)
 
@@ -177,7 +179,7 @@ def test_legacy_socket_duplicate_keys_unchanged_but_new_union_strict(tmp_path):
     from heterodyne.admind import ctl
 
     u = Unit(tmp_path)
-    seed(u.store)
+    seed(u.store, projection=True)
 
     async def scenario():
         server = ctl.JsonSocketServer(
@@ -221,7 +223,7 @@ def test_quoted_answer_revocation_uses_actual_daemon_guard(tmp_path):
 
     u = Unit(tmp_path)
     try:
-        seed(u.store)
+        seed(u.store, projection=True)
         u.store.claim_inbound(hashlib.sha256(b"abcd").hexdigest(), sender_key=OPERATOR_HEX)
         propose(u.store)
         row = u.store.pending()[0]

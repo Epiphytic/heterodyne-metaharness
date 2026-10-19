@@ -261,6 +261,7 @@ def validate_schema_db(db: sqlite3.Connection) -> None:
 class Lifecycle:
     def __init__(self, store: Store):
         self.store = store
+        self.verification_changed: Callable[[], None] = lambda: None
         self.notice_authority: Callable[[], set[str] | None] = lambda: None
         self.post: Callable[[str, str, str | None, str | None, tuple[str, ...] | None], None] = self._post
 
@@ -388,10 +389,12 @@ class Lifecycle:
                 return None
             if type(row[0]) is not int or row[0] > MAX_REPLY:
                 raise Invalid("stored-receipt-unavailable")
-            raw = self.store.db.execute(
-                "SELECT receipt FROM ask_fulfillments WHERE ask_id=?", (ask_id,)
-            ).fetchone()
             try:
+                raw = self.store.db.execute(
+                    "SELECT receipt FROM ask_fulfillments WHERE ask_id=?", (ask_id,)
+                ).fetchone()
+                if raw is None:
+                    raise Invalid("stored-receipt-unavailable")
                 data = str(raw[0]).encode()
                 strict_json(data)
                 value = msgspec.json.decode(data, type=dict[str, object])
@@ -400,7 +403,7 @@ class Lifecycle:
                 ):
                     raise Invalid("stored-receipt-unavailable")
                 return value
-            except (ValueError, TypeError, UnicodeError):
+            except (msgspec.DecodeError, ValueError, TypeError, UnicodeError, sqlite3.Error):
                 raise Invalid("stored-receipt-unavailable") from None
 
     def protected(self, ask_id: str) -> bool:
@@ -474,7 +477,6 @@ class Lifecycle:
                 if pending is None
                 else {
                     **dict(zip(("intent_id", "digest", "status", "created_at"), pending, strict=True)),
-                    "notice": self.notice_state(str(pending[0]))[0],
                 },
             }
 
@@ -580,6 +582,9 @@ class Lifecycle:
                 core,
             ),
         )
+        from .fulfillment_projection import stamp_current
+
+        stamp_current(self.store.db, binding.ask_id)
         self.store.db.execute(
             "INSERT INTO ask_fulfillment_audit(ask_id,request_digest,disposition,at) "
             "VALUES (?,?,'applied',?)",
@@ -624,7 +629,7 @@ class Lifecycle:
             if old is not None:
                 if req.replace_intent != old[1]:
                     raise Invalid("pending-conflict")
-                if self.notice_state(str(old[0]))[0] in ("quarantined", "suppressed"):
+                if self.notice_state(str(old[0]), check_expiry=False)[0] not in ("pending", "delivered"):
                     raise Invalid("notice-owner-unavailable")
                 self.retire(req.ask_id, str(old[1]), "operator-withdrawal")
             elif req.replace_intent is not None:
@@ -718,7 +723,7 @@ class Lifecycle:
         rows.sort(key=lambda r: int(str(r[0]).rsplit(":", 1)[1]))
         return rows
 
-    def notice_state(self, intent: str) -> tuple[str, str]:
+    def notice_state(self, intent: str, *, check_expiry: bool = True) -> tuple[str, str]:
         row = self.store.db.execute(
             "SELECT parts,created_at,length(CAST(notice AS BLOB)) "
             "FROM ask_fulfillment_intents WHERE intent_id=?",
@@ -727,7 +732,9 @@ class Lifecycle:
         if row is None:
             return "unavailable", "delivery-unresolved"
         try:
-            if datetime.now(UTC) - datetime.fromisoformat(str(row[1])) >= timedelta(hours=24):
+            if check_expiry and datetime.now(UTC) - datetime.fromisoformat(str(row[1])) >= timedelta(
+                hours=24
+            ):
                 return "expired", "intent-expired"
             if row[2] > 14000:
                 raise Invalid("delivery-unresolved")
@@ -864,7 +871,10 @@ class Lifecycle:
             duplicate = self.duplicate(str(ask_id), str(intent_digest))
             if duplicate:
                 return duplicate
-            if status != "pending" or self.notice_state(intent)[0] != "delivered":
+            state = self.notice_state(intent)[0]
+            if status != "pending" or state == "expired":
+                raise Invalid("stale-intent")
+            if state != "delivered":
                 raise Invalid("incomplete-notice")
             declared = msgspec.json.decode(str(declaration), type=Declaration)
             self.validate(declared.binding, declared.evidence)

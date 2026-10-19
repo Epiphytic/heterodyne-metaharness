@@ -729,9 +729,9 @@ class Admind:
                                    ("batches", self.batch_loop), ("autobump", self.autobump_loop),
                                    ("maintenance-retry", self.maintenance_retry_loop)):
                     tg.create_task(self.guarded(supervised(name, loop, self.audit)))
-                if fulfillment.ENABLED:
-                    from heterodyne.admind.fulfillment_projection import worker
-                    tg.create_task(self.guarded(worker(self.store)))
+                # Verification is independent of whether producers are enabled.
+                from heterodyne.admind.fulfillment_projection import worker
+                tg.create_task(self.guarded(worker(self.store)))
                 tg.create_task(self.guarded(self.reconcile_asks(snapshot)))
         except BaseException:
             self.shutting_down = True
@@ -912,17 +912,33 @@ class Admind:
             if isinstance(req, fulfillment.Inspect):
                 return fulfillment.Reply("ok", "intent diagnostics", lifecycle.inspect())
             if isinstance(req, fulfillment.Get):
-                return fulfillment.Reply("ok", "lifecycle", lifecycle.view(req.ask_id))
+                view = lifecycle.view(req.ask_id)
+                if view["binding"] is None:
+                    return fulfillment.Reply("unavailable", "binding-unavailable", view)
+                pending = view["pending"]
+                message = (
+                    "lifecycle"
+                    if pending is None
+                    else "notice-"
+                    + lifecycle.notice_state(str(cast(dict[str, object], pending)["intent_id"]))[0]
+                )
+                return fulfillment.Reply("ok", message, view)
             if isinstance(req, fulfillment.Apply):
-                return lifecycle.apply(req.receipt, uid=peer.uid if peer.uid is not None else -1,
-                                       pid=peer.pid)
+                return lifecycle.apply(
+                    req.receipt, uid=peer.uid if peer.uid is not None else -1, pid=peer.pid
+                )
             if isinstance(req, fulfillment.Propose):
-                return lifecycle.propose(req, uid=peer.uid if peer.uid is not None else -1,
-                                         chunk_chars=self.s.chunk_chars)
+                return lifecycle.propose(
+                    req, uid=peer.uid if peer.uid is not None else -1, chunk_chars=self.s.chunk_chars
+                )
             with self.store.transaction():
                 return lifecycle.retire(req.ask_id, req.expect_intent, req.reason)
         except fulfillment.Invalid as exc:
+            if isinstance(req, fulfillment.Get):
+                return fulfillment.Reply("unavailable", "binding-unavailable")
             return fulfillment.Reply("refused", str(exc))
+        except (msgspec.DecodeError, UnicodeError, TypeError, ValueError):
+            return fulfillment.Reply("unavailable", "binding-unavailable")
         except sqlite3.Error:
             return fulfillment.Reply("unavailable", "store unavailable")
 

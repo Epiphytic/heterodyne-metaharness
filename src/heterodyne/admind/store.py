@@ -1300,7 +1300,7 @@ class Store:
         return cur.rowcount
 
     @contextlib.contextmanager
-    def transaction(self, *, read_only: bool = False) -> Generator[None]:
+    def transaction(self, *, read_only: bool = False, notify_fulfillment: bool = True) -> Generator[None]:
         """Run the block's store calls as one SQLite transaction: all of them commit, or (on any
         exception, a simulated crash included) none do. Re-entrant: a nested block joins the outer one.
         The store lock is held throughout, so keep the block short and free of awaits.
@@ -1322,6 +1322,16 @@ class Store:
             try:
                 yield
                 self.db.execute("COMMIT")
+                if (
+                    not read_only
+                    and notify_fulfillment
+                    and hasattr(self, "fulfillment")
+                    and self.db.execute(
+                        "SELECT 1 FROM sqlite_master WHERE name='fulfillment_dirty'"
+                    ).fetchone()
+                    and self.db.execute("SELECT 1 FROM fulfillment_dirty LIMIT 1").fetchone()
+                ):
+                    self.fulfillment.verification_changed()
             except BaseException:
                 if self.db.in_transaction:
                     self.db.execute("ROLLBACK")

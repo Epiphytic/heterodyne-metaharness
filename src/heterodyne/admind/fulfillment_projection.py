@@ -194,6 +194,7 @@ def migrate_connection(db: sqlite3.Connection, *, apply: bool = False) -> dict[s
         return {
             "schema": "fulfillment-migration-v1",
             "changed": changed,
+            "migration_required": not bool(exists) and not apply,
             "before_schema_sha256": before,
             "after_schema_sha256": after,
             "counts": counts,
@@ -281,70 +282,113 @@ def measure(db: sqlite3.Connection, ask_id: str) -> int:
     return size + int(sizes[0])
 
 
+def verify_binding(db: sqlite3.Connection, ask_id: str) -> str:
+    """Verify one already size-bounded unit; malformed retained bytes grant no suppression."""
+    record = db.execute("SELECT receipt FROM ask_fulfillments WHERE ask_id=?", (ask_id,)).fetchone()
+    if record is None or not isinstance(record[0], str):
+        raise f.Invalid("stored-receipt-unavailable")
+    raw = record[0].encode()
+    f.strict_json(raw, limit=131072)
+    original = msgspec.json.decode(raw, type=dict[str, object])
+    binding = original.get("binding")
+    actual = bounded_binding(db, ask_id)
+    row = db.execute("SELECT kind,status FROM asks WHERE ask_id=?", (ask_id,)).fetchone()
+    good = isinstance(binding, dict) and all(
+        cast(dict[str, object], binding).get(k) == actual[k]
+        for k in ("ask_store_id", "ask_id", "created_at", "ask_sha256", "answers_sha256")
+    )
+    good = good and row in (("question", "answered"), ("merge", "answered"))
+    if good:
+        attested = msgspec.convert(binding, type=f.Binding, strict=True)
+        f.validate_binding(attested, [])
+        good = set(attested.consumed_answers) <= set(msgspec.convert(actual["answer_ids"], type=list[str]))
+    return "valid" if good else "conflict"
+
+
+def stamp_current(db: sqlite3.Connection, ask_id: str) -> None:
+    """Caller holds the apply/confirm writer transaction and has just validated this binding.
+
+    Receipt insertion's invalidation trigger runs first. Publish only the resulting exact current
+    generation, atomically with the immutable receipt; legacy writes still invalidate it immediately.
+    """
+    epoch, _ = validate(db)
+    generation = db.execute(
+        "SELECT generation FROM fulfillment_generations WHERE ask_id=?", (ask_id,)
+    ).fetchone()
+    if generation is None:
+        raise f.Invalid("fulfillment-projection-unavailable")
+    db.execute(
+        "INSERT OR REPLACE INTO fulfillment_verifications VALUES (?,?,?,'valid')",
+        (ask_id, epoch, generation[0]),
+    )
+    db.execute("UPDATE ask_fulfillments SET valid=1 WHERE ask_id=?", (ask_id,))
+    db.execute("DELETE FROM fulfillment_dirty WHERE ask_id=? AND generation=?", (ask_id, generation[0]))
+
+
 def verify_pass(store: Store) -> int:
     """One <=20-ID, <=20MiB pass. Snapshot/hash is independent of the live Store RLock."""
     started = time.monotonic()
-    results: list[tuple[str, int, str]] = []
+    results: list[tuple[str, int | None, str]] = []
     with store.read_snapshot() as db:
         epoch, cursor = validate(db)
         dirty = [
             str(r[0]) for r in db.execute("SELECT ask_id FROM fulfillment_dirty ORDER BY ask_id LIMIT 10")
         ]
-        rest = [
-            str(r[0])
-            for r in db.execute(
-                "SELECT f.ask_id FROM ask_fulfillments f WHERE f.ask_id>? "
-                "AND NOT EXISTS(SELECT 1 FROM fulfillment_verifications v "
-                "WHERE v.ask_id=f.ask_id AND v.epoch=?) "
-                "ORDER BY f.ask_id LIMIT 10",
-                (cursor or "", epoch),
-            )
-        ]
-        selected = list(dict.fromkeys(dirty + rest))
+
+        def remaining(after: str) -> list[str]:
+            return [
+                str(r[0])
+                for r in db.execute(
+                    "SELECT f.ask_id FROM ask_fulfillments f WHERE f.ask_id>? "
+                    "AND NOT EXISTS(SELECT 1 FROM fulfillment_verifications v "
+                    "WHERE v.ask_id=f.ask_id AND v.epoch=?) ORDER BY f.ask_id LIMIT 10",
+                    (after, epoch),
+                )
+            ]
+
+        rest = remaining(cursor or "")
+        if not rest and cursor is not None:
+            rest = remaining("")
+        # Alternate queues: even two maximum-sized units fit the 20MiB budget. Each gets a first
+        # unit before either can consume the pass, and overlaps are processed only once.
+        selected: list[str] = []
+        for i in range(max(len(dirty), len(rest))):
+            for queue in (rest, dirty):
+                if i < len(queue) and queue[i] not in selected:
+                    selected.append(queue[i])
         used = 0
         for ask_id in selected:
             if time.monotonic() - started >= 10:
                 break
-            gen = db.execute(
-                "SELECT generation FROM fulfillment_generations WHERE ask_id=?", (ask_id,)
-            ).fetchone()
-            if gen is None:
-                raise f.Invalid("fulfillment-projection-unavailable")
+            generation: int | None = None
             try:
+                gen = db.execute(
+                    "SELECT generation FROM fulfillment_generations WHERE ask_id=?", (ask_id,)
+                ).fetchone()
+                if gen is None:
+                    raise f.Invalid("missing-generation")
+                generation = int(gen[0])
                 size = measure(db, ask_id)
                 if used + size > 20971520:
                     break
                 used += size
-                record = db.execute(
-                    "SELECT receipt FROM ask_fulfillments WHERE ask_id=?", (ask_id,)
-                ).fetchone()
-                raw = str(record[0]).encode()
-                f.strict_json(raw, limit=131072)
-                original = msgspec.json.decode(raw, type=dict[str, object])
-                binding = original.get("binding")
-                actual = bounded_binding(db, ask_id)
-                row = db.execute("SELECT kind,status FROM asks WHERE ask_id=?", (ask_id,)).fetchone()
-                good = isinstance(binding, dict) and all(
-                    cast(dict[str, object], binding).get(k) == actual[k]
-                    for k in ("ask_store_id", "ask_id", "created_at", "ask_sha256", "answers_sha256")
-                )
-                good = good and row in (("question", "answered"), ("merge", "answered"))
-                if good:
-                    attested = msgspec.convert(binding, type=f.Binding, strict=True)
-                    f.validate_binding(attested, [])
-                    good = set(attested.consumed_answers) <= set(
-                        msgspec.convert(actual["answer_ids"], type=list[str])
-                    )
-                state = "valid" if good else "conflict"
-            except (f.Invalid, ValueError, TypeError, UnicodeError) as exc:
+                state = verify_binding(db, ask_id)
+            except (
+                f.Invalid,
+                msgspec.DecodeError,
+                ValueError,
+                TypeError,
+                UnicodeError,
+                sqlite3.Error,
+            ) as exc:
                 state = "too-large" if str(exc) == "too-large" else "conflict"
-            results.append((ask_id, int(gen[0]), state))
-    with store.transaction():
+            results.append((ask_id, generation, state))
+    with store.transaction(notify_fulfillment=False):
         current, _ = validate(store.db)
         if current != epoch:
             return 0
         for ask_id, gen, state in results:
-            if store.db.execute(
+            if gen is None or store.db.execute(
                 "SELECT generation FROM fulfillment_generations WHERE ask_id=?", (ask_id,)
             ).fetchone() != (gen,):
                 continue
@@ -358,7 +402,11 @@ def verify_pass(store: Store) -> int:
             store.db.execute("DELETE FROM fulfillment_dirty WHERE ask_id=? AND generation=?", (ask_id, gen))
         if rest:
             done = {r[0] for r in results}
-            last = next((k for k in reversed(rest) if k in done), cursor)
+            last = cursor
+            for ask_id in rest:
+                if ask_id not in done:
+                    break  # Never advance over an unprocessed epoch-queue prefix.
+                last = ask_id
             store.db.execute(
                 "UPDATE fulfillment_projection_meta SET scan_cursor=? WHERE singleton=1", (last,)
             )
@@ -368,8 +416,20 @@ def verify_pass(store: Store) -> int:
 async def worker(store: Store) -> None:
     """Dedicated single thread; cancellation drains the bounded running pass before closing."""
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="fulfillment")
+    wake = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def changed() -> None:
+        if not loop.is_closed():
+            try:
+                loop.call_soon_threadsafe(wake.set)
+            except RuntimeError:
+                pass  # Shutdown raced notification; durable dirty work survives the next startup.
+
+    store.fulfillment.verification_changed = changed
     try:
         while True:
+            wake.clear()
             future = asyncio.get_running_loop().run_in_executor(executor, verify_pass, store)
             try:
                 count = await asyncio.shield(future)
@@ -377,8 +437,12 @@ async def worker(store: Store) -> None:
             except asyncio.CancelledError:
                 await future
                 raise
-            except (f.Invalid, sqlite3.Error, OSError, ValueError):
+            except (f.Invalid, msgspec.DecodeError, sqlite3.Error, OSError, ValueError, RuntimeError):
                 delay = 30
-            await asyncio.sleep(delay)
+            try:
+                await asyncio.wait_for(wake.wait(), timeout=delay)
+            except TimeoutError:
+                pass
     finally:
+        store.fulfillment.verification_changed = lambda: None
         executor.shutdown(wait=True)
