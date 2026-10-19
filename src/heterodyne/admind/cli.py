@@ -24,6 +24,7 @@ from heterodyne.admind import (
     ctl,
     fulfillment,
     fulfillment_cli,
+    gateway_custody_cli,
     initialised,
     links,
     recovery_cli,
@@ -372,7 +373,7 @@ def _settings_only() -> AdmindSettings:
 
 def _with_settings(args: argparse.Namespace) -> int:
     # Client-only operations never open the daemon database.
-    if args.command in ("ask", "notice", "maintenance-recovery"):
+    if args.command in ("ask", "notice", "maintenance-recovery", "gateway-custody"):
         try:
             s = _settings_only()
         except hconfig.ConfigError as exc:
@@ -380,6 +381,8 @@ def _with_settings(args: argparse.Namespace) -> int:
             return EX_CONFIG
         if args.command == "maintenance-recovery":
             return recovery_cli.command(s, args)
+        if args.command == "gateway-custody":
+            return gateway_custody_cli.command(s, args)
         return ask_command(s, args) if args.command == "ask" else notice_command(s, args)
     try:
         s, store, audit = _load()
@@ -523,6 +526,8 @@ def build_parser() -> argparse.ArgumentParser:
                                            "the answers"))
     recovery_cli.parser(sub.add_parser(
         "maintenance-recovery", help="register or inspect exact local recovery consent"))
+    gateway_custody_cli.parser(sub.add_parser(
+        "gateway-custody", help="register or inspect independently enrolled custody consent"))
     _notice_parser(sub.add_parser("notice", help="post an FYI to the operators; no reply is requested"))
     units.add_arguments(sub.add_parser("unit", help="print a systemd user unit for this install"))
     sub.add_parser("initialised", help="exit 0 if admind init has run, 1 if not, 2 if it can't tell")
