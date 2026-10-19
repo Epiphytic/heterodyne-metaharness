@@ -265,16 +265,17 @@ def stored_inputs(row: AskRow, chunk_chars: int) -> RenderInputs | RenderInputsV
                           row.question_form, choices, recommended, specs,
                           row.pr_url, row.head_sha, row.bead, row.digest, row.refreshed_from,
                           chunk_chars, approval_inputs(row) if row.kind == "approval" else None)
+    validate_stored_request(row, inputs, metadata)
+    if metadata is not None:
+        inputs = RenderInputsV2(**msgspec.structs.asdict(inputs), presentation=management.TAG,
+                                render_version=2, management=metadata)
     if len(canonical(inputs)) > MAX_INPUT_BYTES:
         raise Refusal("oversized")
-    validate_stored_request(row, inputs)
-    if metadata is not None:
-        return RenderInputsV2(**msgspec.to_builtins(inputs), presentation=management.TAG,
-                              render_version=2, management=metadata)
     return inputs
 
 
-def validate_stored_request(row: AskRow, inputs: RenderInputs) -> None:
+def validate_stored_request(row: AskRow, inputs: RenderInputs,
+                            metadata: management.Metadata | None = None) -> None:
     """Reuse native request validation and redaction without changing persisted card bytes."""
     if row.kind == "approval":
         if any(value is not None for value in (row.question_form, row.choices, row.links)):
@@ -282,7 +283,7 @@ def validate_stored_request(row: AskRow, inputs: RenderInputs) -> None:
         return
     request = asks.AskPost(inputs.kind, row.title, row.body, row.pr_url, row.head_sha, row.bead,
                            row.poster, inputs.form, inputs.choices, inputs.recommended, inputs.links,
-                           row.presentation, row.render_version, management.stored(row))
+                           row.presentation, row.render_version, metadata)
     if asks.check(request) is not None:
         raise Refusal("invalid-state")
     context = asks.context(row)

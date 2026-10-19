@@ -278,7 +278,9 @@ def describe(req: AskRequest) -> dict[str, object]:
     if isinstance(req, AskPost):
         return {"op": "post", "ask_kind": req.kind, "poster": req.poster, "bead": req.bead,
                 "title_chars": len(req.title), "body_chars": len(req.body), "pr": req.pr_url is not None,
-                "form": req.form, "choices": len(req.choices), "links": len(req.links)}
+                "form": req.form, "choices": len(req.choices), "links": len(req.links),
+                **({"presentation": req.presentation, "render_version": req.render_version}
+                   if req.presentation is not None else {})}
     if isinstance(req, NoticePost):
         return {"op": "notice", **notices_describe(req)}
     if isinstance(req, AskList):
@@ -445,7 +447,7 @@ def _shown(row: AskRow) -> tuple[str, bool]:
 def question_card(row: AskRow) -> tuple[str, bool]:
     """A question or merge card as one text: (redacted text, truncated). The context is redacted whole before
     the budget is counted (P5); the label, head, links and closing lines are fixed framing, never cut."""
-    if management.stored(row) is not None:
+    if management.present(row):
         return "\n".join(management.lines(row)), False
     shown, truncated = _shown(row)
     return redact("\n".join(t for t, _ in _tagged(row, shown, None))), truncated
@@ -454,7 +456,7 @@ def question_card(row: AskRow) -> tuple[str, bool]:
 def card_chunks(row: AskRow, chunk_chars: int) -> tuple[list[str], bool]:
     """The card's chunks (K23), and whether its context was cut. Raises chunk.TooWide for a link line wider
     than a chunk (the post is refused)."""
-    if management.stored(row) is not None:
+    if management.present(row):
         return management.parts(row, chunk_chars), False
     shown, truncated = _shown(row)
     return _packed(row, shown, chunk_chars), truncated
@@ -467,7 +469,7 @@ def _packed(row: AskRow, shown: str, chunk_chars: int) -> list[str]:
 
 def full_text(row: AskRow) -> str:
     """What `!details` on a card sends: the whole ask, redacted."""
-    if management.stored(row) is not None:
+    if management.present(row):
         return "\n".join(management.lines(row))
     return redact("\n".join(t for t, _ in _tagged(row, redact(context(row)).rstrip(chr(10)), None)))
 
@@ -476,7 +478,7 @@ def full_chunks(row: AskRow, chunk_chars: int, *, details: bool = False) -> list
     """`!details` and `!asks repeat` for a question or merge: the whole ask, packed as its card was. Raises
     chunk.TooWide if the chunk size has shrunk since it was posted so that a link no longer fits: a link is
     never cut (K23), so the caller refuses visibly."""
-    if management.stored(row) is not None:
+    if management.present(row):
         return management.parts(row, chunk_chars, details=details)
     return _packed(row, redact(context(row)).rstrip("\n"), chunk_chars)
 
@@ -488,7 +490,7 @@ def checked_card_chunks(row: AskRow, chunk_chars: int, *, repeat: bool = False
     Ordinary posting still uses the established redacting renderer. A binding must instead distinguish
     faithful reproduction from output that was changed by redaction, including only after a split.
     """
-    if management.stored(row) is not None:
+    if management.present(row):
         return management.parts(row, chunk_chars), False
     shown, truncated = (context(row).rstrip("\n"), False) if repeat else _shown(row)
     return _checked(_tagged(row, shown, chunk.usable(chunk_chars)), chunk_chars), truncated
@@ -499,6 +501,8 @@ def map_reaction(row: AskRow, emoji: str) -> str | None:
     """The choice a reaction records: an approve-set emoji is the recommended option; a deny-set emoji is
     the other option on a yes/no card and `none` on a multiple-choice card; anything else, or no form, is no
     choice."""
+    if management.present(row):
+        management.stored(row)  # malformed V2 never falls back to legacy answer semantics
     f = form(row)
     action = verbs.emoji_action(emoji)
     if f is None or action is None:
@@ -519,6 +523,13 @@ def _short(text: str) -> str:
 
 def map_reply(row: AskRow, text: str) -> str | None:
     """The choice a reply records (K18q), or None for a free answer (stored verbatim as always)."""
+    if management.present(row):
+        management.stored(row)
+        letter = _short(text).upper()
+        if letter in ("A", "B"):
+            return letter
+        reading = verbs.read_reply(text)
+        return (None if reading is None else "A" if reading.action == "approve" else NONE_OF_THESE)
     f = form(row)
     if f is None:
         return None
@@ -712,7 +723,9 @@ def reminder(row: AskRow, at: datetime, every: int | None = None) -> str:
 
 
 NO_OUTSTANDING = "No outstanding asks."
-SKIPPED = {"answered": "{ask_id} is answered; awaiting its asker", "deciding": "{ask_id} is deciding",
+SKIPPED = {
+    "management card refused": "{ask_id}: management card refused",
+    "answered": "{ask_id} is answered; awaiting its asker", "deciding": "{ask_id} is deciding",
            "uncertain": "{ask_id} is uncertain",
            "card not delivered": "{ask_id}: card not delivered; try !asks repeat",
            "link too long": "{ask_id}: a link is longer than this group's message size now allows; "

@@ -321,8 +321,8 @@ def test_exact_whole_card_character_boundary_includes_real_id(daemon):
 def test_native_approve_bead_rejects_management_metadata(daemon):
     # A same-UID caller can copy a presentation tag. That cannot become a native design/execution approval.
     assert asks.check(request(kind="approval", bead="btq-example")) is not None
-    assert asks.check(request(kind="question", title="APPROVAL: design")) is None
-    reply = post(daemon, title="APPROVAL: design")
+    assert asks.check(request(kind="question", title="Task-management operation")) is None
+    reply = post(daemon, title="Task-management operation")
     assert reply.ask.summary.kind == "question"
     assert daemon.store.db.execute("SELECT count(*) FROM asks WHERE kind='approval'").fetchone()[0] == 0
 

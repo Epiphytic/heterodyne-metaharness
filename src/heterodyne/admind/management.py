@@ -19,9 +19,14 @@ VERSION = 2
 CHOICES = ["Perform this exact change", "Leave unchanged and held"]
 MAX_LINES = 36
 MAX_CHARS = 3200
-_HEX = re.compile(r"[0-9a-f]{64}")
-_AUDIT = re.compile(r"https://github\.com/[A-Za-z0-9-]+/[A-Za-z0-9._-]+/blob/[0-9a-f]{40}/[^?#]+")
-_MARKDOWN = re.compile(r"[`*_~|\\\[\]<>]|(?m:^\s*[#!>])")
+# Renderer-owned lines may not be injected as purported task facts.
+_MARKDOWN = re.compile(r"[`*_~|\\\[\]<>]|(?m:^\s*[#!>]|^ {4}|^\s*[-=]{3,}\s*$)")
+_RESERVED = re.compile(
+    r"(?im:^\s*(?:APPROVAL\s*:|QUESTION\s*:|Audit details\s*:|Request\s*:|"
+    r"[A-Z]\s*=|Ask\s|Reply\s|Only a verified management binding|"
+    r"Any other reply or contrary answer|Accepted approval words:|Denial words:|Positive reactions:))"
+)
+REFUSED = "task-management-consent-v1 management card refused: unsafe, invalid or over budget"
 
 
 class Metadata(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -30,19 +35,27 @@ class Metadata(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     audit_url: str
 
 
-class Refusal(chunk.TooWide):
-    """Also handled by existing repeat/details refusal paths; no partial card is queued."""
+class Refusal(ValueError):
+    """A management contract refusal, never a legacy link-width diagnostic."""
 
     def __init__(self) -> None:
-        super().__init__(0, 0)
+        super().__init__("management-contract")
+
+
+def present(row: AskRow) -> bool:
+    """Select V2 validation without decoding twice; partial/unknown metadata still selects refusal."""
+    return any(v is not None for v in (row.presentation, row.render_version, row.management))
 
 
 def literal(text: str, *, multiline: bool = False) -> bool:
     """Plain literals only; no format/control/bidi instructions or lossy sanitization."""
     return (
         not _MARKDOWN.search(text)
+        and not _RESERVED.search(text)
+        and "\u0336" not in text
         and all(
-            (c == "\n" and multiline) or unicodedata.category(c) not in {"Cc", "Cf", "Cs", "Zl", "Zp"}
+            (c == "\n" and multiline)
+            or unicodedata.category(c) not in {"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"}
             for c in text
         )
         and redact(text) == text
@@ -50,12 +63,14 @@ def literal(text: str, *, multiline: bool = False) -> bool:
 
 
 def valid_metadata(value: Metadata) -> bool:
+    from heterodyne.admind.binding import HEX_KEY  # deferred: binding owns the wire identity grammar
+
     return (
-        bool(_HEX.fullmatch(value.request_id))
-        and bool(_HEX.fullmatch(value.descriptor_sha256))
+        bool(HEX_KEY.fullmatch(value.request_id))
+        and bool(HEX_KEY.fullmatch(value.descriptor_sha256))
         and "%" not in value.audit_url
         and len(value.audit_url) <= links.MAX_URL
-        and bool(_AUDIT.fullmatch(value.audit_url))
+        and bool(links.PINNED_BLOB.fullmatch(value.audit_url))
         and links.why(links.LinkSpec("Audit details", value.audit_url)) is None
     )
 
@@ -103,7 +118,9 @@ def lines(row: AskRow) -> list[str]:
     meta = stored(row)
     if meta is None or not literal(row.title) or not literal(row.body, multiline=True):
         raise Refusal()
-    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,31}", row.poster):
+    from heterodyne.admind.asks import POSTER  # deferred: native request validation owns poster syntax
+
+    if not POSTER.fullmatch(row.poster):
         raise Refusal()
     result = [
         "APPROVAL: Task management",
@@ -129,7 +146,10 @@ def parts(row: AskRow, chunk_chars: int, *, details: bool = False) -> list[str]:
     text = lines(row)
     # Treat every fact as atomic: splitting a material literal is never a substitute for refusal.
     tagged: list[tuple[str, chunk.Kind]] = [(line, "atomic") for line in text]
-    packed = chunk.pack(tagged, chunk_chars)
+    try:
+        packed = chunk.pack(tagged, chunk_chars)
+    except chunk.TooWide:
+        raise Refusal() from None
     complete = "\n".join(packed)
     # Include actual continuation framing, not merely the unchunked card budget.
     if (
@@ -146,5 +166,8 @@ def parts(row: AskRow, chunk_chars: int, *, details: bool = False) -> list[str]:
             "Positive reactions: 👍 (all skin tones), ✅, ❤, ♥; negative: 👎 (all skin tones), ❌.",
             "Existing reply punctuation and emoji variation-selector handling are unchanged.",
         ]
-        return chunk.pack([*tagged, *((line, "atomic") for line in grammar)], chunk_chars)
+        try:
+            return chunk.pack([*tagged, *((line, "atomic") for line in grammar)], chunk_chars)
+        except chunk.TooWide:
+            raise Refusal() from None
     return packed

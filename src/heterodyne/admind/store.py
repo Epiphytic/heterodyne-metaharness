@@ -295,13 +295,13 @@ _ASK = ("ask_id, kind, poster, title, body, pr_url, head_sha, bead, digest, trun
 _ASK_READ = _ASK + ", presentation, render_version, management"
 
 def _ask(r: tuple[object, ...]) -> AskRow:
-    if r[22] is not None and type(r[22]) is not int:
-        raise ValueError("invalid render version")
+    # Preserve malformed metadata as a nonlegacy sentinel for per-card refusal; bulk reads survive.
+    version = r[22] if r[22] is None or type(r[22]) is int else -1
     return AskRow(str(r[0]), str(r[1]), str(r[2]), str(r[3]), str(r[4]), _opt_str(r[5]), _opt_str(r[6]),
                   _opt_str(r[7]), _opt_str(r[8]), bool(r[9]), int(cast(int, r[10])), str(r[11]),
                   _opt_str(r[12]), _opt_str(r[13]), str(r[14]), str(r[15]), _opt_str(r[16]), _opt_str(r[17]),
                   _opt_str(r[18]), _opt_str(r[19]), _opt_str(r[20]), _opt_str(r[21]),
-                  r[22], _opt_str(r[23]))
+                  version, _opt_str(r[23]))
 
 
 _OUTBOX = ("seq, key, reply_to, text, attempts, lane, thread_key, ownership_kind, "
