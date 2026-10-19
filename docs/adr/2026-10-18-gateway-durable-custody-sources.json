@@ -1,0 +1,286 @@
+{
+  "schema": "gateway-custody-design-inputs.v1",
+  "status": "proposed unreviewed amendment; source observation is not authority",
+  "task": "btq-q1cau",
+  "baseline": "b4b8c75da984126344716566300fb7cad19a35b5",
+  "captured_input_time": "2026-10-19T05:30:35.540714+00:00",
+  "repository_labels": {
+    "kkv": "Hermes gateway implementation task snapshot",
+    "uuo": "queue packet/coordinator task snapshot",
+    "jlz": "Hermes recovery enrollment compiler task snapshot",
+    "product": "product operational-recovery task snapshot",
+    "hermes": "Hermes parent ADR archive"
+  },
+  "sources": [
+    {
+      "id": "S1",
+      "repository": "kkv",
+      "revision": "2d773ecab60dc476af6f385c98c1e8e5975638b5",
+      "path": "harness/gateway_work.py",
+      "git_blob_sha256": "473b33ff556b312104220e34e994e5e35ff5b3b4b470fe3227685d8e17152c50",
+      "symbols": [
+        {
+          "symbol": "Owner",
+          "line": 57,
+          "end_line": 233
+        },
+        {
+          "symbol": "submit",
+          "line": 75,
+          "end_line": 103
+        },
+        {
+          "symbol": "result",
+          "line": 185,
+          "end_line": 225
+        }
+      ],
+      "qualification": "exact committed bytes",
+      "observed_working_sha256": "473b33ff556b312104220e34e994e5e35ff5b3b4b470fe3227685d8e17152c50"
+    },
+    {
+      "id": "S2",
+      "repository": "kkv",
+      "revision": "2d773ecab60dc476af6f385c98c1e8e5975638b5",
+      "path": "harness/gateway_dispatch.py",
+      "git_blob_sha256": "691b9d3821b4b9bc03017ab1947592a76ed3cc15129390b8754f197ae11d4362",
+      "symbols": [
+        {
+          "symbol": "Segments",
+          "line": 107,
+          "end_line": 171
+        }
+      ],
+      "qualification": "exact committed bytes",
+      "observed_working_sha256": "691b9d3821b4b9bc03017ab1947592a76ed3cc15129390b8754f197ae11d4362"
+    },
+    {
+      "id": "S3",
+      "repository": "kkv",
+      "revision": "2d773ecab60dc476af6f385c98c1e8e5975638b5",
+      "path": "harness/gateway.py",
+      "git_blob_sha256": "7739881e017a56a02431d838ac3bbdb72c747de9b901e4cc5f8340546a222a45",
+      "symbols": [
+        {
+          "symbol": "_unknown_child",
+          "line": 649,
+          "end_line": 665
+        },
+        {
+          "symbol": "run_child",
+          "line": 667,
+          "end_line": 716
+        },
+        {
+          "symbol": "_run_child_worker",
+          "line": 718,
+          "end_line": 757
+        }
+      ],
+      "qualification": "line ranges refer to captured working bytes, NOT this committed blob; working snapshot is private non-authoritative research",
+      "observed_working_sha256": "a7d1fbc0edf1554d191b2ec3e2352199411ce7f9c0329ccc6c77b60da0adbdd2"
+    },
+    {
+      "id": "S4",
+      "repository": "kkv",
+      "revision": "2d773ecab60dc476af6f385c98c1e8e5975638b5",
+      "path": "scripts/hermes_maintenance_inventory.py",
+      "git_blob_sha256": "928cf879bf1c334fb669c9ab26681f0ce4b9c52d2726b599573abf2c420e6e7f",
+      "symbols": [
+        {
+          "symbol": "runs",
+          "line": 134,
+          "end_line": 192
+        },
+        {
+          "symbol": "maintenance_inventory",
+          "line": 246,
+          "end_line": 267
+        }
+      ],
+      "qualification": "exact committed bytes",
+      "observed_working_sha256": "928cf879bf1c334fb669c9ab26681f0ce4b9c52d2726b599573abf2c420e6e7f"
+    },
+    {
+      "id": "S5",
+      "repository": "uuo",
+      "revision": "34b0aa61f47863ea63088e49ed81dcebeec07763",
+      "path": "bin/btq-maintenance.py",
+      "git_blob_sha256": "338d65f14b55495f76678202f5278c0f98ea7c91ce6f3d5e57b86534f13c83fb",
+      "symbols": [
+        {
+          "symbol": "OperationRecovery",
+          "line": 662,
+          "end_line": 1381
+        },
+        {
+          "symbol": "execute_publication",
+          "line": 3759,
+          "end_line": 3832
+        },
+        {
+          "symbol": "prepare",
+          "line": 284,
+          "end_line": 305
+        },
+        {
+          "symbol": "prepare",
+          "line": 668,
+          "end_line": 702
+        },
+        {
+          "symbol": "settle",
+          "line": 963,
+          "end_line": 1038
+        },
+        {
+          "symbol": "local_projection_state",
+          "line": 2029,
+          "end_line": 2122
+        },
+        {
+          "symbol": "_authorize_recovery",
+          "line": 2530,
+          "end_line": 2541
+        },
+        {
+          "symbol": "_inventory",
+          "line": 2549,
+          "end_line": 2558
+        },
+        {
+          "symbol": "completed_publication",
+          "line": 2560,
+          "end_line": 2612
+        },
+        {
+          "symbol": "prepare_publication",
+          "line": 2627,
+          "end_line": 2629
+        },
+        {
+          "symbol": "prepare",
+          "line": 3543,
+          "end_line": 3666
+        }
+      ],
+      "qualification": "exact committed bytes",
+      "observed_working_sha256": "338d65f14b55495f76678202f5278c0f98ea7c91ce6f3d5e57b86534f13c83fb"
+    },
+    {
+      "id": "S6",
+      "repository": "jlz",
+      "revision": "edc543670a39257f00ed887e7c98e302f272886d",
+      "path": "scripts/maintenance_recovery_graph.py",
+      "git_blob_sha256": "f7f75a602ad9b0d7780d3c100a4925633c3f798154f69899261fda1407cb40f6",
+      "symbols": [
+        {
+          "symbol": "compile_closure",
+          "line": 125,
+          "end_line": 186
+        },
+        {
+          "symbol": "stage_recovery",
+          "line": 304,
+          "end_line": 352
+        }
+      ],
+      "qualification": "exact committed bytes",
+      "observed_working_sha256": "f7f75a602ad9b0d7780d3c100a4925633c3f798154f69899261fda1407cb40f6"
+    },
+    {
+      "id": "S7",
+      "repository": "product",
+      "revision": "ec8352ea488016d322032093c511145dae0c00b6",
+      "path": "src/heterodyne/admind/recovery_cli.py",
+      "git_blob_sha256": "587995eec22a2e2b947d85d3845db099ff59f4b2dc6c78d6fd19699a114775db",
+      "symbols": [
+        {
+          "symbol": "command",
+          "line": 27,
+          "end_line": 57
+        }
+      ],
+      "qualification": "exact committed bytes",
+      "observed_working_sha256": "587995eec22a2e2b947d85d3845db099ff59f4b2dc6c78d6fd19699a114775db"
+    },
+    {
+      "id": "S8",
+      "repository": "product",
+      "revision": "ec8352ea488016d322032093c511145dae0c00b6",
+      "path": "src/heterodyne/admind/recovery.py",
+      "git_blob_sha256": "1a1b3785f03289ce104f29b22cd4003693c326aabea70de2b12fc8f2ba5fd58d",
+      "symbols": [
+        {
+          "symbol": "register",
+          "line": 707,
+          "end_line": 768
+        },
+        {
+          "symbol": "permit",
+          "line": 941,
+          "end_line": 1028
+        }
+      ],
+      "qualification": "exact committed bytes",
+      "observed_working_sha256": "1a1b3785f03289ce104f29b22cd4003693c326aabea70de2b12fc8f2ba5fd58d"
+    },
+    {
+      "id": "S9",
+      "repository": "product",
+      "revision": "ec8352ea488016d322032093c511145dae0c00b6",
+      "path": "src/heterodyne/admind/daemon.py",
+      "git_blob_sha256": "77746cf285556d9a680d84c3e319a55f0f7404a6b368b00fa3d266f81f63f208",
+      "symbols": [
+        {
+          "symbol": "prepare",
+          "line": 2806,
+          "end_line": 2813
+        }
+      ],
+      "qualification": "exact committed bytes",
+      "observed_working_sha256": "77746cf285556d9a680d84c3e319a55f0f7404a6b368b00fa3d266f81f63f208"
+    }
+  ],
+  "parent_designs": [
+    {
+      "id": "D1",
+      "repository": "hermes",
+      "revision": "788ad60185c5e42b1d5633b97a1bc25d2602421c",
+      "path": "docs/adr/2026-10-18-gateway-maintenance-publication.md",
+      "sha256": "a358819649409c8c2d7116ee64b4cae3a8ef6879936fae32ad68962fc1c8b01f",
+      "qualification": "existing approved parent design; this amendment has no approval yet"
+    },
+    {
+      "id": "D2",
+      "repository": "hermes",
+      "revision": "6f1c11043bb26395c18e03ed0b5a2c2d85f5eb85",
+      "path": "docs/adr/2026-10-18-maintenance-operational-recovery.md",
+      "sha256": "6c33d7d8884a9362abcf1d6ce7b59cb024317dc639bee9037ee55aecc0d710ec",
+      "qualification": "existing approved parent design; this amendment has no approval yet"
+    }
+  ],
+  "private_inputs": [
+    {
+      "logical_locator": "controller-evidence/kkv1w-custody-design/proposal.md",
+      "sha256": "b124f8c2c5bffeb127c3dc61449bd267fae04343a6eb6b4a6228e178dc07f9ca",
+      "qualification": "private proposal, not approval"
+    },
+    {
+      "logical_locator": "controller-evidence/kkv1w-r3-repair/design-amendment.md",
+      "sha256": "661c6ffbe3b64be977d449693e32eba0aa6082cd50c38b02d442639284cdc4d9",
+      "qualification": "incomplete historical sketch, not authority"
+    }
+  ],
+  "review_history": {
+    "this_amendment": "UNREVIEWED; one HIGH review pending controller",
+    "existing_kkv_critical_findings": [
+      1,
+      2,
+      3,
+      6,
+      7
+    ],
+    "existing_kkv_status": "OPEN; no historical reset"
+  }
+}

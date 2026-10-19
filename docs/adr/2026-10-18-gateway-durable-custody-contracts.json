@@ -1,0 +1,123 @@
+{
+  "schema": "gateway-custody-proposed-ports.v1",
+  "status": "PROPOSED NOT IMPLEMENTED; normative details in companion ADR",
+  "new_ports": [
+    {
+      "owner": "Hermes",
+      "source": "harness/gateway_custody.py",
+      "ports": [
+        "reserve_and_retain",
+        "append_source_output",
+        "seal_source_output",
+        "ack_consumer",
+        "prepare_custody_resolution",
+        "inspect"
+      ],
+      "requirements": [
+        "explicit enrolled hermes_gateway_custody root",
+        "source-owned proof validators",
+        "bounded broker-only writes while SH released",
+        "fresh SH before every later effect",
+        "durable terminal original bytes and receipt"
+      ]
+    },
+    {
+      "owner": "product",
+      "source": "src/heterodyne/admind/gateway_custody.py and closed control DTOs",
+      "ports": [
+        "GatewayCustodyRegister",
+        "GatewayCustodyStatus",
+        "GatewayCustodyPermit",
+        "!custody settle|decline|revoke"
+      ],
+      "requirements": [
+        "independent authenticated transport",
+        "actual principal/group/thread/policy",
+        "separate custody namespace",
+        "no caller-supplied decision"
+      ]
+    },
+    {
+      "owner": "queue",
+      "source": "existing coordinator domain plus closed custody projection adapter",
+      "ports": [
+        "custody_nonconsumption",
+        "resolve_custody"
+      ],
+      "requirements": [
+        "same administrative EX and genuine independent authority",
+        "exact original child-ownership locks",
+        "all-lifetime positive proof or HOLD",
+        "same-program crash recovery only"
+      ]
+    },
+    {
+      "owner": "Hermes+queue",
+      "source": "single existing Hermes inventory and scripts/maintenance_recovery_graph.py",
+      "ports": [
+        "versioned custody inventory compatibility"
+      ],
+      "requirements": [
+        "new explicit BEFORE/AFTER adapter compatibility",
+        "no fallback through current equality restriction"
+      ]
+    }
+  ],
+  "existing_reused": [
+    {
+      "source_ids": [
+        "S5"
+      ],
+      "apis": [
+        "OperationRecovery.prepare",
+        "OperationRecovery.settle"
+      ],
+      "limit": "only existing supported queue target and projection schemas; not gateway settlement"
+    },
+    {
+      "source_ids": [
+        "S5"
+      ],
+      "apis": [
+        "prepare_publication",
+        "execute_publication",
+        "completed_publication"
+      ],
+      "limit": "immutable file publication only; not operational custody authority"
+    },
+    {
+      "source_ids": [
+        "S6"
+      ],
+      "apis": [
+        "compile_closure"
+      ],
+      "limit": "current adapter hash equality cannot implement changed inventory without new compatibility contract"
+    }
+  ],
+  "limits": {
+    "active_slots": 256,
+    "active_bytes_per_slot": 8388608,
+    "terminal_slots": 4096,
+    "terminal_bytes_per_slot": 8388608,
+    "receipt_bytes_per_slot": 32768,
+    "transitions_per_event": 512,
+    "transition_max_bytes": 1920,
+    "child_segments_lifetime": 32,
+    "work_generations": 3,
+    "attempts_per_work_generation": 3,
+    "permit_generations_per_proposal": 3,
+    "proposal_bundles_per_event": 16,
+    "retry_spacing_seconds": 30,
+    "permit_initiation_seconds": 30,
+    "proposal_lifetime_seconds": 86400
+  },
+  "delivery": "three real implementation IDs/dependencies to be minted by controller before genuine human ask; role names are not task IDs",
+  "activation_holds": [
+    "all required source components composed and reviewed",
+    "actual native delivery and consumer ACK integration",
+    "independent authenticated recovery route",
+    "old writer retirement and compatible rollback",
+    "genuine deployment approval; no live effects from design approval"
+  ]
+}
