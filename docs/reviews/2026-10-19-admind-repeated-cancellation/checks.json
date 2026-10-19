@@ -1,0 +1,53 @@
+{
+  "compatibility": {
+    "argv": [
+      "/tmp/7hokw-ci-python312/bin/python",
+      "-m",
+      "pytest",
+      "-q",
+      "tests/test_admind_fulfillment_activation.py",
+      "tests/test_admind_fulfillment_worker_cancel.py",
+      "tests/test_admind_fulfillment_worker_repeated_cancel.py",
+      "--basetemp=/tmp/x84-double-compat"
+    ],
+    "returncode": 0
+  },
+  "ruff": {
+    "argv": [
+      "ruff",
+      "check",
+      "src/heterodyne/admind/fulfillment_projection.py",
+      "tests/test_admind_fulfillment_worker_repeated_cancel.py"
+    ],
+    "returncode": 0
+  },
+  "format": {
+    "argv": [
+      "ruff",
+      "format",
+      "--check",
+      "src/heterodyne/admind/fulfillment_projection.py",
+      "tests/test_admind_fulfillment_worker_repeated_cancel.py"
+    ],
+    "returncode": 0
+  },
+  "types": {
+    "argv": [
+      "<operator-home>/repos/heterodyne-metaharness-v2-btq-btq-qzkdk/.venv/bin/pyright",
+      "--pythonpath",
+      "/tmp/7hokw-ci-python312/bin/python",
+      "--outputjson",
+      "src/heterodyne/admind/fulfillment_projection.py",
+      "tests/test_admind_fulfillment_worker_repeated_cancel.py"
+    ],
+    "returncode": 0
+  },
+  "quality": {
+    "argv": [
+      "ripwire",
+      "src/heterodyne/admind",
+      "--quality-delta"
+    ],
+    "returncode": 2
+  }
+}

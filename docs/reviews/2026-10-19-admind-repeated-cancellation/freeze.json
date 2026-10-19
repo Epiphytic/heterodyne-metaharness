@@ -1,0 +1,188 @@
+{
+  "schema": "x84mg-repeated-cancel-repair.v1",
+  "worktree": "<operator-home>/repos/heterodyne-metaharness-v2-btq-btq-x84mg",
+  "base": "2125775fe0ea2fee004efb076a2a74359d274ecc",
+  "files": {
+    "src/heterodyne/admind/fulfillment_projection.py": {
+      "sha256": "42a3709d781760347a2bf34c9e8278ccd69198fb28c3cf54f09a11b602a42c8d",
+      "bytes": 20660
+    },
+    "tests/test_admind_fulfillment_worker_repeated_cancel.py": {
+      "sha256": "c44b99222c311f3cb91c08594439499ea902aa153750263b6234b946ee86b894",
+      "bytes": 2710
+    }
+  },
+  "original_oracle": {
+    "file": "tests/test_admind_fulfillment_worker_cancel.py",
+    "original": {
+      "sha256": "f40be8bcf8f1fd2b7dc8b9bac255709ceac84d362667a1569787891df3a5759a",
+      "bytes": 1361
+    },
+    "current": {
+      "sha256": "f40be8bcf8f1fd2b7dc8b9bac255709ceac84d362667a1569787891df3a5759a",
+      "bytes": 1361
+    },
+    "byte_identical": true,
+    "assertion_ast_identical": true
+  },
+  "checks": {
+    "compatibility": {
+      "argv": [
+        "/tmp/7hokw-ci-python312/bin/python",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/test_admind_fulfillment_activation.py",
+        "tests/test_admind_fulfillment_worker_cancel.py",
+        "tests/test_admind_fulfillment_worker_repeated_cancel.py",
+        "--basetemp=/tmp/x84-double-compat"
+      ],
+      "returncode": 0
+    },
+    "ruff": {
+      "argv": [
+        "ruff",
+        "check",
+        "src/heterodyne/admind/fulfillment_projection.py",
+        "tests/test_admind_fulfillment_worker_repeated_cancel.py"
+      ],
+      "returncode": 0
+    },
+    "format": {
+      "argv": [
+        "ruff",
+        "format",
+        "--check",
+        "src/heterodyne/admind/fulfillment_projection.py",
+        "tests/test_admind_fulfillment_worker_repeated_cancel.py"
+      ],
+      "returncode": 0
+    },
+    "types": {
+      "argv": [
+        "<operator-home>/repos/heterodyne-metaharness-v2-btq-btq-qzkdk/.venv/bin/pyright",
+        "--pythonpath",
+        "/tmp/7hokw-ci-python312/bin/python",
+        "--outputjson",
+        "src/heterodyne/admind/fulfillment_projection.py",
+        "tests/test_admind_fulfillment_worker_repeated_cancel.py"
+      ],
+      "returncode": 0
+    },
+    "quality": {
+      "argv": [
+        "ripwire",
+        "src/heterodyne/admind",
+        "--quality-delta"
+      ],
+      "returncode": 2
+    }
+  },
+  "results": {
+    "predecessor": "2 failed",
+    "focused": "3 passed",
+    "compatibility": "43 passed",
+    "types": "2 files; 0 errors; 0 warnings",
+    "quality": "OPEN: two gating regressions; no waiver"
+  },
+  "evidence": {
+    "candidate.patch": {
+      "sha256": "fe8ac030d231163129e205c9bba34b069a3c2e66b11e5cf426eac7d658b3b238",
+      "bytes": 4156
+    },
+    "checks.json": {
+      "sha256": "22ec1225e73cdc9becc9ac501d301ce1f4179376816ba37c7556db41cef80a59",
+      "bytes": 1295
+    },
+    "compatibility.stderr": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "compatibility.stdout": {
+      "sha256": "ddcf7dfba16fdead4cb7c89b20dbed537bdef19c4fa10c0647d0e9748e2632dc",
+      "bytes": 100
+    },
+    "format.stderr": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "format.stdout": {
+      "sha256": "3bc53bf3e981a98a34a852e175bf9b77af841edea74fca595d9aedcbaf9a4938",
+      "bytes": 26
+    },
+    "green.stderr": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "green.stdout": {
+      "sha256": "f26c7cabab869047e35292657118ac214a5c637a07d8d2b2f23f2a62b77cb7d5",
+      "bytes": 98
+    },
+    "original/src/heterodyne/admind/fulfillment_projection.py": {
+      "sha256": "d7997ad78a43ec1c6dd607599cf23c0ffa247e8aec1c5b3a11bc14d85183fcc5",
+      "bytes": 20236
+    },
+    "original/tests/test_admind_fulfillment_worker_cancel.py": {
+      "sha256": "f40be8bcf8f1fd2b7dc8b9bac255709ceac84d362667a1569787891df3a5759a",
+      "bytes": 1361
+    },
+    "original-oracle-proof.json": {
+      "sha256": "ef79b2fca47c8b3456bc2d76078c1d71cb89911fda18d5dbffa92e2120ef7bd7",
+      "bytes": 365
+    },
+    "predecessor.json": {
+      "sha256": "488288169f645fa1ce568d4823d906222b08e6ba26b4250536500ecbff3144bb",
+      "bytes": 323
+    },
+    "quality.stderr": {
+      "sha256": "6c7fc74fbf8e4f367dc25f1a3335851ebb0d5a44c017c930bef00eb8e31c7291",
+      "bytes": 309
+    },
+    "quality.stdout": {
+      "sha256": "ab1c6d381654d435b02ac44942c0acb1cdeca203999d4b0e73ddd8cfe979cb0c",
+      "bytes": 3372
+    },
+    "red.stderr": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "red.stdout": {
+      "sha256": "4dcdb28460ae8fdbd088695bed9099a7faad4821f128e1e1d8d12855c05b9b8f",
+      "bytes": 10320
+    },
+    "report.md": {
+      "sha256": "a33df9117182f1c5ae6a5e54fe8a4d1507fb30c959b64637cf96960ec5922ac9",
+      "bytes": 2489
+    },
+    "ruff.stderr": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "ruff.stdout": {
+      "sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18",
+      "bytes": 19
+    },
+    "source/src/heterodyne/admind/fulfillment_projection.py": {
+      "sha256": "42a3709d781760347a2bf34c9e8278ccd69198fb28c3cf54f09a11b602a42c8d",
+      "bytes": 20660
+    },
+    "source/tests/test_admind_fulfillment_worker_repeated_cancel.py": {
+      "sha256": "c44b99222c311f3cb91c08594439499ea902aa153750263b6234b946ee86b894",
+      "bytes": 2710
+    },
+    "types.stderr": {
+      "sha256": "3ebaf53089643613d07d7784d3634a315ec0f889345135d2c3fb067168ac334e",
+      "bytes": 109
+    },
+    "types.stdout": {
+      "sha256": "d0a2bd789bac92c0f0e6877e35af04029cdc44ddcdeab802e30ceb6c44a39a27",
+      "bytes": 251
+    }
+  },
+  "review": "No review invoked; cumulative existing lineage retained; parent chooses next actual ordinal",
+  "limitations": [
+    "No activation/deployment clearance",
+    "Bounded verifier assumption retained",
+    "Quality complexity/churn OPEN"
+  ]
+}
