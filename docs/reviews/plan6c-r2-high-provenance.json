@@ -1,0 +1,21 @@
+{
+  "review": "SECOND FULL HIGH",
+  "model": "opus",
+  "effort": "high",
+  "invocation": "Claude built-in /code-review",
+  "capture_kind": "manual-foreign-observed-stream-not-reserved-profile-proof",
+  "reviewed_head": "e2c9921845bd1db178e009569d5d8c0b6501cc06",
+  "reviewed_base": "2c0c5b5b775ee652d2ce32c192091aa2314e5b32",
+  "actual_result": "10 findings, first9 correctness/design-fidelity and10 cleanup; explicitly not an APPROVE token",
+  "source_unchanged": true,
+  "events": 43,
+  "original_artifacts": {
+    "4w2ec-code-review-r2-high-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "4w2ec-code-review-r2-high-start.json": "2c073e3488efe883e41ae3a129043e04229c28fc49011e0a78fb066a4245cc49",
+    "4w2ec-code-review-r2-high-result.json": "70d97cdd5bb157989bce9c85598cc8341fb8925a9a0cac047a9ef280cac75ca6",
+    "4w2ec-code-review-r2-high.log": "1317715037706cecad7e2a00e8fa9b507844ac4c76b976c9d4734b2330d2b3ba",
+    "4w2ec-code-review-r2-high-stream.jsonl": "b5b421df60a561bae2f6cbf02fd6dccc57e8b471f93375a1c594710b229502f1"
+  },
+  "privacy": "Original artifacts retained byte-exact in private evidence; public provenance exposes exact hashes/filenames without private home paths. Actual raw report is byte-exact.",
+  "next_review": "THIRD MEDIUM, controller only, exact operator PoC question. Author ran no review/model."
+}

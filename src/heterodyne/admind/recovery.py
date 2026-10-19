@@ -71,6 +71,23 @@ class Descriptor(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     expires_at: str
 
 
+class BackupOwner(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    pid: int
+    start: int
+    boot: str
+
+
+class BackupRecord(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    schema: Literal["maintenance-backup.v1"]
+    operation: str
+    owner: BackupOwner
+    source_sha256: str
+    state: Literal["active", "issued", "unknown", "complete"]
+    ordinal: int
+    intent_sha256: str | None
+    recovery_only: bool
+
+
 class Certificate(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     schema: Literal["maintenance-recovery-nonconsumption.v1"]
     proposal_sha256: str
@@ -621,6 +638,72 @@ class Service:
             raise Invalid("clock-rollback")
         return at
 
+    def original_provenance(self, obj: Descriptor, enrolled: Enrollment) -> str:
+        """Read local evidence only; the queue repeats fresh target validation under EX."""
+        root = Path(enrolled.coordinator_root)
+        if obj.mode != "finish-health":
+            origin = decode(private_read(root / "operations" / f"{obj.operation}.json"), dict[str, object])
+            if sha(origin) != obj.original_record_sha256:
+                raise Invalid("original-mismatch")
+            actor = origin.get("actor")
+            if not isinstance(actor, str) or not re.fullmatch(r"[\x21-\x7e]{1,256}", actor):
+                raise Invalid("actor")
+            return actor
+        backup = decode(private_read(root / "backup.json"), BackupRecord)
+        if sha(backup) != obj.original_record_sha256 or sha(backup) != obj.backup_before_sha256:
+            raise Invalid("backup-mismatch")
+        owner = backup.owner
+        try:
+            valid_boot = str(uuid.UUID(owner.boot)) == owner.boot
+        except ValueError:
+            valid_boot = False
+        if (
+            backup.operation != obj.operation
+            or owner.pid <= 0
+            or owner.start < 0
+            or not valid_boot
+            or not 0 <= backup.ordinal <= 10000
+            or (backup.ordinal == 0) != (backup.intent_sha256 is None)
+            or (backup.intent_sha256 is not None and not HEX.fullmatch(backup.intent_sha256))
+            or not HEX.fullmatch(backup.source_sha256)
+        ):
+            raise Invalid("backup-identity")
+        graph = decode(private_read(root / "enrollment.json"), dict[str, object])
+        coverage = decode(private_read(root / "coverage.json"), dict[str, object])
+        if sha(graph) != enrolled.enrollment_sha256 or sha(coverage) != graph.get("coverage_sha256"):
+            raise Invalid("enrollment-drift")
+        policy, sources = coverage.get("backup_policy"), graph.get("sources")
+        if (
+            not isinstance(policy, dict)
+            or not isinstance(sources, dict)
+            or not isinstance(graph.get("profile"), dict)
+        ):
+            raise Invalid("backup-source")
+        source = cast(dict[str, object], policy).get("source")
+        if (
+            not isinstance(source, str)
+            or cast(dict[str, object], sources).get(source) != backup.source_sha256
+        ):
+            raise Invalid("backup-source")
+        failure = decode(private_read(root / "backup-failure.json"), dict[str, object])
+        legacy = {"schema", "operation"}
+        current = legacy | {"source_sha256", "profile_sha256"}
+        if (
+            sha(failure) != obj.failure_before_sha256
+            or set(failure) not in (legacy, current)
+            or failure.get("schema") != "maintenance-backup-failure.v1"
+            or failure.get("operation") != obj.operation
+            or (
+                set(failure) == current
+                and (
+                    failure.get("source_sha256") != backup.source_sha256
+                    or failure.get("profile_sha256") != sha(graph.get("profile"))
+                )
+            )
+        ):
+            raise Invalid("backup-failure")
+        return f"pid={owner.pid} start={owner.start} boot={owner.boot}"
+
     def register(
         self,
         req: Register,
@@ -643,15 +726,8 @@ class Service:
             raise Invalid("enrollment-mismatch")
         at = self.live(obj)
         key = sha(obj)
-        # No native command: the enrolled immutable original operation supplies actor provenance.
-        original = private_read(Path(enrolled.coordinator_root) / "operations" / f"{obj.operation}.json")
-        if sha(decode(original, dict[str, object])) != obj.original_record_sha256:
-            raise Invalid("original-mismatch")
-        origin = decode(original, dict[str, object])
-        actor = origin.get("actor")
-        if not isinstance(actor, str) or not re.fullmatch(r"[\x21-\x7e]{1,256}", actor):
-            raise Invalid("actor")
-        text = render(obj, actor, enrolled.descriptor_links.get(key), min(chunk_chars, 3200))
+        provenance = self.original_provenance(obj, enrolled)
+        text = render(obj, provenance, enrolled.descriptor_links.get(key), min(chunk_chars, 3200))
         from heterodyne.admind import notices
 
         notice_key = ""
@@ -1020,7 +1096,7 @@ def render(obj: Descriptor, actor: str, link: str | None, budget: int) -> str:
     lines = [
         "Maintenance recovery consent",
         f"Operation: {obj.operation}",
-        f"Original actor: {actor}",
+        f"Backup owner: {actor}" if obj.mode == "finish-health" else f"Original actor: {actor}",
         f"Result: {obj.result}",
         f"Local records: {records}",
         f"Proof-covered effects: {obj.effect_count}",

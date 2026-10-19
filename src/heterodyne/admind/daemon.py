@@ -40,6 +40,8 @@ from heterodyne.admind import (
     commands,
     ctl,
     fulfillment,
+    gateway_custody,
+    gateway_custody_control,
     guard,
     guard_state,
     membership,
@@ -351,6 +353,11 @@ class Admind:
         self.agent = agent
         self.runner = runner
         self.account = account
+        # Ports deliberately absent until a separately qualified source/transport
+        # enrollment exists. Merely exposing the closed socket creates no authority.
+        self.gateway_custody = gateway_custody.Service(store)
+        self.custody_lock = asyncio.Lock()
+        self.custody_work: asyncio.Queue[InboundMessage] = asyncio.Queue(maxsize=256)
         try:
             self.maintenance_recovery: recovery.Service | None = recovery.Service(
                 store, settings.state_dir / "maintenance-recovery")
@@ -692,6 +699,9 @@ class Admind:
         server = self.make_server(self.s.state_dir / "hook.sock")
         control: ctl.JsonSocketServer[ctl.CtlRequest, ctl.CtlReply] | None = None
         recovery_server: ctl.JsonSocketServer[recovery.Request, recovery.Reply] | None = None
+        custody_server: (
+            ctl.JsonSocketServer[gateway_custody.Request, gateway_custody_control.Reply] | None
+        ) = None
         try:
             await server.start()
             control = ctl.CtlServer(self.s.state_dir / ctl.CTL_SOCKET, self.on_ctl, self.audit)
@@ -711,6 +721,16 @@ class Admind:
             )
             if self.maintenance_recovery is not None:
                 await recovery_server.start()
+            custody_server = ctl.JsonSocketServer(
+                self.s.state_dir / gateway_custody_control.SOCKET, self.on_gateway_custody, self.audit,
+                kind="gateway-custody", max_request=gateway_custody.MAX_REQUEST,
+                max_reply=gateway_custody.MAX_REQUEST, request_type=gateway_custody.Request,
+                check=gateway_custody.check,
+                refused=lambda why: gateway_custody_control.Reply("refused", why),
+                failed=lambda: gateway_custody_control.Reply("unavailable", "custody unavailable"),
+                describe=lambda req: {"op": type(req).__name__},
+            )
+            await custody_server.start()
             self.ask_server = ctl.JsonSocketServer(
                 self.s.state_dir / asks.ASK_SOCKET, self.on_ask_wire, self.audit, kind="ask",
                 max_request=asks.MAX_REQUEST, max_reply=asks.MAX_REPLY,
@@ -734,6 +754,7 @@ class Admind:
                 tg.create_task(self.guarded(supervised(
                     "fulfillment-verification", lambda: worker(self.store), self.audit, base=30, cap=30
                 )))
+                tg.create_task(self.guarded(supervised("gateway-custody", self.custody_loop, self.audit)))
                 tg.create_task(self.guarded(self.reconcile_asks(snapshot)))
         except BaseException:
             self.shutting_down = True
@@ -747,6 +768,8 @@ class Admind:
                 await self.ask_server.close()
             if recovery_server is not None:
                 await recovery_server.close()
+            if custody_server is not None:
+                await custody_server.close()
             if control is not None:
                 await control.close()
             await server.close()
@@ -774,6 +797,59 @@ class Admind:
                 "confirmed": sorted(self.confirmed_operators() or ()),
             }
         )
+
+    async def custody_authority(self, account: str, group: str, sender: str) -> str | None:
+        if (account != self.account or group != self.group or not self.refresh_authority()
+                or not await self.check_group()):
+            return None
+        return self.recovery_authority(sender)
+
+    async def on_gateway_custody(
+        self, req: gateway_custody.Request, peer: ctl.Peer,
+    ) -> gateway_custody_control.Reply:
+        """Own lock and worker: custody control cannot wait for a held model dispatcher."""
+        try:
+            gateway_custody.Service.peer(peer.uid)
+            if why := gateway_custody.check(req):
+                raise gateway_custody.Invalid(why)
+            async with self.custody_lock:
+                if not isinstance(req, gateway_custody.GatewayCustodyStatus):
+                    if (not self.refresh_authority() or not await self.check_group()
+                            or self.recovery_authority() is None):
+                        raise gateway_custody.Invalid("authority")
+                service = gateway_custody_control.independent(self.gateway_custody, self.custody_authority)
+                result = await gateway_custody_control.worker(lambda: gateway_custody_control.perform(
+                    service, req, uid=peer.uid, max_chars=self.s.chunk_chars))
+                self.wake.set()
+                return result
+        except gateway_custody.Invalid as exc:
+            return gateway_custody_control.Reply("refused", str(exc))
+        except (OSError, sqlite3.Error):
+            return gateway_custody_control.Reply("unavailable", "custody source or store unavailable")
+
+    async def custody_message(self, ev: InboundMessage) -> None:
+        """Native event only. It never joins generic prompt execution or ask slots."""
+        try:
+            async with self.custody_lock:
+                service = gateway_custody_control.independent(self.gateway_custody, self.custody_authority)
+                outcome = await gateway_custody_control.worker(lambda: service.message(
+                    account=ev.account_id_hex.lower(), group=ev.group_id_hex.lower(),
+                    mid=ev.message.message_id_hex.lower(), sender=ev.message.sender.account_id_hex.lower(),
+                    target=None if ev.reply_to is None else ev.reply_to.message_id_hex.lower(),
+                    text=ev.message.text))
+                self.audit.write("gateway-custody", action=outcome)
+        except gateway_custody.Invalid as exc:
+            self.audit.write("gateway-custody", action="refused", reason=str(exc))
+        except (OSError, sqlite3.Error):
+            self.audit.write("gateway-custody", action="unavailable")
+
+    async def custody_loop(self) -> None:
+        while True:
+            event = await self.custody_work.get()
+            try:
+                await self.custody_message(event)
+            finally:
+                self.custody_work.task_done()
 
     async def on_recovery(self, req: recovery.Request, peer: ctl.Peer) -> recovery.Reply:
         try:
@@ -2527,7 +2603,20 @@ class Admind:
         self.reading = True     # acknowledged but not observing if latched; a rearm then restores it
 
     def on_event(self, event: object) -> None:
-        if isinstance(event, InboundMessage | ReactionAdded):    # one worker, one order (R27)
+        if isinstance(event, InboundMessage) and gateway_custody.command(event.message.text) is not None:
+            if (event.account_id_hex.lower() != self.account or event.group_id_hex.lower() != self.group
+                    or not self.refresh_authority()
+                    or event.message.sender.account_id_hex.lower() not in self.operators
+                    or not MESSAGE_ID.fullmatch(event.message.message_id_hex.lower())):
+                self.audit.write("gateway-custody", action="refused", reason="command-auth")
+                return
+            try:
+                self.custody_work.put_nowait(event)
+            except asyncio.QueueFull:
+                # No acknowledgment, consent or permit is manufactured at this
+                # boundary. Production enrollment must qualify native redelivery.
+                self.audit.write("gateway-custody", action="refused", reason="command-capacity")
+        elif isinstance(event, InboundMessage | ReactionAdded):    # one worker, one order (R27)
             self.work.put_nowait(event)
         elif isinstance(event, GroupStateChanged):
             if event.group_id_hex.lower() != self.group or event.change not in guard.MEMBERSHIP_CHANGES:
@@ -2575,6 +2664,12 @@ class Admind:
         if not MESSAGE_ID.fullmatch(mid):
             self.audit.write("drop", operator=verdict.operator, reason="malformed message id",
                              text=own_text(ev.message.text))
+            return
+        if gateway_custody.command(ev.message.text) is not None:
+            try:
+                self.custody_work.put_nowait(ev)
+            except asyncio.QueueFull:
+                self.audit.write("gateway-custody", action="refused", reason="command-capacity")
             return
         if (recovery.COMMAND.fullmatch(ev.message.text) is not None
                 and MESSAGE_ID.fullmatch(mid)):
