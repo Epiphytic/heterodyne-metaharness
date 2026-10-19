@@ -1,0 +1,35 @@
+{
+  "review": "FIRST FULL HIGH",
+  "model": "opus",
+  "effort": "high",
+  "invocation": "Claude built-in /code-review",
+  "capture_kind": "manual-foreign-observed-stream-not-reserved-profile-proof",
+  "reviewed_head": "5b84f877e1a3cd775aab8f258c72015cba3ace2b",
+  "reviewed_base": "2c0c5b5b775ee652d2ce32c192091aa2314e5b32",
+  "actual_result": "10 findings; This is not an APPROVE token.",
+  "source_unchanged": true,
+  "events": 37,
+  "original_artifacts": {
+    "start": {
+      "filename": "4w2ec-code-review-r1-high-start.json",
+      "sha256": "411e7153518195c04104f4556bb2bcacd99eb182e16bcc8fd1f233962e0ba2e6"
+    },
+    "result": {
+      "filename": "4w2ec-code-review-r1-high-result.json",
+      "sha256": "131cf6f1c9221319cb418653f75592b14aa43093ee093ebf1ee8100d9eaf864a"
+    },
+    "raw": {
+      "filename": "4w2ec-code-review-r1-high.log",
+      "sha256": "b45064b2f800964530c50a100b8ea9906cd29b109670e927dd8dc2bba9e03448"
+    },
+    "stream": {
+      "filename": "4w2ec-code-review-r1-high-stream.jsonl",
+      "sha256": "be33cab0680d4072ac8b726c61bbb1a4b66eeb6e11f86779ca83d6ab8eda6eeb"
+    },
+    "stderr": {
+      "filename": "4w2ec-code-review-r1-high-stderr.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "privacy": "Original start/result/stream retained exactly in private evidence. Public provenance contains their exact hashes; no private-home path substitutions in the actual raw report."
+}
