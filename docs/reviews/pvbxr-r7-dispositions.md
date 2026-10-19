@@ -1,0 +1,17 @@
+# Actual seventh MEDIUM review and critical repair
+
+The actual seventh review used the exact critical-flaws question with MEDIUM effort after two FULL HIGH and four MEDIUM reviews. It found two critical composition gaps. This was **not** a pass. The public report normalizes only the operator home prefix; exact raw private report hash and observed provenance are retained alongside the public hash. Initial commit hook caught this path before publication; it was corrected without bypassing the hook. The next review is actual eighth, MEDIUM. No reserved-profile proof or reviewer APPROVE token is claimed.
+
+1. REPAIRED, awaiting actual eighth review: V1 fulfillment has no management descriptor binding. Preserve its receipt hash, ASK_FIELDS and migration DDL byte-for-byte. All non-NULL presentation/render_version/management rows refuse V1 binding, apply, propose, confirm and duplicate success. Projection suppression additionally requires all three columns NULL in the current read snapshot, even when the unchanged trigger did not bump generation. A legacy receipt followed by any metadata write remains retained, active and unverified; no receipt rehash or history rewrite occurs. Supporting V2 fulfillment later requires an explicitly designed binding/migration; this repair grants no such capability.
+2. REPAIRED, awaiting review: the same closed guard rejects valid, malformed, partial and text-version metadata. No renderer parse can accidentally confer V1 lifecycle authority. Existing management operation consent and answer/binding protocols remain unchanged.
+3. REPAIRED coverage:19 new actual SQLite cases fail against exact predecessor8eff, then pass: four metadata variants across binding/apply/propose/confirm, and three post-fulfillment metadata column mutations including duplicate-apply and bounded-verification refusal. Five composition selector cases are updated to assert unsupported fulfillment rather than encode the critical bug. These are new branch-owned tests, not preexisting product oracles.
+4. OPEN: ask.sock list uses two separate snapshots and can duplicate/drop rows across concurrent verification.
+5. OPEN: reminders exclude any receipt, even a dirty/conflicting active one. No reminder execution is added by this repair.
+6. OPEN: historical hashed-field lists remain duplicated. The new unsupported-metadata predicate is shared by validation and suppression, but V1 hash tuples are deliberately not changed here.
+7. OPEN: repeated projection schema validation cost remains.
+
+## Actual verification
+
+19 predecessor failures, then19 passes;474 focused management/fulfillment/binding tests pass. Configured typing412files0errors0warnings. Scoped Ruff and formatting and diff checks pass. Quality delta against8eff:8 regressions,1 gating churn,5 minor,6 preexisting-worse,2 new-symbol; OPEN unwaived, plus all prior composition/whole-branch debt. Unsupported ripwire --exemplar in the installed version was retained as a tool limitation; existing SQL/validation building blocks were used.
+
+The earlier full admind invocation started on8eff before this repair and may still be running; it is not evidence for this new source. A fresh full run follows the signed repair. No full-suite clearance, live fulfillment capability, independent reader enrollment, queue V2 adapter or deployment is claimed. R6 findings1–9 and prior unresolved findings remain OPEN and unwaived; this local card branch still changes no deployed cards or queue authority.

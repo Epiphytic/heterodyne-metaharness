@@ -7,6 +7,7 @@ from test_admind_fulfillment import apply, seed
 from test_admind_management_presentation import META
 
 from heterodyne.admind import asks, management
+from heterodyne.admind import fulfillment as f
 
 pytest_plugins = ("test_admind_fulfillment",)
 
@@ -19,7 +20,8 @@ def test_projection_selectors_preserve_management_metadata(store, state):
         (management.TAG, management.VERSION, json.dumps(META)),
     )
     if state in ("fulfilled", "dirty"):
-        assert apply(store).result == "applied"
+        with pytest.raises(f.Invalid, match="unsupported-management-fulfillment"):
+            apply(store)
     if state == "inactive":
         store.set_ask("abcd", "cancelled")
     if state == "dirty":
@@ -30,14 +32,14 @@ def test_projection_selectors_preserve_management_metadata(store, state):
         "fulfilled": store.fulfilled_asks(),
         "inactive": store.inactive_asks(),
     }
-    destination = "active" if state in ("active", "dirty") else state
+    destination = "inactive" if state == "inactive" else "active"
     assert selected[destination] == [expected]
     assert expected.presentation == management.TAG
     assert expected.render_version == management.VERSION
     assert json.loads(expected.management) == META
     assert store.capacity_count() == len(selected["active"])
-    if state == "dirty":
-        assert selected["fulfilled"] == []
+    assert selected["fulfilled"] == []
+    if state != "inactive":
         assert selected["inactive"] == []
 
 
