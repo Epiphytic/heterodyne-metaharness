@@ -59,9 +59,11 @@ old writer.
 
 Use `admind ask binding --json --version 2 ASK_ID`. It uses the existing daemon RPC;
 the explicit CLI option selects closed version-dispatched response decoding.
-Default CLI readback retains the exact legacy v1 decoder. A v2-capable reader also
-accepts genuine v1 results, but consumers must compare the requested version and
-presentation, never treat a v1 response as a v2 request acknowledgment.
+Default CLI readback retains the exact legacy v1 decoder. The internal
+version-dispatched wire decoder can read genuine v1 results, but
+explicit `--version 2` refuses a successful v1 envelope with `invalid-reply` and no
+binding. The default `--version 1` success bytes are unchanged. Consumers must also
+compare the exact presentation, never treat another card as this request acknowledgment.
 
 With explicit `--version 2`, CLI refusals use the typed v2 reply domain and
 `ask.binding.v2 unavailable`. That identifies the requested local decoding domain;
@@ -84,8 +86,16 @@ history and no contrary answer. Literal B records B; denial words and negative r
 these), not B. Both leave the request held, as the card legend states, and
 ambiguous/contrary history must remain held. The presentation and title provide no
 authority. This product component preserves the answer parser; it does not apply
-management policy. `!details` exposes the existing full accepted grammar without
-altering original card bytes; full repeat reproduces the original card.
+management policy. The card lists every accepted positive word and emoji family,
+including supported skin tones, and the denial-word/no/n distinction. A recorded
+answer is not authorization: the queue must verify complete history and hold on
+any contrary or ambiguous answer. Both B-then-A and negative-then-A remain in the
+native history; the daemon does not enforce first-answer-wins. Management-only
+choice confirmations explain this distinction; legacy confirmations are unchanged.
+`!details` exposes the existing full accepted grammar, with the same final packed
+36-line/3200-character and redaction checks as the card. An over-budget details
+request refuses; it is never truncated and cannot widen either budget. Full repeat
+reproduces the original card.
 
 ## Persistence and compatibility
 

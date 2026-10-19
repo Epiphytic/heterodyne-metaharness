@@ -549,7 +549,12 @@ def recorded(row: AskRow, choice: str, text: str) -> str:
     f = form(row)
     shown = {name: name if t is None else f"{name} = {t}" for name, t in (f.options() if f else [])}
     what = "none of these" if choice == NONE_OF_THESE else shown.get(choice, choice)
-    return f"Recorded for {row.ask_id}: {what} (from {text.strip()})."
+    result = f"Recorded for {row.ask_id}: {what} (from {text.strip()})."
+    if management.present(row):
+        management.stored(row)
+        result += (" Recorded answer is not authorization; queue verifies complete history "
+                   "and holds on any contrary reply.")
+    return result
 
 
 # --- approval cards (spec §6, R8, R21, R25; delta R8, R30) ---------------------------------------

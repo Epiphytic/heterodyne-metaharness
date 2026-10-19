@@ -341,6 +341,8 @@ def ask_binding_command(s: AdmindSettings, ask_id: str, *, version: int = 1) -> 
             peer = binding.decode_reply(raw)
         except (ValueError, TypeError):
             raise ctl.CtlInvalidReply("invalid binding envelope") from None
+        if version == 2 and peer.result == "ok" and not isinstance(peer.binding, binding.EnvelopeV2):
+            raise ctl.CtlInvalidReply("requested binding version not acknowledged")
         if peer.code in ("transport-unavailable", "response-timeout", "invalid-reply"):
             raise ctl.CtlInvalidReply("client-only refusal from peer")
         return peer

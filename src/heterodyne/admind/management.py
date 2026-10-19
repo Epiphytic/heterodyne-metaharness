@@ -24,7 +24,7 @@ _RESERVED = re.compile(
     r"(?im:^\s*(?:APPROVAL\s*:|QUESTION\s*:|Audit\s+details\s*:|Request\s*:|"
     r"(?:Option\s+)?[A-Z]\s*(?:=|/)|Ask\s|Reply\s|Only a verified management binding|"
     r"deny\s*/|Any other reply or contrary answer|Accepted approval words:|"
-    r"Denial words:|Positive reactions:))"
+    r"Denial words:|Positive reactions:|Queue verifies complete history;))"
 )
 _URL = re.compile(r"(?i:(?:[a-z][a-z0-9+.-]*://|www\.|(?:https?|ftp|mailto|tel|data|javascript):))")
 REFUSED = "task-management-consent-v1 management card refused: unsafe, invalid or over budget"
@@ -128,9 +128,11 @@ def lines(row: AskRow) -> list[str]:
         f"Request: {meta.request_id[:12]}; facts: {meta.descriptor_sha256[:12]}",
         "A = Perform this exact change (recommended)",
         "B = Leave unchanged and held",
-        "A / approved / 👍 ✅ ❤ ♥ = approve; B = leave held.",
+        "A / approve / approved / yes / y / ok / okay / lgtm = approve; B = leave held.",
+        "Positive reactions: 👍 (all skin tones), ✅, ❤, ♥ = approve.",
         "deny / 👎 ❌ = none of these; request stays held.",
-        "Any other reply or contrary answer holds this request; a later A cannot override it.",
+        "Denial words: deny, denied, reject, rejected (optional reason); no or n alone = none of these.",
+        "Queue verifies complete history; any contrary or ambiguous answer holds this request.",
         f"Reply A or B, or !answer {row.ask_id} A|B.",
         "Only a verified management binding authorizes this change.",
     ]
@@ -142,6 +144,13 @@ def lines(row: AskRow) -> list[str]:
 
 def parts(row: AskRow, chunk_chars: int, *, details: bool = False) -> list[str]:
     text = lines(row)
+    if details:
+        text += [
+            "Accepted approval words: approve, approved, yes, y, ok, okay, lgtm.",
+            "Denial words: deny, denied, reject, rejected (optional reason); no or n alone.",
+            "Positive reactions: 👍 (all skin tones), ✅, ❤, ♥; negative: 👎 (all skin tones), ❌.",
+            "Existing reply punctuation and emoji variation-selector handling are unchanged.",
+        ]
     # Treat every fact as atomic: splitting a material literal is never a substitute for refusal.
     tagged: list[tuple[str, chunk.Kind]] = [(line, "atomic") for line in text]
     try:
@@ -157,15 +166,4 @@ def parts(row: AskRow, chunk_chars: int, *, details: bool = False) -> list[str]:
         or any(redact(p) != p for p in packed)
     ):
         raise Refusal()
-    if details:
-        grammar = [
-            "Accepted approval words: approve, approved, yes, y, ok, okay, lgtm.",
-            "Denial words: deny, denied, reject, rejected (optional reason); no or n alone.",
-            "Positive reactions: 👍 (all skin tones), ✅, ❤, ♥; negative: 👎 (all skin tones), ❌.",
-            "Existing reply punctuation and emoji variation-selector handling are unchanged.",
-        ]
-        try:
-            return chunk.pack([*tagged, *((line, "atomic") for line in grammar)], chunk_chars)
-        except chunk.TooWide:
-            raise Refusal() from None
     return packed
