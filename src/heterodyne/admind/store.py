@@ -365,6 +365,7 @@ class Store:
         self.path = path.absolute()
         self.file_identity = (opened.st_dev, opened.st_ino)
         self.lock = threading.RLock()
+        self._read_only = False
         self._depth = 0         # open transaction() nesting, guarded by self.lock
         # check_same_thread=False: calls are serialized by self.lock (see _locked), not by thread.
         self.db = sqlite3.connect(path, isolation_level=None, timeout=5.0, check_same_thread=False)
@@ -401,6 +402,8 @@ class Store:
 
         from heterodyne.admind.fulfillment import Lifecycle
         self.fulfillment = Lifecycle(self)
+        self._verification_dirty = False
+        self.configure_verification_notifications()
         try:
             self.fulfillment.migrate()
             self.db.executescript(OPERATION_SCHEMA)
@@ -890,16 +893,19 @@ class Store:
     @_locked
     def capacity_asks(self) -> list[AskRow]:
         """Separate capacity projection; raw status selectors retain their original meaning."""
-        rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE {CAPACITY_ACTIVE_SQL} "  # noqa: S608
-                               "ORDER BY created_at,rowid").fetchall()
-        return [_ask(r) for r in rows]
+        with self.transaction(read_only=True):
+            rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE {self.fulfillment.capacity_predicate()} "  # noqa: S608
+                                   "ORDER BY created_at,rowid").fetchall()
+            return [_ask(r) for r in rows]
 
     @_locked
     def fulfilled_asks(self, limit: int = 20) -> list[AskRow]:
-        rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE EXISTS "  # noqa: S608
-            "(SELECT 1 FROM ask_fulfillments f WHERE f.ask_id=asks.ask_id AND f.valid=1) "
-            "ORDER BY created_at DESC,rowid DESC LIMIT ?", (limit,)).fetchall()
-        return [_ask(r) for r in rows]
+        with self.transaction(read_only=True):
+            rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE EXISTS "  # noqa: S608
+                f"(SELECT 1 FROM ask_fulfillments f WHERE f.ask_id=asks.ask_id) "
+                f"AND NOT ({self.fulfillment.capacity_predicate()}) "
+                "ORDER BY created_at DESC,rowid DESC LIMIT ?", (limit,)).fetchall()
+            return [_ask(r) for r in rows]
 
     @_locked
     def remindable_asks(self) -> list[AskRow]:
@@ -910,14 +916,17 @@ class Store:
 
     @_locked
     def capacity_count(self) -> int:
-        return int(self.db.execute(f"SELECT COUNT(*) FROM asks WHERE {CAPACITY_ACTIVE_SQL}"  # noqa: S608
-                                   ).fetchone()[0])
+        with self.transaction(read_only=True):
+            predicate = self.fulfillment.capacity_predicate()
+            return int(self.db.execute(f"SELECT COUNT(*) FROM asks WHERE {predicate}").fetchone()[0])  # noqa: S608
 
     @_locked
     def inactive_asks(self, limit: int = 20) -> list[AskRow]:
-        rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE NOT ({CAPACITY_ACTIVE_SQL}) "  # noqa: S608
-                               "ORDER BY created_at DESC,rowid DESC LIMIT ?", (limit,)).fetchall()
-        return [_ask(r) for r in rows]
+        with self.transaction(read_only=True):
+            predicate = self.fulfillment.capacity_predicate()
+            rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE NOT ({predicate}) "  # noqa: S608
+                                   "ORDER BY created_at DESC,rowid DESC LIMIT ?", (limit,)).fetchall()
+            return [_ask(r) for r in rows]
 
     @_locked
     def recent_asks(self, limit: int) -> list[AskRow]:
@@ -1292,8 +1301,33 @@ class Store:
                               (before,))
         return cur.rowcount
 
+    def configure_verification_notifications(self) -> None:
+        """Connection-local hooks observe new dirty writes, without changing durable DDL.
+
+        External/legacy connections have no hooks and remain covered by the bounded idle poll.
+        The callback records only a bit; notification happens after the outer commit succeeds.
+        """
+        def dirty() -> int:
+            self._verification_dirty = True
+            return 0
+
+        self.db.create_function("fulfillment_dirty_changed", 0, dirty)
+        if self.db.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='fulfillment_dirty'"
+        ).fetchone():
+            self.db.execute(
+                "CREATE TEMP TRIGGER IF NOT EXISTS fulfillment_dirty_insert_notify "
+                "AFTER INSERT ON main.fulfillment_dirty BEGIN "
+                "SELECT fulfillment_dirty_changed(); END"
+            )
+            self.db.execute(
+                "CREATE TEMP TRIGGER IF NOT EXISTS fulfillment_dirty_update_notify "
+                "AFTER UPDATE ON main.fulfillment_dirty BEGIN "
+                "SELECT fulfillment_dirty_changed(); END"
+            )
+
     @contextlib.contextmanager
-    def transaction(self, *, read_only: bool = False) -> Generator[None]:
+    def transaction(self, *, read_only: bool = False, notify_fulfillment: bool = True) -> Generator[None]:
         """Run the block's store calls as one SQLite transaction: all of them commit, or (on any
         exception, a simulated crash included) none do. Re-entrant: a nested block joins the outer one.
         The store lock is held throughout, so keep the block short and free of awaits.
@@ -1301,22 +1335,33 @@ class Store:
         must perform reads only. A nested block joins the already established snapshot."""
         with self.lock:
             if self._depth:
+                if self._read_only and not read_only:
+                    raise ValueError("read-only-transaction")
                 self._depth += 1
                 try:
                     yield
                 finally:
                     self._depth -= 1
                 return
+            self._verification_dirty = False
             self.db.execute("BEGIN" if read_only else "BEGIN IMMEDIATE")
             self._depth = 1
+            self._read_only = read_only
             try:
                 yield
                 self.db.execute("COMMIT")
             except BaseException:
-                self.db.execute("ROLLBACK")
+                if self.db.in_transaction:
+                    self.db.execute("ROLLBACK")
                 raise
             finally:
                 self._depth = 0
+                self._read_only = False
+            if not read_only and notify_fulfillment and self._verification_dirty:
+                # A wake is advisory. Neither a failed callback nor a stopped loop may turn a
+                # successful commit into a reported writer failure. Polling preserves liveness.
+                with contextlib.suppress(Exception):
+                    self.fulfillment.verification_changed()
 
     @_locked
     def relay_alert(self, name: bytes, key: str, text: str) -> bool:

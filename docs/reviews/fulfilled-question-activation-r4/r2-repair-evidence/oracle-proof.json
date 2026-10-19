@@ -1,0 +1,14 @@
+{
+  "old_sha256": "a3ba641ad896199af2a09a51327b02e5e5a83a269afa06d0e85510d062dc3ae1",
+  "new_sha256": "ddbd92dc7ff8ea2a4df72da57149de0e318186275d8c075bfae7977263142e21",
+  "old_assertions": 7,
+  "all_old_assertions_retained_in_correct_branch": true,
+  "only_two_added_assertions_for_authorized_missing_ask": [
+    "Assert(test=Compare(left=Subscript(value=Name(id='result', ctx=Load()), slice=Constant(value='results'), ctx=Load()), ops=[Eq()], comparators=[List(elts=[Dict(keys=[Constant(value='ask_id'), Constant(value='outcome')], values=[Constant(value='abcd'), Constant(value='already-applied')])], ctx=Load())]))",
+    "Assert(test=Call(func=Attribute(value=Call(func=Name(id='str', ctx=Load()), args=[Subscript(value=Name(id='result', ctx=Load()), slice=Constant(value='continuation'), ctx=Load())], keywords=[]), attr='endswith', ctx=Load()), args=[Constant(value=':1')], keywords=[]))"
+  ],
+  "normalized_full_module_ast_equal": true,
+  "authorization": "Controller explicitly authorized matching readable immutable receipt missing-ask only; approved ADR receipt-first / R2 finding 4. Malformed receipt stays unavailable/:0.",
+  "raw_review_byte_equal": true,
+  "all_10_findings_verbatim_order": true
+}

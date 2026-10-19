@@ -1,0 +1,66 @@
+{
+  "ruff-final": {
+    "argv": [
+      "<operator-home>/.local/bin/ruff",
+      "check",
+      "src/heterodyne/admind/daemon.py",
+      "src/heterodyne/admind/fulfillment.py",
+      "src/heterodyne/admind/fulfillment_cli.py",
+      "src/heterodyne/admind/fulfillment_projection.py",
+      "src/heterodyne/admind/store.py",
+      "tests/test_admind_fulfillment_activation_r1.py",
+      "tests/test_admind_fulfillment_activation_r2.py"
+    ],
+    "exit": 0
+  },
+  "format-final": {
+    "argv": [
+      "<operator-home>/.local/bin/ruff",
+      "format",
+      "--check",
+      "src/heterodyne/admind/daemon.py",
+      "src/heterodyne/admind/fulfillment.py",
+      "src/heterodyne/admind/fulfillment_cli.py",
+      "src/heterodyne/admind/fulfillment_projection.py",
+      "src/heterodyne/admind/store.py",
+      "tests/test_admind_fulfillment_activation_r1.py",
+      "tests/test_admind_fulfillment_activation_r2.py"
+    ],
+    "exit": 1
+  },
+  "install-agnostic": {
+    "argv": [
+      "python3",
+      "scripts/check_install_agnostic.py",
+      "src/heterodyne/admind/daemon.py",
+      "src/heterodyne/admind/fulfillment.py",
+      "src/heterodyne/admind/fulfillment_cli.py",
+      "src/heterodyne/admind/fulfillment_projection.py",
+      "src/heterodyne/admind/store.py",
+      "tests/test_admind_fulfillment_activation_r1.py",
+      "docs/reviews/fulfilled-question-activation-r2-dispositions.json",
+      "docs/reviews/fulfilled-question-activation-r2-dispositions.md",
+      "docs/reviews/fulfilled-question-activation-r2-high.md",
+      "tests/test_admind_fulfillment_activation_r2.py"
+    ],
+    "exit": 0
+  },
+  "diff-check": {
+    "argv": [
+      "git",
+      "diff",
+      "--check"
+    ],
+    "exit": 0
+  },
+  "secrets": {
+    "argv": [
+      "<operator-home>/.cache/pre-commit/repox9i15hut/golangenv-system/bin/gitleaks",
+      "dir",
+      "<operator-home>/.hermes/handoff/2026-10-15/codex/autonomous-resume/x84mg-r2-repair/secrets-snapshot",
+      "--no-banner",
+      "--redact"
+    ],
+    "exit": 0
+  }
+}

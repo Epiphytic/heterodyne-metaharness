@@ -1,0 +1,28 @@
+[
+  {
+    "path": "src/heterodyne/admind/daemon.py",
+    "argv": [
+      "<operator-home>/.local/bin/ruff",
+      "format",
+      "--check",
+      "--stdin-filename",
+      "src/heterodyne/admind/daemon.py",
+      "-"
+    ],
+    "exit": 1,
+    "output": ""
+  },
+  {
+    "path": "src/heterodyne/admind/store.py",
+    "argv": [
+      "<operator-home>/.local/bin/ruff",
+      "format",
+      "--check",
+      "--stdin-filename",
+      "src/heterodyne/admind/store.py",
+      "-"
+    ],
+    "exit": 1,
+    "output": ""
+  }
+]

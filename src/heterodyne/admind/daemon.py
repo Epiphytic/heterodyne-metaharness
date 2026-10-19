@@ -348,6 +348,7 @@ class Admind:
         self.dispatching: str | None = None     # the prompt being pasted; it may return to `held`
         self.client = client
         self.store = store
+        store.fulfillment.notice_authority = self.fulfillment_notice_authority
         self.audit = audit
         self.agent = agent
         self.runner = runner
@@ -524,6 +525,16 @@ class Admind:
             self.operators = {}
             self.audit_quietly("guard", action="policy-unreadable")
             return False
+
+    def fulfillment_notice_authority(self) -> set[str] | None:
+        """Pure readback for notice diagnostics; no group RPC or guard-state mutation."""
+        try:
+            confirmed = self.confirmed_operators()
+            if confirmed is None:
+                return None
+            return confirmed & {o.hex for o in self.load_operators()}
+        except (OSError, ValueError):
+            return None
 
     def request_owners(self, mid: str | None) -> tuple[str, ...]:
         sender = None if mid is None else self.store.inbound_sender(mid)
@@ -738,6 +749,11 @@ class Admind:
                                    ("batches", self.batch_loop), ("autobump", self.autobump_loop),
                                    ("maintenance-retry", self.maintenance_retry_loop)):
                     tg.create_task(self.guarded(supervised(name, loop, self.audit)))
+                # Verification is independent of whether producers are enabled.
+                from heterodyne.admind.fulfillment_projection import worker
+                tg.create_task(self.guarded(supervised(
+                    "fulfillment-verification", lambda: worker(self.store), self.audit, base=30, cap=30
+                )))
                 tg.create_task(self.guarded(supervised("gateway-custody", self.custody_loop, self.audit)))
                 tg.create_task(self.guarded(self.reconcile_asks(snapshot)))
         except BaseException:
@@ -971,18 +987,43 @@ class Admind:
             if why:
                 return fulfillment.Reply("refused", why)
             lifecycle = self.store.fulfillment
+            if isinstance(req, fulfillment.Inspect):
+                return fulfillment.Reply("ok", "intent diagnostics", lifecycle.inspect())
             if isinstance(req, fulfillment.Get):
-                return fulfillment.Reply("ok", "lifecycle", lifecycle.view(req.ask_id))
+                with self.store.transaction(read_only=True):
+                    view = lifecycle.view(req.ask_id)
+                    if view["binding"] is None:
+                        return fulfillment.Reply("unavailable", "binding-unavailable", view)
+                    try:
+                        lifecycle.require_projection()
+                    except fulfillment.Invalid as exc:
+                        return fulfillment.Reply("unavailable", str(exc), view)
+                    pending = view["pending"]
+                    message = (
+                        "lifecycle"
+                        if pending is None
+                        else "notice-"
+                        + lifecycle.notice_state(str(cast(dict[str, object], pending)["intent_id"]))[0]
+                    )
+                    return fulfillment.Reply("ok", message, view)
             if isinstance(req, fulfillment.Apply):
-                return lifecycle.apply(req.receipt, uid=peer.uid if peer.uid is not None else -1,
-                                       pid=peer.pid)
+                return lifecycle.apply(
+                    req.receipt, uid=peer.uid if peer.uid is not None else -1, pid=peer.pid
+                )
             if isinstance(req, fulfillment.Propose):
-                return lifecycle.propose(req, uid=peer.uid if peer.uid is not None else -1,
-                                         chunk_chars=self.s.chunk_chars)
+                return lifecycle.propose(
+                    req, uid=peer.uid if peer.uid is not None else -1, chunk_chars=self.s.chunk_chars
+                )
             with self.store.transaction():
                 return lifecycle.retire(req.ask_id, req.expect_intent, req.reason)
         except fulfillment.Invalid as exc:
+            if isinstance(req, fulfillment.Get) and str(exc) != "missing":
+                return fulfillment.Reply("unavailable", "binding-unavailable")
             return fulfillment.Reply("refused", str(exc))
+        except (msgspec.DecodeError, UnicodeError, TypeError, ValueError):
+            if isinstance(req, fulfillment.Get):
+                return fulfillment.Reply("unavailable", "binding-unavailable")
+            raise
         except sqlite3.Error:
             return fulfillment.Reply("unavailable", "store unavailable")
 
@@ -1030,7 +1071,12 @@ class Admind:
         queue its card in one transaction."""
         if self.latched():
             return asks.refused(ASK_LATCHED)
-        if len(self.store.capacity_asks()) >= asks.MAX_OPEN:
+        if fulfillment.ENABLED:
+            try:
+                self.store.fulfillment.require_projection()
+            except fulfillment.Invalid as exc:
+                return asks.refused(str(exc))
+        if self.store.capacity_count() >= asks.MAX_OPEN:
             return asks.refused(ASK_TOO_MANY)
         if self.store.ask_posted_since(asks.hour_ago()) >= asks.MAX_PER_HOUR:
             return asks.refused(ASK_TOO_OFTEN)
@@ -1105,7 +1151,7 @@ class Admind:
             return ASK_LATCHED
         if self.approve_bead is None:
             return ASK_NO_APPROVALS
-        if len(self.store.capacity_asks()) >= asks.MAX_OPEN:
+        if self.store.capacity_count() >= asks.MAX_OPEN:
             return ASK_TOO_MANY
         if self.store.ask_posted_since(asks.hour_ago()) >= asks.MAX_PER_HOUR:
             return ASK_TOO_OFTEN
@@ -2744,18 +2790,19 @@ class Admind:
                 self.touch_card(target)
                 self.finish(mid, "dropped", CONTROL_REFUSED, "refused")
             return
-        if text.strip() == "!fulfill":
+        if fulfillment.ENABLED and text.strip() == "!fulfill":
             try:
-                if not fulfillment.ENABLED or not self.authorised(mid):
-                    self.finish(mid, "done", "Fulfillment unavailable under current authorization.", "cmd")
+                if not self.authorised(mid) or not self.store.inbound_sender(mid):
+                    with self.store.transaction():
+                        self.deny_rows(mid)
                     return
                 try:
                     with self.store.transaction():
                         result = self.store.fulfillment.confirm(
-                            target, principal=self.senders.get(mid, ""), message_id=mid)
+                            target, principal=self.store.inbound_sender(mid) or "", message_id=mid)
                         self.finish(mid, "done", result.message, "cmd")
                 except fulfillment.Invalid as exc:
-                    self.finish(mid, "done", "Fulfillment refused: " + str(exc), "cmd")
+                    self.finish(mid, "done", str(exc), "cmd")
                 return
             except sqlite3.Error as exc:
                 reason = "store unavailable"
