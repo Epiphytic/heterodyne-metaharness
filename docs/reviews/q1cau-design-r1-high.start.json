@@ -1,0 +1,28 @@
+{
+  "at": "2026-10-19T05:53:08.184802+00:00",
+  "head": "776bb562af28567c6af572cb2b54203366d0ccec",
+  "base": "b4b8c75da984126344716566300fb7cad19a35b5",
+  "cwd": "<operator-home>/.hermes/handoff/2026-10-15/codex/autonomous-resume/q1cau-design-review-r1-high-inputs",
+  "source_cwd": "<operator-home>/repos/heterodyne-metaharness-v2-btq-btq-q1cau",
+  "argv": [
+    "<operator-home>/.nvm/versions/node/v22.22.0/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+    "-p",
+    "--model",
+    "opus",
+    "--effort",
+    "high",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--dangerously-skip-permissions",
+    "--disallowedTools",
+    "Agent,Task",
+    "--add-dir",
+    "<operator-home>/repos/heterodyne-metaharness-v2-btq-btq-q1cau",
+    "--",
+    "/code-review ONE AND ONLY DESIGN review using HIGH reasoning, author Codex. Read proposed ADR and identical design copy docs/adr/2026-10-18-gateway-durable-custody.md plus -contracts.json, -sources.json and -working-source-note.md in <operator-home>/repos/heterodyne-metaharness-v2-btq-btq-q1cau at 776bb562af28567c6af572cb2b54203366d0ccec. Amend approved D788 gateway and D6f operational recovery to resolve actual R3critical1/2/3/6/7 locked/lost retained work; review all proposed interfaces/state/budgets/source proof and practical implementability. This is proposed NEW work, no existing broker/native consumerACK/admin custody port claimed. Actual pinned sources read-only: KKV <operator-home>/repos/harness-improvements-btq-btq-kkv1w signed2d773ecab60dc476af6f385c98c1e8e5975638b5 plus frozen working gateway.py explicitly qualified; queue <operator-home>/repos/beads-task-queue-btq-btq-uuozt signed34b0aa61f47863ea63088e49ed81dcebeec07763; JLZ <operator-home>/repos/harness-improvements-btq-btq-jlzxd signededc543 companion source manifest actualrevision exact; product <operator-home>/repos/heterodyne-metaharness-v2-btq-btq-u9e24. Root may have differently named JLZ/UUO worktrees; if absent use canonical git objects <operator-home>/repos/beads-task-queue and <operator-home>/repos/harness-improvements rather than invent source. Core: narrow custody-only broker while SHreleased, source-issued output/cessation proofs, actual positive native consumerACK activationHOLD, bounded active2GiB+terminal32GiB+receipt128MiB reservations noautoarchive, lifetime32segments/3generations\u00d73attempts30s, separate custody native thread consent/permitted EXresolution with30s residual/no callback/unknown remainsHOLD, ONEinventory+explicit oldnewadaptercompat/UUOexactpacket no invented existing recovery. Three implementation roles IDs minted by root before final humanask. Identify critical design gaps and missing source contracts without demanding nonexistent implementations as already present. Give concrete findings severity/why/fix. No second review or validation will be run; author incorporates once then publishes immutable GitHub and asks genuine human approval. No code or design edits, tests, probes, queue/native/services/network/model calls beyond this actual built-in review. Manual foreign observedstream not reserved-profile proof."
+  ],
+  "prompt": "/code-review ONE AND ONLY DESIGN review using HIGH reasoning, author Codex. Read proposed ADR and identical design copy docs/adr/2026-10-18-gateway-durable-custody.md plus -contracts.json, -sources.json and -working-source-note.md in <operator-home>/repos/heterodyne-metaharness-v2-btq-btq-q1cau at 776bb562af28567c6af572cb2b54203366d0ccec. Amend approved D788 gateway and D6f operational recovery to resolve actual R3critical1/2/3/6/7 locked/lost retained work; review all proposed interfaces/state/budgets/source proof and practical implementability. This is proposed NEW work, no existing broker/native consumerACK/admin custody port claimed. Actual pinned sources read-only: KKV <operator-home>/repos/harness-improvements-btq-btq-kkv1w signed2d773ecab60dc476af6f385c98c1e8e5975638b5 plus frozen working gateway.py explicitly qualified; queue <operator-home>/repos/beads-task-queue-btq-btq-uuozt signed34b0aa61f47863ea63088e49ed81dcebeec07763; JLZ <operator-home>/repos/harness-improvements-btq-btq-jlzxd signededc543 companion source manifest actualrevision exact; product <operator-home>/repos/heterodyne-metaharness-v2-btq-btq-u9e24. Root may have differently named JLZ/UUO worktrees; if absent use canonical git objects <operator-home>/repos/beads-task-queue and <operator-home>/repos/harness-improvements rather than invent source. Core: narrow custody-only broker while SHreleased, source-issued output/cessation proofs, actual positive native consumerACK activationHOLD, bounded active2GiB+terminal32GiB+receipt128MiB reservations noautoarchive, lifetime32segments/3generations\u00d73attempts30s, separate custody native thread consent/permitted EXresolution with30s residual/no callback/unknown remainsHOLD, ONEinventory+explicit oldnewadaptercompat/UUOexactpacket no invented existing recovery. Three implementation roles IDs minted by root before final humanask. Identify critical design gaps and missing source contracts without demanding nonexistent implementations as already present. Give concrete findings severity/why/fix. No second review or validation will be run; author incorporates once then publishes immutable GitHub and asks genuine human approval. No code or design edits, tests, probes, queue/native/services/network/model calls beyond this actual built-in review. Manual foreign observedstream not reserved-profile proof.",
+  "executable_sha256": "bc1aad9982c7b59c7d889ff92595d61cf46e0a6eae074cb551d932a989bcd222",
+  "capture_kind": "manual-foreign-observed-stream-not-reserved-profile-proof"
+}

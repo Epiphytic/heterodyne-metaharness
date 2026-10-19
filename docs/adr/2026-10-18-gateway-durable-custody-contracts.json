@@ -1,6 +1,6 @@
 {
   "schema": "gateway-custody-proposed-ports.v1",
-  "status": "PROPOSED NOT IMPLEMENTED; normative details in companion ADR",
+  "status": "SOLE HIGH FINDINGS INCORPORATED ONCE; proposed, human approval pending; ports NOT IMPLEMENTED",
   "new_ports": [
     {
       "owner": "Hermes",
@@ -11,14 +11,27 @@
         "seal_source_output",
         "ack_consumer",
         "prepare_custody_resolution",
-        "inspect"
+        "inspect",
+        "start_bounded_invocation",
+        "resume_sealed_delivery",
+        "record_delivery_intent",
+        "record_delivery_proof",
+        "native_consumer_ack",
+        "prepare_terminal_export",
+        "verify_external_custody",
+        "rotate_archive_epoch"
       ],
       "requirements": [
         "explicit enrolled hermes_gateway_custody root",
         "source-owned proof validators",
         "bounded broker-only writes while SH released",
         "fresh SH before every later effect",
-        "durable terminal original bytes and receipt"
+        "durable terminal original bytes and receipt",
+        "all Owner input classes; intake distinct from per-attempt identity",
+        "real kernel containment and supported capped worker output channel; current codex -o does not qualify",
+        "Hermes owns actual upstream native ACK and outbound receipt validators",
+        "archive-unknown retains unresolved gate obligation; export never clears it",
+        "verified independent external custody plus exact human consent before reclaim"
       ]
     },
     {
@@ -34,7 +47,11 @@
         "independent authenticated transport",
         "actual principal/group/thread/policy",
         "separate custody namespace",
-        "no caller-supplied decision"
+        "no caller-supplied decision",
+        "24hex proposal prefix + full-hash authenticated notice mapping; collision HOLD",
+        "separate custody tables: <=4096 retained proposal bundles total, <=16/event, <=32KiB/bundle; separate <=256KiB permit/WAL index overhead per active batch",
+        "separate custody notices: <=32/hour, <=256 undelivered, <=3200chars/36lines each; denied notice means no consent or authority",
+        "proposal rows never evicted at cap; only verified consented export/epoch rotation; original expiry remains24h"
       ]
     },
     {
@@ -48,18 +65,25 @@
         "same administrative EX and genuine independent authority",
         "exact original child-ownership locks",
         "all-lifetime positive proof or HOLD",
-        "same-program crash recovery only"
+        "same-program crash recovery only",
+        "turnstile EX > gate EX > sorted exact child lease EX|NB > journal > custody;5s bound",
+        "issuing WAL embeds permit/program before consumed; no consumption-before-WAL",
+        "child lease availability never replaces real model lifecycle proof"
       ]
     },
     {
       "owner": "Hermes+queue",
       "source": "single existing Hermes inventory and scripts/maintenance_recovery_graph.py",
       "ports": [
-        "versioned custody inventory compatibility"
+        "versioned custody inventory compatibility",
+        "publication_epoch_barrier"
       ],
       "requirements": [
         "new explicit BEFORE/AFTER adapter compatibility",
-        "no fallback through current equality restriction"
+        "no fallback through current equality restriction",
+        "single hermes-inventory-custody.v2; sealed exact covered admission branch only",
+        "unknown archive remains acknowledged-unresolved publication HOLD",
+        "durable barrier blocks new intake/attempt/issue;30s drain outside locks;incremental verified roots"
       ]
     }
   ],
@@ -102,7 +126,7 @@
     "terminal_bytes_per_slot": 8388608,
     "receipt_bytes_per_slot": 32768,
     "transitions_per_event": 512,
-    "transition_max_bytes": 1920,
+    "transition_max_bytes": 1664,
     "child_segments_lifetime": 32,
     "work_generations": 3,
     "attempts_per_work_generation": 3,
@@ -110,7 +134,17 @@
     "proposal_bundles_per_event": 16,
     "retry_spacing_seconds": 30,
     "permit_initiation_seconds": 30,
-    "proposal_lifetime_seconds": 86400
+    "proposal_lifetime_seconds": 86400,
+    "cancel_waiters_per_event": 16,
+    "reserved_final_transitions": 32,
+    "output_metadata_records": 1024,
+    "output_metadata_record_bytes": 512,
+    "archive_export_batch_events": 256,
+    "local_archive_epochs": 2,
+    "epoch_export_inflight": 1,
+    "product_proposal_bundles_total": 4096,
+    "product_notice_per_hour": 32,
+    "product_notice_undelivered": 256
   },
   "delivery": "three real implementation IDs/dependencies to be minted by controller before genuine human ask; role names are not task IDs",
   "activation_holds": [
@@ -119,5 +153,13 @@
     "independent authenticated recovery route",
     "old writer retirement and compatible rollback",
     "genuine deployment approval; no live effects from design approval"
-  ]
+  ],
+  "protocol_changes": {
+    "intake": "gateway-custody-intake.v1; no parent/dispatch/prompt before creation",
+    "attempt": "gateway-custody-attempt.v1; UNIQUE(inbox_id,generation,attempt), UNIQUE(dispatch), event lifetime CAS",
+    "unknown_archive": "unknown-diagnostic receipt + immutable unresolved obligation, not complete",
+    "external_export": "full originals, independently read back exact hashes, genuine bounded human consent, retained successor epoch root",
+    "WAL": "issuing embeds descriptor+full permit+before+after+program/proofs before consumed references issuing"
+  },
+  "critical_mapping": "ADR final table; KKV R3 1/2/3/6/7 OPEN until actual composed evidence; all native adapters owned by Hermes child"
 }

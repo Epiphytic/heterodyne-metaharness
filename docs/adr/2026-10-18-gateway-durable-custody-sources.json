@@ -1,15 +1,15 @@
 {
   "schema": "gateway-custody-design-inputs.v1",
-  "status": "proposed unreviewed amendment; source observation is not authority",
+  "status": "sole HIGH reviewed at776bb562; findings incorporated once; no human approval",
   "task": "btq-q1cau",
   "baseline": "b4b8c75da984126344716566300fb7cad19a35b5",
   "captured_input_time": "2026-10-19T05:30:35.540714+00:00",
   "repository_labels": {
-    "kkv": "Hermes gateway implementation task snapshot",
-    "uuo": "queue packet/coordinator task snapshot",
-    "jlz": "Hermes recovery enrollment compiler task snapshot",
-    "product": "product operational-recovery task snapshot",
-    "hermes": "Hermes parent ADR archive"
+    "kkv": "canonical Hermes git object store <operator-home>/repos/harness-improvements",
+    "uuo": "canonical queue git object store <operator-home>/repos/beads-task-queue",
+    "jlz": "canonical Hermes git object store <operator-home>/repos/harness-improvements",
+    "product": "canonical product git object store <operator-home>/repos/heterodyne-metaharness-v2",
+    "hermes": "canonical Hermes git object store <operator-home>/repos/harness-improvements"
   },
   "sources": [
     {
@@ -240,6 +240,40 @@
       ],
       "qualification": "exact committed bytes",
       "observed_working_sha256": "77746cf285556d9a680d84c3e319a55f0f7404a6b368b00fa3d266f81f63f208"
+    },
+    {
+      "id": "S10",
+      "repository": "kkv",
+      "revision": "2d773ecab60dc476af6f385c98c1e8e5975638b5",
+      "path": "harness/escalation.py",
+      "git_blob_sha256": "c532f6cb0f2b512afb2427b3f8453d84f53147a53f503c465f692b7fd29693c3",
+      "symbols": [
+        {
+          "symbol": "_run_one",
+          "line": 377
+        }
+      ],
+      "qualification": "exact committed source object; working snapshot separately qualified, not authority",
+      "observed_working_sha256": "ee1a195d29e2f0b77071f76c5cdf36f8fefe28c81e017b8735fa13b2b81ec881",
+      "observed_working_diff_sha256": "e28db72c613de5f41f94c36dda128af44c7771b972126c54b16153927450b2a5",
+      "working_capture": "private evidence q1cau-design-r1-incorporation/S10-working.py"
+    },
+    {
+      "id": "S11",
+      "repository": "kkv",
+      "revision": "2d773ecab60dc476af6f385c98c1e8e5975638b5",
+      "path": "harness/queue_maintenance.py",
+      "git_blob_sha256": "23284e0c8b34ee66a71ce08c9e7a5fa1352b5c618af24dbf6c4264269fd1293c",
+      "symbols": [
+        {
+          "symbol": "detached_idle",
+          "line": 413
+        }
+      ],
+      "qualification": "exact committed source object; working snapshot separately qualified, not authority",
+      "observed_working_sha256": "23284e0c8b34ee66a71ce08c9e7a5fa1352b5c618af24dbf6c4264269fd1293c",
+      "observed_working_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "working_capture": "private evidence q1cau-design-r1-incorporation/S11-working.py"
     }
   ],
   "parent_designs": [
@@ -273,7 +307,7 @@
     }
   ],
   "review_history": {
-    "this_amendment": "UNREVIEWED; one HIGH review pending controller",
+    "this_amendment": "ONE actual HIGH at776bb562, findings incorporated once; no second review/validation; human approval pending",
     "existing_kkv_critical_findings": [
       1,
       2,
@@ -281,6 +315,12 @@
       6,
       7
     ],
-    "existing_kkv_status": "OPEN; no historical reset"
+    "existing_kkv_status": "OPEN; no historical reset",
+    "raw_report_sha256": "9edf815737b3d46dde1d37c82c8396fc07fde90cff059ee857ef6713b1c3a582"
+  },
+  "public_copy_normalization": {
+    "explanation": "Publication-only normalized copy: literal private operator home prefix is replaced by <operator-home>. Original report, command/start record, source artifact hashes and actual sole HIGH review history remain unchanged in retained private originals; public raw/start copies are not byte-exact originals. No new review or validation occurred.",
+    "original_raw_report_sha256": "9edf815737b3d46dde1d37c82c8396fc07fde90cff059ee857ef6713b1c3a582",
+    "published_raw_report_sha256": "87c7b0c7a30668ff47c9206d54833030b05ba0e11f8926fd5f51d45d4a6698c9"
   }
 }

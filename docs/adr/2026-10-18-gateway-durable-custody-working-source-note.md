@@ -1,9 +1,13 @@
 # Source qualification for the custody proposal
 
-This is proposed design evidence, not implementation clearance or approval. The companion source manifest identifies nine exact committed source blobs and two existing parent ADRs. Source IDs S1–S9 refer to the recorded historical revisions, not whatever a worktree contains later.
+This is proposed design evidence, not implementation clearance or approval. The companion source manifest identifies eleven exact committed source blobs and two existing parent ADRs. Source IDs S1–S11 refer to the recorded historical revisions, not whatever a worktree contains later.
 
 S3 (`harness/gateway.py`) was inspected as working bytes whose SHA256 is `a7d1fbc0edf1554d191b2ec3e2352199411ce7f9c0329ccc6c77b60da0adbdd2`; these differ from the recorded commit. The manifest supplies the committed blob hash separately. S3's captured line ranges apply only to that qualified working observation. The working diff SHA256 was `3564278034898a1a761924b661cfec3c0f9d5cb4d028988bfa4a5f93db741625`; it is private controller evidence, not a published source revision. No authority is inferred from those working changes.
 
 Implementation admission must bind the then-current reviewed source graph and preserve public review workflow features. This proposal neither copies working code nor authorizes overwriting canonical dirty files. Local repository/evidence root mappings remain private; a reviewer receives them from the controller. Missing private evidence is an unavailable input, not permission to substitute guessed source.
 
 The new broker, consumer acknowledgment validator, independent custody consent/control, queue custody EX settlement and compiler compatibility ports are proposed. Existing queue operational recovery and immutable publication do not already implement them. KKV critical findings 1/2/3/6/7 remain OPEN.
+
+The sole HIGH review identified the omitted actual writer dependency. S10 escalation.py and S11 queue_maintenance.py now bind exact canonical Git objects at2d773eca plus separately captured working bytes and diff hashes. S10's current worker uses uncapped answer.txt and does not prove descendant cessation; S11 releases the segment lease during idle, so lease availability is not writer lifecycle proof. The new bounded worker/containment and native ACK/continuation ports remain activation HOLD until genuinely implemented. Neither committed nor working hashes assert capabilities. S3/S10/S11 working observations are private research snapshots, not permission to overwrite canonical changes. Canonical object stores in the manifest replace nonexistent task-worktree guesses.
+
+All ten design findings were incorporated once; raw verdict is unchanged. The review was not repeated. Archive/export never manufactures completeness, delivery, consumption or external trust; unknown obligations remain in the versioned inventory across epochs.

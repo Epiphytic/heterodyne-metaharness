@@ -1,0 +1,92 @@
+{
+  "schema": "q1cau-sole-design-review-provenance.v1",
+  "reviewed_head": "776bb562af28567c6af572cb2b54203366d0ccec",
+  "review_policy": "exactly one actual Claude Opus HIGH design review, incorporated once; no second review/validation",
+  "actual_result": "ten findings, critical/high; no APPROVE verdict asserted",
+  "actual_command_model_reasoning": {
+    "argv": [
+      "<operator-home>/.nvm/versions/node/v22.22.0/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+      "-p",
+      "--model",
+      "opus",
+      "--effort",
+      "high",
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--dangerously-skip-permissions",
+      "--disallowedTools",
+      "Agent,Task",
+      "--add-dir",
+      "<operator-home>/repos/heterodyne-metaharness-v2-btq-btq-q1cau",
+      "--",
+      "/code-review ONE AND ONLY DESIGN review using HIGH reasoning, author Codex. Read proposed ADR and identical design copy docs/adr/2026-10-18-gateway-durable-custody.md plus -contracts.json, -sources.json and -working-source-note.md in <operator-home>/repos/heterodyne-metaharness-v2-btq-btq-q1cau at 776bb562af28567c6af572cb2b54203366d0ccec. Amend approved D788 gateway and D6f operational recovery to resolve actual R3critical1/2/3/6/7 locked/lost retained work; review all proposed interfaces/state/budgets/source proof and practical implementability. This is proposed NEW work, no existing broker/native consumerACK/admin custody port claimed. Actual pinned sources read-only: KKV <operator-home>/repos/harness-improvements-btq-btq-kkv1w signed2d773ecab60dc476af6f385c98c1e8e5975638b5 plus frozen working gateway.py explicitly qualified; queue <operator-home>/repos/beads-task-queue-btq-btq-uuozt signed34b0aa61f47863ea63088e49ed81dcebeec07763; JLZ <operator-home>/repos/harness-improvements-btq-btq-jlzxd signededc543 companion source manifest actualrevision exact; product <operator-home>/repos/heterodyne-metaharness-v2-btq-btq-u9e24. Root may have differently named JLZ/UUO worktrees; if absent use canonical git objects <operator-home>/repos/beads-task-queue and <operator-home>/repos/harness-improvements rather than invent source. Core: narrow custody-only broker while SHreleased, source-issued output/cessation proofs, actual positive native consumerACK activationHOLD, bounded active2GiB+terminal32GiB+receipt128MiB reservations noautoarchive, lifetime32segments/3generations\u00d73attempts30s, separate custody native thread consent/permitted EXresolution with30s residual/no callback/unknown remainsHOLD, ONEinventory+explicit oldnewadaptercompat/UUOexactpacket no invented existing recovery. Three implementation roles IDs minted by root before final humanask. Identify critical design gaps and missing source contracts without demanding nonexistent implementations as already present. Give concrete findings severity/why/fix. No second review or validation will be run; author incorporates once then publishes immutable GitHub and asks genuine human approval. No code or design edits, tests, probes, queue/native/services/network/model calls beyond this actual built-in review. Manual foreign observedstream not reserved-profile proof."
+    ],
+    "model_requested": "opus",
+    "effort_requested": "high",
+    "capture_kind": "manual-foreign-observed-stream-not-reserved-profile-proof",
+    "executable_sha256": "bc1aad9982c7b59c7d889ff92595d61cf46e0a6eae074cb551d932a989bcd222",
+    "at": "2026-10-19T05:53:08.184802+00:00"
+  },
+  "source_artifacts": {
+    "q1cau-design-review-r1-high.log": {
+      "sha256": "9edf815737b3d46dde1d37c82c8396fc07fde90cff059ee857ef6713b1c3a582",
+      "bytes": 12748
+    },
+    "q1cau-design-review-r1-high-result.json": {
+      "sha256": "759a5ab40f3d71732e56326860976c0c15f07f27b0f09b43425f016f6a25d415",
+      "bytes": 501
+    },
+    "q1cau-design-review-r1-high-start.json": {
+      "sha256": "19aa589272b7a921a7e327cff5ff3f344ba67814c4cead3b8e180875c93ddd7f",
+      "bytes": 5654
+    },
+    "q1cau-design-review-r1-high-stream.jsonl": {
+      "sha256": "08d50ca5ed371ec64e1af28a2bad1ccbe194152c97d9de5d3de1df85b1000408",
+      "bytes": 319891
+    },
+    "q1cau-design-review-r1-high-stderr.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "q1cau-design-review-r1-high-runner.py": {
+      "sha256": "d8a459dc4dfcc1138df6bf463682fddc084856fc2987b298c249efad451f2b36",
+      "bytes": 4984
+    }
+  },
+  "source_unchanged_during_actual_review": true,
+  "incorporation": "design only; human approval pending; root must mint real three implementation targets before ask",
+  "public_copy_normalization": {
+    "explanation": "Publication-only normalized copy: literal private operator home prefix is replaced by <operator-home>. Original report, command/start record, source artifact hashes and actual sole HIGH review history remain unchanged in retained private originals; public raw/start copies are not byte-exact originals. No new review or validation occurred.",
+    "original_artifact_hashes_retained_in": "source_artifacts",
+    "original_publication_documents": {
+      "docs/adr/2026-10-18-gateway-durable-custody-sources.json": "341b50491ada62037a74ab46ef3340535df8bea79be82301d19853a384234e5a",
+      "docs/reviews/q1cau-design-r1-high.provenance.json": "67becfea50062e6a184576989930b33aaab2070a1eab12b4ca8e11623b85f52a",
+      "docs/reviews/q1cau-design-r1-high.raw.md": "9edf815737b3d46dde1d37c82c8396fc07fde90cff059ee857ef6713b1c3a582",
+      "docs/reviews/q1cau-design-r1-high.start.json": "19aa589272b7a921a7e327cff5ff3f344ba67814c4cead3b8e180875c93ddd7f"
+    },
+    "published_artifacts": {
+      "docs/reviews/q1cau-design-r1-high.raw.md": {
+        "sha256": "87c7b0c7a30668ff47c9206d54833030b05ba0e11f8926fd5f51d45d4a6698c9",
+        "bytes": 12751
+      },
+      "docs/reviews/q1cau-design-r1-high.start.json": {
+        "sha256": "c0840acd64ecd449cb4adef1959a71d6a8cc5a120c5badb62f0c8f74f554c78e",
+        "bytes": 5672
+      },
+      "docs/adr/2026-10-18-gateway-durable-custody-sources.json": {
+        "sha256": "0026ebbbc19e99ad1fc1525e283121ef97d68eb1988a2ea81542697ae8c8256f",
+        "bytes": 11411
+      },
+      "docs/reviews/q1cau-design-r1-high.dispositions.json": {
+        "sha256": "4715c7ca9f76a4dd34e920e741890a2996b0da2fb8519348b8f07a0d8df195cc",
+        "bytes": 5213
+      },
+      "docs/reviews/q1cau-design-r1-high.result.json": {
+        "sha256": "759a5ab40f3d71732e56326860976c0c15f07f27b0f09b43425f016f6a25d415",
+        "bytes": 501
+      }
+    },
+    "provenance_self_hash": "Recorded externally in publication-normalization freeze to avoid a self-referential digest."
+  }
+}

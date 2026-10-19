@@ -1,0 +1,83 @@
+{
+  "schema": "q1cau-design-review-dispositions.v1",
+  "review_report_sha256": "9edf815737b3d46dde1d37c82c8396fc07fde90cff059ee857ef6713b1c3a582",
+  "reviewed_head": "776bb562af28567c6af572cb2b54203366d0ccec",
+  "policy": "sole HIGH incorporated once, no second validation",
+  "findings": [
+    {
+      "number": 1,
+      "disposition": "INCORPORATED IN DESIGN; IMPLEMENTATION/ACTIVATION OPEN",
+      "remedy": "archive-unknown retains exact originals and acknowledged unresolved obligation; writer cessation required; it frees active slot only, never publication eligibility",
+      "location": "ADR4,5,6 supplemental final/export schemas",
+      "remaining_limit": "native ambiguity/lifecycle absence remains HOLD, no replay or invented completion"
+    },
+    {
+      "number": 2,
+      "disposition": "INCORPORATED IN DESIGN; IMPLEMENTATION/ACTIVATION OPEN",
+      "remedy": "consented bounded external export, independent readback, two local epochs plus one inflight; measured rate required",
+      "location": "ADR3 export/epoch, supplemental export proof",
+      "remaining_limit": "actual receiver/privacy authority/retention/readback absent => activation HOLD; unknown index saturation remains truthful finite refusal"
+    },
+    {
+      "number": 3,
+      "disposition": "INCORPORATED IN DESIGN; IMPLEMENTATION/ACTIVATION OPEN",
+      "remedy": "immutable intake distinct from actual later attempt linkage; tuple child uniqueness and event lifetime counters",
+      "location": "ADR3 intake/attempt",
+      "remaining_limit": "new table/CAS not implemented; preserve original linkage and all attempt history"
+    },
+    {
+      "number": 4,
+      "disposition": "INCORPORATED IN DESIGN; IMPLEMENTATION/ACTIVATION OPEN",
+      "remedy": "closed escalation/direct/reaction/control/rejected event lifecycles; explicit upstream consumer versus outbound recipient",
+      "location": "ADR3 and supplemental final",
+      "remaining_limit": "unsupported native class refuses upstream ACK; no in-memory fallback"
+    },
+    {
+      "number": 5,
+      "disposition": "INCORPORATED IN DESIGN; IMPLEMENTATION/ACTIVATION OPEN",
+      "remedy": "pin actual escalation and detached idle committed and working sources; required bounded worker channel and kernel containment",
+      "location": "S10/S11 manifest; ADR4 writer port",
+      "remaining_limit": "current codex -o/default process lifecycle cannot qualify; pidfd/PID/group alone insufficient"
+    },
+    {
+      "number": 6,
+      "disposition": "INCORPORATED IN DESIGN; IMPLEMENTATION/ACTIVATION OPEN",
+      "remedy": "Hermes-owned resumed sealed delivery, delivery intent/proof, native consumer ACK ports with fresh per-effect SH and explicit Store stages",
+      "location": "ADR4 continuation; contracts Hermes ports",
+      "remaining_limit": "native positive readback/idempotent adapter required; unknown send never replayed"
+    },
+    {
+      "number": 7,
+      "disposition": "INCORPORATED IN DESIGN; IMPLEMENTATION/ACTIVATION OPEN",
+      "remedy": "single versioned inventory narrow sealed admission branch; durable epoch barrier; bounded drain outside locks; incremental verified seal roots",
+      "location": "ADR6 and contracts",
+      "remaining_limit": "archived unknown is still unresolved gate; legacy/NULL/uncovered and unrelated refusal preserved"
+    },
+    {
+      "number": 8,
+      "disposition": "INCORPORATED IN DESIGN; IMPLEMENTATION/ACTIVATION OPEN",
+      "remedy": "actual settle lock ordering; embedded issuing WAL durably before consumed; exact same-program crash continuation",
+      "location": "ADR5; corrected appendix issuing/consumed",
+      "remaining_limit": "all segment child locks plus separate containment proof, never lease=>cessation"
+    },
+    {
+      "number": 9,
+      "disposition": "INCORPORATED IN DESIGN; IMPLEMENTATION/ACTIVATION OPEN",
+      "remedy": "exact2MiB allocations, bounded metadata and cancellation, protected final reserve; separate product proposal/notice quotas",
+      "location": "ADR3 and supplemental product accounting; contracts limits",
+      "remaining_limit": "at cap HOLD without eviction; encoding ceiling must be demonstrated RED-first"
+    },
+    {
+      "number": 10,
+      "disposition": "INCORPORATED IN DESIGN; IMPLEMENTATION/ACTIVATION OPEN",
+      "remedy": "critical1/2/3/6/7 mapping and native ACK ownership;24hex token mapped to full hash+thread with collision HOLD",
+      "location": "ADR closure table, command grammar; contracts",
+      "remaining_limit": "all KKV criticals remain OPEN until composed evidence; actual child IDs root pending"
+    }
+  ],
+  "public_copy_normalization": {
+    "explanation": "Publication-only normalized copy: literal private operator home prefix is replaced by <operator-home>. Original report, command/start record, source artifact hashes and actual sole HIGH review history remain unchanged in retained private originals; public raw/start copies are not byte-exact originals. No new review or validation occurred.",
+    "original_raw_report_sha256": "9edf815737b3d46dde1d37c82c8396fc07fde90cff059ee857ef6713b1c3a582",
+    "published_raw_report_sha256": "87c7b0c7a30668ff47c9206d54833030b05ba0e11f8926fd5f51d45d4a6698c9"
+  }
+}
