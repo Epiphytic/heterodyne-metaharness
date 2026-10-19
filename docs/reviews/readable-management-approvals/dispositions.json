@@ -1,0 +1,61 @@
+{
+  "review_rounds": 1,
+  "effort": "high",
+  "reviewer": "claude-opus",
+  "author": "codex",
+  "reviewed_revision": "f19492a463b661140cc32713cc9be85737d4da37",
+  "findings": [
+    {
+      "number": 1,
+      "topic": "Approval semantics and heading",
+      "disposition": "Accepted with deliberate new-card A recommendation: ordinary approval words and all positive reactions select A. This explicitly amends new-card D4 B recommendation. Native question kind retained, visible contradictory subtitle replaced. Old cards unchanged."
+    },
+    {
+      "number": 2,
+      "topic": "Legacy format1 and retained hashes",
+      "disposition": "Accepted. Freeze legacy format1 bytes/mapping, no new presentation there. Only new enrolled format2 requests use new framing. Protected btq/supervisor remain untouched."
+    },
+    {
+      "number": 3,
+      "topic": "Literal screening",
+      "disposition": "Accepted. New closed path redaction-equality and control/bidi rejection with literal display; refuse any material corruption. Explicitly do not use old sanitizer."
+    },
+    {
+      "number": 4,
+      "topic": "Material D4 attestations",
+      "disposition": "Accepted. Task class, complete-known-source/non-gate attestation, issued/completed/remaining budget, no reset/resume restored to body and golden example."
+    },
+    {
+      "number": 5,
+      "topic": "Native preflight ownership",
+      "disposition": "Accepted. Daemon computes actual native parts after real ID allocation and refuses before insert/send on redaction/truncation/overflow. No queue estimate."
+    },
+    {
+      "number": 6,
+      "topic": "Source base and retained versions",
+      "disposition": "Accepted. New isolated queue task starts from accepted1ier9 5dcc80; frozen candidates untouched. Request format2 optional render_version absent1/new2, paired history schema and binding envelope v2 specified."
+    },
+    {
+      "number": 7,
+      "topic": "Rollback owner and order",
+      "disposition": "Accepted. Operator stops submissions, executor proves drained terminal/cancelled requests; uncertain/in-flight effect holds/escalates. Queue rolls back before product; retain compatible product reader until drained."
+    },
+    {
+      "number": 8,
+      "topic": "Local caller misuse",
+      "disposition": "Accepted without claiming same-UID caller authentication. Require closed binding metadata and explicit unverified attribution/no-authority-without-verified-binding. Native consumers must reject this as design/execution authority; forgery negative test."
+    },
+    {
+      "number": 9,
+      "topic": "Reply routes and permanent holds",
+      "disposition": "Accepted. Explicit !answer route; non-A/ambiguous/contrary answer holds and later A cannot override. Complete parser retained; representative positive/negative grammar stated."
+    },
+    {
+      "number": 10,
+      "topic": "Persistence complexity",
+      "disposition": "Accepted. Additive paired nullable columns following current Store migration convention; atomic same-row insert, no backfill, old fixed-column writes NULL. Closed paired validation."
+    }
+  ],
+  "second_review": false,
+  "deployment_authority": false
+}
