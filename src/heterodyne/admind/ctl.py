@@ -186,7 +186,12 @@ class JsonSocketServer[Req, Rep: msgspec.Struct]:
                     operation_request = (isinstance(envelope, dict)
                                          and cast(dict[str, object], envelope).get("type")
                                          == "approval.operation.v1")
-                if self.kind == "maintenance-recovery":
+                if self.kind == "gateway-custody":
+                    from heterodyne.admind import gateway_custody
+
+                    req = cast(Req, gateway_custody.decode(
+                        line.rstrip(b"\n"), cast(type[gateway_custody.Request], gateway_custody.Request)))
+                elif self.kind == "maintenance-recovery":
                     from heterodyne.admind import recovery
 
                     req = cast(Req, recovery.decode(line, cast(type[recovery.Request], recovery.Request)))

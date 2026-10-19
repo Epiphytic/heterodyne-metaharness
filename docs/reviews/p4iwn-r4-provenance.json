@@ -1,0 +1,24 @@
+{
+  "actual_ordinal": 4,
+  "effort": "medium",
+  "reviewer": "Claude Opus",
+  "author": "Codex",
+  "mode": "cross-model",
+  "review_phrase": "Are there any critical flaws with this, or is this good enough to implement as a PoC?",
+  "actual_result": {
+    "at": "2026-10-19T08:43:26.767576+00:00",
+    "exit": 0,
+    "head": "808fda047bc7bfdfebc4382cf2559e3112353e1a",
+    "source_unchanged": true,
+    "stream_sha256": "9b95de1cc6135c24167541a5f1aba1503791127c14393e517065c5f2aaad5589",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "events": 47,
+    "malformed_line_numbers": [],
+    "terminal_results": 1,
+    "terminal_success": true,
+    "log_sha256": "1bf6f599a31e1564bf63952671bc51ae9ad3e2afbc0dce1eef17ca04ec0efda5"
+  },
+  "public_report_sha256": "1bf6f599a31e1564bf63952671bc51ae9ad3e2afbc0dce1eef17ca04ec0efda5",
+  "normalization": "operator-home prefix only; private original retained",
+  "conclusion": "Actual reviewer found no critical flaws in two R3 repairs, good enough dormant source-only PoC only; explicitly not approval or operational qualification."
+}
