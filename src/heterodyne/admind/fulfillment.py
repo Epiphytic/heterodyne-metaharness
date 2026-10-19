@@ -11,11 +11,12 @@ import json
 import os
 import re
 import secrets
+import sqlite3
 import stat
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 import msgspec
 
@@ -34,6 +35,22 @@ ANSWER_ID = re.compile(r"(?:r:)?[0-9a-f]{64}\Z")
 
 class Invalid(ValueError):
     """Fixed public refusal code, never includes request material."""
+
+
+# V1 receipts predate operation-consent metadata and cannot bind its descriptor.
+# Keep the existing receipt hash/DDL frozen; a future V2 lifecycle needs its own design.
+LEGACY_PRESENTATION = "presentation IS NULL AND render_version IS NULL AND management IS NULL"
+
+
+def require_legacy_presentation(db: sqlite3.Connection, ask_id: str) -> None:
+    row = db.execute(
+        f"SELECT {LEGACY_PRESENTATION} FROM asks WHERE ask_id=?",  # noqa: S608 - fixed predicate
+        (ask_id,),
+    ).fetchone()
+    if row is None:
+        raise Invalid("missing")
+    if row != (1,):
+        raise Invalid("unsupported-management-fulfillment")
 
 
 class Evidence(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -89,7 +106,11 @@ class Get(msgspec.Struct, frozen=True, tag="fulfillment.get", forbid_unknown_fie
     ask_id: str
 
 
-Request = Apply | Propose | Dispose | Get
+class Inspect(msgspec.Struct, frozen=True, tag="fulfillment.inspect", forbid_unknown_fields=True):
+    pass
+
+
+Request = Apply | Propose | Dispose | Get | Inspect
 
 
 class Reply(msgspec.Struct, frozen=True):
@@ -241,32 +262,41 @@ DDL = (
 )
 
 
+def validate_schema_db(db: sqlite3.Connection) -> None:
+    revision = db.execute("SELECT value FROM kv WHERE key='ask_fulfillment_schema'").fetchone()
+    identity = db.execute("SELECT value FROM kv WHERE key='ask_store_id'").fetchone()
+    if revision != ("1",) or identity is None or not HEX.fullmatch(str(identity[0])):
+        raise Invalid("unsupported-schema")
+    for statement in DDL:
+        expected = statement.replace(" IF NOT EXISTS", "")
+        name = expected.split()[2] if not expected.startswith("CREATE UNIQUE") else expected.split()[3]
+        if db.execute("SELECT sql FROM sqlite_master WHERE name=?", (name,)).fetchone() != (expected,):
+            raise Invalid("incompatible-schema")
+
+
 class Lifecycle:
     def __init__(self, store: Store):
         self.store = store
+        self.verification_changed: Callable[[], None] = lambda: None
+        self.notice_authority: Callable[[], set[str] | None] = lambda: None
         self.post: Callable[[str, str, str | None, str | None, tuple[str, ...] | None], None] = self._post
 
-    def _post(self, key: str, text: str, target: str | None, thread: str | None,
-              owners: tuple[str, ...] | None) -> None:
+    def _post(
+        self, key: str, text: str, target: str | None, thread: str | None, owners: tuple[str, ...] | None
+    ) -> None:
         """Offline Store adapter. The daemon installs its central redaction/wake pipeline."""
-        self.store.enqueue(key, redact(text), target, thread_key=thread,
-                           ownership_kind="system" if owners is None else "request" if owners else "unknown",
-                           owners=owners or ())
+        self.store.enqueue(
+            key,
+            redact(text),
+            target,
+            thread_key=thread,
+            ownership_kind="system" if owners is None else "request" if owners else "unknown",
+            owners=owners or (),
+        )
 
     def validate_schema(self) -> None:
         """Read-only compatibility check; never rehash history on a routine CLI open."""
-        version = self.store.get("ask_fulfillment_schema")
-        if version != "1":
-            raise Invalid("unsupported-schema")
-        identity = self.store.get("ask_store_id")
-        if identity is None or not HEX.fullmatch(identity):
-            raise Invalid("missing-store-identity")
-        for statement in DDL:
-            expected = statement.replace(" IF NOT EXISTS", "")
-            name = expected.split()[2] if not expected.startswith("CREATE UNIQUE") else expected.split()[3]
-            actual = self.store.db.execute("SELECT sql FROM sqlite_master WHERE name=?", (name,)).fetchone()
-            if actual is None or str(actual[0]) != expected:
-                raise Invalid("incompatible-schema")
+        validate_schema_db(self.store.db)
 
     def migrate(self) -> None:
         with self.store.lock:
@@ -284,14 +314,22 @@ class Lifecycle:
                 self.validate_schema()
 
     def rebuild(self) -> None:
-        """Startup/roll-forward only, before accepting requests; old-code changes remain conflicts."""
-        with self.store.transaction():
-            self.validate_schema()
-            for (ask_id,) in self.store.db.execute("SELECT ask_id FROM ask_fulfillments").fetchall():
-                self.refresh(str(ask_id))
+        """Startup checks only. Hash work belongs to the independent bounded worker."""
+        self.validate_schema()
+
+    def capacity_predicate(self) -> str:
+        from heterodyne.admind.fulfillment_projection import capacity_predicate
+
+        return capacity_predicate(self.store.db)
+
+    def require_projection(self) -> None:
+        from heterodyne.admind.fulfillment_projection import validate
+
+        validate(self.store.db)
 
     def binding(self, ask_id: str) -> dict[str, object]:
         with self.store.lock:
+            require_legacy_presentation(self.store.db, ask_id)
             row = self.store.ask(ask_id)
             if row is None:
                 raise Invalid("missing")
@@ -362,9 +400,28 @@ class Lifecycle:
     def stored(self, ask_id: str) -> dict[str, object] | None:
         with self.store.lock:
             row = self.store.db.execute(
-                "SELECT receipt FROM ask_fulfillments WHERE ask_id=?", (ask_id,)
+                "SELECT length(CAST(receipt AS BLOB)) FROM ask_fulfillments WHERE ask_id=?", (ask_id,)
             ).fetchone()
-            return None if row is None else json.loads(str(row[0]))
+            if row is None:
+                return None
+            if type(row[0]) is not int or row[0] > MAX_REPLY:
+                raise Invalid("stored-receipt-unavailable")
+            try:
+                raw = self.store.db.execute(
+                    "SELECT receipt FROM ask_fulfillments WHERE ask_id=?", (ask_id,)
+                ).fetchone()
+                if raw is None:
+                    raise Invalid("stored-receipt-unavailable")
+                data = str(raw[0]).encode()
+                strict_json(data)
+                value = msgspec.json.decode(data, type=dict[str, object])
+                if value.get("schema") != "fulfillment-receipt-v1" or not HEX.fullmatch(
+                    str(value.get("request_digest"))
+                ):
+                    raise Invalid("stored-receipt-unavailable")
+                return value
+            except (msgspec.DecodeError, ValueError, TypeError, UnicodeError, sqlite3.Error):
+                raise Invalid("stored-receipt-unavailable") from None
 
     def protected(self, ask_id: str) -> bool:
         with self.store.lock:
@@ -375,11 +432,47 @@ class Lifecycle:
 
     def view(self, ask_id: str) -> dict[str, object]:
         with self.store.transaction(read_only=True):
-            binding = self.binding(ask_id)
-            original = self.store.ask(ask_id)
-            row = self.store.db.execute(
-                "SELECT valid FROM ask_fulfillments WHERE ask_id=?", (ask_id,)
+            from . import fulfillment_projection as projection
+
+            receipt = self.stored(ask_id)
+            original = self.store.db.execute(
+                "SELECT kind,status FROM asks WHERE ask_id=?", (ask_id,)
             ).fetchone()
+            projected = False
+            state = None
+            try:
+                epoch, _ = projection.validate(self.store.db)
+                projected = True
+                stamp = self.store.db.execute(
+                    "SELECT v.state,f.valid FROM fulfillment_verifications v "
+                    "JOIN fulfillment_generations g ON g.ask_id=v.ask_id "
+                    "JOIN ask_fulfillments f ON f.ask_id=v.ask_id "
+                    "WHERE v.ask_id=? AND v.epoch=? AND v.generation=g.generation",
+                    (ask_id, epoch),
+                ).fetchone()
+                state = None if stamp is None else stamp[0]
+                if state == "valid" and stamp is not None and stamp[1] != 1:
+                    state = None
+            except (Invalid, sqlite3.Error):
+                pass  # Invalid projection grants no lifecycle suppression or eligibility.
+            binding = None
+            try:
+                if receipt is not None:
+                    projection.measure(self.store.db, ask_id)
+                    binding = projection.bounded_binding(self.store.db, ask_id)
+                else:
+                    binding = self.binding(ask_id)
+            except (Invalid, sqlite3.Error, ValueError, TypeError, UnicodeError):
+                if receipt is None:
+                    raise
+            lifecycle = "unfulfilled"
+            if receipt is not None:
+                lifecycle = "unverified"
+                if projected and binding is not None:
+                    if state == "valid":
+                        lifecycle = "fulfilled"
+                    elif state == "conflict":
+                        lifecycle = "conflict"
             pending = self.store.db.execute(
                 "SELECT intent_id,digest,status,created_at FROM "
                 "ask_fulfillment_intents WHERE ask_id=? AND status='pending'",
@@ -388,16 +481,20 @@ class Lifecycle:
             return {
                 "schema": "fulfillment-view-v1",
                 "binding": binding,
-                "receipt": self.stored(ask_id),
-                "lifecycle": "unfulfilled" if row is None else "fulfilled" if row[0] else "conflict",
-                "eligible": row is None
+                "receipt": receipt,
+                "lifecycle": lifecycle,
+                "eligible": projected
+                and receipt is None
                 and original is not None
-                and original.kind in ("question", "merge")
-                and original.status == "answered"
+                and original[0] in ("question", "merge")
+                and original[1] == "answered"
+                and binding is not None
                 and bool(binding["answer_ids"]),
                 "pending": None
                 if pending is None
-                else dict(zip(("intent_id", "digest", "status", "created_at"), pending, strict=True)),
+                else {
+                    **dict(zip(("intent_id", "digest", "status", "created_at"), pending, strict=True)),
+                },
             }
 
     def apply(self, receipt: Completion, *, uid: int, pid: int | None) -> Reply:
@@ -449,12 +546,13 @@ class Lifecycle:
             raise Invalid("unverified-peer")
 
     def duplicate(self, ask_id: str, request_digest: str) -> Reply | None:
+        require_legacy_presentation(self.store.db, ask_id)
         row = self.store.db.execute(
             "SELECT request_digest,valid FROM ask_fulfillments WHERE ask_id=?", (ask_id,)
         ).fetchone()
         if row is None:
             return None
-        if row[0] != request_digest or not row[1]:
+        if row[0] != request_digest:
             raise Invalid("conflict")
         return Reply("already-applied", "fulfilled; original answer retained", self.stored(ask_id))
 
@@ -469,6 +567,7 @@ class Lifecycle:
         operation_id: str | None = None,
         core: str | None = None,
     ) -> Reply:
+        self.require_projection()
         before = self.store.capacity_count()
         receipt_id = secrets.token_hex(16)
         record = {
@@ -501,6 +600,9 @@ class Lifecycle:
                 core,
             ),
         )
+        from .fulfillment_projection import stamp_current
+
+        stamp_current(self.store.db, binding.ask_id)
         self.store.db.execute(
             "INSERT INTO ask_fulfillment_audit(ask_id,request_digest,disposition,at) "
             "VALUES (?,?,'applied',?)",
@@ -524,6 +626,7 @@ class Lifecycle:
             raise Invalid(why)
         self.require_uid(uid)
         with self.store.transaction():
+            self.require_projection()
             self.validate(req.declaration.binding, req.declaration.evidence)
             if self.protected(req.ask_id):
                 raise Invalid("conflict")
@@ -536,10 +639,25 @@ class Lifecycle:
             if old is not None and str(old[2]) == encoded and req.replace_intent is None:
                 if datetime.now(UTC) - datetime.fromisoformat(str(old[3])) >= timedelta(hours=24):
                     raise Invalid("stale-intent")
-                return Reply("pending", "existing notice retained", {"intent_id": old[0], "digest": old[1]})
+                return Reply(
+                    "pending",
+                    "notice-" + self.notice_state(str(old[0]))[0],
+                    {"intent_id": old[0], "digest": old[1]},
+                )
             if old is not None:
                 if req.replace_intent != old[1]:
                     raise Invalid("pending-conflict")
+                if self.notice_state(str(old[0]), check_expiry=False)[0] not in ("pending", "delivered"):
+                    raise Invalid("notice-owner-unavailable")
+                consumed = set(req.declaration.binding.consumed_answers)
+                senders = [
+                    self.store.inbound_sender(answer.message_id)
+                    for answer in self.store.answers(req.ask_id)
+                    if answer.message_id in consumed
+                ]
+                authority = self.notice_authority()
+                if not senders or not all(senders) or authority is None or not set(senders) <= authority:
+                    raise Invalid("notice-owner-unavailable")
                 self.retire(req.ask_id, str(old[1]), "operator-withdrawal")
             elif req.replace_intent is not None:
                 raise Invalid("stale-intent")
@@ -584,12 +702,10 @@ class Lifecycle:
                 "This releases capacity; it does not authorize execution or change the original answer."
             )
             if len(notice) > 3500 or notice.count("\n") > 40 or redact(notice) != notice:
-                raise Invalid("notice-redaction-or-bounds: complete request/answer context "
-                              "cannot be delivered safely")
+                raise Invalid("notice-redaction-or-bounds")
             parts = chunk.split(notice, chunk_chars)
             if any(redact(part) != part for part in parts):
-                raise Invalid("notice-redaction-or-bounds: complete request/answer context "
-                              "cannot be delivered safely")
+                raise Invalid("notice-redaction-or-bounds")
             if len(encoded.encode()) > MAX_FILE:
                 raise Invalid("oversized-intent")
             self.store.db.execute(
@@ -599,7 +715,8 @@ class Lifecycle:
             # Durable inbound provenance, never the answer's display label. Any unknown source
             # quarantines the entire quoted context; a mixed set cannot become system-owned.
             senders = [
-                self.store.inbound_sender(answer.message_id) for answer in self.store.answers(req.ask_id)
+                self.store.inbound_sender(answer.message_id)
+                for answer in self.store.answers(req.ask_id)
                 if answer.message_id in req.declaration.binding.consumed_answers
             ]
             owners = tuple(sorted({sender for sender in senders if sender})) if all(senders) else ()
@@ -612,8 +729,111 @@ class Lifecycle:
                     owners,
                 )
             return Reply(
-                "pending", "confirmation notice queued", {"intent_id": intent, "digest": intent_digest}
+                "pending",
+                "notice-" + self.notice_state(intent)[0],
+                {"intent_id": intent, "digest": intent_digest},
             )
+
+    def delivery(self, intent: str, parts: object) -> list[tuple[object, ...]]:
+        if type(parts) is not int or not 1 <= parts <= 3500:
+            raise Invalid("delivery-unresolved")
+        prefix = "fulfill-intent:" + intent
+        rows = self.store.db.execute(
+            "SELECT key,length(CAST(text AS BLOB)),status,message_id,ownership_kind,seq "
+            "FROM outbox WHERE key>=? COLLATE BINARY AND key<? COLLATE BINARY ORDER BY key LIMIT ?",
+            (prefix + ":", prefix + ";", parts + 1),
+        ).fetchall()
+        if len(rows) != parts or {r[0] for r in rows} != {prefix + ":" + str(i) for i in range(parts)}:
+            raise Invalid("delivery-unresolved")
+        if any(r[1] > 14000 for r in rows):
+            raise Invalid("delivery-unresolved")
+        rows.sort(key=lambda r: int(str(r[0]).rsplit(":", 1)[1]))
+        return rows
+
+    def notice_state(self, intent: str, *, check_expiry: bool = True) -> tuple[str, str]:
+        row = self.store.db.execute(
+            "SELECT parts,created_at,length(CAST(notice AS BLOB)) "
+            "FROM ask_fulfillment_intents WHERE intent_id=?",
+            (intent,),
+        ).fetchone()
+        if row is None:
+            return "unavailable", "delivery-unresolved"
+        try:
+            if check_expiry and datetime.now(UTC) - datetime.fromisoformat(str(row[1])) >= timedelta(
+                hours=24
+            ):
+                return "expired", "intent-expired"
+            if row[2] > 14000:
+                raise Invalid("delivery-unresolved")
+            rows = self.delivery(intent, row[0])
+            statuses = {r[2] for r in rows}
+            if statuses == {"quarantined"}:
+                return "quarantined", "unproven-owner"
+            if statuses == {"suppressed"}:
+                return "suppressed", "requester-revoked"
+            kinds = {r[4] for r in rows}
+            owners = [self.store.row_owners(cast(int, r[5])) for r in rows]
+            if kinds == {"unknown"} or (kinds == {"request"} and all(not o for o in owners)):
+                return "quarantined", "unproven-owner"
+            if kinds != {"request"} or any(not o for o in owners) or len(set(owners)) != 1:
+                raise Invalid("delivery-unresolved")
+            authority = self.notice_authority()
+            if authority is None:
+                raise Invalid("delivery-unresolved")
+            if not set(owners[0]) <= authority:
+                return "suppressed", "requester-revoked"
+            texts = [
+                self.store.db.execute("SELECT text FROM outbox WHERE seq=?", (r[5],)).fetchone()[0]
+                for r in rows
+            ]
+            text = "".join(texts)
+            if len(text) > 3500 or text.count("\n") > 40:
+                raise Invalid("delivery-unresolved")
+            notice = self.store.db.execute(
+                "SELECT notice FROM ask_fulfillment_intents WHERE intent_id=?", (intent,)
+            ).fetchone()[0]
+            if text != notice:
+                raise Invalid("delivery-unresolved")
+            if statuses == {"sent"} and all(r[3] for r in rows):
+                return "delivered", "delivery-complete"
+            if statuses == {"pending"} and all(not r[3] for r in rows):
+                return "pending", "delivery-pending"
+        except (Invalid, ValueError, TypeError, OverflowError):
+            pass
+        return "unavailable", "delivery-unresolved"
+
+    def inspect(self) -> dict[str, object]:
+        with self.store.transaction(read_only=True):
+            rows = self.store.db.execute(
+                "SELECT ask_id,intent_id,digest,created_at FROM ask_fulfillment_intents "
+                "WHERE status='pending' ORDER BY intent_id LIMIT 41"
+            ).fetchall()
+            if len(rows) > 40:
+                raise Invalid("fulfillment-intent-integrity")
+            entries: list[dict[str, object]] = []
+            for ask_id, intent, digest_value, created in rows:
+                state, reason = self.notice_state(str(intent))
+                actions = {
+                    "pending": ["get", "dispose", "replace", "hold"],
+                    "delivered": ["get", "dispose", "hold"],
+                    "quarantined": ["dispose", "controller-receipt", "hold"],
+                    "suppressed": ["dispose", "controller-receipt", "hold"],
+                    "expired": ["dispose", "replace", "controller-receipt", "hold"],
+                    "unavailable": ["get", "dispose", "controller-receipt", "hold"],
+                }[state]
+                entry = dict(
+                    ask_id=ask_id,
+                    intent_id=intent,
+                    digest=digest_value,
+                    created_at=created,
+                    state=state,
+                    reason=reason,
+                    actions=actions,
+                )
+                if len(canonical(entry)) > 1024:
+                    raise Invalid("fulfillment-intent-integrity")
+                entries.append(entry)
+            return {"schema": "fulfillment-inspect-v1", "entries": entries}
 
     def retire_pending(self, ask_id: str, reason: str) -> None:
         """Caller holds the mutation transaction; retain notice rows and an audit tombstone."""
@@ -658,35 +878,30 @@ class Lifecycle:
     def confirm(self, target: str | None, *, principal: str, message_id: str) -> Reply:
         # Caller verifies the currently authenticated inbound principal under the daemon's actual gates.
         with self.store.transaction():
-            rows = self.store.db.execute(
-                "SELECT i.intent_id,i.ask_id,i.digest,i.declaration,i.parts,"
-                "i.created_at,i.status FROM ask_fulfillment_intents i JOIN outbox o "
-                "ON o.key LIKE 'fulfill-intent:' || i.intent_id || ':%' "
-                "WHERE o.message_id=? AND o.status='sent'",
-                (target,),
+            targets = self.store.db.execute(
+                "SELECT key FROM outbox WHERE message_id=? AND status='sent' LIMIT 2", (target,)
             ).fetchall()
-            if len(rows) != 1:
+            if len(targets) != 1:
                 raise Invalid("unbound-confirmation")
-            intent, ask_id, intent_digest, declaration, parts, created, status = rows[0]
+            key = str(targets[0][0])
+            match = re.fullmatch(r"fulfill-intent:([0-9a-f]{32}):[0-9]+", key)
+            if match is None:
+                raise Invalid("unbound-confirmation")
+            intent = match[1]
+            row = self.store.db.execute(
+                "SELECT ask_id,digest,declaration,status FROM ask_fulfillment_intents WHERE intent_id=?",
+                (intent,),
+            ).fetchone()
+            if row is None:
+                raise Invalid("unbound-confirmation")
+            ask_id, intent_digest, declaration, status = row
             duplicate = self.duplicate(str(ask_id), str(intent_digest))
             if duplicate:
                 return duplicate
-            if status != "pending" or datetime.now(UTC) - datetime.fromisoformat(str(created)) >= timedelta(
-                hours=24
-            ):
+            state = self.notice_state(intent)[0]
+            if status != "pending" or state == "expired":
                 raise Invalid("stale-intent")
-            delivery = self.store.db.execute(
-                "SELECT text,status,message_id FROM outbox WHERE key LIKE ? ORDER BY seq",
-                (f"fulfill-intent:{intent}:%",),
-            ).fetchall()
-            original_notice = self.store.db.execute(
-                "SELECT notice FROM ask_fulfillment_intents WHERE intent_id=?", (intent,)
-            ).fetchone()[0]
-            if (
-                len(delivery) != int(parts)
-                or any(r[1] != "sent" or not r[2] for r in delivery)
-                or "".join(str(r[0]) for r in delivery) != original_notice
-            ):
+            if state != "delivered":
                 raise Invalid("incomplete-notice")
             declared = msgspec.json.decode(str(declaration), type=Declaration)
             self.validate(declared.binding, declared.evidence)

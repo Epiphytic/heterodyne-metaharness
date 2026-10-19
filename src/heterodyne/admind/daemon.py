@@ -348,6 +348,7 @@ class Admind:
         self.dispatching: str | None = None     # the prompt being pasted; it may return to `held`
         self.client = client
         self.store = store
+        store.fulfillment.notice_authority = self.fulfillment_notice_authority
         self.audit = audit
         self.agent = agent
         self.runner = runner
@@ -524,6 +525,16 @@ class Admind:
             self.operators = {}
             self.audit_quietly("guard", action="policy-unreadable")
             return False
+
+    def fulfillment_notice_authority(self) -> set[str] | None:
+        """Pure readback for notice diagnostics; no group RPC or guard-state mutation."""
+        try:
+            confirmed = self.confirmed_operators()
+            if confirmed is None:
+                return None
+            return confirmed & {o.hex for o in self.load_operators()}
+        except (OSError, ValueError):
+            return None
 
     def request_owners(self, mid: str | None) -> tuple[str, ...]:
         sender = None if mid is None else self.store.inbound_sender(mid)
@@ -738,6 +749,11 @@ class Admind:
                                    ("batches", self.batch_loop), ("autobump", self.autobump_loop),
                                    ("maintenance-retry", self.maintenance_retry_loop)):
                     tg.create_task(self.guarded(supervised(name, loop, self.audit)))
+                # Verification is independent of whether producers are enabled.
+                from heterodyne.admind.fulfillment_projection import worker
+                tg.create_task(self.guarded(supervised(
+                    "fulfillment-verification", lambda: worker(self.store), self.audit, base=30, cap=30
+                )))
                 tg.create_task(self.guarded(supervised("gateway-custody", self.custody_loop, self.audit)))
                 tg.create_task(self.guarded(self.reconcile_asks(snapshot)))
         except BaseException:
@@ -971,18 +987,43 @@ class Admind:
             if why:
                 return fulfillment.Reply("refused", why)
             lifecycle = self.store.fulfillment
+            if isinstance(req, fulfillment.Inspect):
+                return fulfillment.Reply("ok", "intent diagnostics", lifecycle.inspect())
             if isinstance(req, fulfillment.Get):
-                return fulfillment.Reply("ok", "lifecycle", lifecycle.view(req.ask_id))
+                with self.store.transaction(read_only=True):
+                    view = lifecycle.view(req.ask_id)
+                    if view["binding"] is None:
+                        return fulfillment.Reply("unavailable", "binding-unavailable", view)
+                    try:
+                        lifecycle.require_projection()
+                    except fulfillment.Invalid as exc:
+                        return fulfillment.Reply("unavailable", str(exc), view)
+                    pending = view["pending"]
+                    message = (
+                        "lifecycle"
+                        if pending is None
+                        else "notice-"
+                        + lifecycle.notice_state(str(cast(dict[str, object], pending)["intent_id"]))[0]
+                    )
+                    return fulfillment.Reply("ok", message, view)
             if isinstance(req, fulfillment.Apply):
-                return lifecycle.apply(req.receipt, uid=peer.uid if peer.uid is not None else -1,
-                                       pid=peer.pid)
+                return lifecycle.apply(
+                    req.receipt, uid=peer.uid if peer.uid is not None else -1, pid=peer.pid
+                )
             if isinstance(req, fulfillment.Propose):
-                return lifecycle.propose(req, uid=peer.uid if peer.uid is not None else -1,
-                                         chunk_chars=self.s.chunk_chars)
+                return lifecycle.propose(
+                    req, uid=peer.uid if peer.uid is not None else -1, chunk_chars=self.s.chunk_chars
+                )
             with self.store.transaction():
                 return lifecycle.retire(req.ask_id, req.expect_intent, req.reason)
         except fulfillment.Invalid as exc:
+            if isinstance(req, fulfillment.Get) and str(exc) != "missing":
+                return fulfillment.Reply("unavailable", "binding-unavailable")
             return fulfillment.Reply("refused", str(exc))
+        except (msgspec.DecodeError, UnicodeError, TypeError, ValueError):
+            if isinstance(req, fulfillment.Get):
+                return fulfillment.Reply("unavailable", "binding-unavailable")
+            raise
         except sqlite3.Error:
             return fulfillment.Reply("unavailable", "store unavailable")
 
@@ -1028,9 +1069,19 @@ class Admind:
     def post_ask(self, req: asks.AskPost, peer: ctl.Peer) -> asks.AskReply:
         """Under `ask_post_lock`: check the latch and the limits, then store a question or merge ask and
         queue its card in one transaction."""
+        if asks.management_check(req) is not None:
+            self.audit.write("ask", action="refused", ask_kind=req.kind, poster=req.poster,
+                             pid=peer.pid, reason="management-contract",
+                             presentation=req.presentation, render_version=req.render_version)
+            return asks.refused(asks.management.REFUSED)
         if self.latched():
             return asks.refused(ASK_LATCHED)
-        if len(self.store.capacity_asks()) >= asks.MAX_OPEN:
+        if fulfillment.ENABLED:
+            try:
+                self.store.fulfillment.require_projection()
+            except fulfillment.Invalid as exc:
+                return asks.refused(str(exc))
+        if self.store.capacity_count() >= asks.MAX_OPEN:
             return asks.refused(ASK_TOO_MANY)
         if self.store.ask_posted_since(asks.hour_ago()) >= asks.MAX_PER_HOUR:
             return asks.refused(ASK_TOO_OFTEN)
@@ -1038,24 +1089,51 @@ class Admind:
         question_form, choices = asks.stored_form(req)
         row = AskRow(asks.new_id(lambda i: self.store.ask(i) is not None), req.kind, req.poster, req.title,
                      req.body, req.pr_url, req.head_sha, req.bead, None, False, 0, "open", None, None, at, at,
-                     question_form=question_form, choices=choices, links=asks.stored_links(req.links))
+                     question_form=question_form, choices=choices, links=asks.stored_links(req.links),
+                     presentation=req.presentation, render_version=req.render_version,
+                     management=(None if req.management is None
+                                 else msgspec.json.encode(req.management).decode()))
         try:
             parts, truncated = asks.card_chunks(row, self.s.chunk_chars)
+        except asks.management.Refusal:
+            self.audit.write("ask", action="refused", ask_kind=row.kind, poster=row.poster,
+                             pid=peer.pid, reason="management-contract",
+                             presentation=row.presentation, render_version=row.render_version)
+            return asks.refused(asks.management.REFUSED)
         except chunk.TooWide:
             self.audit.write("ask", action="refused", ask_kind=row.kind, poster=row.poster, pid=peer.pid,
                              reason="link too long")
             return asks.refused(asks.ASK_LINK_TOO_LONG)
         row = dataclasses.replace(row, truncated=truncated, card_parts=len(parts))
-        with self.store.transaction():
-            self.store.insert_ask(row, peer.pid)
-            self.post_parts(f"ask:{row.ask_id}", parts, owner=None)
+        try:
+            with self.store.transaction():
+                self.store.insert_ask(row, peer.pid)
+                if asks.management.present(row):
+                    saved = self.store.ask(row.ask_id)
+                    expected = dataclasses.replace(row, last_activity_at=row.last_activity_at or at)
+                    if saved is None or saved != expected:
+                        raise asks.management.Refusal()
+                    asks.management.stored(saved)
+                    row = saved
+                self.post_parts(f"ask:{row.ask_id}", parts, owner=None)
+        except asks.management.Refusal:
+            self.audit.write("ask", action="refused", ask_kind=row.kind, poster=row.poster,
+                             pid=peer.pid, reason="management-readback",
+                             presentation=row.presentation, render_version=row.render_version)
+            return asks.refused(asks.management.REFUSED)
         self.audit.write("ask", action="posted", ask_id=row.ask_id, ask_kind=row.kind, poster=row.poster,
                          pid=peer.pid, parts=len(parts), truncated=truncated, title_chars=len(row.title),
                          body_chars=len(row.body), form=req.form, choices=len(req.choices),
-                         links=len(req.links))
+                         links=len(req.links),
+                         **({"presentation": row.presentation, "render_version": row.render_version}
+                            if asks.management.present(row) else {}))
         message = f"ask {row.ask_id} posted"
         if row.kind == "question" and req.form is None:     # the K14 grace window
             message += "\n" + asks.FORM_WARNING
+        if req.presentation is not None:
+            return asks.ManagementReply("posted", message, ask=self.ask_view(row),
+                                        presentation=row.presentation, render_version=row.render_version,
+                                        management=asks.management.stored(row))
         return asks.AskReply("posted", message, ask=self.ask_view(row))
 
     def post_notice(self, req: NoticePost, peer: ctl.Peer) -> asks.AskReply:
@@ -1105,7 +1183,7 @@ class Admind:
             return ASK_LATCHED
         if self.approve_bead is None:
             return ASK_NO_APPROVALS
-        if len(self.store.capacity_asks()) >= asks.MAX_OPEN:
+        if self.store.capacity_count() >= asks.MAX_OPEN:
             return ASK_TOO_MANY
         if self.store.ask_posted_since(asks.hour_ago()) >= asks.MAX_PER_HOUR:
             return ASK_TOO_OFTEN
@@ -1298,6 +1376,10 @@ class Admind:
 
     def answer_refusal(self, row: AskRow, text: str) -> str | None:
         """Why an answer is not stored (R15): fixed wording, or None."""
+        try:
+            asks.management.stored(row)
+        except asks.management.Refusal:
+            return asks.management.REFUSED
         if self.store.fulfillment.protected(row.ask_id):
             return "Already fulfilled; original answer retained."
         if row.status not in ("open", "answered"):
@@ -1357,12 +1439,20 @@ class Admind:
         skipped: list[tuple[str, str]] = []
         with self.store.transaction():
             for row in self.store.capacity_asks():
+                try:
+                    asks.management.stored(row)
+                except asks.management.Refusal:
+                    skipped.append((row.ask_id, "management card refused"))
+                    continue
                 if row.status != "open":
                     skipped.append((row.ask_id, row.status))
                     continue
                 if sub == "repeat":
                     try:
                         self.repeat_card(mid, row, at)
+                    except asks.management.Refusal:
+                        skipped.append((row.ask_id, "management card refused"))
+                        continue
                     except chunk.TooWide:      # nothing queued: a link is never cut (K23, r1 B3)
                         skipped.append((row.ask_id, "link too long"))
                         continue
@@ -1400,6 +1490,11 @@ class Admind:
         skipped: list[tuple[str, str]] = []
         for row in self.store.remindable_asks():
             if row.last_activity_at is None or datetime.fromisoformat(row.last_activity_at) > due:
+                continue
+            try:
+                asks.management.stored(row)
+            except asks.management.Refusal:
+                skipped.append((row.ask_id, "management card refused"))
                 continue
             if self.store.reminder_pending(row.ask_id):
                 skipped.append((row.ask_id, "pending delivery"))
@@ -1483,7 +1578,14 @@ class Admind:
             parts = asks.stored_details(row)
         else:
             try:
-                parts = asks.full_chunks(row, self.s.chunk_chars)
+                parts = asks.full_chunks(row, self.s.chunk_chars, details=True)
+            except asks.management.Refusal:
+                with self.store.transaction():
+                    self.touch(ask_id)
+                    self.finish(mid, "done", asks.management.REFUSED, "cmd")
+                self.audit.write("ask", action="details-refused", message_id=mid, ask_id=ask_id,
+                                 reason="management-contract")
+                return
             except chunk.TooWide as exc:   # a link is never cut (K23, r1 B3): refused, nothing queued
                 text = asks.DETAILS_LINK_TOO_LONG.format(ask_id=ask_id, n=exc.length, usable=exc.usable,
                                                          c=self.s.chunk_chars)
@@ -2744,18 +2846,19 @@ class Admind:
                 self.touch_card(target)
                 self.finish(mid, "dropped", CONTROL_REFUSED, "refused")
             return
-        if text.strip() == "!fulfill":
+        if fulfillment.ENABLED and text.strip() == "!fulfill":
             try:
-                if not fulfillment.ENABLED or not self.authorised(mid):
-                    self.finish(mid, "done", "Fulfillment unavailable under current authorization.", "cmd")
+                if not self.authorised(mid) or not self.store.inbound_sender(mid):
+                    with self.store.transaction():
+                        self.deny_rows(mid)
                     return
                 try:
                     with self.store.transaction():
                         result = self.store.fulfillment.confirm(
-                            target, principal=self.senders.get(mid, ""), message_id=mid)
+                            target, principal=self.store.inbound_sender(mid) or "", message_id=mid)
                         self.finish(mid, "done", result.message, "cmd")
                 except fulfillment.Invalid as exc:
-                    self.finish(mid, "done", "Fulfillment refused: " + str(exc), "cmd")
+                    self.finish(mid, "done", str(exc), "cmd")
                 return
             except sqlite3.Error as exc:
                 reason = "store unavailable"

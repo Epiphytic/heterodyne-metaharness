@@ -1,0 +1,67 @@
+{
+  "review_round": 10,
+  "scope": "source-only merge PoC; no critical flaws reported",
+  "findings": [
+    {
+      "number": 1,
+      "finding": "**Capacity fallback on a store that hasn't been migrated** (`fulfillment_projection.py:221`): this one matters before activation. If `fulfillment migrate --apply` hasn't been run, asks with valid receipts keep counting toward capacity. Once enough fulfilled asks pile up, every `post_ask` and approval post is refused with `ASK_TOO_MANY`. `fulfilled_asks()` also returns nothing.",
+      "status": "OPEN UNWAIVED",
+      "disposition": "Inherited main activation prerequisite. Explicit fulfillment migration and verified projection rollout remain required; this archival makes no migration or deployment claim."
+    },
+    {
+      "number": 2,
+      "finding": "**Receipt size mismatch** (`fulfillment.py:416`): stored receipts are accepted up to 128 KiB but parsed with a 64 KiB limit. Receipts between those sizes can't be viewed or re-applied, even though the background worker marks them valid.",
+      "status": "OPEN UNWAIVED",
+      "disposition": "Inherited main receipt-size inconsistency remains open; no repair or independent reproduction in this documentation-only task."
+    },
+    {
+      "number": 3,
+      "finding": "**Reconcile reports conflicts as `already-applied`** (`fulfillment_cli.py:167`): if an ask changed after its receipt was applied, the operator is told everything is fine when the receipt is actually in conflict.",
+      "status": "OPEN UNWAIVED",
+      "disposition": "Inherited main conflict-reporting defect remains open; already-applied output is not independent proof of settlement."
+    },
+    {
+      "number": 4,
+      "finding": "**`duplicate()` replies \"fulfilled\" for receipts marked invalid** (`fulfillment.py:553`): this happens after an ask is edited or a new answer is added, while the ask still counts toward capacity.",
+      "status": "OPEN UNWAIVED",
+      "disposition": "Inherited main duplicate response defect remains open; no capacity or authority exception is granted."
+    },
+    {
+      "number": 5,
+      "finding": "**`!details` refused on full-size management cards** (`management.py:155`): `!details` adds one line, so a card exactly at the size limit posts fine but `!details` on it is refused.",
+      "status": "OPEN UNWAIVED",
+      "disposition": "Inherited main full-size details refusal remains open; no rendering policy change made."
+    },
+    {
+      "number": 6,
+      "finding": "`ask list` can show an ask twice or drop it, because its two queries can see different verification states (`daemon.py:1046`).",
+      "status": "OPEN UNWAIVED",
+      "disposition": "Inherited main list snapshot race remains open."
+    },
+    {
+      "number": 7,
+      "finding": "Every post or list runs about 30 extra schema queries.",
+      "status": "OPEN UNWAIVED",
+      "disposition": "Inherited main schema-query overhead remains open; no performance claim or broad refactor."
+    },
+    {
+      "number": 8,
+      "finding": "On stores that haven't been migrated, the verification worker logs a warning every 30 seconds forever.",
+      "status": "OPEN UNWAIVED",
+      "disposition": "Inherited main unmigrated-worker warning behavior remains open; migration is a separate authorized rollout step."
+    },
+    {
+      "number": 9,
+      "finding": "The binding-digest code is duplicated, and only one copy caps answers at 50.",
+      "status": "OPEN UNWAIVED",
+      "disposition": "Inherited main duplicated binding digest and answer-bound inconsistency remain open; no authentication or binding equivalence claim."
+    },
+    {
+      "number": 10,
+      "finding": "`Lifecycle.refresh()` and `CAPACITY_ACTIVE_SQL` are now unused.",
+      "status": "OPEN UNWAIVED",
+      "disposition": "Inherited main unused lifecycle helpers remain open; no code removed."
+    }
+  ],
+  "prior_med9_findings": "All previous activation and quality holds remain; historical merge-pending observation is resolved by the separately recorded signed merge."
+}

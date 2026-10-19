@@ -1,0 +1,29 @@
+{
+  "task": "btq-x84mg",
+  "actual_invocation": 6,
+  "substantive_review": 5,
+  "aborted_invocations": [
+    3
+  ],
+  "effort": "medium",
+  "reviewer": "Claude Opus",
+  "author": "Codex",
+  "mode": "cross-model",
+  "review_phrase": "Are there any critical flaws with this, or is this good enough to implement as a PoC?",
+  "private_actual_result": {
+    "at": "2026-10-19T08:54:06.951433+00:00",
+    "exit": 0,
+    "head": "36cc7dd421ce7e32a8d314ec13ea0cc0e39d1d9a",
+    "source_unchanged": true,
+    "stream_sha256": "8dfe0b9099c64e9a44ccbd36cb0ce61bacc71bbc5315c898c7158ea82ab78d3d",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "events": 51,
+    "malformed_line_numbers": [],
+    "terminal_results": 1,
+    "terminal_success": true,
+    "log_sha256": "6f693ca6ec5c650b847391217ac92582c95416bbdd35f8c8212b6a881de93c52"
+  },
+  "public_report_sha256": "6f693ca6ec5c650b847391217ac92582c95416bbdd35f8c8212b6a881de93c52",
+  "normalization": "operator-home prefix only; private original retained; not native profile proof",
+  "conclusion": "no critical flaw in shutdown repair; offline PoC only; all reported findings OPEN UNWAIVED; full suite pending"
+}

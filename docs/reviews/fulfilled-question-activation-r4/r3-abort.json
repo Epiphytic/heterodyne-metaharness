@@ -1,0 +1,11 @@
+{
+  "at": "2026-10-19T06:10:15.772377+00:00",
+  "actual_ordinal": 3,
+  "requested_policy": "medium",
+  "actual_effort": "high",
+  "reason": "Controller runner generation retained predecessor argv effort high; terminated mistaken invocation; invocation and any output retained, no clearance claimed. Next actual ordinal4 uses medium.",
+  "parent": 849034,
+  "children": [
+    849041
+  ]
+}

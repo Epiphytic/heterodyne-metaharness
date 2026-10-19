@@ -1,0 +1,21 @@
+{
+  "rule": "Only the literal private operator-home prefix replaced with <operator-home>; exact original report/provenance retained externally. No findings or verdict changed.",
+  "files": {
+    "docs/reviews/pvbxr-main-custody-r12/actual-report.md": {
+      "original_sha256": "b2a4e79aee7406a58c894926ddc45c37769813f77e1aaddc24213b609a706209",
+      "published_sha256": "b2a4e79aee7406a58c894926ddc45c37769813f77e1aaddc24213b609a706209"
+    },
+    "docs/reviews/pvbxr-main-custody-r12/provenance.json": {
+      "original_sha256": "9c244d174353da15d98899ce9d28923ff46958588fa26a387ba11e4d65f10040",
+      "published_sha256": "3d8ea7cbf75f00bb03a1952e59c64422fb9fb67e1201a1d4ad5f32056946c811"
+    },
+    "docs/reviews/pvbxr-main-custody-r12/dispositions.md": {
+      "original_sha256": "77a77cb127fe3f45f4e0b41df95c1639f795221a5f153215f6bc7cdc1b31b4cf",
+      "published_sha256": "77a77cb127fe3f45f4e0b41df95c1639f795221a5f153215f6bc7cdc1b31b4cf"
+    },
+    "docs/reviews/pvbxr-main-custody-r12/dispositions.json": {
+      "original_sha256": "3fab0caa2b39bcdb7da3e5f944358de1ef9433bd3d8283824b1ce3c8fd393ef7",
+      "published_sha256": "3fab0caa2b39bcdb7da3e5f944358de1ef9433bd3d8283824b1ce3c8fd393ef7"
+    }
+  }
+}

@@ -1,0 +1,360 @@
+FFFFFFFFFFFFF                                                            [100%]
+=================================== FAILURES ===================================
+______ test_notification_failure_cannot_reclassify_committed_transaction _______
+
+tmp_path = PosixPath('/dev/shm/hzzcbucicy/test_notification_failure_cann0')
+
+    def test_notification_failure_cannot_reclassify_committed_transaction(tmp_path):
+        store = migrated(tmp_path)
+        try:
+            seed(store)
+            apply(store)
+            def failed():
+                raise RuntimeError("notification failed after commit")
+            store.fulfillment.verification_changed = failed
+>           with store.transaction():
+
+tests/test_admind_fulfillment_activation_r2.py:26: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/usr/lib/python3.12/contextlib.py:144: in __exit__
+    next(self.gen)
+src/heterodyne/admind/store.py:1334: in transaction
+    self.fulfillment.verification_changed()
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def failed():
+>       raise RuntimeError("notification failed after commit")
+E       RuntimeError: notification failed after commit
+
+tests/test_admind_fulfillment_activation_r2.py:24: RuntimeError
+_______ test_notifications_cannot_shorten_worker_minimum_delay[False-1] ________
+
+tmp_path = PosixPath('/dev/shm/hzzcbucicy/test_notifications_cannot_shor0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7b90e0b17fe0>
+failed = False, delay = 1
+
+    @pytest.mark.parametrize("failed,delay", [(False, 1), (True, 30)])
+    def test_notifications_cannot_shorten_worker_minimum_delay(tmp_path, monkeypatch, failed, delay):
+        store = migrated(tmp_path)
+        sleeps = []
+        try:
+            def verify(_store):
+                if failed:
+                    raise KeyError("malformed cursor")
+                return 1
+            async def sleep(seconds):
+                sleeps.append(seconds)
+                raise asyncio.CancelledError
+            async def wait_for(awaitable, timeout):
+                awaitable.close()
+                raise asyncio.CancelledError
+            monkeypatch.setattr(p, "verify_pass", verify)
+            monkeypatch.setattr(p.asyncio, "sleep", sleep)
+            monkeypatch.setattr(p.asyncio, "wait_for", wait_for)
+            async def exercise():
+                with pytest.raises(asyncio.CancelledError):
+                    await p.worker(store)
+            asyncio.run(exercise())
+>           assert sleeps == [delay]
+E           assert [] == [1]
+E             
+E             Right contains one more item: 1
+E             Use -v to get more diff
+
+tests/test_admind_fulfillment_activation_r2.py:57: AssertionError
+_______ test_notifications_cannot_shorten_worker_minimum_delay[True-30] ________
+
+tmp_path = PosixPath('/dev/shm/hzzcbucicy/test_notifications_cannot_shor1')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7b90e0af8230>
+failed = True, delay = 30
+
+    @pytest.mark.parametrize("failed,delay", [(False, 1), (True, 30)])
+    def test_notifications_cannot_shorten_worker_minimum_delay(tmp_path, monkeypatch, failed, delay):
+        store = migrated(tmp_path)
+        sleeps = []
+        try:
+            def verify(_store):
+                if failed:
+                    raise KeyError("malformed cursor")
+                return 1
+            async def sleep(seconds):
+                sleeps.append(seconds)
+                raise asyncio.CancelledError
+            async def wait_for(awaitable, timeout):
+                awaitable.close()
+                raise asyncio.CancelledError
+            monkeypatch.setattr(p, "verify_pass", verify)
+            monkeypatch.setattr(p.asyncio, "sleep", sleep)
+            monkeypatch.setattr(p.asyncio, "wait_for", wait_for)
+            async def exercise():
+                with pytest.raises(asyncio.CancelledError):
+                    await p.worker(store)
+>           asyncio.run(exercise())
+
+tests/test_admind_fulfillment_activation_r2.py:56: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/usr/lib/python3.12/asyncio/runners.py:194: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/asyncio/base_events.py:687: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests/test_admind_fulfillment_activation_r2.py:55: in exercise
+    await p.worker(store)
+src/heterodyne/admind/fulfillment_projection.py:435: in worker
+    count = await asyncio.shield(future)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/concurrent/futures/thread.py:58: in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+_store = <heterodyne.admind.store.Store object at 0x7b90e0af8350>
+
+    def verify(_store):
+        if failed:
+>           raise KeyError("malformed cursor")
+E           KeyError: 'malformed cursor'
+
+tests/test_admind_fulfillment_activation_r2.py:42: KeyError
+____________________ test_get_missing_remains_typed_refusal ____________________
+
+tmp_path = PosixPath('/dev/shm/hzzcbucicy/test_get_missing_remains_typed0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7b90e0b15100>
+
+    def test_get_missing_remains_typed_refusal(tmp_path, monkeypatch):
+        unit = Unit(tmp_path)
+        try:
+            monkeypatch.setattr(f, "ENABLED", True)
+            p.migrate(unit.store, apply=True)
+            reply = run(unit.daemon.on_fulfillment(f.Get("abcd"), ctl.Peer(123, os.getuid(), os.getgid())))
+>           assert (reply.result, reply.message) == ("refused", "missing")
+E           AssertionError: assert ('unavailable...-unavailable') == ('refused', 'missing')
+E             
+E             At index 0 diff: 'unavailable' != 'refused'
+E             Use -v to get more diff
+
+tests/test_admind_fulfillment_activation_r2.py:68: AssertionError
+___________ test_readable_receipt_precedes_unavailable_binding[True] ___________
+
+tmp_path = PosixPath('/dev/shm/hzzcbucicy/test_readable_receipt_precedes0')
+matching = True
+
+    @pytest.mark.parametrize("matching", [True, False])
+    def test_readable_receipt_precedes_unavailable_binding(tmp_path, matching):
+        store = migrated(tmp_path)
+        try:
+            seed(store)
+            receipt = completion(store)
+            apply(store, receipt)
+            view = store.fulfillment.view("abcd")
+            view["binding"] = None
+            if not matching:
+                receipt = msgspec.structs.replace(receipt, terminal_result_sha256="e" * 64)
+>           assert cli.plan(receipt, f.Reply("unavailable", "binding-unavailable", view)) == (
+                "already-applied" if matching else "conflict"
+            )
+E           AssertionError: assert 'unavailable' == 'already-applied'
+E             
+E             - already-applied
+E             + unavailable
+
+tests/test_admind_fulfillment_activation_r2.py:84: AssertionError
+__________ test_readable_receipt_precedes_unavailable_binding[False] ___________
+
+tmp_path = PosixPath('/dev/shm/hzzcbucicy/test_readable_receipt_precedes1')
+matching = False
+
+    @pytest.mark.parametrize("matching", [True, False])
+    def test_readable_receipt_precedes_unavailable_binding(tmp_path, matching):
+        store = migrated(tmp_path)
+        try:
+            seed(store)
+            receipt = completion(store)
+            apply(store, receipt)
+            view = store.fulfillment.view("abcd")
+            view["binding"] = None
+            if not matching:
+                receipt = msgspec.structs.replace(receipt, terminal_result_sha256="e" * 64)
+>           assert cli.plan(receipt, f.Reply("unavailable", "binding-unavailable", view)) == (
+                "already-applied" if matching else "conflict"
+            )
+E           AssertionError: assert 'unavailable' == 'conflict'
+E             
+E             - conflict
+E             + unavailable
+
+tests/test_admind_fulfillment_activation_r2.py:84: AssertionError
+____ test_replacement_requires_new_consumed_owner_before_retiring_old[None] ____
+
+tmp_path = PosixPath('/dev/shm/hzzcbucicy/test_replacement_requires_new_0')
+new_owner = None
+
+    @pytest.mark.parametrize("new_owner", [None, "b" * 64])
+    def test_replacement_requires_new_consumed_owner_before_retiring_old(tmp_path, new_owner):
+        store = migrated(tmp_path)
+        try:
+            seed(store)
+            first_mid = store.answers("abcd")[0].message_id
+            store.claim_inbound(first_mid, sender_key="a" * 64)
+            store.fulfillment.notice_authority = lambda: {"a" * 64}
+            first = store.fulfillment.propose(f.Propose("abcd", declaration(store)), uid=os.getuid(), chunk_chars=1800)
+            store.add_answer("abcd", "answer", "Other", "e" * 64, "B", "B")
+            if new_owner:
+                store.claim_inbound("e" * 64, sender_key=new_owner)
+            next_declaration = declaration(store)
+            next_declaration = msgspec.structs.replace(next_declaration, binding=msgspec.structs.replace(
+                next_declaration.binding, consumed_answers=["e" * 64]))
+            assert first.view is not None
+>           with pytest.raises(f.Invalid, match="notice-owner-unavailable"):
+E           AssertionError: Regex pattern did not match.
+E             Expected regex: 'notice-owner-unavailable'
+E             Actual message: 'stale-intent'
+
+tests/test_admind_fulfillment_activation_r2.py:107: AssertionError
+_ test_replacement_requires_new_consumed_owner_before_retiring_old[bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb] _
+
+tmp_path = PosixPath('/dev/shm/hzzcbucicy/test_replacement_requires_new_1')
+new_owner = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+
+    @pytest.mark.parametrize("new_owner", [None, "b" * 64])
+    def test_replacement_requires_new_consumed_owner_before_retiring_old(tmp_path, new_owner):
+        store = migrated(tmp_path)
+        try:
+            seed(store)
+            first_mid = store.answers("abcd")[0].message_id
+            store.claim_inbound(first_mid, sender_key="a" * 64)
+            store.fulfillment.notice_authority = lambda: {"a" * 64}
+            first = store.fulfillment.propose(f.Propose("abcd", declaration(store)), uid=os.getuid(), chunk_chars=1800)
+            store.add_answer("abcd", "answer", "Other", "e" * 64, "B", "B")
+            if new_owner:
+                store.claim_inbound("e" * 64, sender_key=new_owner)
+            next_declaration = declaration(store)
+            next_declaration = msgspec.structs.replace(next_declaration, binding=msgspec.structs.replace(
+                next_declaration.binding, consumed_answers=["e" * 64]))
+            assert first.view is not None
+>           with pytest.raises(f.Invalid, match="notice-owner-unavailable"):
+E           AssertionError: Regex pattern did not match.
+E             Expected regex: 'notice-owner-unavailable'
+E             Actual message: 'stale-intent'
+
+tests/test_admind_fulfillment_activation_r2.py:107: AssertionError
+_____________ test_get_notice_observation_joins_view_read_snapshot _____________
+
+tmp_path = PosixPath('/dev/shm/hzzcbucicy/test_get_notice_observation_jo0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7b90e0af45f0>
+
+    def test_get_notice_observation_joins_view_read_snapshot(tmp_path, monkeypatch):
+        unit = Unit(tmp_path)
+        try:
+            monkeypatch.setattr(f, "ENABLED", True)
+            p.migrate(unit.store, apply=True)
+            seed(unit.store)
+            unit.store.fulfillment.propose(f.Propose("abcd", declaration(unit.store)), uid=os.getuid(), chunk_chars=1800)
+            original = unit.store.fulfillment.notice_state
+            observations = []
+            def observed(intent, **kwargs):
+                observations.append(unit.store.db.in_transaction)
+                return original(intent, **kwargs)
+            monkeypatch.setattr(unit.store.fulfillment, "notice_state", observed)
+            reply = run(unit.daemon.on_fulfillment(f.Get("abcd"), ctl.Peer(123, os.getuid(), os.getgid())))
+            assert reply.result == "ok"
+>           assert observations == [True]
+E           assert [False] == [True]
+E             
+E             At index 0 diff: False != True
+E             Use -v to get more diff
+
+tests/test_admind_fulfillment_activation_r2.py:129: AssertionError
+__________ test_projection_damage_is_unavailable_without_losing_view ___________
+
+tmp_path = PosixPath('/dev/shm/hzzcbucicy/test_projection_damage_is_unav0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7b90e0af65d0>
+
+    def test_projection_damage_is_unavailable_without_losing_view(tmp_path, monkeypatch):
+        unit = Unit(tmp_path)
+        try:
+            monkeypatch.setattr(f, "ENABLED", True)
+            p.migrate(unit.store, apply=True)
+            seed(unit.store)
+            unit.store.db.execute("DROP TRIGGER fq2_asks_update")
+            reply = run(unit.daemon.on_fulfillment(f.Get("abcd"), ctl.Peer(123, os.getuid(), os.getgid())))
+>           assert (reply.result, reply.message) == ("unavailable", "fulfillment-projection-unavailable")
+E           AssertionError: assert ('ok', 'lifecycle') == ('unavailable...-unavailable')
+E             
+E             At index 0 diff: 'ok' != 'unavailable'
+E             Use -v to get more diff
+
+tests/test_admind_fulfillment_activation_r2.py:142: AssertionError
+___________ test_non_get_programming_failure_is_not_binding_refusal ____________
+
+tmp_path = PosixPath('/dev/shm/hzzcbucicy/test_non_get_programming_failu0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7b90e0af5700>
+
+    def test_non_get_programming_failure_is_not_binding_refusal(tmp_path, monkeypatch):
+        unit = Unit(tmp_path)
+        try:
+            monkeypatch.setattr(f, "ENABLED", True)
+            p.migrate(unit.store, apply=True)
+            seed(unit.store)
+            def failed(*args, **kwargs):
+                raise TypeError("programming failure")
+            monkeypatch.setattr(unit.store.fulfillment, "apply", failed)
+>           with pytest.raises(TypeError, match="programming failure"):
+E           Failed: DID NOT RAISE TypeError
+
+tests/test_admind_fulfillment_activation_r2.py:158: Failed
+_____ test_distinct_trigger_target_bumped_once[UPDATE asks SET body=body] ______
+
+tmp_path = PosixPath('/dev/shm/hzzcbucicy/test_distinct_trigger_target_b0')
+sql = 'UPDATE asks SET body=body'
+
+    @pytest.mark.parametrize("sql", ["UPDATE asks SET body=body", "UPDATE ask_answers SET text=text"])
+    def test_distinct_trigger_target_bumped_once(tmp_path, sql):
+        store = migrated(tmp_path)
+        try:
+            seed(store)
+            apply(store)
+            before = store.db.execute("SELECT generation FROM fulfillment_generations").fetchone()[0]
+            store.db.execute(sql)
+            after = store.db.execute("SELECT generation FROM fulfillment_generations").fetchone()[0]
+>           assert after == before + 1
+E           assert 2 == (0 + 1)
+
+tests/test_admind_fulfillment_activation_r2.py:173: AssertionError
+__ test_distinct_trigger_target_bumped_once[UPDATE ask_answers SET text=text] __
+
+tmp_path = PosixPath('/dev/shm/hzzcbucicy/test_distinct_trigger_target_b1')
+sql = 'UPDATE ask_answers SET text=text'
+
+    @pytest.mark.parametrize("sql", ["UPDATE asks SET body=body", "UPDATE ask_answers SET text=text"])
+    def test_distinct_trigger_target_bumped_once(tmp_path, sql):
+        store = migrated(tmp_path)
+        try:
+            seed(store)
+            apply(store)
+            before = store.db.execute("SELECT generation FROM fulfillment_generations").fetchone()[0]
+            store.db.execute(sql)
+            after = store.db.execute("SELECT generation FROM fulfillment_generations").fetchone()[0]
+>           assert after == before + 1
+E           assert 3 == (0 + 1)
+
+tests/test_admind_fulfillment_activation_r2.py:173: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_admind_fulfillment_activation_r2.py::test_notification_failure_cannot_reclassify_committed_transaction
+FAILED tests/test_admind_fulfillment_activation_r2.py::test_notifications_cannot_shorten_worker_minimum_delay[False-1]
+FAILED tests/test_admind_fulfillment_activation_r2.py::test_notifications_cannot_shorten_worker_minimum_delay[True-30]
+FAILED tests/test_admind_fulfillment_activation_r2.py::test_get_missing_remains_typed_refusal
+FAILED tests/test_admind_fulfillment_activation_r2.py::test_readable_receipt_precedes_unavailable_binding[True]
+FAILED tests/test_admind_fulfillment_activation_r2.py::test_readable_receipt_precedes_unavailable_binding[False]
+FAILED tests/test_admind_fulfillment_activation_r2.py::test_replacement_requires_new_consumed_owner_before_retiring_old[None]
+FAILED tests/test_admind_fulfillment_activation_r2.py::test_replacement_requires_new_consumed_owner_before_retiring_old[bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb]
+FAILED tests/test_admind_fulfillment_activation_r2.py::test_get_notice_observation_joins_view_read_snapshot
+FAILED tests/test_admind_fulfillment_activation_r2.py::test_projection_damage_is_unavailable_without_losing_view
+FAILED tests/test_admind_fulfillment_activation_r2.py::test_non_get_programming_failure_is_not_binding_refusal
+FAILED tests/test_admind_fulfillment_activation_r2.py::test_distinct_trigger_target_bumped_once[UPDATE asks SET body=body]
+FAILED tests/test_admind_fulfillment_activation_r2.py::test_distinct_trigger_target_bumped_once[UPDATE ask_answers SET text=text]
+13 failed in 0.79s

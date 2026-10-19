@@ -1,0 +1,48 @@
+{
+  "start": {
+    "at": "2026-10-19T07:32:07.359223+00:00",
+    "head": "0fb9d309020bbe96a24d80adadfdc124c8e23474",
+    "base": "b4b8c75da984126344716566300fb7cad19a35b5",
+    "cwd": "<operator-home>/.hermes/handoff/2026-10-15/codex/autonomous-resume/pvbxr-code-review-r6-medium-inputs",
+    "source_cwd": "<operator-home>/repos/heterodyne-metaharness-v2-btq-btq-pvbxr",
+    "argv": [
+      "<operator-home>/.nvm/versions/node/v22.22.0/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+      "-p",
+      "--model",
+      "opus",
+      "--effort",
+      "medium",
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--dangerously-skip-permissions",
+      "--disallowedTools",
+      "Agent,Task",
+      "--add-dir",
+      "<operator-home>/repos/heterodyne-metaharness-v2-btq-btq-pvbxr",
+      "--",
+      "/code-review Are there any critical flaws with this, or is this good enough to implement as a PoC? Use MEDIUM reasoning. Actual SIXTH review after two FULL HIGH and three MEDIUM, preserve all actual ordinals. Read-only full b4b8c75da984126344716566300fb7cad19a35b5..0fb9d309020bbe96a24d80adadfdc124c8e23474 in <operator-home>/repos/heterodyne-metaharness-v2-btq-btq-pvbxr. Approved design62e7ecf1433c601a36ad23b350da025b86a4c7dc genuinegvz0v. Actual R5 no-criticalofflinePoC but producer text spoofing liveHOLD. Since R5: only management.lines now renderer-owned Local facts unverified header + uniform | prefix each exact admitted local title/body line; official answer instructions outside/below. This structurally distinguishes all admitted producer text including prefixed fake legends/alternative delimiters/natural-language instructions rather than claiming word blacklist complete. Literal payload screening remains unchanged. Whole chunked card limits36lines3200chars include new framing. Details removes3 duplicate grammar lines already fully in main card; retains punctuation note. New21correctedregressionsRED predecessor and1detailsRED; candidate175focusedPASS. Initial too-short bodyfixture failures honestly retained. Sole prior test oracle changed from BODY substring to exact every original title/body line equality after removing only framing prefix; remaining257of258trackedtestfiles byteexact. Configured typing406files0error0warning; Ruff/format/diff/hooksPASS; quality3findings1churngate OPEN and prior wholechangequality/coverage unwaived. Read docs/reviews/pvbxr-r5-framing-repair.md plus actual all review history. Assess whether larger live-use text framing concern is resolved, separate actual missing queue/independentreader/completehistory/policybinding/deployment alwaysHOLD. No edits, tests/probes, nativeDB/queue/service/transport/model calls, delegation or activation; do not manufacture APPROVE token."
+    ],
+    "prompt": "/code-review Are there any critical flaws with this, or is this good enough to implement as a PoC? Use MEDIUM reasoning. Actual SIXTH review after two FULL HIGH and three MEDIUM, preserve all actual ordinals. Read-only full b4b8c75da984126344716566300fb7cad19a35b5..0fb9d309020bbe96a24d80adadfdc124c8e23474 in <operator-home>/repos/heterodyne-metaharness-v2-btq-btq-pvbxr. Approved design62e7ecf1433c601a36ad23b350da025b86a4c7dc genuinegvz0v. Actual R5 no-criticalofflinePoC but producer text spoofing liveHOLD. Since R5: only management.lines now renderer-owned Local facts unverified header + uniform | prefix each exact admitted local title/body line; official answer instructions outside/below. This structurally distinguishes all admitted producer text including prefixed fake legends/alternative delimiters/natural-language instructions rather than claiming word blacklist complete. Literal payload screening remains unchanged. Whole chunked card limits36lines3200chars include new framing. Details removes3 duplicate grammar lines already fully in main card; retains punctuation note. New21correctedregressionsRED predecessor and1detailsRED; candidate175focusedPASS. Initial too-short bodyfixture failures honestly retained. Sole prior test oracle changed from BODY substring to exact every original title/body line equality after removing only framing prefix; remaining257of258trackedtestfiles byteexact. Configured typing406files0error0warning; Ruff/format/diff/hooksPASS; quality3findings1churngate OPEN and prior wholechangequality/coverage unwaived. Read docs/reviews/pvbxr-r5-framing-repair.md plus actual all review history. Assess whether larger live-use text framing concern is resolved, separate actual missing queue/independentreader/completehistory/policybinding/deployment alwaysHOLD. No edits, tests/probes, nativeDB/queue/service/transport/model calls, delegation or activation; do not manufacture APPROVE token.",
+    "executable_sha256": "bc1aad9982c7b59c7d889ff92595d61cf46e0a6eae074cb551d932a989bcd222",
+    "capture_kind": "manual-foreign-observed-stream-not-reserved-profile-proof"
+  },
+  "result": {
+    "at": "2026-10-19T07:34:19.772400+00:00",
+    "exit": 0,
+    "head": "0fb9d309020bbe96a24d80adadfdc124c8e23474",
+    "source_unchanged": true,
+    "stream_sha256": "9111553a34ebd4833f9e028b400debdf6ffa592b06001cef3db06fd30b672f19",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "events": 39,
+    "malformed_line_numbers": [],
+    "terminal_results": 1,
+    "terminal_success": true,
+    "log_sha256": "dbd40dfd8f6d3dd4e4e6520eee67dcd38cbe5c22ce939d927d7dabd39ac393d3"
+  },
+  "publication": {
+    "normalization": "Only home prefix normalized to <operator-home>; exact raw report unchanged, original private start/result hashes retained.",
+    "original_start_sha256": "cfec3bec40a5ffc78e74c7f94513db082186b2d44573ebed893854c4b85ed116",
+    "original_result_sha256": "ee247ff74bfedd8b498dcdc122f01171c14d22d47f0d0f1631f77e58e218425c"
+  }
+}

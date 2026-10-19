@@ -1,0 +1,60 @@
+......FF.....                                                            [100%]
+=================================== FAILURES ===================================
+____ test_replacement_requires_new_consumed_owner_before_retiring_old[None] ____
+
+tmp_path = PosixPath('/dev/shm/hzby10c7wz/test_replacement_requires_new_0')
+new_owner = None
+
+    @pytest.mark.parametrize("new_owner", [None, "b" * 64])
+    def test_replacement_requires_new_consumed_owner_before_retiring_old(tmp_path, new_owner):
+        store = migrated(tmp_path)
+        try:
+            seed(store)
+            first_mid = store.answers("abcd")[0].message_id
+            store.claim_inbound(first_mid, sender_key="a" * 64)
+            store.fulfillment.notice_authority = lambda: {"a" * 64}
+            first = store.fulfillment.propose(f.Propose("abcd", declaration(store)), uid=os.getuid(), chunk_chars=1800)
+            store.add_answer("abcd", "answer", "Other", "e" * 64, "B", "B")
+            if new_owner:
+                store.claim_inbound("e" * 64, sender_key=new_owner)
+            next_declaration = declaration(store)
+            next_declaration = msgspec.structs.replace(next_declaration, binding=msgspec.structs.replace(
+                next_declaration.binding, consumed_answers=["e" * 64]))
+            assert first.view is not None
+>           with pytest.raises(f.Invalid, match="notice-owner-unavailable"):
+E           AssertionError: Regex pattern did not match.
+E             Expected regex: 'notice-owner-unavailable'
+E             Actual message: 'stale-intent'
+
+tests/test_admind_fulfillment_activation_r2.py:107: AssertionError
+_ test_replacement_requires_new_consumed_owner_before_retiring_old[bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb] _
+
+tmp_path = PosixPath('/dev/shm/hzby10c7wz/test_replacement_requires_new_1')
+new_owner = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+
+    @pytest.mark.parametrize("new_owner", [None, "b" * 64])
+    def test_replacement_requires_new_consumed_owner_before_retiring_old(tmp_path, new_owner):
+        store = migrated(tmp_path)
+        try:
+            seed(store)
+            first_mid = store.answers("abcd")[0].message_id
+            store.claim_inbound(first_mid, sender_key="a" * 64)
+            store.fulfillment.notice_authority = lambda: {"a" * 64}
+            first = store.fulfillment.propose(f.Propose("abcd", declaration(store)), uid=os.getuid(), chunk_chars=1800)
+            store.add_answer("abcd", "answer", "Other", "e" * 64, "B", "B")
+            if new_owner:
+                store.claim_inbound("e" * 64, sender_key=new_owner)
+            next_declaration = declaration(store)
+            next_declaration = msgspec.structs.replace(next_declaration, binding=msgspec.structs.replace(
+                next_declaration.binding, consumed_answers=["e" * 64]))
+            assert first.view is not None
+>           with pytest.raises(f.Invalid, match="notice-owner-unavailable"):
+E           AssertionError: Regex pattern did not match.
+E             Expected regex: 'notice-owner-unavailable'
+E             Actual message: 'stale-intent'
+
+tests/test_admind_fulfillment_activation_r2.py:107: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_admind_fulfillment_activation_r2.py::test_replacement_requires_new_consumed_owner_before_retiring_old[None]
+FAILED tests/test_admind_fulfillment_activation_r2.py::test_replacement_requires_new_consumed_owner_before_retiring_old[bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb]
+2 failed, 11 passed in 0.68s

@@ -1,0 +1,21 @@
+{
+  "rule": "Only the literal private operator-home prefix replaced with <operator-home>; exact original report/provenance retained externally. No findings or verdict changed.",
+  "files": {
+    "docs/reviews/x84mg-main-custody-r7/actual-report.md": {
+      "original_sha256": "09256c59f32793f29a53bc7158afa1e8c5741fc6250fb13578a7da10e87904e0",
+      "published_sha256": "b3320625de843b0f7709e066d0e5df31ead15f307783088816970a943995b775"
+    },
+    "docs/reviews/x84mg-main-custody-r7/provenance.json": {
+      "original_sha256": "7aef6e1519244bcd062b9637a6195c1e05ca64ed9a9b51b25b04774fd215583d",
+      "published_sha256": "a36f85a2c793c0c3f5fa816b526ec82d99ec6d2f4e4ad05a530a8b2367ddf437"
+    },
+    "docs/reviews/x84mg-main-custody-r7/dispositions.md": {
+      "original_sha256": "4333267a8a498b61128deed66225aec7eb44ee4e4246f24e8b158c558d91346a",
+      "published_sha256": "4333267a8a498b61128deed66225aec7eb44ee4e4246f24e8b158c558d91346a"
+    },
+    "docs/reviews/x84mg-main-custody-r7/dispositions.json": {
+      "original_sha256": "07cd3d502a19334ad011c2bec6f5e73a8c85fd817d887e3c6930babd4bbf5980",
+      "published_sha256": "07cd3d502a19334ad011c2bec6f5e73a8c85fd817d887e3c6930babd4bbf5980"
+    }
+  }
+}
