@@ -16,7 +16,7 @@ import http.client
 import json
 import os
 import re
-import select
+import selectors
 import shutil
 import signal
 import socket
@@ -416,18 +416,20 @@ class Fetcher:
     def _stream(self, src: int, out_fd: int, end: float) -> None:
         """`src` to its end into `out_fd`, refusing past `MAX_ARTIFACT` bytes (`TOO_LARGE`) or the
         deadline."""
-        written = 0
-        while True:
-            ready, _, _ = select.select([src], [], [], self._remaining(end))
-            if not ready:
-                raise FetchRefused(DEADLINE)
-            chunk = os.read(src, sc.CHUNK)
-            if not chunk:
-                return
-            written += len(chunk)
-            if written > MAX_ARTIFACT:
-                raise FetchRefused(TOO_LARGE)
-            _write_all(out_fd, chunk)
+        with selectors.DefaultSelector() as selector:
+            selector.register(src, selectors.EVENT_READ)
+            written = 0
+            while True:
+                ready = selector.select(self._remaining(end))
+                if not ready:
+                    raise FetchRefused(DEADLINE)
+                chunk = os.read(src, sc.CHUNK)
+                if not chunk:
+                    return
+                written += len(chunk)
+                if written > MAX_ARTIFACT:
+                    raise FetchRefused(TOO_LARGE)
+                _write_all(out_fd, chunk)
 
 
 def _tree_size(root: Path) -> int:

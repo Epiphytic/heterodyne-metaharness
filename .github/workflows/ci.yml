@@ -4,6 +4,7 @@ permissions:
   contents: read
 jobs:
   test:
+    timeout-minutes: 70
     strategy:
       fail-fast: false
       matrix:
@@ -14,6 +15,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
       # tmux-backed tests must run, not skip: HZ_REQUIRE_TMUX fails the session if tmux is missing.
       - if: runner.os == 'Linux'
@@ -23,7 +26,26 @@ jobs:
       - run: uv sync --locked
       - run: uv run ruff check
       - run: uv run pyright
-      - run: uv run pytest -q
+      - name: pytest with bounded shutdown diagnostics
+        shell: bash
+        run: |
+          diagnostics="$RUNNER_TEMP/pytest-shutdown-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          set +e
+          uv run python scripts/pytest_shutdown_probe.py --supervise "$diagnostics" -q
+          status=$?
+          set -e
+          for report in signal-ready.json sessionfinish-return.json pytest-main-return.json supervisor-result.json python-thread-stacks.log; do
+            echo "::group::pytest shutdown $report"
+            if [ -f "$diagnostics/$report" ]; then
+              if ! cat "$diagnostics/$report"; then
+                echo "Unable to read diagnostic: $report"
+              fi
+            else
+              echo "Not produced: $report"
+            fi
+            echo "::endgroup::"
+          done
+          exit "$status"
         env:
           HZ_REQUIRE_TMUX: "1"
       # Install-agnostic check (ADR 0001 §15). No host-local leakcheck.txt exists on CI runners.
