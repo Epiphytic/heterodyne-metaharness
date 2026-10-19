@@ -9,7 +9,7 @@ from typing import Literal
 
 import msgspec
 
-from heterodyne.admind import chunk, links
+from heterodyne.admind import chunk, links, verbs
 from heterodyne.admind.redact import redact
 from heterodyne.admind.store import AskRow
 
@@ -25,6 +25,11 @@ _RESERVED = re.compile(
     r"(?:Option\s+)?[A-Z]\s*(?:=|/)|Ask\s|Reply\s|Only a verified management binding|"
     r"deny\s*/|Any other reply or contrary answer|Accepted approval words:|"
     r"Denial words:|Positive reactions:|Queue verifies complete history;))"
+)
+_ANSWER_LEGEND = re.compile(
+    r"(?im:^\s*(?:"
+    + "|".join(sorted(verbs.APPROVE_WORDS | verbs.DENY_WORDS | verbs.DENY_ALONE))
+    + r")\b[^\n]*(?:=|/|:))"
 )
 _URL = re.compile(r"(?i:(?:[a-z][a-z0-9+.-]*://|www\.|(?:https?|ftp|mailto|tel|data|javascript):))")
 REFUSED = "task-management-consent-v1 management card refused: unsafe, invalid or over budget"
@@ -53,6 +58,7 @@ def literal(text: str, *, multiline: bool = False) -> bool:
     return (
         not _MARKDOWN.search(text)
         and not _RESERVED.search(text)
+        and not _ANSWER_LEGEND.search(text)
         and not _URL.search(text)
         and all((c == "\n" and multiline) or " " <= c <= "~" for c in text)
         and redact(text) == text
