@@ -150,9 +150,19 @@ def _ask_request(s: AdmindSettings, req: asks.AskRequest, timeout: float = ASK_R
     ctl.CtlUnavailable). The reply limit matches the daemon's (R24)."""
     async def bounded() -> asks.AskReply:
         try:
-            reply = ctl.request(s.state_dir / asks.ASK_SOCKET, req, timeout, reply_type=asks.AskReply,
-                                max_reply=asks.MAX_REPLY)
-            return await asyncio.wait_for(reply, timeout)
+            new_post = isinstance(req, asks.AskPost) and req.presentation is not None
+            reply_type = asks.ManagementReply if new_post else asks.AskReply
+            pending = ctl.request(s.state_dir / asks.ASK_SOCKET, req, timeout, reply_type=reply_type,
+                                  max_reply=asks.MAX_REPLY)
+            reply = await asyncio.wait_for(pending, timeout)
+            if (new_post and isinstance(req, asks.AskPost) and reply.result == "posted"
+                    and (not isinstance(reply, asks.ManagementReply)
+                         or reply.presentation != req.presentation
+                         or reply.render_version != req.render_version
+                         or reply.management != req.management or reply.ask is None
+                         or reply.ask.summary.kind != "question")):
+                raise ctl.CtlInvalidReply("management presentation not acknowledged")
+            return reply
         except TimeoutError:
             raise ctl.CtlUnavailable("TimeoutError") from None
     return asyncio.run(bounded())
@@ -224,8 +234,15 @@ def _ask_post(args: argparse.Namespace) -> asks.AskPost | None:
     if specs is None:
         return None
     form = "yes-no" if args.yes_no else "choices" if args.choice else None
+    metadata = None
+    if any((args.request_id, args.descriptor_sha256, args.audit_url)):
+        metadata = asks.management.Metadata(args.request_id or "", args.descriptor_sha256 or "",
+                                            args.audit_url or "")
     return asks.AskPost(args.kind, args.title, body, args.pr, args.head, args.bead, args.poster, form=form,
-                        choices=args.choice or [], recommended=args.recommended, links=specs)
+                        choices=args.choice or [], recommended=args.recommended, links=specs,
+                        presentation=args.presentation, render_version=args.render_version,
+                        management=metadata)
+
 
 
 def notice_command(s: AdmindSettings, args: argparse.Namespace) -> int:
@@ -262,7 +279,7 @@ def ask_command(s: AdmindSettings, args: argparse.Namespace) -> int:
     if args.ask_command == "fulfillment":
         return fulfillment_cli.command(s, args)
     if args.ask_command == "binding":
-        return ask_binding_command(s, args.ask_id)
+        return ask_binding_command(s, args.ask_id, version=args.version)
     req: asks.AskRequest
     if args.ask_command == "post":
         post = _ask_post(args)
@@ -305,7 +322,7 @@ def ask_command(s: AdmindSettings, args: argparse.Namespace) -> int:
     return 0 if reply.result in ("posted", "ok") else 1
 
 
-def ask_binding_command(s: AdmindSettings, ask_id: str) -> int:
+def ask_binding_command(s: AdmindSettings, ask_id: str, *, version: int = 1) -> int:
     """Only the daemon reads native state. The client cannot supply policy, files or answer evidence."""
     req = asks.AskBinding(ask_id)
     why = asks.check(req)
@@ -313,10 +330,15 @@ def ask_binding_command(s: AdmindSettings, ask_id: str) -> int:
         print(msgspec.json.encode(binding.AskBindingReply(
             "refused", "ask.binding.v1 unavailable", code="invalid-state")).decode())
         return 1
-    async def request() -> binding.AskBindingReply:
-        peer = await asyncio.wait_for(ctl.request(s.state_dir / asks.ASK_SOCKET, req, ASK_READ_SECONDS,
-                                                  reply_type=binding.AskBindingReply,
-                                                  max_reply=asks.MAX_REPLY), ASK_READ_SECONDS)
+    async def request() -> binding.AskBindingReply | binding.AskBindingReplyV2:
+        reply_type = binding.WireBindingReply if version == 2 else binding.AskBindingReply
+        raw = await asyncio.wait_for(ctl.request(s.state_dir / asks.ASK_SOCKET, req, ASK_READ_SECONDS,
+                                                 reply_type=reply_type, max_reply=asks.MAX_REPLY),
+                                     ASK_READ_SECONDS)
+        try:
+            peer = binding.decode_reply(raw)
+        except (ValueError, TypeError):
+            raise ctl.CtlInvalidReply("invalid binding envelope") from None
         if peer.code in ("transport-unavailable", "response-timeout", "invalid-reply"):
             raise ctl.CtlInvalidReply("client-only refusal from peer")
         return peer
@@ -549,6 +571,11 @@ def _ask_parser(ask: argparse.ArgumentParser) -> None:
                       help="question: the recommended option's letter, or yes/no (default yes)")
     _link_arguments(post)
     post.add_argument("--from", dest="poster", default="local", help="a label for the card (unverified)")
+    post.add_argument("--presentation", choices=[asks.management.TAG])
+    post.add_argument("--render-version", type=int)
+    post.add_argument("--request-id")
+    post.add_argument("--descriptor-sha256")
+    post.add_argument("--audit-url")
     post.add_argument("--json", action="store_true")
     for name, what in (("get", "an ask's status and answers"), ("cancel", "cancel an open or answered ask"),
                        ("wait", "wait for an answer or note, or for the ask to end; for an approval ask "
@@ -561,6 +588,7 @@ def _ask_parser(ask: argparse.ArgumentParser) -> None:
             one.add_argument("--timeout", type=float, default=WAIT_TIMEOUT)
     bound = sub.add_parser("binding", help="read complete source-owned ask.binding.v1 evidence")
     bound.add_argument("ask_id")
+    bound.add_argument("--version", type=int, choices=[1, 2], default=1)
     bound.add_argument("--json", action="store_true", required=True)
     sub.add_parser("list", help="active asks and the 20 most recent others").add_argument(
         "--json", action="store_true")

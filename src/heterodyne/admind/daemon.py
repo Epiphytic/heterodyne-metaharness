@@ -952,6 +952,8 @@ class Admind:
     def post_ask(self, req: asks.AskPost, peer: ctl.Peer) -> asks.AskReply:
         """Under `ask_post_lock`: check the latch and the limits, then store a question or merge ask and
         queue its card in one transaction."""
+        if asks.management_check(req) is not None:
+            return asks.refused("invalid task-management-consent-v1 presentation contract")
         if self.latched():
             return asks.refused(ASK_LATCHED)
         if len(self.store.capacity_asks()) >= asks.MAX_OPEN:
@@ -962,9 +964,14 @@ class Admind:
         question_form, choices = asks.stored_form(req)
         row = AskRow(asks.new_id(lambda i: self.store.ask(i) is not None), req.kind, req.poster, req.title,
                      req.body, req.pr_url, req.head_sha, req.bead, None, False, 0, "open", None, None, at, at,
-                     question_form=question_form, choices=choices, links=asks.stored_links(req.links))
+                     question_form=question_form, choices=choices, links=asks.stored_links(req.links),
+                     presentation=req.presentation, render_version=req.render_version,
+                     management=(None if req.management is None
+                                 else msgspec.json.encode(req.management).decode()))
         try:
             parts, truncated = asks.card_chunks(row, self.s.chunk_chars)
+        except asks.management.Refusal:
+            return asks.refused("task-management-consent-v1 card refused: unsafe or over budget")
         except chunk.TooWide:
             self.audit.write("ask", action="refused", ask_kind=row.kind, poster=row.poster, pid=peer.pid,
                              reason="link too long")
@@ -980,6 +987,10 @@ class Admind:
         message = f"ask {row.ask_id} posted"
         if row.kind == "question" and req.form is None:     # the K14 grace window
             message += "\n" + asks.FORM_WARNING
+        if req.presentation is not None:
+            return asks.ManagementReply("posted", message, ask=self.ask_view(row),
+                                        presentation=req.presentation, render_version=req.render_version,
+                                        management=req.management)
         return asks.AskReply("posted", message, ask=self.ask_view(row))
 
     def post_notice(self, req: NoticePost, peer: ctl.Peer) -> asks.AskReply:
@@ -1407,7 +1418,7 @@ class Admind:
             parts = asks.stored_details(row)
         else:
             try:
-                parts = asks.full_chunks(row, self.s.chunk_chars)
+                parts = asks.full_chunks(row, self.s.chunk_chars, details=True)
             except chunk.TooWide as exc:   # a link is never cut (K23, r1 B3): refused, nothing queued
                 text = asks.DETAILS_LINK_TOO_LONG.format(ask_id=ask_id, n=exc.length, usable=exc.usable,
                                                          c=self.s.chunk_chars)

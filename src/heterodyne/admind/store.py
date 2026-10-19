@@ -260,6 +260,9 @@ class AskRow:
     question_form: str | None = None        # cxmkf K13
     choices: str | None = None
     links: str | None = None
+    presentation: str | None = None
+    render_version: int | None = None
+    management: str | None = None
 
 
 @dataclass(frozen=True)
@@ -289,11 +292,16 @@ _ASK = ("ask_id, kind, poster, title, body, pr_url, head_sha, bead, digest, trun
         "choices, links")   # fixed, as _TURN
 
 
+_ASK_READ = _ASK + ", presentation, render_version, management"
+
 def _ask(r: tuple[object, ...]) -> AskRow:
+    if r[22] is not None and type(r[22]) is not int:
+        raise ValueError("invalid render version")
     return AskRow(str(r[0]), str(r[1]), str(r[2]), str(r[3]), str(r[4]), _opt_str(r[5]), _opt_str(r[6]),
                   _opt_str(r[7]), _opt_str(r[8]), bool(r[9]), int(cast(int, r[10])), str(r[11]),
                   _opt_str(r[12]), _opt_str(r[13]), str(r[14]), str(r[15]), _opt_str(r[16]), _opt_str(r[17]),
-                  _opt_str(r[18]), _opt_str(r[19]), _opt_str(r[20]))
+                  _opt_str(r[18]), _opt_str(r[19]), _opt_str(r[20]), _opt_str(r[21]),
+                  r[22], _opt_str(r[23]))
 
 
 _OUTBOX = ("seq, key, reply_to, text, attempts, lane, thread_key, ownership_kind, "
@@ -394,6 +402,7 @@ class Store:
                 if column not in {str(r[1]) for r in self.db.execute(f"PRAGMA table_info({table})")}:
                     self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
         try:
+            self._migrate_management()
             self.migrate_guard()
         except BaseException:
             self.db.close()
@@ -415,6 +424,15 @@ class Store:
         except BaseException:
             self.db.close()
             raise
+
+    def _migrate_management(self) -> None:
+        """Nullable presentation metadata: all-or-none, never backfill historical rows."""
+        with self.transaction():
+            present = {str(r[1]) for r in self.db.execute("PRAGMA table_info(asks)")}
+            for column, sql_type in (("presentation", "TEXT"), ("render_version", "INTEGER"),
+                                     ("management", "TEXT")):
+                if column not in present:
+                    self.db.execute(f"ALTER TABLE asks ADD COLUMN {column} {sql_type}")
 
     def migrate_guard(self) -> None:
         from heterodyne.admind.guard_state import migrate
@@ -450,13 +468,15 @@ class Store:
                           "coalesce(length(CAST(choices AS BLOB)),0) + "
                           "coalesce(length(CAST(links AS BLOB)),0) + "
                           "coalesce(length(CAST(outcome AS BLOB)),0) + "
+                          "coalesce(length(CAST(presentation AS BLOB)),0) + "
+                          "coalesce(length(CAST(management AS BLOB)),0) + "
                           "coalesce(length(decided_by),0) + coalesce(length(attempt),0) FROM asks "
                           "WHERE ask_id = ?", (ask_id,)).fetchone()
         if size is None:
             return None
         if size[0] > max_bytes:
             raise OverflowError("ask snapshot budget")
-        raw = db.execute(f"SELECT {_ASK}, attempt FROM asks WHERE ask_id = ?",  # noqa: S608
+        raw = db.execute(f"SELECT {_ASK_READ}, attempt FROM asks WHERE ask_id = ?",  # noqa: S608
                          (ask_id,)).fetchone()
         return _ask(raw[:-1]), raw[-1]
 
@@ -854,13 +874,20 @@ class Store:
     # --- asks (relay spec §5) ------------------------------------------------------------------
     @_locked
     def insert_ask(self, row: AskRow, peer_pid: int | None) -> None:
-        self.db.execute(f"INSERT INTO asks({_ASK}, peer_pid) "  # noqa: S608 - a fixed column list
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (row.ask_id, row.kind, row.poster, row.title, row.body, row.pr_url, row.head_sha,
-                         row.bead, row.digest, int(row.truncated), row.card_parts, row.status, row.outcome,
-                         row.decided_by, row.created_at, row.updated_at, row.refreshed_from,
-                         row.last_activity_at or row.created_at, row.question_form, row.choices, row.links,
-                         peer_pid))
+        with self.transaction():
+            self.db.execute(f"INSERT INTO asks({_ASK}, peer_pid) "  # noqa: S608 - a fixed column list
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (row.ask_id, row.kind, row.poster, row.title, row.body, row.pr_url, row.head_sha,
+                             row.bead, row.digest, int(row.truncated), row.card_parts,
+                             row.status, row.outcome,
+                             row.decided_by, row.created_at, row.updated_at, row.refreshed_from,
+                             row.last_activity_at or row.created_at, row.question_form,
+                             row.choices, row.links,
+                             peer_pid))
+            if any(v is not None for v in (row.presentation, row.render_version, row.management)):
+                self.db.execute("UPDATE asks SET presentation=?, render_version=?, management=? "
+                                "WHERE ask_id=?",
+                                (row.presentation, row.render_version, row.management, row.ask_id))
 
     @_locked
     def touch_ask(self, ask_id: str, at: str) -> None:
@@ -870,40 +897,40 @@ class Store:
 
     @_locked
     def ask(self, ask_id: str) -> AskRow | None:
-        r = self.db.execute(f"SELECT {_ASK} FROM asks WHERE ask_id = ?", (ask_id,)).fetchone()  # noqa: S608
+        r = self.db.execute(f"SELECT {_ASK_READ} FROM asks WHERE ask_id = ?", (ask_id,)).fetchone()  # noqa: S608
         return None if r is None else _ask(r)
 
     @_locked
     def asks_with_status(self, *statuses: str) -> list[AskRow]:
         marks = ", ".join("?" * len(statuses))
-        rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE status IN ({marks}) "  # noqa: S608
+        rows = self.db.execute(f"SELECT {_ASK_READ} FROM asks WHERE status IN ({marks}) "  # noqa: S608
                                "ORDER BY created_at, rowid", statuses).fetchall()
         return [_ask(r) for r in rows]
 
     @_locked
     def approval_lineage(self, bead: str, limit: int) -> list[AskRow]:
         """Bounded approval history in insertion order, excluding unrelated question/merge asks."""
-        rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE bead=? AND kind='approval' "  # noqa: S608
+        rows = self.db.execute(f"SELECT {_ASK_READ} FROM asks WHERE bead=? AND kind='approval' "  # noqa: S608
                                "ORDER BY rowid LIMIT ?", (bead, limit)).fetchall()
         return [_ask(r) for r in rows]
 
     @_locked
     def capacity_asks(self) -> list[AskRow]:
         """Separate capacity projection; raw status selectors retain their original meaning."""
-        rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE {CAPACITY_ACTIVE_SQL} "  # noqa: S608
+        rows = self.db.execute(f"SELECT {_ASK_READ} FROM asks WHERE {CAPACITY_ACTIVE_SQL} "  # noqa: S608
                                "ORDER BY created_at,rowid").fetchall()
         return [_ask(r) for r in rows]
 
     @_locked
     def fulfilled_asks(self, limit: int = 20) -> list[AskRow]:
-        rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE EXISTS "  # noqa: S608
+        rows = self.db.execute(f"SELECT {_ASK_READ} FROM asks WHERE EXISTS "  # noqa: S608
             "(SELECT 1 FROM ask_fulfillments f WHERE f.ask_id=asks.ask_id AND f.valid=1) "
             "ORDER BY created_at DESC,rowid DESC LIMIT ?", (limit,)).fetchall()
         return [_ask(r) for r in rows]
 
     @_locked
     def remindable_asks(self) -> list[AskRow]:
-        rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE status='open' AND NOT EXISTS "  # noqa: S608
+        rows = self.db.execute(f"SELECT {_ASK_READ} FROM asks WHERE status='open' AND NOT EXISTS "  # noqa: S608
             "(SELECT 1 FROM ask_fulfillments f WHERE f.ask_id=asks.ask_id) "
             "ORDER BY created_at,rowid").fetchall()
         return [_ask(r) for r in rows]
@@ -915,7 +942,7 @@ class Store:
 
     @_locked
     def inactive_asks(self, limit: int = 20) -> list[AskRow]:
-        rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE NOT ({CAPACITY_ACTIVE_SQL}) "  # noqa: S608
+        rows = self.db.execute(f"SELECT {_ASK_READ} FROM asks WHERE NOT ({CAPACITY_ACTIVE_SQL}) "  # noqa: S608
                                "ORDER BY created_at DESC,rowid DESC LIMIT ?", (limit,)).fetchall()
         return [_ask(r) for r in rows]
 
@@ -923,7 +950,7 @@ class Store:
     def recent_asks(self, limit: int) -> list[AskRow]:
         """The `limit` newest asks that are no longer active (R24)."""
         marks = ", ".join("?" * len(ASK_ACTIVE))
-        rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE status NOT IN ({marks}) "  # noqa: S608
+        rows = self.db.execute(f"SELECT {_ASK_READ} FROM asks WHERE status NOT IN ({marks}) "  # noqa: S608
                                "ORDER BY created_at DESC, rowid DESC LIMIT ?",
                                (*ASK_ACTIVE, limit)).fetchall()
         return [_ask(r) for r in rows]
@@ -1080,14 +1107,14 @@ class Store:
     def ask_for_bead(self, bead: str, *statuses: str) -> AskRow | None:
         """The newest ask for `bead` in one of `statuses`."""
         marks = ", ".join("?" * len(statuses))
-        r = self.db.execute(f"SELECT {_ASK} FROM asks WHERE bead = ? AND status IN ({marks}) "  # noqa: S608
+        r = self.db.execute(f"SELECT {_ASK_READ} FROM asks WHERE bead = ? AND status IN ({marks}) "  # noqa: S608
                             "ORDER BY created_at DESC, rowid DESC LIMIT 1", (bead, *statuses)).fetchone()
         return None if r is None else _ask(r)
 
     @_locked
     def newer_ask(self, ask_id: str) -> AskRow | None:
         """The newest ask for the same bead posted after `ask_id`, in any status (R31)."""
-        r = self.db.execute(f"SELECT {_ASK} FROM asks WHERE bead = (SELECT bead FROM asks "  # noqa: S608
+        r = self.db.execute(f"SELECT {_ASK_READ} FROM asks WHERE bead = (SELECT bead FROM asks "  # noqa: S608
                             "WHERE ask_id = ?) AND rowid > (SELECT rowid FROM asks WHERE ask_id = ?) "
                             "ORDER BY rowid DESC LIMIT 1", (ask_id, ask_id)).fetchone()
         return None if r is None else _ask(r)
