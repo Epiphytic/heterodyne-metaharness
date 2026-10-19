@@ -3,6 +3,9 @@
 import argparse
 import asyncio
 import json
+import os
+import sqlite3
+import stat
 import sys
 from pathlib import Path
 from typing import cast
@@ -16,10 +19,16 @@ from heterodyne.admind.settings import AdmindSettings
 
 def parser(parent: argparse.ArgumentParser) -> None:
     sub = parent.add_subparsers(dest="fulfillment_command", required=True)
-    for name in ("apply", "propose", "dispose", "get", "reconcile"):
+    for name in ("apply", "propose", "dispose", "get", "reconcile", "inspect", "migrate"):
         cmd = sub.add_parser(name)
         cmd.add_argument("--json", action="store_true")
-        if name == "apply":
+        if name == "inspect":
+            continue
+        if name == "migrate":
+            mode = cmd.add_mutually_exclusive_group(required=True)
+            mode.add_argument("--plan", action="store_true")
+            mode.add_argument("--apply", action="store_true")
+        elif name == "apply":
             cmd.add_argument("--receipt", required=True, type=Path)
         elif name == "propose":
             cmd.add_argument("--ask", required=True)
@@ -54,11 +63,16 @@ def send(settings: AdmindSettings, req: f.Request) -> f.Reply:
 def command(settings: AdmindSettings, args: argparse.Namespace) -> int:
     try:
         name = args.fulfillment_command
+        if name == "migrate":
+            print(json.dumps(migration(settings, apply=args.apply)))
+            return 0
         if name == "reconcile":
             result = reconcile(settings, args)
             print(json.dumps(result, ensure_ascii=False))
             return 0
-        if name == "apply":
+        if name == "inspect":
+            req = f.Inspect()
+        elif name == "apply":
             req = f.Apply(f.parse(f.read_file(args.receipt), f.Completion))
         elif name == "propose":
             req = f.Propose(
@@ -95,7 +109,7 @@ def reconcile(settings: AdmindSettings, args: argparse.Namespace) -> dict[str, o
         receipts = msgspec.convert(raw, type=list[f.Completion], strict=True)
     except (ValueError, RecursionError, msgspec.ValidationError):
         raise f.Invalid("manifest") from None
-    if len(receipts) > 20 or len({r.binding.ask_id for r in receipts}) != len(receipts):
+    if not 1 <= len(receipts) <= 20 or len({r.binding.ask_id for r in receipts}) != len(receipts):
         raise f.Invalid("manifest-bounds")
     manifest_digest = f.digest("manifest", raw)
     offset = 0
@@ -128,7 +142,7 @@ def reconcile(settings: AdmindSettings, args: argparse.Namespace) -> dict[str, o
             if outcome == "unavailable":
                 break
             offset += 1
-        except ctl.CtlUnavailable:
+        except (ctl.CtlUnavailable, f.Invalid, msgspec.DecodeError, KeyError, TypeError, ValueError):
             results.append({"ask_id": ask_id, "outcome": "unavailable"})
             break
     return {
@@ -152,8 +166,6 @@ def plan(receipt: f.Completion, reply: f.Reply) -> str:
     if reply.result != "ok" or reply.view is None:
         return refusal_outcome(reply)
     view = reply.view
-    if view["lifecycle"] == "conflict":
-        return "conflict"
     stored = view.get("receipt")
     if stored is not None:
         return (
@@ -162,6 +174,8 @@ def plan(receipt: f.Completion, reply: f.Reply) -> str:
             == f.digest("application", f.builtins(receipt))
             else "conflict"
         )
+    if view["lifecycle"] == "conflict":
+        return "conflict"
     actual = cast(dict[str, object], view["binding"])
     expected = receipt.binding
     if any(
@@ -176,3 +190,24 @@ def plan(receipt: f.Completion, reply: f.Reply) -> str:
         if set(expected.consumed_answers) <= set(msgspec.convert(actual["answer_ids"], type=list[str]))
         else "incomplete"
     )
+
+
+def migration(settings: AdmindSettings, *, apply: bool) -> dict[str, object]:
+    """Explicit local deployment step, never invoked by a daemon/constructor.
+
+    The controller must first quiesce writers and retain its genuine deployment/backup receipts.
+    The CLI records schema hashes, not a fabricated claim to have verified human authority.
+    """
+    from heterodyne.admind.fulfillment_projection import migrate_connection
+
+    path = settings.state_dir / "admind.db"
+    info = path.stat(follow_symlinks=False)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+        raise f.Invalid("unsafe-store")
+    db = sqlite3.connect(
+        path.as_uri() + ("?mode=rw" if apply else "?mode=ro"), uri=True, isolation_level=None, timeout=1.0
+    )
+    try:
+        return migrate_connection(db, apply=apply)
+    finally:
+        db.close()

@@ -365,6 +365,7 @@ class Store:
         self.path = path.absolute()
         self.file_identity = (opened.st_dev, opened.st_ino)
         self.lock = threading.RLock()
+        self._read_only = False
         self._depth = 0         # open transaction() nesting, guarded by self.lock
         # check_same_thread=False: calls are serialized by self.lock (see _locked), not by thread.
         self.db = sqlite3.connect(path, isolation_level=None, timeout=5.0, check_same_thread=False)
@@ -890,16 +891,19 @@ class Store:
     @_locked
     def capacity_asks(self) -> list[AskRow]:
         """Separate capacity projection; raw status selectors retain their original meaning."""
-        rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE {CAPACITY_ACTIVE_SQL} "  # noqa: S608
-                               "ORDER BY created_at,rowid").fetchall()
-        return [_ask(r) for r in rows]
+        with self.transaction(read_only=True):
+            rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE {self.fulfillment.capacity_predicate()} "  # noqa: S608
+                                   "ORDER BY created_at,rowid").fetchall()
+            return [_ask(r) for r in rows]
 
     @_locked
     def fulfilled_asks(self, limit: int = 20) -> list[AskRow]:
-        rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE EXISTS "  # noqa: S608
-            "(SELECT 1 FROM ask_fulfillments f WHERE f.ask_id=asks.ask_id AND f.valid=1) "
-            "ORDER BY created_at DESC,rowid DESC LIMIT ?", (limit,)).fetchall()
-        return [_ask(r) for r in rows]
+        with self.transaction(read_only=True):
+            rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE EXISTS "  # noqa: S608
+                f"(SELECT 1 FROM ask_fulfillments f WHERE f.ask_id=asks.ask_id) "
+                f"AND NOT ({self.fulfillment.capacity_predicate()}) "
+                "ORDER BY created_at DESC,rowid DESC LIMIT ?", (limit,)).fetchall()
+            return [_ask(r) for r in rows]
 
     @_locked
     def remindable_asks(self) -> list[AskRow]:
@@ -910,14 +914,17 @@ class Store:
 
     @_locked
     def capacity_count(self) -> int:
-        return int(self.db.execute(f"SELECT COUNT(*) FROM asks WHERE {CAPACITY_ACTIVE_SQL}"  # noqa: S608
-                                   ).fetchone()[0])
+        with self.transaction(read_only=True):
+            predicate = self.fulfillment.capacity_predicate()
+            return int(self.db.execute(f"SELECT COUNT(*) FROM asks WHERE {predicate}").fetchone()[0])  # noqa: S608
 
     @_locked
     def inactive_asks(self, limit: int = 20) -> list[AskRow]:
-        rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE NOT ({CAPACITY_ACTIVE_SQL}) "  # noqa: S608
-                               "ORDER BY created_at DESC,rowid DESC LIMIT ?", (limit,)).fetchall()
-        return [_ask(r) for r in rows]
+        with self.transaction(read_only=True):
+            predicate = self.fulfillment.capacity_predicate()
+            rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE NOT ({predicate}) "  # noqa: S608
+                                   "ORDER BY created_at DESC,rowid DESC LIMIT ?", (limit,)).fetchall()
+            return [_ask(r) for r in rows]
 
     @_locked
     def recent_asks(self, limit: int) -> list[AskRow]:
@@ -1301,6 +1308,8 @@ class Store:
         must perform reads only. A nested block joins the already established snapshot."""
         with self.lock:
             if self._depth:
+                if self._read_only and not read_only:
+                    raise ValueError("read-only-transaction")
                 self._depth += 1
                 try:
                     yield
@@ -1309,14 +1318,17 @@ class Store:
                 return
             self.db.execute("BEGIN" if read_only else "BEGIN IMMEDIATE")
             self._depth = 1
+            self._read_only = read_only
             try:
                 yield
                 self.db.execute("COMMIT")
             except BaseException:
-                self.db.execute("ROLLBACK")
+                if self.db.in_transaction:
+                    self.db.execute("ROLLBACK")
                 raise
             finally:
                 self._depth = 0
+                self._read_only = False
 
     @_locked
     def relay_alert(self, name: bytes, key: str, text: str) -> bool:
