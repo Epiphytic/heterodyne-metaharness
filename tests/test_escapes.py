@@ -10,7 +10,7 @@ audit hook, never this one, since an audit hook can't be removed.
 import fcntl
 import json
 import os
-import select
+import selectors
 import shlex
 import shutil
 import signal
@@ -90,7 +90,9 @@ def census_held(path: Path) -> bool:
 
 def ready(r: int, bound: float = BUDGET) -> bytes:
     """The ready byte from pipe `r` (b"" once every writer is gone), within the hang guard."""
-    readable, _, _ = select.select([r], [], [], bound)
+    with selectors.DefaultSelector() as selector:
+        selector.register(r, selectors.EVENT_READ)
+        readable = selector.select(bound)
     assert readable, f"no ready byte or EOF within {bound} s"
     return os.read(r, 1)
 

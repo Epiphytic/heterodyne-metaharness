@@ -19,7 +19,7 @@ Test-only knobs: `HZ_TMUX_WATCHDOG_SCRIPT`, `HZ_TMUX_WATCHDOG_ACK_TIMEOUT`, `HZ_
 import ast
 import fcntl
 import os
-import select
+import selectors
 import shutil
 import subprocess
 import sys
@@ -182,14 +182,16 @@ def start_watchdog(run: Path, script: Path = WATCHDOG, ack_timeout: float = ACK_
 def _read_ack(fd: int, timeout: float) -> bytes:
     end = time.monotonic() + timeout
     data = b""
-    while len(data) < len(b"ready"):
-        left = end - time.monotonic()
-        if left <= 0 or not select.select([fd], [], [], left)[0]:
-            break
-        chunk = os.read(fd, 16)
-        if not chunk:
-            break
-        data += chunk
+    with selectors.DefaultSelector() as selector:
+        selector.register(fd, selectors.EVENT_READ)
+        while len(data) < len(b"ready"):
+            left = end - time.monotonic()
+            if left <= 0 or not selector.select(left):
+                break
+            chunk = os.read(fd, 16)
+            if not chunk:
+                break
+            data += chunk
     return data
 
 
