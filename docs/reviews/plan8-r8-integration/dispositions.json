@@ -1,0 +1,53 @@
+{
+  "actual_review_ordinal": 8,
+  "actual_verdict": "APPROVE as a source-only PoC merge",
+  "original_raw_sha256": "64ba658212f6db33861531b969b8efaaa0495533c26e3827a7b23995528bc6d9",
+  "publication": "raw byte-exact",
+  "dispositions": [
+    {
+      "finding": 1,
+      "status": "FIXED",
+      "disposition": "harness_advance returns before advancing during maintenance. Actual pre-fix regression fails and passes with this guard; ordinary ticks remain enabled."
+    },
+    {
+      "finding": 2,
+      "status": "OPEN UNWAIVED \u2014 BEFORE ACTIVATION",
+      "disposition": "EffectStore initialization/installation integration remains a controller-assessment prerequisite. This repair does not initialize any store or activate systemd ownership."
+    },
+    {
+      "finding": 3,
+      "status": "OPEN UNWAIVED \u2014 BEFORE ACTIVATION",
+      "disposition": "Shared alert lifetime/capacity and retained harness alerts require controller assessment. No retention/alert semantics changed here."
+    },
+    {
+      "finding": 4,
+      "status": "OPEN UNWAIVED",
+      "disposition": "Interrupted copy cycle failure/retry behavior unchanged."
+    },
+    {
+      "finding": 5,
+      "status": "OPEN UNWAIVED",
+      "disposition": "Cancelled queued-job running-origin bookkeeping unchanged."
+    },
+    {
+      "finding": 6,
+      "status": "OPEN UNWAIVED",
+      "disposition": "Cadence range diagnostic finding retained for assessment; no settings changes in this repair."
+    },
+    {
+      "finding": 7,
+      "status": "OPEN UNWAIVED",
+      "disposition": "Health UID/effective-UID consistency finding unchanged."
+    },
+    {
+      "finding": 8,
+      "status": "OPEN UNWAIVED",
+      "disposition": "Repeated retained-backup verification cost unchanged."
+    },
+    {
+      "finding": 9,
+      "status": "ROOT-OWNED PENDING SOURCE COMMIT",
+      "disposition": "Merged source remains uncommitted for controller inspection/signing; no worker commit or history reset."
+    }
+  ]
+}

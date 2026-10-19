@@ -1,0 +1,40 @@
+{
+  "schema": "review-dispositions.v1",
+  "actual_review_ordinal": 6,
+  "verdict": "APPROVE as a PoC",
+  "raw_sha256": "41301b56d1f9f1ec8945fac5fb1829efc30a1d8fe8eaf25389f06835d90c7830",
+  "reviewed_source": "7ee76379060c891701622cb7b277d2411d960522",
+  "items": [
+    {
+      "ordinal": 1,
+      "disposition": "Retained symlink-state-root limitation; schedule render not activated; deployment must refuse unsupported convention until repaired."
+    },
+    {
+      "ordinal": 2,
+      "disposition": "Retained off-convention path validation issue before any live activation."
+    },
+    {
+      "ordinal": 3,
+      "disposition": "Retained state-root convention duplication."
+    },
+    {
+      "ordinal": 4,
+      "disposition": "Retained duplicated parent computation."
+    },
+    {
+      "ordinal": 5,
+      "disposition": "Retained end-to-end settings/symlink test gap; current test proves arithmetic only."
+    },
+    {
+      "ordinal": 6,
+      "disposition": "Retained resolved/unresolved canonical path divergence."
+    }
+  ],
+  "subsequent_change": {
+    "trigger": "Hosted CI39114639404 failed safety-tier collection with three randomized UUID parameter labels;6953passed72skipped1failed.",
+    "repair": "Replace only collection-time UUID values in three parameter cases with fixed valid UUID fixtures. Runtime payload UUID generation and assertions unchanged.",
+    "checks": "103 scheduled protocol and tiers testsPASS24.57s; RuffPASS; full configured Pyright0; diffPASS; qualitygating0 (prior debt UNWAIVED).",
+    "invalid_environment_attempt": "Initial shared environment with PYTHONPATH=.:tests imported another checkout; collection failed missing scheduled module. Preserved raw log. Corrected actual local .venv plus PYTHONPATH=src:tests PASS."
+  },
+  "published_review_annotation": "One inline install-agnostic allowance identifies reviewer hypothetical home path; exact unannotated raw remains retained with raw_sha256. No findings text removed."
+}

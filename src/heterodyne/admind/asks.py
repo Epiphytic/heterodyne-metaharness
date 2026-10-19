@@ -22,9 +22,10 @@ from typing import Literal
 
 import msgspec
 
-from heterodyne.admind import chunk, links, verbs
+from heterodyne.admind import chunk, links, management, verbs
 from heterodyne.admind.approvals import BEAD_ID, PINNED_DIGEST_LINE, Readout
 from heterodyne.admind.links import LinkSpec
+from heterodyne.admind.management import Metadata as ManagementMetadata
 from heterodyne.admind.notices import NoticePost
 from heterodyne.admind.notices import describe as notices_describe
 from heterodyne.admind.redact import redact
@@ -82,6 +83,9 @@ class AskPost(msgspec.Struct, frozen=True, tag="post", forbid_unknown_fields=Tru
     choices: list[str] = []
     recommended: str | None = None
     links: list[LinkSpec] = []
+    presentation: str | None = None
+    render_version: int | None = None
+    management: ManagementMetadata | None = None
 
 
 class AskGet(msgspec.Struct, frozen=True, tag="get", forbid_unknown_fields=True):
@@ -137,6 +141,27 @@ class AskReply(msgspec.Struct, frozen=True):
     asks: list[AskSummary] | None = None
 
 
+class ManagementReply(AskReply, frozen=True, forbid_unknown_fields=True):
+    """New opt-in reply only; historical reply bytes and schemas remain unchanged."""
+    presentation: str | None = None
+    render_version: int | None = None
+    management: ManagementMetadata | None = None
+
+
+def management_check(req: AskPost) -> str | None:
+    fields = (req.presentation, req.render_version, req.management)
+    if all(value is None for value in fields):
+        return None
+    if (req.presentation != management.TAG or type(req.render_version) is not int
+            or req.render_version != management.VERSION or req.management is None
+            or not management.valid_metadata(req.management) or req.kind != "question"
+            or req.form != "choices" or req.choices != management.CHOICES or req.recommended != "A"
+            or req.links or req.bead is not None or req.pr_url is not None or req.head_sha is not None
+            or not management.literal(req.title) or not management.literal(req.body, multiline=True)):
+        return "invalid task-management-consent-v1 presentation contract"
+    return None
+
+
 def now() -> datetime:
     """The clock for `created_at` and the hourly limit (patched in tests)."""
     return datetime.now(UTC)
@@ -178,6 +203,9 @@ def check(req: AskRequest) -> str | None:
         return "--from must match [a-z0-9][a-z0-9._-]{0,31}"
     if isinstance(req, NoticePost):     # the rest is the handler's, so every refusal is audited (K9)
         return None
+    why = management_check(req)
+    if why is not None:
+        return why
     if req.bead is not None and not BEAD.fullmatch(req.bead):
         return "--bead must be a bead ID ([a-z0-9]{1,16}-[a-z0-9.]{1,32})"
     if req.kind == "approval":
@@ -250,7 +278,9 @@ def describe(req: AskRequest) -> dict[str, object]:
     if isinstance(req, AskPost):
         return {"op": "post", "ask_kind": req.kind, "poster": req.poster, "bead": req.bead,
                 "title_chars": len(req.title), "body_chars": len(req.body), "pr": req.pr_url is not None,
-                "form": req.form, "choices": len(req.choices), "links": len(req.links)}
+                "form": req.form, "choices": len(req.choices), "links": len(req.links),
+                **({"presentation": req.presentation, "render_version": req.render_version}
+                   if req.presentation is not None else {})}
     if isinstance(req, NoticePost):
         return {"op": "notice", **notices_describe(req)}
     if isinstance(req, AskList):
@@ -417,6 +447,8 @@ def _shown(row: AskRow) -> tuple[str, bool]:
 def question_card(row: AskRow) -> tuple[str, bool]:
     """A question or merge card as one text: (redacted text, truncated). The context is redacted whole before
     the budget is counted (P5); the label, head, links and closing lines are fixed framing, never cut."""
+    if management.present(row):
+        return "\n".join(management.lines(row)), False
     shown, truncated = _shown(row)
     return redact("\n".join(t for t, _ in _tagged(row, shown, None))), truncated
 
@@ -424,6 +456,8 @@ def question_card(row: AskRow) -> tuple[str, bool]:
 def card_chunks(row: AskRow, chunk_chars: int) -> tuple[list[str], bool]:
     """The card's chunks (K23), and whether its context was cut. Raises chunk.TooWide for a link line wider
     than a chunk (the post is refused)."""
+    if management.present(row):
+        return management.parts(row, chunk_chars), False
     shown, truncated = _shown(row)
     return _packed(row, shown, chunk_chars), truncated
 
@@ -435,13 +469,17 @@ def _packed(row: AskRow, shown: str, chunk_chars: int) -> list[str]:
 
 def full_text(row: AskRow) -> str:
     """What `!details` on a card sends: the whole ask, redacted."""
+    if management.present(row):
+        return "\n".join(management.lines(row))
     return redact("\n".join(t for t, _ in _tagged(row, redact(context(row)).rstrip(chr(10)), None)))
 
 
-def full_chunks(row: AskRow, chunk_chars: int) -> list[str]:
+def full_chunks(row: AskRow, chunk_chars: int, *, details: bool = False) -> list[str]:
     """`!details` and `!asks repeat` for a question or merge: the whole ask, packed as its card was. Raises
     chunk.TooWide if the chunk size has shrunk since it was posted so that a link no longer fits: a link is
     never cut (K23), so the caller refuses visibly."""
+    if management.present(row):
+        return management.parts(row, chunk_chars, details=details)
     return _packed(row, redact(context(row)).rstrip("\n"), chunk_chars)
 
 
@@ -452,6 +490,8 @@ def checked_card_chunks(row: AskRow, chunk_chars: int, *, repeat: bool = False
     Ordinary posting still uses the established redacting renderer. A binding must instead distinguish
     faithful reproduction from output that was changed by redaction, including only after a split.
     """
+    if management.present(row):
+        return management.parts(row, chunk_chars), False
     shown, truncated = (context(row).rstrip("\n"), False) if repeat else _shown(row)
     return _checked(_tagged(row, shown, chunk.usable(chunk_chars)), chunk_chars), truncated
 
@@ -461,6 +501,8 @@ def map_reaction(row: AskRow, emoji: str) -> str | None:
     """The choice a reaction records: an approve-set emoji is the recommended option; a deny-set emoji is
     the other option on a yes/no card and `none` on a multiple-choice card; anything else, or no form, is no
     choice."""
+    if management.present(row):
+        management.stored(row)  # malformed V2 never falls back to legacy answer semantics
     f = form(row)
     action = verbs.emoji_action(emoji)
     if f is None or action is None:
@@ -481,6 +523,13 @@ def _short(text: str) -> str:
 
 def map_reply(row: AskRow, text: str) -> str | None:
     """The choice a reply records (K18q), or None for a free answer (stored verbatim as always)."""
+    if management.present(row):
+        management.stored(row)
+        letter = _short(text).upper()
+        if letter in ("A", "B"):
+            return letter
+        reading = verbs.read_reply(text)
+        return (None if reading is None else "A" if reading.action == "approve" else NONE_OF_THESE)
     f = form(row)
     if f is None:
         return None
@@ -500,7 +549,12 @@ def recorded(row: AskRow, choice: str, text: str) -> str:
     f = form(row)
     shown = {name: name if t is None else f"{name} = {t}" for name, t in (f.options() if f else [])}
     what = "none of these" if choice == NONE_OF_THESE else shown.get(choice, choice)
-    return f"Recorded for {row.ask_id}: {what} (from {text.strip()})."
+    result = f"Recorded for {row.ask_id}: {what} (from {text.strip()})."
+    if management.present(row):
+        management.stored(row)
+        result += (" Recorded answer is not authorization; queue verifies complete history "
+                   "and holds on any contrary reply.")
+    return result
 
 
 # --- approval cards (spec §6, R8, R21, R25; delta R8, R30) ---------------------------------------
@@ -674,7 +728,9 @@ def reminder(row: AskRow, at: datetime, every: int | None = None) -> str:
 
 
 NO_OUTSTANDING = "No outstanding asks."
-SKIPPED = {"answered": "{ask_id} is answered; awaiting its asker", "deciding": "{ask_id} is deciding",
+SKIPPED = {
+    "management card refused": "{ask_id}: management card refused",
+    "answered": "{ask_id} is answered; awaiting its asker", "deciding": "{ask_id} is deciding",
            "uncertain": "{ask_id} is uncertain",
            "card not delivered": "{ask_id}: card not delivered; try !asks repeat",
            "link too long": "{ask_id}: a link is longer than this group's message size now allows; "

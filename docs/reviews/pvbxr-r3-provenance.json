@@ -1,0 +1,52 @@
+{
+  "schema": "actual-review-provenance.v1",
+  "ordinal": 3,
+  "effort": "medium",
+  "model_requested": "opus",
+  "capture_kind": "manual-foreign-observed-stream-not-reserved-profile-proof",
+  "question": "Are there any critical flaws with this, or is this good enough to implement as a PoC?",
+  "actual_result": {
+    "at": "2026-10-19T06:45:49.963225+00:00",
+    "exit": 0,
+    "head": "397d40250bfcfbec858220bd7562c97496ed9cf0",
+    "source_unchanged": true,
+    "stream_sha256": "9ca5937d9788ad99b2cd0b317c791b697a54247871486e90b5ab751732fc37d2",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "events": 59,
+    "malformed_line_numbers": [],
+    "terminal_results": 1,
+    "terminal_success": true,
+    "log_sha256": "7134a0744c879336098f808b21366bb3340a5010a91c3ed1df1a6fdb56c6b451"
+  },
+  "start_record_portable": {
+    "at": "2026-10-19T06:42:33.278586+00:00",
+    "head": "397d40250bfcfbec858220bd7562c97496ed9cf0",
+    "base": "b4b8c75da984126344716566300fb7cad19a35b5",
+    "cwd": "<REVIEW_INPUTS>",
+    "source_cwd": "<SOURCE_WORKTREE>",
+    "argv": [
+      "<CLAUDE_EXECUTABLE>",
+      "-p",
+      "--model",
+      "opus",
+      "--effort",
+      "medium",
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--dangerously-skip-permissions",
+      "--disallowedTools",
+      "Agent,Task",
+      "--add-dir",
+      "<SOURCE_WORKTREE>",
+      "--",
+      "/code-review Are there any critical flaws with this, or is this good enough to implement as a PoC? Use MEDIUM reasoning. This is actual THIRD substantive code review; first two were FULL HIGH. Author Codex. Read-only inspect full b4b8c75da984126344716566300fb7cad19a35b5..397d40250bfcfbec858220bd7562c97496ed9cf0 diff in <SOURCE_WORKTREE>. Approved design62e7ecf1433c601a36ad23b350da025b86a4c7dc docs/adr/2026-10-19-readable-management-approvals.md in product-btq-btq-pvmni (full path <DESIGN_WORKTREE>), genuine human approval gvz0v. Goal readable APPROVAL Task management consent cards, no garbled JSON; preserves legacy/default V1/native question meaning, typed opt-in V2 paired metadata, exact final framed36line3200char bound, persisted readback/ACK, source/delivery/current-policy binding. Queue child separate and not implemented; no live/deployment proof. Read both actual HIGH reports and dispositions in docs/reviews/pvbxr-r1-* and pvbxr-r2-*. Both had no critical findings, all ten each preserved. R2 fixes reject non-printable-ASCII facts, spoof option/legend/audit prefixes, entities/HTML/URLs; unsupported facts refuse unchanged, never lossy-sanitize. Restores V1 oversized precedence, validates malformed card only after autobump due eligibility, V2 CLI refusal identifies LOCAL requested decode domain only (existing socket request has no selector, no peer-capability claim), legend matches literal B vs deny/reaction none. F8-10 and R1F10 duplication/dispatch/packing/INSERT UPDATE remain OPEN UNWAIVED. R2 final-byte predecessor46FAIL6PASS, focused192PASS, all-admind2391PASS112.18s; all255original tracked test paths byte-exact relative72dd8 (249Python6other). ConfiguredRuffPASS, configuredPyright six identical baseline live-import errors zeroadded403vs402files, fullformat323samebaseline paths, quality16regressions9gates OPEN UNWAIVED. Private freeze02efec038b5af154a832e8cf98e6f1d0b210defe2fa8efe0c39eb35c61aa2aca at <EVIDENCE_ROOT>/pvbxr-r2-repair. Existing R1 original test change only two neutral setup titles, assertions/normalizedASTexact. Inspect actual code/tests; focus critical correctness and PoC suitability, retain concrete remaining findings. No source edits, execution tests/probes, native/queue/DB/service operations, independent network/model calls or activation."
+    ],
+    "prompt": "/code-review Are there any critical flaws with this, or is this good enough to implement as a PoC? Use MEDIUM reasoning. This is actual THIRD substantive code review; first two were FULL HIGH. Author Codex. Read-only inspect full b4b8c75da984126344716566300fb7cad19a35b5..397d40250bfcfbec858220bd7562c97496ed9cf0 diff in <SOURCE_WORKTREE>. Approved design62e7ecf1433c601a36ad23b350da025b86a4c7dc docs/adr/2026-10-19-readable-management-approvals.md in product-btq-btq-pvmni (full path <DESIGN_WORKTREE>), genuine human approval gvz0v. Goal readable APPROVAL Task management consent cards, no garbled JSON; preserves legacy/default V1/native question meaning, typed opt-in V2 paired metadata, exact final framed36line3200char bound, persisted readback/ACK, source/delivery/current-policy binding. Queue child separate and not implemented; no live/deployment proof. Read both actual HIGH reports and dispositions in docs/reviews/pvbxr-r1-* and pvbxr-r2-*. Both had no critical findings, all ten each preserved. R2 fixes reject non-printable-ASCII facts, spoof option/legend/audit prefixes, entities/HTML/URLs; unsupported facts refuse unchanged, never lossy-sanitize. Restores V1 oversized precedence, validates malformed card only after autobump due eligibility, V2 CLI refusal identifies LOCAL requested decode domain only (existing socket request has no selector, no peer-capability claim), legend matches literal B vs deny/reaction none. F8-10 and R1F10 duplication/dispatch/packing/INSERT UPDATE remain OPEN UNWAIVED. R2 final-byte predecessor46FAIL6PASS, focused192PASS, all-admind2391PASS112.18s; all255original tracked test paths byte-exact relative72dd8 (249Python6other). ConfiguredRuffPASS, configuredPyright six identical baseline live-import errors zeroadded403vs402files, fullformat323samebaseline paths, quality16regressions9gates OPEN UNWAIVED. Private freeze02efec038b5af154a832e8cf98e6f1d0b210defe2fa8efe0c39eb35c61aa2aca at <EVIDENCE_ROOT>/pvbxr-r2-repair. Existing R1 original test change only two neutral setup titles, assertions/normalizedASTexact. Inspect actual code/tests; focus critical correctness and PoC suitability, retain concrete remaining findings. No source edits, execution tests/probes, native/queue/DB/service operations, independent network/model calls or activation.",
+    "executable_sha256": "bc1aad9982c7b59c7d889ff92595d61cf46e0a6eae074cb551d932a989bcd222",
+    "capture_kind": "manual-foreign-observed-stream-not-reserved-profile-proof"
+  },
+  "original_start_sha256": "4196205ad356e554ff92ea224a00c95f1c504ef1dcae62ec524c91fe8c1bc7b0",
+  "original_result_sha256": "6182b033d20918887ced2ad8132ea424f20f754c0d967d056cd11f1187e97ab4",
+  "publication_normalization": "Only absolute local executable/worktree/evidence roots in the start record are replaced with the explicit portable tokens shown. The original start/result/raw bytes are retained privately, bound by exact SHA256; raw report and result record are unchanged. No reviewer finding, verdict or command option is edited. This is manual observed-stream provenance, not reserved-profile execution proof."
+}

@@ -1069,6 +1069,11 @@ class Admind:
     def post_ask(self, req: asks.AskPost, peer: ctl.Peer) -> asks.AskReply:
         """Under `ask_post_lock`: check the latch and the limits, then store a question or merge ask and
         queue its card in one transaction."""
+        if asks.management_check(req) is not None:
+            self.audit.write("ask", action="refused", ask_kind=req.kind, poster=req.poster,
+                             pid=peer.pid, reason="management-contract",
+                             presentation=req.presentation, render_version=req.render_version)
+            return asks.refused(asks.management.REFUSED)
         if self.latched():
             return asks.refused(ASK_LATCHED)
         if fulfillment.ENABLED:
@@ -1084,24 +1089,51 @@ class Admind:
         question_form, choices = asks.stored_form(req)
         row = AskRow(asks.new_id(lambda i: self.store.ask(i) is not None), req.kind, req.poster, req.title,
                      req.body, req.pr_url, req.head_sha, req.bead, None, False, 0, "open", None, None, at, at,
-                     question_form=question_form, choices=choices, links=asks.stored_links(req.links))
+                     question_form=question_form, choices=choices, links=asks.stored_links(req.links),
+                     presentation=req.presentation, render_version=req.render_version,
+                     management=(None if req.management is None
+                                 else msgspec.json.encode(req.management).decode()))
         try:
             parts, truncated = asks.card_chunks(row, self.s.chunk_chars)
+        except asks.management.Refusal:
+            self.audit.write("ask", action="refused", ask_kind=row.kind, poster=row.poster,
+                             pid=peer.pid, reason="management-contract",
+                             presentation=row.presentation, render_version=row.render_version)
+            return asks.refused(asks.management.REFUSED)
         except chunk.TooWide:
             self.audit.write("ask", action="refused", ask_kind=row.kind, poster=row.poster, pid=peer.pid,
                              reason="link too long")
             return asks.refused(asks.ASK_LINK_TOO_LONG)
         row = dataclasses.replace(row, truncated=truncated, card_parts=len(parts))
-        with self.store.transaction():
-            self.store.insert_ask(row, peer.pid)
-            self.post_parts(f"ask:{row.ask_id}", parts, owner=None)
+        try:
+            with self.store.transaction():
+                self.store.insert_ask(row, peer.pid)
+                if asks.management.present(row):
+                    saved = self.store.ask(row.ask_id)
+                    expected = dataclasses.replace(row, last_activity_at=row.last_activity_at or at)
+                    if saved is None or saved != expected:
+                        raise asks.management.Refusal()
+                    asks.management.stored(saved)
+                    row = saved
+                self.post_parts(f"ask:{row.ask_id}", parts, owner=None)
+        except asks.management.Refusal:
+            self.audit.write("ask", action="refused", ask_kind=row.kind, poster=row.poster,
+                             pid=peer.pid, reason="management-readback",
+                             presentation=row.presentation, render_version=row.render_version)
+            return asks.refused(asks.management.REFUSED)
         self.audit.write("ask", action="posted", ask_id=row.ask_id, ask_kind=row.kind, poster=row.poster,
                          pid=peer.pid, parts=len(parts), truncated=truncated, title_chars=len(row.title),
                          body_chars=len(row.body), form=req.form, choices=len(req.choices),
-                         links=len(req.links))
+                         links=len(req.links),
+                         **({"presentation": row.presentation, "render_version": row.render_version}
+                            if asks.management.present(row) else {}))
         message = f"ask {row.ask_id} posted"
         if row.kind == "question" and req.form is None:     # the K14 grace window
             message += "\n" + asks.FORM_WARNING
+        if req.presentation is not None:
+            return asks.ManagementReply("posted", message, ask=self.ask_view(row),
+                                        presentation=row.presentation, render_version=row.render_version,
+                                        management=asks.management.stored(row))
         return asks.AskReply("posted", message, ask=self.ask_view(row))
 
     def post_notice(self, req: NoticePost, peer: ctl.Peer) -> asks.AskReply:
@@ -1344,6 +1376,10 @@ class Admind:
 
     def answer_refusal(self, row: AskRow, text: str) -> str | None:
         """Why an answer is not stored (R15): fixed wording, or None."""
+        try:
+            asks.management.stored(row)
+        except asks.management.Refusal:
+            return asks.management.REFUSED
         if self.store.fulfillment.protected(row.ask_id):
             return "Already fulfilled; original answer retained."
         if row.status not in ("open", "answered"):
@@ -1403,12 +1439,20 @@ class Admind:
         skipped: list[tuple[str, str]] = []
         with self.store.transaction():
             for row in self.store.capacity_asks():
+                try:
+                    asks.management.stored(row)
+                except asks.management.Refusal:
+                    skipped.append((row.ask_id, "management card refused"))
+                    continue
                 if row.status != "open":
                     skipped.append((row.ask_id, row.status))
                     continue
                 if sub == "repeat":
                     try:
                         self.repeat_card(mid, row, at)
+                    except asks.management.Refusal:
+                        skipped.append((row.ask_id, "management card refused"))
+                        continue
                     except chunk.TooWide:      # nothing queued: a link is never cut (K23, r1 B3)
                         skipped.append((row.ask_id, "link too long"))
                         continue
@@ -1446,6 +1490,11 @@ class Admind:
         skipped: list[tuple[str, str]] = []
         for row in self.store.remindable_asks():
             if row.last_activity_at is None or datetime.fromisoformat(row.last_activity_at) > due:
+                continue
+            try:
+                asks.management.stored(row)
+            except asks.management.Refusal:
+                skipped.append((row.ask_id, "management card refused"))
                 continue
             if self.store.reminder_pending(row.ask_id):
                 skipped.append((row.ask_id, "pending delivery"))
@@ -1529,7 +1578,14 @@ class Admind:
             parts = asks.stored_details(row)
         else:
             try:
-                parts = asks.full_chunks(row, self.s.chunk_chars)
+                parts = asks.full_chunks(row, self.s.chunk_chars, details=True)
+            except asks.management.Refusal:
+                with self.store.transaction():
+                    self.touch(ask_id)
+                    self.finish(mid, "done", asks.management.REFUSED, "cmd")
+                self.audit.write("ask", action="details-refused", message_id=mid, ask_id=ask_id,
+                                 reason="management-contract")
+                return
             except chunk.TooWide as exc:   # a link is never cut (K23, r1 B3): refused, nothing queued
                 text = asks.DETAILS_LINK_TOO_LONG.format(ask_id=ask_id, n=exc.length, usable=exc.usable,
                                                          c=self.s.chunk_chars)

@@ -1,0 +1,121 @@
+{
+  "schema": "plan8-r1-dispositions-v1",
+  "reviewed_head": "77e4e666b206a6da5b1179cee8e5cfb7f149649a",
+  "actual_review": "FIRST FULL HIGH Claude Opus built-in /code-review",
+  "actual_result": "REVISE",
+  "review_recipe_note": "Actual high review explicitly called all ten findings unverified; author tests/dispositions do not fabricate reviewer verification.",
+  "raw_review_sha256": "b70881937570278e3d7e65caa94ad5fa3fae486b119de6068442097e3efff45d",
+  "review_ordinal": 1,
+  "next_review": "Requires root authorization: actual SECOND FULL HIGH, not launched by author.",
+  "findings": [
+    {
+      "number": 1,
+      "verbatim_finding": "1. `src/heterodyne/wsd/cli.py:249`: wsd_main now catches every OSError (around `wsd run` too) and returns EX_CONFIG 78. The WSD unit has RestartPreventExitStatus=78, and the ConfigError text is replaced by just the type name.\n\n   Failure scenario: Say an admitted scheduled job trips the fatal latch with an OSError (for example ENOSPC/EIO in the journal write inside _guarded), or a transient OSError hits during journal open or serve. serve() re-raises it and wsd_main turns it into exit 78. systemd then never restarts WSD. That breaks the approved 'WSD still fails and restarts' rule and silently stops all pickup/reconcile. Separately, an operator with a bad config sees only 'wsd: ConfigError' and loses the actionable message they got before.\n",
+      "status": "fixed",
+      "resolution": "Runtime OSError propagates from wsd run, retaining its existing restart behavior. ConfigError retains actionable text. Non-daemon scheduling CLI OSError returns clean unavailable (1), never fake admission.",
+      "contract": "D4 §4 fatal-partial/restart boundary",
+      "tests": [
+        "test_runtime_oserror_is_not_configuration_exit",
+        "test_config_diagnostic_remains_actionable"
+      ]
+    },
+    {
+      "number": 2,
+      "verbatim_finding": "2. `src/heterodyne/wsd/effect_owner.py:48`: Once a backup cycle fails, the backup_cycle row stays pending and 'uncertain' for good, and every later paired-backup cycle is refused as 'unresolved'.\n\n   Failure scenario: Four ways in: (a) copy_bundle raises in-process (5s busy timeout, the 512MiB free-space floor, WAL growth, or the 30-minute deadline), so _settle -> finish_backup('uncertain') keeps cycle != NULL. (b) A daemon shutdown during a copy sets cancel, which ends the same way. (c) A crash between begin_backup's commit and backup_attempt's separate commit leaves attempt='' with nothing to resolve it, because _open only verifies when pending[2] is set. (d) After a restart, verify_bundle fails because no manifest exists, so the cycle is held again. In all four, begin_backup returns 'unresolved' forever. The design allows a fresh uniquely named attempt once the old worker is positively gone, and wants failures recorded as partial/failure. Here no new attempt is ever made.\n",
+      "status": "fixed",
+      "resolution": "A completed local copy future failure or exclusive owner recovery without a complete matching manifest consumes the failed LOCAL cycle. Later actual native cycles may create new uniquely named local attempts. No native replay, native success inference or changed source restoration authority. Exact matching manifest recovery still verifies fully.",
+      "contract": "D4 §8 local worker fencing/partial failure",
+      "tests": [
+        "test_restart_without_attempt_consumes_failed_local_cycle",
+        "test_failed_local_copy_or_missing_manifest_does_not_stall_later_cycles"
+      ]
+    },
+    {
+      "number": 3,
+      "verbatim_finding": "3. `src/heterodyne/wsd/health.py:173`: effect_hold comes from clock readiness (effect_state == 'ready'), not from held or uncertain effects. 'unready' is reported as true instead of unknown, and the snapshot carries no per-effect counts.\n\n   Failure scenario: This slice has no clock-sample source, so EffectStore.cache is always 'unready'. Every systemd install therefore shows effect_hold=true permanently, and the observer opens a lasting failure episode and alert. If a clock source is added and becomes ready, an uncertain job or a permanently 'uncertain' backup cycle reports effect_hold=false. The design says unready/stale effect data must be unknown, never zero backlog.\n",
+      "status": "fixed",
+      "resolution": "Valid effect-store projection readiness is distinct from calendar readiness. One outstanding writer-lane refresh updates bounded held/uncertain counts and oldest held-effect age. Heartbeat reads immutable cache only; stale/unready/error cache predicates are unknown. Fresh zero counts alone establish false.",
+      "contract": "D4 §§5–6 cached aggregate and independent predicates",
+      "tests": [
+        "test_effect_projection_is_fresh_and_reports_uncertainty_without_ready_clock",
+        "test_fresh_effect_cache_reports_real_holds_without_clock_readiness"
+      ]
+    },
+    {
+      "number": 4,
+      "verbatim_finding": "4. `src/heterodyne/wsd/effect_slots.py:319`: Clock.observe raises the durable UTC high-water from any sane sample before the jump check, including the first sample after boot and samples it is about to reject as jumps. EffectStore.observe then persists that value.\n\n   Failure scenario: One synchronized sample jumps a year ahead (bad NTP); readiness rejects it as a jump but high_water is already set to it. After the clock is corrected, every sample has utc < high_water and fails the sanity check. Effect readiness stays false until real time catches up with the bad value, so every effect job is held for about a year. The design calls this the 'durable highest admitted UTC', not the highest observed.\n",
+      "status": "fixed",
+      "resolution": "Rejected or merely observed samples never advance UTC water. Actual accepted effect preparation updates the durable highest admitted UTC in the same transaction as its prepared row; the in-memory water follows commit. Backward samples still hold effects.",
+      "contract": "D4 §5 highest admitted UTC",
+      "tests": [
+        "test_rejected_clock_jump_does_not_poison_admitted_water",
+        "test_only_admitted_effect_updates_durable_utc_water"
+      ]
+    },
+    {
+      "number": 5,
+      "verbatim_finding": "5. `src/heterodyne/local_alerts.py:223`: The coalesce path is not idempotent: every retry of the same intent adds to `coalesced` and rewrites shared_overflow.json. settle() also adds to `retired` for 'cleared' and 'published', not just retirements.\n\n   Failure scenario: Once the directory is saturated, the observer keeps episode.notice pending and calls publish again every 300s pass. A single pending failure notice therefore raises coalesced by about 288 a day and rewrites the overflow text each time. Every ordinary recovery publication or failure clearance shows up as 'retired=N'. The overflow counts no longer mean what the local-alert-v1 contract says, and a same-ID repeat is not idempotent.\n",
+      "status": "fixed",
+      "resolution": "Bounded exact-ID/hash private pending metadata makes a repeat coalesced intent idempotent; mismatched payload is held. At 255 retained pending identities, only new diagnostic publication is held, never task/wake admission. Retired increments only on explicit retired settlement, not cleared/published. Shared 6C metadata/byte fixture remains an activation prerequisite. Known owner state transitions release superseded coalesced pending identities without pretending an individual file was published; 300 full-directory failure/recovery cycles retain only current per-code notices.",
+      "contract": "D4 §§6–7 bounded local-alert-v1 lifecycle",
+      "tests": [
+        "test_coalesced_retries_are_idempotent_and_cleared_is_not_retired",
+        "test_coalesced_observer_transitions_keep_only_latest_pending_per_code"
+      ]
+    },
+    {
+      "number": 6,
+      "verbatim_finding": "6. `src/heterodyne/wsd/backup_pairing.py:168`: paired_attempt reads, validates and rewrites the companion counter, and takes the 5s directory lock, before calling native(). Any failure in those steps skips the authoritative native Beads backup completely.\n\n   Failure scenario: A missing or corrupt native-backup-cycle.state, a lock timeout, or a write_private ENOSPC raises ValueError/TimeoutError/OSError before native() runs. The real Beads backup owner's cycle then never happens. The companion's own state has stalled the native backup it is only supposed to accompany. The design says the companion holds itself and the original native backup still runs.\n",
+      "status": "fixed",
+      "resolution": "Counter read/validation/lock/write failures hold only the companion. Native owner invokes its authoritative backup once even without a usable companion cycle; return cycle=None does not invent/reset a namespace. The actual owner retains exclusive native-cycle ownership.",
+      "contract": "D4 §8 companion cannot block native backup",
+      "tests": [
+        "test_companion_counter_failure_never_suppresses_native_backup",
+        "test_missing_or_mismatched_counter_holds_only_companion"
+      ]
+    },
+    {
+      "number": 7,
+      "verbatim_finding": "7. `src/heterodyne/wsd/daemon.py:849`: In internal mode, serve() still loads schedule-manifest.json whenever the file exists, and refuses startup if it is invalid. It also opens the effect store and accepts paired-backup admission.\n\n   Failure scenario: An operator moves from systemd back to internal (config change plus restart) and leaves the manifest. If backstop_seconds was also changed, or a location or workstream no longer matches, load_manifest raises ManifestInvalid and WSD exits 78. It is not restarted, so internal-mode pickup is down because of a file internal mode should ignore.\n",
+      "status": "fixed",
+      "resolution": "Only systemd mode loads scheduling manifest and opens effect owner. Internal mode clears leftover in-memory manifest, ignores stale external bytes and retains native internal startup/loops.",
+      "contract": "D4 §§3,9 owner switch/rollback",
+      "tests": [
+        "test_internal_owner_ignores_stale_external_manifest"
+      ]
+    },
+    {
+      "number": 8,
+      "verbatim_finding": "8. `src/heterodyne/wsd/observer.py:182`: The alert texts are not the approved fixed templates, and _load treats a first-ever run with no state file as a corruption reset.\n\n   Failure scenario: The code publishes 'Workstream daemon diagnostic: <code>.', '...cleared: <code>.' and 'Observation state reset. Earlier diagnostic conditions are unknown...'. The design pins 'Plan8 health: <code>. Scheduled work status requires attention. Remote delivery unconfirmed.', the matching recovered-from template and the exact reset notice, all of which are meant for the jointly pinned byte fixture. Also, the first babysitter run on a fresh install mints an epoch and publishes a spurious 'state reset' retirement alert, but the design limits resets to loss/corruption after installation.\n",
+      "status": "fixed",
+      "resolution": "Use all three exact approved fixed templates. A durable private observer-installed marker distinguishes first install from subsequent state loss; existing valid state establishes the marker too. Corrupt/lost installed state keeps the supported fresh diagnostic epoch/reset behavior.",
+      "contract": "D4 §6 fixed templates/reset after installation",
+      "tests": [
+        "test_first_observation_is_not_corruption_and_fixed_templates",
+        "test_state_loss_after_first_install_requires_exact_reset_notice"
+      ]
+    },
+    {
+      "number": 9,
+      "verbatim_finding": "9. `src/heterodyne/wsd/daemon.py:305`: self.maintenance is initialized to False and never set anywhere, so the 'maintenance' refusal is dead code and scheduled ingress cannot be closed for maintenance.\n\n   Failure scenario: Switch step (2), 'enter maintenance and close scheduled ingress', cannot be done. Systemd oneshots keep getting 'queued' replies during a deployment window until WSD is stopped. The reason code and its branches in scheduled() and maintenance_request() are unreachable.\n",
+      "status": "fixed",
+      "resolution": "The existing private control socket exposes wsctl scheduled-hold (no parameters). Serving-loop serialization closes new Plan8 scheduled/effect/paired-backup ingress until restart. It does not pause workstreams, suppress observation, cancel admitted work, retire timers or establish deployment authority; installer must still quiesce/drain/verify. No automatic re-open command.",
+      "contract": "D4 §9 switch step2",
+      "tests": [
+        "test_private_control_hold_closes_external_ingress_but_is_not_workstream_pause",
+        "test_cli_hold_uses_existing_private_control_boundary"
+      ]
+    },
+    {
+      "number": 10,
+      "verbatim_finding": "10. `src/heterodyne/wsd/backup_cycles.py:269`: retain() calls verify_bundle (full SHA-256 of each DB copy plus PRAGMA integrity_check) on every retained bundle each cycle. Combined with CtlServer._handle growing from complexity 9 to 29, this adds avoidable cost and complexity.\n\n    Failure scenario: With roughly 7 daily plus 4 weekly bundles and two possibly large journal copies each, every backup cycle re-reads and integrity-checks about 22 databases on the single copy worker. That lengthens the window in which shutdown has to wait for the copy. A recorded manifest hash or verified marker would avoid the rework. Separately, the triple isinstance/op dispatch in ctl._handle (the quality-delta gating row) could be a table from op to decoder and handler.",
+      "status": "deferred-noncritical",
+      "resolution": "Retain full hash/integrity checks of retained backup bundles and current bounded control dispatch. No unverified cached marker shortcut is introduced. Repeated verification cost and measured dispatch complexity remain unwaived quality/performance debt; no live cadence/large-store acceptance claimed.",
+      "contract": "D4 §8 backup validity and explicit early activation limits",
+      "tests": [
+        "test_latest_verified_success_survives_calendar_retention",
+        "existing control regression suite"
+      ]
+    }
+  ]
+}

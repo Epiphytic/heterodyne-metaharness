@@ -28,6 +28,8 @@ _FORMS = (rf"pull/[1-9][0-9]{{0,9}}(?:/files|/commits/{_SHA})?", rf"blob/{_SHA}/
           r"actions/runs/[1-9][0-9]{0,19}", r"issues/[1-9][0-9]{0,9}")
 PINNED = re.compile(rf"https://github\.com/{_OWNER}/{_REPO}/(?:{'|'.join(_FORMS)})")
 
+PINNED_BLOB = re.compile(rf"https://github\.com/{_OWNER}/{_REPO}/blob/{_SHA}/{_PATH}")
+
 FORMAT = "--link must be a GitHub URL pinned to a 40-hex commit, or a PR, run or issue"
 LABEL = f"a --link label must be one line of 1-{MAX_LABEL} characters"
 TOO_LONG = f"a --link URL is over {MAX_URL} characters"

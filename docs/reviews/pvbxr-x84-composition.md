@@ -1,0 +1,11 @@
+# Card and fulfillment projection composition
+
+This source composition joins the reviewed management consent cards at a54473968f61401cb525c77681597dd70dc820fe with the reviewed fulfillment projection at b12b535228f2d902b1df38bcd89e929efa5f695f. Both original review histories and all unresolved findings remain retained. This is not deployment, native reader enrollment or queue authorization.
+
+The Store conflict resolution keeps the fulfillment branch's read-only transaction scopes, projection predicates and ordering, and selects the card branch's complete `_ASK_READ` columns in `capacity_asks`, `fulfilled_asks` and `inactive_asks`. Reading the old column list into the new row decoder raises IndexError. Metadata remains unchanged, including malformed metadata that the renderer must refuse. The projection DDL and historical binding hash fields remain unchanged; V2 metadata has its own closed native binding.
+
+Five new isolated SQLite cases cover active, fulfilled, inactive, dirty and malformed-management rows. All five fail with IndexError when the three selectors deliberately use the old column list, and all five pass with the resolution. This is an explicit regression mutation of the composed candidate, not a claim about an untouched predecessor. The initial fixture incorrectly subscripted the typed Reply and produced two setup errors; it was corrected to use its `.result` field. No earlier test assertion changed during composition.
+
+Configured typing: 411 files, zero errors and warnings. Focused lint and new-test formatting pass. Full admind tests were started on the final runtime/test bytes; their eventual result must be recorded separately. Structural change evidence is retained privately. Quality delta versus the card parent reports 198 regressions, including 112 gating findings; these include imported fulfillment changes and remain OPEN and unwaived. Neither a baseline reset nor an acknowledgment was used. No claim of a clean quality gate is made.
+
+Final source review, exact CI, the matching queue adapter, independent reader enrollment and separately approved deployment remain required. The standalone card branch's prior 2,477 passes do not establish the result of this combined source. Reminder/list framing, client rendering, final layout pinning and all other unresolved review findings remain explicit live holds.

@@ -10,7 +10,7 @@ paths, one of them `default`) and `roles.coder` its coder profile.
 from collections.abc import Mapping
 from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from heterodyne.config import Config, ConfigError, load, paths, secret_scan
 from heterodyne.config.layers import table_at
@@ -21,7 +21,8 @@ from heterodyne.wsd.headroom import UsageSettings
 from heterodyne.wsd.workstream import DEFAULT_REPO, Limits, WorkstreamSettings
 
 WSD_KEYS = frozenset({"backstop_seconds", "reconcile_seconds", "launch_failures_before_human",
-                      "park_attempts_before_human", "inbox_attempts_before_human", "coder_role"})
+                      "park_attempts_before_human", "inbox_attempts_before_human", "coder_role",
+                      "timer_owner"})
 BTQ_KEYS = frozenset({"btq", "config_dir", "repo", "dolt_host", "dolt_port", "dolt_database",
                       "tls_cert", "credentials"})
 BTQ_PATHS = ("config_dir", "repo", "tls_cert")
@@ -44,6 +45,7 @@ class WsdSettings:
     accounts: Accounts | None = None     # the host's accounts: the journal upgrade's adapter facts (AU-3 §3)
     # The host's config directory, where `harnesses.toml` is (plan 4c T7). None: no install is selected.
     config_dir: Path | None = None
+    timer_owner: Literal["internal", "systemd"] = "internal"
 
     @property
     def journal(self) -> Path:
@@ -90,6 +92,7 @@ class RestartView:
     btq_checkout: Path
     btq_locations: tuple[tuple[str, str], ...]
     workstreams: tuple[WorkstreamView, ...]
+    timer_owner: Literal["internal", "systemd"] = "internal"
 
 
 def restart_view(s: WsdSettings) -> RestartView:
@@ -97,7 +100,7 @@ def restart_view(s: WsdSettings) -> RestartView:
                                    w.coder_role, w.coder_profile, tuple(sorted(w.profiles)), w.limits)
                     for w in sorted(s.workstreams, key=lambda w: w.name))
     return RestartView(s.state_dir, s.backstop_seconds, s.reconcile_seconds, s.inbox_attempts_before_human,
-                       s.btq_checkout, tuple(sorted(s.btq_locations.items())), streams)
+                       s.btq_checkout, tuple(sorted(s.btq_locations.items())), streams, s.timer_owner)
 
 
 def restart_fields(running: RestartView, loaded: RestartView) -> list[str]:
@@ -128,6 +131,14 @@ def resolve(env: Mapping[str, str]) -> WsdSettings:
     host = load(env=env)
     wsd = table_at(host.values, "wsd", "config")
     _only(wsd, WSD_KEYS, "[wsd]")
+    timer_owner = wsd.get("timer_owner", "internal")
+    if timer_owner not in ("internal", "systemd"):
+        raise ConfigError('[wsd] timer_owner must be "internal" or "systemd"')
+    cadence = {key: _seconds(wsd, key) for key in ("backstop_seconds", "reconcile_seconds")}
+    if timer_owner == "systemd":
+        for key, value in cadence.items():
+            if not value.is_integer():
+                raise ConfigError(f"[wsd] {key} must be an integer from 1 to 86400 for systemd")
     btq = table_at(table_at(host.values, "integrations", "config"), "beads", "integrations")
     _only(btq, BTQ_KEYS, BEADS)
     limits = Limits(launch_failures_before_human=_int(wsd, "launch_failures_before_human"),
@@ -140,14 +151,15 @@ def resolve(env: Mapping[str, str]) -> WsdSettings:
                     for name in workstream_names(paths.config_dir(env)))
     return WsdSettings(
         state_dir=paths.state_dir(env) / "wsd",
-        backstop_seconds=_seconds(wsd, "backstop_seconds"),
-        reconcile_seconds=_seconds(wsd, "reconcile_seconds"),
+        backstop_seconds=cadence["backstop_seconds"],
+        reconcile_seconds=cadence["reconcile_seconds"],
         inbox_attempts_before_human=_int(wsd, "inbox_attempts_before_human"),
         btq_checkout=_path(btq.get("btq"), env, f"{BEADS} btq"),
         btq_locations=_locations(btq, env),
         workstreams=streams,
         accounts=ConfiguredAccounts.from_config(host, env),
-        config_dir=paths.config_dir(env))
+        config_dir=paths.config_dir(env),
+        timer_owner=timer_owner)
 
 
 def _workstream(name: str, cfg: Config, coder_role: str, limits: Limits, usage: UsageSettings,

@@ -37,6 +37,22 @@ class Invalid(ValueError):
     """Fixed public refusal code, never includes request material."""
 
 
+# V1 receipts predate operation-consent metadata and cannot bind its descriptor.
+# Keep the existing receipt hash/DDL frozen; a future V2 lifecycle needs its own design.
+LEGACY_PRESENTATION = "presentation IS NULL AND render_version IS NULL AND management IS NULL"
+
+
+def require_legacy_presentation(db: sqlite3.Connection, ask_id: str) -> None:
+    row = db.execute(
+        f"SELECT {LEGACY_PRESENTATION} FROM asks WHERE ask_id=?",  # noqa: S608 - fixed predicate
+        (ask_id,),
+    ).fetchone()
+    if row is None:
+        raise Invalid("missing")
+    if row != (1,):
+        raise Invalid("unsupported-management-fulfillment")
+
+
 class Evidence(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     artifact_id: str
     sha256: str
@@ -313,6 +329,7 @@ class Lifecycle:
 
     def binding(self, ask_id: str) -> dict[str, object]:
         with self.store.lock:
+            require_legacy_presentation(self.store.db, ask_id)
             row = self.store.ask(ask_id)
             if row is None:
                 raise Invalid("missing")
@@ -529,6 +546,7 @@ class Lifecycle:
             raise Invalid("unverified-peer")
 
     def duplicate(self, ask_id: str, request_digest: str) -> Reply | None:
+        require_legacy_presentation(self.store.db, ask_id)
         row = self.store.db.execute(
             "SELECT request_digest,valid FROM ask_fulfillments WHERE ask_id=?", (ask_id,)
         ).fetchone()
