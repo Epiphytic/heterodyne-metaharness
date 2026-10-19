@@ -182,7 +182,8 @@ def test_run_supervises_the_agent_loop(tmp_path: Path, monkeypatch: pytest.Monke
     u = Unit(tmp_path)
     names: list[str] = []
 
-    async def record(name: str, factory: object, audit: object) -> None:
+    async def record(name: str, factory: object, audit: object, *,
+                     base: float = 1.0, cap: float = 30.0) -> None:
         names.append(name)
     monkeypatch.setattr("heterodyne.admind.daemon.supervised", record)
     run(u.daemon.run())
