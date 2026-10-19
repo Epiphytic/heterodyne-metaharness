@@ -540,7 +540,11 @@ class HookServer:
         if sock is None:
             return False
         try:
-            ready, _, _ = select.select([sock], [], [], 0)
+            # select() rejects otherwise valid descriptors >= FD_SETSIZE. A busy daemon or
+            # a cumulative test process can reach that numeric limit without a socket fault.
+            poller = select.poll()
+            poller.register(sock, select.POLLIN)
+            ready = poller.poll(0)
         except (OSError, ValueError):
             return True     # cannot tell: fail closed (a later flush retries)
         return bool(ready)
