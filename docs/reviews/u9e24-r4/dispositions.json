@@ -1,0 +1,74 @@
+{
+  "reviewed_head": "131fa1032caac4322d7f84d206d779a843b3c9a4",
+  "base": "878b50e55cafdfcd4bd22f2a258c3cce2863e4a8",
+  "raw_sha256": "debcae9067dbd8ad16a02030d3994719fd546e9bc55ec1910e84599ea37fc12d",
+  "actual_review": "FOURTH MEDIUM builtin Claude Opus /code-review",
+  "verdict": "PoC sufficient only while executor stays separately gated",
+  "waiver": false,
+  "implementation_followup_tasks": [
+    "btq-jlzk6",
+    "btq-qe3gk"
+  ],
+  "findings": [
+    {
+      "ordinal": 1,
+      "verbatim": "`src/heterodyne/admind/recovery.py:865`: permit() calls self.enrollment() but never checks obj.enrollment_sha256 or obj.source_closure against the current enrollment (only register() does), so a proposal consented under an old source closure can still get a permit after the enrollment or sources change.\n\n   Failure scenario: Proposal P is registered and consented under enrollment E1. The coordinator is redeployed with enrollment E2, which is internally consistent so enrollment() passes. `admind maintenance-recovery permit P` then issues a first-generation permit bound to E1's source closure under E2 code, defeating the source-drift fence that register enforces.",
+      "status": "OPEN_UNWAIVED_BEFORE_EXECUTOR",
+      "disposition": "Mandatory before executor integration: compare proposal enrollment/source closure against current enrollment on every permit issuance."
+    },
+    {
+      "ordinal": 2,
+      "verbatim": "`src/heterodyne/admind/recovery.py:898`: A new permit generation (certificate path) checks the boot ID and certificate but not that the previous permit's initiate_before_boottime_ns has passed, unlike supersede(), which raises permit-active; nothing on the admind side stops two generations from being live at once.\n\n   Failure scenario: Generation 1 is issued at time T. The queue writes a nonconsumption certificate at T+5s. Permit is called with that certificate at T+6s and generation 2 is published while generation 1's window runs to T+30s. If the queue's superseded tombstone isn't honoured exactly (it lives in a mutable coordinator that isn't frozen evidence), both permits can start recovery.",
+      "status": "OPEN_UNWAIVED_BEFORE_EXECUTOR",
+      "disposition": "Mandatory before executor integration: renewal must reject the previous still-active initiation window, preserving exact queue nonconsumption/tombstone proof."
+    },
+    {
+      "ordinal": 3,
+      "verbatim": "`src/heterodyne/admind/recovery.py:901`: The final authority check runs before the writer transaction. Inside the transaction, the compare-and-set only compares the stored consent row (including its old policy hash), not current host policy or operators, so the claim that the transaction rechecks policy and operators is only partly true.\n\n   Failure scenario: The worker thread calls authority() and it matches. The event loop then processes a policy change or operator removal. The worker enters the transaction, finds row == observed, and issues and publishes the permit under the consent of an operator who has just been removed.",
+      "status": "OPEN_UNWAIVED_BEFORE_EXECUTOR",
+      "disposition": "Mandatory composed authority-race regression and correction before activation. Fresh callback then stored-row CAS does not itself freeze host policy/operator changes."
+    },
+    {
+      "ordinal": 4,
+      "verbatim": "`src/heterodyne/admind/recovery.py:533`: Once any permit generation has been issued, a reboot permanently wedges the operation: supersede() raises boot-changed and permit() reissue raises boot-changed. The 'terminal' state and the terminal column are never written anywhere, so supersede's terminal branch is dead code.\n\n   Failure scenario: A permit is issued, the host reboots before the queue consumes it or certifies nonconsumption, and every later register or reissue for that operation is refused forever. Recovering requires manually editing the database.",
+      "status": "OPEN_UNWAIVED",
+      "disposition": "Conservative cross-boot HOLD retained; do not edit native databases to recover. Any broader cross-boot authority needs approved design, not inferred timeout/death."
+    },
+    {
+      "ordinal": 5,
+      "verbatim": "`src/heterodyne/admind/daemon.py:835`: recovery_message returns before service.message/refusal when check_group() fails (or the service is unavailable), so an observed replay-mismatch conflict is never written to maintenance_recovery_conflicts. This contradicts the R3 claim that conflict denials are persisted even when policy is unreadable.\n\n   Failure scenario: A redelivered message ID arrives with different content while the group check is failing. The conflict is only audited, nothing is persisted, and a later permit() for that proposal does not see the conflict and is not refused.",
+      "status": "OPEN_UNWAIVED_BEFORE_EXECUTOR",
+      "disposition": "Persisted conflicts after service ingress are covered; earlier transport/group guard is an explicit unresolved observation boundary. Must exercise/fix in composed activation acceptance."
+    },
+    {
+      "ordinal": 6,
+      "verbatim": "`src/heterodyne/admind/operations.py:344`: withdraw() on an operation that was never posted enrolls it, permanently tombstones the bead, adopts the legacy asks for that bead, and cancels their open or answered asks.\n\n   Failure scenario: A same-UID source sends withdraw for a new operation key on a bead with legacy asks and a matching context_digest. The operator's open legacy ask is cancelled, later legacy posts are refused with 'source-owned bead', and the operation can never be re-posted.",
+      "status": "OPEN_UNWAIVED",
+      "disposition": "Inherited operation API withdrawal behavior remains open; standalone recovery does not authorize legacy cancellation. Preserve source ownership and real legacy histories."
+    },
+    {
+      "ordinal": 7,
+      "verbatim": "`src/heterodyne/admind/daemon.py:808`: register and permit run Service.enrollment(), which hashes up to 256 source files of up to 16 MiB each, while holding the daemon's work_lock, so operator message processing stalls for the whole hash.\n\n   Failure scenario: With a large source closure, a permit request holds work_lock for many seconds. Operator !approve/!deny messages queue behind it, and the CLI's 10-second timeout reports 'unavailable' while the server still goes on to issue the permit.",
+      "status": "OPEN_UNWAIVED",
+      "disposition": "Source hashing under work_lock is bounded but potentially slow. No availability/latency acceptance claimed."
+    },
+    {
+      "ordinal": 8,
+      "verbatim": "`src/heterodyne/admind/store.py:406`: executescript(OPERATION_SCHEMA) implicitly COMMITs and runs its statements outside any transaction, and a failure there or in Retirement.migrate() closes the Store, so a schema problem in the new features blocks the whole daemon, unlike the isolated recovery service.\n\n   Failure scenario: A trigger creation fails partway through, leaving tables without triggers. Store() raises and admind does not start at all, even though the maintenance-recovery feature was designed to fail without taking the daemon down.",
+      "status": "OPEN_UNWAIVED",
+      "disposition": "Inherited Store operation/retirement schema startup behavior remains open. Recovery-specific schema isolation does not fix all feature migrations."
+    },
+    {
+      "ordinal": 9,
+      "verbatim": "`src/heterodyne/admind/ctl.py:185`: Every request on the ask socket is now JSON-decoded twice (an untyped envelope decode, then the typed decode).\n\n   Failure scenario: Every legacy ask or fulfillment request up to MAX_REQUEST pays a redundant full parse. Peeking only at the tag, or decoding once into the tagged union, would do the same job.",
+      "status": "OPEN_UNWAIVED",
+      "disposition": "Bound check precedes untyped decode, but double parsing remains open performance debt."
+    },
+    {
+      "ordinal": 10,
+      "verbatim": "`src/heterodyne/admind/recovery.py:393`: The proposals schema and the supersede() code carry 'terminal' handling, but no code path ever moves a proposal to terminal or writes terminal data, so that branch is unreachable state.\n\n    Failure scenario: A reviewer or operator assumes a consumed recovery becomes terminal and blocks supersede. In practice a consumed proposal looks the same as a consented one, and only the certificate's consumed/issuing/receipt file probes stop it.",
+      "status": "OPEN_UNWAIVED",
+      "disposition": "Terminal state machinery has no current producer; no inference that proposal lifecycle alone proves queue consumption."
+    }
+  ]
+}

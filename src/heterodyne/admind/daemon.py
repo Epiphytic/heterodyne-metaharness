@@ -18,6 +18,7 @@ import hmac
 import json
 import os
 import re
+import sqlite3
 import threading
 import time
 import uuid
@@ -34,13 +35,19 @@ from heterodyne.admind import (
     approvals,
     asks,
     backstop,
+    binding,
     chunk,
     commands,
     ctl,
+    fulfillment,
+    gateway_custody,
+    gateway_custody_control,
     guard,
     guard_state,
     membership,
     notices,
+    operations,
+    recovery,
     summarize,
     verbs,
 )
@@ -63,7 +70,17 @@ from heterodyne.admind.hook import (
 from heterodyne.admind.notices import NoticePost
 from heterodyne.admind.redact import redact
 from heterodyne.admind.settings import AdmindSettings, Operator
-from heterodyne.admind.store import REACTION_PREFIX, AskRow, OutboxRow, Store, TurnRow, now
+from heterodyne.admind.store import (
+    MAINTENANCE_CAPACITY,
+    MAINTENANCE_RETRY_SECONDS,
+    MAINTENANCE_SUSPENDED,
+    REACTION_PREFIX,
+    AskRow,
+    OutboxRow,
+    Store,
+    TurnRow,
+    now,
+)
 from heterodyne.agents.claude_code import headless_argv
 from heterodyne.config.secret_scan import show
 from heterodyne.marmot.control import (
@@ -319,7 +336,6 @@ def reconcile(count: int, confirmed: set[str] | None, pending_raw: str | None,
     return None, "unknown"
 
 
-
 class Admind:
     def __init__(self, settings: AdmindSettings, client: ControlClient, store: Store, audit: Audit,
                  agent: AdminAgent, runner: commands.CommandRunner, account: str, group: str,
@@ -336,6 +352,17 @@ class Admind:
         self.agent = agent
         self.runner = runner
         self.account = account
+        # Ports deliberately absent until a separately qualified source/transport
+        # enrollment exists. Merely exposing the closed socket creates no authority.
+        self.gateway_custody = gateway_custody.Service(store)
+        self.custody_lock = asyncio.Lock()
+        self.custody_work: asyncio.Queue[InboundMessage] = asyncio.Queue(maxsize=256)
+        try:
+            self.maintenance_recovery: recovery.Service | None = recovery.Service(
+                store, settings.state_dir / "maintenance-recovery")
+        except (recovery.Invalid, OSError, sqlite3.Error):
+            self.maintenance_recovery = None
+            self.audit.write("maintenance-recovery", action="feature-unavailable")
         self.group = group
         self.hooks: asyncio.Queue[HookEvent | Delivery] = asyncio.Queue()
         # operator messages and reactions for worker_loop
@@ -375,6 +402,8 @@ class Admind:
         self.acked = False          # the current subscription was acknowledged; check_group may then observe
         self.sub_gen = 0            # bumped at the start and end of every subscription attempt
         self.wake = asyncio.Event()
+        self.store.fulfillment.post = lambda key, text, target, thread, owners: self.post(
+            key, text, target, thread_key=thread, owner=owners)
         self.send_lock = asyncio.Lock()     # held across each send; a membership transition drains it (B7)
         self.count_lock = asyncio.Lock()        # never acquire transition/send while held
         self.check_requested = False
@@ -399,7 +428,9 @@ class Admind:
         self._sleep: Callable[[float], Awaitable[None]] = asyncio.sleep     # replaced in tests
         self.posts_in_flight = 0                # ask posts on ask.sock being handled (R15)
         self.ask_post_lock = asyncio.Lock()     # posts run one at a time (R22)
-        self.ask_server: ctl.JsonSocketServer[asks.AskRequest, asks.AskReply] | None = None
+        self.ask_server: ctl.JsonSocketServer[
+            asks.AskRequest | fulfillment.Request | operations.Request,
+            asks.AskReply | fulfillment.Reply | operations.Reply] | None = None
         self.approve_bead = None if settings.approve_bead is None else ApproveBead(settings.approve_bead)
 
     # --- state helpers -------------------------------------------------------------------------
@@ -518,7 +549,16 @@ class Admind:
     def latch(self, why: str) -> None:
         """`why` is built by admind from numbers and allowlisted change names, never from peer text."""
         if not self.latched():
-            self.store.set("latched", why)
+            with self.store.transaction():
+                self.store.set("latched", why)
+                self.store.set("maintenance_latch_token", uuid.uuid4().hex)
+            # Commit the safety latch before best-effort overlay suspension. Failure below must
+            # never roll back the latch; no await allows rearm between these synchronous writes.
+            with self.store.transaction():
+                for ask_id, mid, due in self.store.maintenance_pending():
+                    attempt = self.store.current_attempt(ask_id)
+                    if attempt is not None and attempt.message_id == mid:
+                        self.store.defer_maintenance(attempt, due, reason="latched")
             self.audit.write("guard", action="latch", reason=why)
 
     def may_post(self) -> bool:
@@ -594,6 +634,7 @@ class Admind:
     # --- lifecycle -----------------------------------------------------------------------------
     def recover(self) -> None:
         """Settle what a previous run left half done (D6). Idempotent."""
+        self.store.fulfillment.rebuild()  # roll-forward index before serving any socket or worker
         # A turn in flight when admind stopped can't be tied to its Stop any more (it may have been
         # lost, or arrive later). Close it out; a late Stop then has no anchor and posts top-level.
         self.abandon_in_flight("admind restarted during this turn; a late reply may appear unthreaded")
@@ -646,14 +687,47 @@ class Admind:
         await self.check_group()
         server = self.make_server(self.s.state_dir / "hook.sock")
         control: ctl.JsonSocketServer[ctl.CtlRequest, ctl.CtlReply] | None = None
+        recovery_server: ctl.JsonSocketServer[recovery.Request, recovery.Reply] | None = None
+        custody_server: (
+            ctl.JsonSocketServer[gateway_custody.Request, gateway_custody_control.Reply] | None
+        ) = None
         try:
             await server.start()
             control = ctl.CtlServer(self.s.state_dir / ctl.CTL_SOCKET, self.on_ctl, self.audit)
             await control.start()
+            recovery_server = ctl.JsonSocketServer(
+                self.s.state_dir / recovery.SOCKET,
+                self.on_recovery,
+                self.audit,
+                kind="maintenance-recovery",
+                max_request=recovery.MAX_BYTES,
+                max_reply=recovery.MAX_BYTES,
+                request_type=recovery.Request,
+                check=recovery.check,
+                refused=lambda why: recovery.Reply("refused", why),
+                failed=lambda: recovery.Reply("unavailable", "recovery unavailable"),
+                describe=lambda req: {"op": type(req).__name__},
+            )
+            if self.maintenance_recovery is not None:
+                await recovery_server.start()
+            custody_server = ctl.JsonSocketServer(
+                self.s.state_dir / gateway_custody_control.SOCKET, self.on_gateway_custody, self.audit,
+                kind="gateway-custody", max_request=gateway_custody.MAX_REQUEST,
+                max_reply=gateway_custody.MAX_REQUEST, request_type=gateway_custody.Request,
+                check=gateway_custody.check,
+                refused=lambda why: gateway_custody_control.Reply("refused", why),
+                failed=lambda: gateway_custody_control.Reply("unavailable", "custody unavailable"),
+                describe=lambda req: {"op": type(req).__name__},
+            )
+            await custody_server.start()
             self.ask_server = ctl.JsonSocketServer(
-                self.s.state_dir / asks.ASK_SOCKET, self.on_ask, self.audit, kind="ask",
-                max_request=asks.MAX_REQUEST, max_reply=asks.MAX_REPLY, request_type=asks.AskRequest,
-                check=asks.check, refused=asks.refused, failed=asks.failed, describe=asks.describe)
+                self.s.state_dir / asks.ASK_SOCKET, self.on_ask_wire, self.audit, kind="ask",
+                max_request=asks.MAX_REQUEST, max_reply=asks.MAX_REPLY,
+                request_type=asks.AskRequest | fulfillment.Request | operations.Request,
+                check=self.check_ask_wire,
+                refused=asks.refused, failed=asks.failed,
+                describe=lambda req: (asks.describe(req) if isinstance(req, asks.AskRequest) else
+                    {"op": type(req).__name__}))
             await self.ask_server.start()
             await self.start_agent(startup=True)
             async with asyncio.TaskGroup() as tg:
@@ -661,8 +735,10 @@ class Admind:
                                    ("hooks", self.hook_loop), ("outbox", self.outbox_loop),
                                    ("alerts", self.alerts_loop), ("group", self.group_loop),
                                    ("agent", self.agent_loop), ("summaries", self.summary_loop),
-                                   ("batches", self.batch_loop), ("autobump", self.autobump_loop)):
+                                   ("batches", self.batch_loop), ("autobump", self.autobump_loop),
+                                   ("maintenance-retry", self.maintenance_retry_loop)):
                     tg.create_task(self.guarded(supervised(name, loop, self.audit)))
+                tg.create_task(self.guarded(supervised("gateway-custody", self.custody_loop, self.audit)))
                 tg.create_task(self.guarded(self.reconcile_asks(snapshot)))
         except BaseException:
             self.shutting_down = True
@@ -674,6 +750,10 @@ class Admind:
             self._backoff.clear()
             if self.ask_server is not None:
                 await self.ask_server.close()
+            if recovery_server is not None:
+                await recovery_server.close()
+            if custody_server is not None:
+                await custody_server.close()
             if control is not None:
                 await control.close()
             await server.close()
@@ -691,17 +771,238 @@ class Admind:
                 self.audit_quietly("ctl", action="flush-failed", error=type(exc).__name__)
         return ctl.CtlReply(result, redact(message))
 
+    def recovery_authority(self, sender: str | None = None) -> str | None:
+        """Actual current host policy/confirmed-set observation, never local request claims."""
+        if not self.authorised() or (sender is not None and sender not in self.operators):
+            return None
+        return recovery.sha(
+            {
+                "policy": sorted((o.hex, o.name) for o in self.policy_operators),
+                "confirmed": sorted(self.confirmed_operators() or ()),
+            }
+        )
+
+    async def custody_authority(self, account: str, group: str, sender: str) -> str | None:
+        if (account != self.account or group != self.group or not self.refresh_authority()
+                or not await self.check_group()):
+            return None
+        return self.recovery_authority(sender)
+
+    async def on_gateway_custody(
+        self, req: gateway_custody.Request, peer: ctl.Peer,
+    ) -> gateway_custody_control.Reply:
+        """Own lock and worker: custody control cannot wait for a held model dispatcher."""
+        try:
+            gateway_custody.Service.peer(peer.uid)
+            if why := gateway_custody.check(req):
+                raise gateway_custody.Invalid(why)
+            async with self.custody_lock:
+                if not isinstance(req, gateway_custody.GatewayCustodyStatus):
+                    if (not self.refresh_authority() or not await self.check_group()
+                            or self.recovery_authority() is None):
+                        raise gateway_custody.Invalid("authority")
+                service = gateway_custody_control.independent(self.gateway_custody, self.custody_authority)
+                result = await gateway_custody_control.worker(lambda: gateway_custody_control.perform(
+                    service, req, uid=peer.uid, max_chars=self.s.chunk_chars))
+                self.wake.set()
+                return result
+        except gateway_custody.Invalid as exc:
+            return gateway_custody_control.Reply("refused", str(exc))
+        except (OSError, sqlite3.Error):
+            return gateway_custody_control.Reply("unavailable", "custody source or store unavailable")
+
+    async def custody_message(self, ev: InboundMessage) -> None:
+        """Native event only. It never joins generic prompt execution or ask slots."""
+        try:
+            async with self.custody_lock:
+                service = gateway_custody_control.independent(self.gateway_custody, self.custody_authority)
+                outcome = await gateway_custody_control.worker(lambda: service.message(
+                    account=ev.account_id_hex.lower(), group=ev.group_id_hex.lower(),
+                    mid=ev.message.message_id_hex.lower(), sender=ev.message.sender.account_id_hex.lower(),
+                    target=None if ev.reply_to is None else ev.reply_to.message_id_hex.lower(),
+                    text=ev.message.text))
+                self.audit.write("gateway-custody", action=outcome)
+        except gateway_custody.Invalid as exc:
+            self.audit.write("gateway-custody", action="refused", reason=str(exc))
+        except (OSError, sqlite3.Error):
+            self.audit.write("gateway-custody", action="unavailable")
+
+    async def custody_loop(self) -> None:
+        while True:
+            event = await self.custody_work.get()
+            try:
+                await self.custody_message(event)
+            finally:
+                self.custody_work.task_done()
+
+    async def on_recovery(self, req: recovery.Request, peer: ctl.Peer) -> recovery.Reply:
+        try:
+            service = self.maintenance_recovery
+            if service is None:
+                return recovery.Reply("unavailable", "recovery unavailable")
+            if peer.uid != os.getuid():
+                raise recovery.Invalid("peer")
+            if why := recovery.check(req):
+                raise recovery.Invalid(why)
+            if isinstance(req, recovery.Status):
+                return recovery.Reply(
+                    "ok", "recovery status", service.get(req.proposal_sha256)
+                )
+            async with self.work_lock:
+                if not await self.check_group() or self.recovery_authority() is None:
+                    raise recovery.Invalid("authority")
+                # Hash the bounded source closure off the subscription event loop. Keep
+                # work_lock until the worker has actually stopped, including cancellation.
+                loop = asyncio.get_running_loop()
+
+                async def observe_authority(sender: str) -> str | None:
+                    # Policy refresh and membership state belong to the daemon loop,
+                    # never to the source-hashing worker. work_lock is still held.
+                    return self.recovery_authority(sender)
+
+                def authority(sender: str) -> str | None:
+                    pending = asyncio.run_coroutine_threadsafe(observe_authority(sender), loop)
+                    try:
+                        return pending.result(timeout=5)
+                    except TimeoutError:
+                        pending.cancel()
+                        raise recovery.Invalid("authority-unavailable") from None
+
+                def perform() -> recovery.Reply:
+                    if isinstance(req, recovery.Register):
+                        def post(key: str, text: str) -> None:
+                            self.store.enqueue(key, text, None, lane=2, ownership_kind="system")
+                            loop.call_soon_threadsafe(self.wake.set)
+                        return service.register(
+                            req, uid=peer.uid, pid=peer.pid,
+                            chunk_chars=self.s.chunk_chars, post=post,
+                        )
+                    return service.permit(
+                        req, uid=peer.uid, authority=authority,
+                    )
+
+                task = asyncio.create_task(asyncio.to_thread(perform))
+                try:
+                    return await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    while not task.done():
+                        try:
+                            await asyncio.shield(task)
+                        except asyncio.CancelledError:
+                            continue
+                        except Exception:  # worker failure must not replace cancellation
+                            break
+                    if not task.cancelled():
+                        task.exception()
+                    raise
+        except recovery.Invalid as exc:
+            return recovery.Reply("refused", str(exc))
+        except (OSError, sqlite3.Error):
+            return recovery.Reply("unavailable", "recovery store or enrollment unavailable")
+
+    async def recovery_message(self, ev: InboundMessage) -> None:
+        if (ev.account_id_hex.lower() != self.account.lower()
+                or ev.group_id_hex.lower() != self.group.lower()):
+            self.audit.write("drop", reason="maintenance account/group mismatch",
+                             sender_prefix=ev.message.sender.account_id_hex[:8],
+                             text_chars=len(ev.message.text))
+            return
+        service = self.maintenance_recovery
+        if service is None or not await self.check_group():
+            self.audit.write("maintenance-recovery", action="authority-unavailable")
+            return
+        sender = ev.message.sender.account_id_hex.lower()
+        mid = ev.message.message_id_hex.lower()
+        fields = recovery.MessageFields(
+                      account=ev.account_id_hex.lower(), group=ev.group_id_hex.lower(),
+                      mid=mid, sender=sender,
+                      target=None if ev.reply_to is None else ev.reply_to.message_id_hex.lower(),
+                      text=ev.message.text, authority=lambda: self.recovery_authority(sender))
+        response_key = "maintenance-response:" + recovery.sha(
+            [fields["account"], fields["group"], mid]
+        )
+
+        def post(text: str) -> None:
+            self.post(response_key, text, mid, owner=(sender,))
+
+        try:
+            reply = service.message(**fields, post=post)
+            self.audit.write("maintenance-recovery", action=reply.message)
+        except recovery.Invalid as exc:
+            self.audit.write("maintenance-recovery", action="refused", reason=str(exc))
+            try:
+                service.refusal(**fields, reason=str(exc), post=post)
+            except (recovery.Invalid, OSError, sqlite3.Error):
+                self.audit.write("maintenance-recovery", action="refusal-unavailable")
+        except (OSError, sqlite3.Error):
+            self.audit.write("maintenance-recovery", action="unavailable")
+
     # --- asks (relay spec) ----------------------------------------------------------------------
+    @staticmethod
+    def check_ask_wire(req: asks.AskRequest | fulfillment.Request | operations.Request) -> str | None:
+        """Validate the selected closed protocol without weakening legacy DTO checks."""
+        if isinstance(req, operations.Request):
+            return operations.check(req)
+        if isinstance(req, fulfillment.Request):
+            return fulfillment.check(req)
+        return asks.check(req)
+
+    async def on_ask_wire(self, req: asks.AskRequest | fulfillment.Request | operations.Request,
+                          peer: ctl.Peer) -> asks.AskReply | fulfillment.Reply | operations.Reply:
+        if isinstance(req, operations.Request):
+            return await self.on_operation(req, peer)
+        if isinstance(req, fulfillment.Request):
+            reply = await self.on_fulfillment(req, peer)
+            if len(msgspec.json.encode(reply)) > fulfillment.MAX_REPLY:
+                return fulfillment.Reply("unavailable", "lifecycle reply exceeds bound")
+            return reply
+        return await self.on_ask(req, peer)
+
+    async def on_operation(self, req: operations.Request, peer: ctl.Peer) -> operations.Reply:
+        return await operations.handle(self, req, peer)
+
+    async def on_fulfillment(self, req: fulfillment.Request, peer: ctl.Peer) -> fulfillment.Reply:
+        """Separate opt-in protocol. No long-lived daemon lock or external operation is involved."""
+        if not fulfillment.ENABLED:
+            return fulfillment.Reply("unavailable", "capability disabled")
+        try:
+            fulfillment.Lifecycle.require_uid(peer.uid)
+            why = fulfillment.check(req)
+            if why:
+                return fulfillment.Reply("refused", why)
+            lifecycle = self.store.fulfillment
+            if isinstance(req, fulfillment.Get):
+                return fulfillment.Reply("ok", "lifecycle", lifecycle.view(req.ask_id))
+            if isinstance(req, fulfillment.Apply):
+                return lifecycle.apply(req.receipt, uid=peer.uid if peer.uid is not None else -1,
+                                       pid=peer.pid)
+            if isinstance(req, fulfillment.Propose):
+                return lifecycle.propose(req, uid=peer.uid if peer.uid is not None else -1,
+                                         chunk_chars=self.s.chunk_chars)
+            with self.store.transaction():
+                return lifecycle.retire(req.ask_id, req.expect_intent, req.reason)
+        except fulfillment.Invalid as exc:
+            return fulfillment.Reply("refused", str(exc))
+        except sqlite3.Error:
+            return fulfillment.Reply("unavailable", "store unavailable")
+
     async def on_ask(self, req: asks.AskRequest, peer: ctl.Peer) -> asks.AskReply:
         """A request on ask.sock, already checked by `asks.check`. Get, list and cancel work while
         latched (R17); a post does not."""
+        if isinstance(req, asks.AskBinding):
+            ask_id = asks.normalise_id(req.ask_id)
+            if ask_id is None:
+                return binding.AskBindingReply("refused", "ask.binding.v1 unavailable",
+                                               code="invalid-state")
+            return await asyncio.to_thread(binding.read, self.store, ask_id, self.s.chunk_chars,
+                                           self.load_operators)
         if isinstance(req, asks.AskPost):
             return await self.serialised_post(req, peer)
         if isinstance(req, NoticePost):
             async with self.ask_post_lock:
                 return self.post_notice(req, peer)
         if isinstance(req, asks.AskList):
-            rows = self.store.asks_with_status(*asks.ACTIVE) + self.store.recent_asks(20)
+            rows = self.store.capacity_asks() + self.store.inactive_asks(20)
             return asks.AskReply("ok", f"{len(rows)} asks", asks=[self.ask_summary(r) for r in rows])
         ask_id = asks.normalise_id(req.ask_id)
         row = None if ask_id is None else self.store.ask(ask_id)
@@ -729,7 +1030,7 @@ class Admind:
         queue its card in one transaction."""
         if self.latched():
             return asks.refused(ASK_LATCHED)
-        if len(self.store.asks_with_status(*asks.ACTIVE)) >= asks.MAX_OPEN:
+        if len(self.store.capacity_asks()) >= asks.MAX_OPEN:
             return asks.refused(ASK_TOO_MANY)
         if self.store.ask_posted_since(asks.hour_ago()) >= asks.MAX_PER_HOUR:
             return asks.refused(ASK_TOO_OFTEN)
@@ -804,7 +1105,7 @@ class Admind:
             return ASK_LATCHED
         if self.approve_bead is None:
             return ASK_NO_APPROVALS
-        if len(self.store.asks_with_status(*asks.ACTIVE)) >= asks.MAX_OPEN:
+        if len(self.store.capacity_asks()) >= asks.MAX_OPEN:
             return ASK_TOO_MANY
         if self.store.ask_posted_since(asks.hour_ago()) >= asks.MAX_PER_HOUR:
             return ASK_TOO_OFTEN
@@ -828,6 +1129,9 @@ class Admind:
         """Spec §8 "Post an approval ask", under `ask_post_lock` (R22): read the bead with approve-bead,
         prepare the card from its readout, then commit it in one transaction."""
         bead = req.bead or ""
+        with self.store.transaction(read_only=True):
+            if operations.bead_binding(self.store, bead) is not None:
+                return asks.refused("source-owned bead; use approval.operation.v1")
         refusal = self.approval_post_refusal(bead)
         if refusal is not None or self.approve_bead is None:
             return self.approval_refused(bead, refusal or ASK_NO_APPROVALS, "limits")
@@ -858,7 +1162,7 @@ class Admind:
         row = AskRow(asks.new_id(lambda i: self.store.ask(i) is not None), "approval", poster,
                      asks.approval_title(r, bead), "", None, None, bead, r.digest, False, 0, "open", None,
                      None, at, at, None if retiring is None else retiring[0])
-        others = asks.count_others(o for o in self.store.asks_with_status(*asks.ACTIVE)
+        others = asks.count_others(o for o in self.store.capacity_asks()
                                    if o.bead != bead and (retiring is None or o.ask_id != retiring[0]))
         card = asks.approval_card(row, r, self.s.chunk_chars, others)
         if isinstance(card, str):
@@ -870,19 +1174,23 @@ class Admind:
         row = dataclasses.replace(row, body=asks.approval_body(r, card), card_parts=len(card.card_chunks))
         return FreshCard(row, card)
 
-    def commit_approval(self, fresh: FreshCard, peer_pid: int | None) -> list[str]:
+    def commit_approval(self, fresh: FreshCard, peer_pid: int | None, *,
+                        operation_key: str | None = None) -> list[str]:
         """Inside the caller's transaction: supersede the bead's open and answered asks, store the fresh
         one and queue its card. Returns the superseded ask IDs."""
         row, bead = fresh.row, fresh.row.bead
         superseded: list[str] = []
         with self.store.transaction():
+            bound_key = operations.before_commit(self.store, bead, operation_key)
             for old in self.store.asks_with_status("open", "answered"):
-                if old.bead == bead:
+                if old.bead == bead and not self.store.fulfillment.protected(old.ask_id):
                     superseded.append(old.ask_id)
                     self.store.set_ask(old.ask_id, "superseded")
                     self.ask_notice(old.ask_id, "superseded", row.ask_id, ASK_SUPERSEDED_NOTICE.format(
                         old=old.ask_id, new=row.ask_id, bead=bead))
             self.store.insert_ask(row, peer_pid)
+            if bound_key is not None:
+                operations.attach(self.store, bound_key, row.ask_id)
             self.post_parts(f"ask:{row.ask_id}", fresh.card.card_chunks, owner=None)  # checked chunks
         return superseded
 
@@ -898,6 +1206,11 @@ class Admind:
             return asks.refused(f"ask {row.ask_id} is {row.status}; only an open or answered ask can be "
                                 "cancelled")
         with self.store.transaction():
+            if self.store.fulfillment.protected(row.ask_id):
+                return asks.refused("already fulfilled; original answer retained; see fulfillment get")
+            current = self.store.ask(row.ask_id)
+            if current is None or current.status not in ("open", "answered"):
+                return asks.refused("ask state changed; read it again")
             self.store.set_ask(row.ask_id, "cancelled")
             self.ask_notice(row.ask_id, "cancelled", "0", ASK_CANCELLED_NOTICE.format(ask_id=row.ask_id))
         self.audit.write("ask", action="cancelled", ask_id=row.ask_id)
@@ -952,42 +1265,41 @@ class Admind:
         """Store an operator's answer to a question or merge ask and reply in thread, as one step. On a
         question with a form, the reaction or reply is mapped to a choice (K17q, K18q) and the reply says so
         (K19); the answer text is stored verbatim either way."""
-        row = self.store.ask(ask_id)
-        if row is None:
-            self.finish(mid, "done", f"No ask {ask_id}.", "ask")
-            return
-        refusal = self.answer_refusal(row, text)
-        if refusal is not None:
-            with self.store.transaction():
+        choice: str | None = None
+        with self.store.transaction():
+            row = self.store.ask(ask_id)
+            if row is None:
+                self.finish(mid, "done", f"No ask {ask_id}.", "ask")
+                return
+            refusal = self.answer_refusal(row, text)
+            if refusal is not None:
+                action = "answer-refused"
                 self.touch(ask_id)
                 self.finish(mid, "done", refusal, "ask")
-            self.audit.write("ask", action="answer-refused", message_id=mid, ask_id=ask_id, chars=len(text))
-            return
-        if row.kind == "approval":      # a note the poster sees; never a decision (R13)
-            with self.store.transaction():
+            elif row.kind == "approval":
+                action = "noted"
                 self.store.add_answer(ask_id, "note", self.operator_name(mid), mid, text)
                 self.touch(ask_id)
                 self.finish(mid, "done", NOTED.format(ask_id=ask_id), "ask")
-            self.audit.write("ask", action="noted", message_id=mid, ask_id=ask_id, chars=len(text))
-            return
-        again = row.status == "answered"
-        choice = asks.map_reaction(row, text) if reaction else asks.map_reply(row, text)
-        if choice is not None:
-            said = asks.recorded(row, choice, text)
-        elif again:
-            said = f"Added to ask {ask_id}; it was already answered, and the poster sees both."
-        else:
-            said = f"Answer recorded for ask {ask_id}."
-        with self.store.transaction():
-            self.store.add_answer(ask_id, "answer", self.operator_name(mid), mid, text, choice)
-            self.store.set_ask(ask_id, "answered")
-            self.touch(ask_id)
-            self.finish(mid, "done", said, "ask")
-        self.audit.write("ask", action="answered", message_id=mid, ask_id=ask_id, chars=len(text),
-                         choice=choice)
+            else:
+                action = "answered"
+                choice = asks.map_reaction(row, text) if reaction else asks.map_reply(row, text)
+                if choice is not None:
+                    said = asks.recorded(row, choice, text)
+                elif row.status == "answered":
+                    said = f"Added to ask {ask_id}; it was already answered, and the poster sees both."
+                else:
+                    said = f"Answer recorded for ask {ask_id}."
+                self.store.add_answer(ask_id, "answer", self.operator_name(mid), mid, text, choice)
+                self.store.set_ask(ask_id, "answered")
+                self.touch(ask_id)
+                self.finish(mid, "done", said, "ask")
+        self.audit.write("ask", action=action, message_id=mid, ask_id=ask_id, chars=len(text), choice=choice)
 
     def answer_refusal(self, row: AskRow, text: str) -> str | None:
         """Why an answer is not stored (R15): fixed wording, or None."""
+        if self.store.fulfillment.protected(row.ask_id):
+            return "Already fulfilled; original answer retained."
         if row.status not in ("open", "answered"):
             return self.not_open(row)
         if not text.strip():
@@ -1014,8 +1326,25 @@ class Admind:
         if sub is not None:
             self.remind(mid, sub)
             return
+        from heterodyne.admind.retirement import display_attempt, publish_notice
         at = asks.now()
-        lines = [asks.list_line(r, at) for r in self.store.asks_with_status(*asks.ACTIVE)]
+        lines = [asks.list_line(r, at) for r in self.store.capacity_asks()]
+        lines += [f"{r.ask_id} fulfilled (lifecycle); original answer retained"
+                  for r in self.store.fulfilled_asks(20)]
+        # One bounded eligibility snapshot, at most one new selector per inspection. No retry
+        # history is allocated; later inspections can offer other current notices without fan-out.
+        with self.store.transaction():
+            published = False
+            for ask_id, attempt_id, _ in self.store.maintenance_pending():
+                attempt = self.store.current_attempt(ask_id)
+                proof = None if attempt is None else self.store.retirement.eligible(attempt)
+                if proof is None:
+                    continue
+                if not published and attempt is not None:
+                    published = publish_notice(self, attempt, refresh=True, proof=proof)
+                lines.append(f"{ask_id} attempt {display_attempt(attempt_id)}: "
+                             "reply to its recovery notice with "
+                             f"!asks retire {proof.token}")
         self.finish(mid, "done", "\n".join(lines) or NO_ACTIVE_ASKS, "cmd")
         self.audit.write("command", message_id=mid, command="asks", asks=len(lines))
 
@@ -1027,7 +1356,7 @@ class Admind:
         done: list[str] = []
         skipped: list[tuple[str, str]] = []
         with self.store.transaction():
-            for row in self.store.asks_with_status(*asks.ACTIVE):
+            for row in self.store.capacity_asks():
                 if row.status != "open":
                     skipped.append((row.ask_id, row.status))
                     continue
@@ -1069,7 +1398,7 @@ class Admind:
         due = at - timedelta(hours=hours)
         bumped: list[str] = []
         skipped: list[tuple[str, str]] = []
-        for row in self.store.asks_with_status("open"):
+        for row in self.store.remindable_asks():
             if row.last_activity_at is None or datetime.fromisoformat(row.last_activity_at) > due:
                 continue
             if self.store.reminder_pending(row.ask_id):
@@ -1098,7 +1427,11 @@ class Admind:
         """The ask's whole card again, top-level (B11): an approval's stored checked chunks as they are
         (R21), a question's or merge's whole text split; recorded with its own part count (B12). Raises
         chunk.TooWide, with nothing queued, if a link no longer fits a chunk."""
-        if row.kind == "approval":
+        if self.store.fulfillment.protected(row.ask_id):
+            # Explicit history resend, never an active card or new answer authority.
+            text = "Fulfilled; no new answer or authority.\n" + asks.full_text(row)
+            parts = chunk.split(text, self.s.chunk_chars)
+        elif row.kind == "approval":
             parts = asks.stored_details(row)
         else:
             parts = asks.full_chunks(row, self.s.chunk_chars)
@@ -1160,6 +1493,10 @@ class Admind:
                 self.audit.write("ask", action="details-refused", message_id=mid, ask_id=ask_id,
                                  reason="link too long")
                 return
+        if self.store.fulfillment.protected(ask_id):
+            receipt = self.store.fulfillment.stored(ask_id)
+            label = f"Fulfilled lifecycle; receipt {receipt['receipt_id'] if receipt else 'unavailable'}. "
+            parts = [label + "Original card and answer authority retained.", *parts]
         with self.store.transaction():
             for i, part in enumerate(parts):
                 self.post(f"askd:{ask_id}:{mid}:{i}", part, mid, lane=2, owner=self.request_owners(mid))
@@ -1265,6 +1602,9 @@ class Admind:
     def close_refused(self, a: Attempt, new_status: str, text: str, why: str) -> None:
         """Close the attempt before anything was launched, with its reply, in one compare-and-set."""
         with self.store.transaction():
+            if new_status == "open" and self.store.operation_withdrawn(a.ask_id):
+                new_status, text, why = ("cancelled", "Source withdrew this approval request; "
+                                         "no native decision was issued.", "source-withdrawn")
             closed = self.store.close_attempt(a.ask_id, a.message_id, expect_status="deciding",
                                               settled="refused", exit_status=None, new_status=new_status,
                                               outcome=text, decided_by=None)
@@ -1273,7 +1613,7 @@ class Admind:
         if not closed:
             self.conflict(a, "deciding")
             return
-        self.audit.write("ask", action="refused", message_id=a.message_id, ask_id=a.ask_id, reason=why,
+        self.audit_quietly("ask", action="refused", message_id=a.message_id, ask_id=a.ask_id, reason=why,
                          status=new_status)
 
     def conflict(self, a: Attempt, expected: str) -> None:
@@ -1281,12 +1621,56 @@ class Admind:
         self.audit_quietly("ask", action="conflict", ask_id=a.ask_id, message_id=a.message_id,
                            expected=expected)
 
-    async def run_attempt(self, a: Attempt, row: AskRow) -> None:
+    def hold_maintenance(self, a: Attempt, reason: str, *,
+                         hold: approvals.MaintenanceHold | None = None,
+                         not_spawned: bool = False) -> None:
+        """Commit proof and overlay together; notice delivery cannot erase observed evidence."""
+        with self.store.transaction():
+            if hold is not None:
+                self.store.retirement.record_hold(a, hold)
+            elif not_spawned:
+                self.store.retirement.record_not_spawned(a)
+            deferred = self.store.defer_maintenance(
+                a, self.wallclock() + MAINTENANCE_RETRY_SECONDS, reason=reason)
+            if not deferred:
+                self.conflict(a, "deciding")
+                row = self.store.ask(a.ask_id)
+                self.finish(a.message_id, "done",
+                            CONFLICT.format(ask_id=a.ask_id, bead=row.bead if row else ""), "ask")
+                return
+        # A separate transaction retains an all-or-nothing notice/mapping pair. Expected local
+        # delivery/storage failures leave the durable proof+overlay eligible for later inspection.
+        try:
+            with self.store.transaction():
+                decision = "denial" if a.action == "deny" else "approval"
+                next_step = ("Automatic retry is suspended. "
+                             "See the separate recovery notice for eligibility. "
+                             if reason in MAINTENANCE_SUSPENDED else
+                             "It will retry after fresh card and operator-authority checks. ")
+                self.ask_notice(a.ask_id, "maintenance-" + reason, a.message_id,
+                                f"Ask {a.ask_id}: {decision} received and held ({reason}). "
+                                "No decision was issued by the invocation that returned maintenance HOLD. "
+                                + next_step + "The original reply is preserved.", a.message_id)
+                from heterodyne.admind.retirement import publish_notice
+                publish_notice(self, a, refresh=reason in MAINTENANCE_SUSPENDED)
+        except (OSError, sqlite3.Error, RuntimeError, ValueError) as exc:
+            self.audit_quietly("ask", action="maintenance-notice-unavailable", ask_id=a.ask_id,
+                               error=type(exc).__name__)
+        self.audit_quietly("ask", action="maintenance-held", ask_id=a.ask_id,
+                           message_id=a.message_id, reason=reason)
+
+    async def run_attempt(self, a: Attempt, row: AskRow, *, maintenance_retry: bool = False,
+                          prechecked: Readout | None = None) -> None:
         """Steps 4-8 of a persisted attempt. Until the decision child exists, every failure closes the
-        attempt as `refused` (r5-1); once it exists, every exit goes through the reap and the read-back."""
+        attempt as `refused` (r5-1). The child is reaped; ordinary results use native readback,
+        while a closed pre-effect HOLD retains the attempt without native readback."""
         assert self.approve_bead is not None and row.bead is not None      # noqa: S101 - checked by decide
         ab, bead, mid = self.approve_bead, row.bead, a.message_id
         launched = False
+        if not maintenance_retry and len(self.store.maintenance_pending()) >= MAINTENANCE_CAPACITY:
+            self.close_refused(a, "open", "Maintenance retention capacity reached; no decision was issued. "
+                               "Operator recovery is required before retrying.", "maintenance-capacity")
+            return
 
         def on_launch() -> None:
             nonlocal launched
@@ -1294,29 +1678,66 @@ class Admind:
 
         code: int | None = None
         line = ""
-        audited = unauthorised = False
+        audited = unauthorised = issued = False
+        authority_reason: str | None = None
         stop: tuple[str, str, str] | None = None
         r: Readout | Busy | None = None
+        proven_hold: approvals.MaintenanceHold | None = None
+        not_spawned = False
+        latch_token = self.store.get("maintenance_latch_token")
         try:
             self.audit.write("ask", action="deciding", message_id=mid, ask_id=a.ask_id, bead=bead,
                              decision=a.action, operator=a.operator)
             audited = True
-            r = await ab.read(bead)                                     # step 5
+            r = prechecked if prechecked is not None else await ab.read(bead)  # step 5
             stop = self.preflight(r, a, bead)
             if stop is None:
-                unauthorised = not self.authorised(mid)                 # step 6: the commit point (R11)
+                if maintenance_retry:
+                    authority_reason = self.maintenance_authority_reason(a)
+                    unauthorised = authority_reason is not None
+                else:
+                    unauthorised = not self.authorised(mid)
                 if not unauthorised:
-                    code, line = await ab.decide(a, bead, on_launch)    # step 7
+                    if not self.store.issue_decision(a, maintenance_retry=maintenance_retry):
+                        if self.store.operation_withdrawn(a.ask_id):
+                            self.close_refused(a, "cancelled", "Source withdrew this approval request; "
+                                               "no native decision was issued.", "source-withdrawn")
+                            return
+                        self.conflict(a, "deciding")
+                        self.finish(mid, "done", CONFLICT.format(ask_id=a.ask_id, bead=bead), "ask")
+                        return
+                    issued = True
+                    result = await ab.decide(a, bead, on_launch)        # step 7
+                    if isinstance(result, approvals.MaintenanceHold):
+                        proven_hold = result
+                    else:
+                        code, line = result
         except asyncio.CancelledError:
-            raise       # left `deciding`; the startup reconcile settles it (R26)
+            # Ordinary decisions retain R26 readback settlement. An interrupted maintenance retry
+            # keeps its prelaunch uncertainty marker and never regains automatic replay entitlement.
+            raise
         except Exception as exc:  # noqa: BLE001 - fixed words; nothing launched means nothing was written
             if not launched:
                 # approve-bead's own failures carry their word (a spawn OSError is "unavailable"); the
                 # audit write failing, or a bug, is "error" (spec §8's table)
                 word = (exc.word if isinstance(exc, BtqError)
                         else "unavailable" if isinstance(exc, OSError) and audited else "error")
+                not_spawned = maintenance_retry and issued and isinstance(exc, approvals.NotSpawned)
                 stop = ("open", PREFLIGHT_FAILED.format(bead=bead, word=word), word)
+        if proven_hold is not None:
+            # Retain the conservative issuance distinction even if the subsequent durable proof +
+            # overlay commit fails. This marker alone never grants retry/retirement entitlement.
+            if not self.store.mark_maintenance_issuing(a):
+                self.conflict(a, "deciding")
+                self.finish(mid, "done", CONFLICT.format(ask_id=a.ask_id, bead=bead), "ask")
+                return
+            revoked = self.latched() or self.store.get("maintenance_latch_token") != latch_token
+            self.hold_maintenance(a, "latched" if revoked else "maintenance", hold=proven_hold)
+            return
         if unauthorised:
+            if maintenance_retry:
+                self.hold_maintenance(a, authority_reason or "authority")
+                return
             with self.store.transaction():
                 closed = self.store.close_attempt(a.ask_id, mid, expect_status="deciding", settled="refused",
                                                   exit_status=None, new_status="open", outcome=None,
@@ -1329,6 +1750,9 @@ class Admind:
             self.audit.write("drop", message_id=mid, reason="no longer authorised", what="decision")
             return
         if stop is not None:
+            if maintenance_retry:
+                self.hold_maintenance(a, self.maintenance_stop_reason(stop), not_spawned=not_spawned)
+                return
             if stop[0] == "stale" and isinstance(r, Readout):
                 await self.refresh(a, row, r, "refused", None, "")
             else:
@@ -1381,13 +1805,36 @@ class Admind:
                 text += f'\napprove-bead said: "{line}"'
             thread = self.attempt_thread(a.ask_id, mid)        # the updated content goes where the reply goes
             superseded: list[str] = []
+            closed = False
             with self.store.transaction():
-                closed = self.store.close_attempt(a.ask_id, mid, expect_status="deciding", settled=settled,
-                                                  exit_status=code, new_status="stale", outcome=text,
-                                                  decided_by=None)
-                if closed:
+                binding = operations.bead_binding(self.store, bead)
+                if binding is not None and binding[1]:
+                    # Both callers have positive evidence of no decision: preflight refusal or
+                    # actual untouched readback. Withdrawal forbids replacement, not settlement.
+                    text = "Source withdrew this approval request; no native decision was recorded."
+                    closed = self.store.close_attempt(
+                        a.ask_id, mid, expect_status="deciding", settled=settled, exit_status=code,
+                        new_status="cancelled", outcome=text, decided_by=None)
+                    if closed:
+                        self.finish(mid, "done", text, "ask")
+                    withdrawn = True
+                else:
+                    withdrawn = False
+                if not withdrawn and isinstance(fresh, FreshCard):
+                    try:
+                        operations.before_commit(self.store, bead, None if binding is None else binding[0])
+                    except operations.Invalid as error:
+                        fresh = ("Source lineage cannot accept a replacement card.", str(error))
+                        text = STALE_NOT_REFRESHED.format(bead=bead, shown=shown, now=now_,
+                                                          why=fresh[0].rstrip("."))
+                if not withdrawn:
+                    closed = self.store.close_attempt(a.ask_id, mid, expect_status="deciding",
+                                                      settled=settled, exit_status=code, new_status="stale",
+                                                      outcome=text, decided_by=None)
+                if closed and not withdrawn:
                     if isinstance(fresh, FreshCard):
-                        superseded = self.commit_approval(fresh, None)
+                        superseded = self.commit_approval(
+                            fresh, None, operation_key=None if binding is None else binding[0])
                     for i, part in enumerate(updated):      # the request part is the bare event ID
                         self.post(f"askd:{a.ask_id}:{mid.removeprefix(REACTION_PREFIX)}:{i}", part, thread,
                                   lane=2, owner=self.request_owners(mid))
@@ -1396,11 +1843,13 @@ class Admind:
             self.conflict(a, "deciding")
             return
         self.audit.write("ask", action="refused" if settled == "refused" else "decided", message_id=mid,
-                         ask_id=a.ask_id, bead=bead, reason="stale", outcome=settled, status="stale",
-                         exit_status=code, fresh=fresh.row.ask_id if isinstance(fresh, FreshCard) else None,
+                         ask_id=a.ask_id, bead=bead, reason="source-withdrawn" if withdrawn else "stale",
+                         outcome=settled, status="cancelled" if withdrawn else "stale",
+                         exit_status=code,
+                         fresh=fresh.row.ask_id if not withdrawn and isinstance(fresh, FreshCard) else None,
                          refresh_refused=None if isinstance(fresh, FreshCard) else fresh[1],
                          updated_parts=len(updated))
-        if isinstance(fresh, FreshCard):
+        if not withdrawn and isinstance(fresh, FreshCard):
             self.audit_posted(fresh, None, superseded)
 
     async def read_and_settle(self, a: Attempt, bead: str) -> tuple[str, Readout | None]:
@@ -1423,6 +1872,8 @@ class Admind:
         both settle from the read-back like every other outcome. approve-bead's stderr line is quoted in
         every reply that has one (R12): inside the untouched and blocked wording, and on a line of its own
         after the recorded and uncertain wording (exit 5's warning, say)."""
+        if settled == "untouched" and self.store.operation_withdrawn(a.ask_id):
+            return "cancelled", "Source withdrew this approval request; no native decision was recorded."
         if settled == "untouched":
             return "open", (UNTOUCHED.format(line=line, bead=bead) if line
                             else UNTOUCHED_SILENT.format(bead=bead))
@@ -1430,7 +1881,7 @@ class Admind:
             return "blocked", BLOCKED.format(bead=bead, quoted=f' ("{line}")' if line else "")
         said = f'\napprove-bead said: "{line}"' if line else ""
         if settled == "recorded" and back is not None:
-            others = asks.count_others(o for o in self.store.asks_with_status(*asks.ACTIVE)
+            others = asks.count_others(o for o in self.store.capacity_asks()
                                        if o.ask_id != a.ask_id)
             said = "\n" + asks.in_flight(*others) + said
             if a.action == "deny":
@@ -1469,12 +1920,19 @@ class Admind:
         if a is None or a.message_id != attempt or row is None or row.bead is None:
             self.audit_quietly("ask", action="reconcile-skipped", ask_id=ask_id)
             return
+        if self.store.maintenance_retry_at(ask_id, attempt, include_suspended=True) is not None:
+            # Proven pre-effect attempts keep their original inbound/provenance across restart.
+            # The bounded retry loop performs fresh policy and native checks before any new child.
+            return
+        if row.outcome == "maintenance-issuing":
+            await self.reconcile_issuing(a, row)
+            return
         if self.approve_bead is None:
             self.unverified(ask_id, attempt, row.bead)
             return
         settled, back = await self.read_and_settle(a, row.bead)
         new_status, text = self.settlement(settled, back, a, row.bead, "")
-        if settled == "untouched":
+        if settled == "untouched" and new_status == "open":
             text = RECONCILE_RESTARTED if restarted else RECONCILE_STRANDED.format(ask_id=ask_id)
         with self.store.transaction():
             closed = self.store.close_attempt(ask_id, attempt, expect_status=status, settled=settled,
@@ -1490,6 +1948,124 @@ class Admind:
             return
         self.audit.write("ask", action="reconciled", ask_id=ask_id, message_id=attempt, outcome=settled,
                          status=new_status, was=status, restarted=restarted)
+
+    async def maintenance_retry_loop(self) -> None:
+        """Bounded serial cycles; overdue or failed work never creates a tight exception loop."""
+        while True:
+            delay = MAINTENANCE_RETRY_SECONDS
+            failed = False
+            try:
+                for ask_id, mid, due in self.store.maintenance_retryable():
+                    if self.wallclock() < due:
+                        delay = min(delay, max(1.0, due - self.wallclock()))
+                        continue
+                    async with self.work_lock:
+                        try:
+                            await self.retry_maintenance(ask_id, mid)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as exc:  # noqa: BLE001 - preserve uncertainty; bounded cycle
+                            failed = True
+                            self.audit_quietly("ask", action="maintenance-retry-failed", ask_id=ask_id,
+                                               error=type(exc).__name__)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - DB listing failure also receives full backoff
+                failed = True
+                self.audit_quietly("ask", action="maintenance-list-failed", error=type(exc).__name__)
+            await asyncio.sleep(MAINTENANCE_RETRY_SECONDS if failed else delay)
+
+    def maintenance_authority_reason(self, a: Attempt) -> str | None:
+        """Separate temporary observation/policy failure from a proven sender-policy mismatch."""
+        if self.approve_bead is None:
+            return "approvals-unconfigured"
+        if not self.refresh_authority():
+            return "policy-unavailable"
+        if self.latched():
+            return "latched"
+        if not self.group_ok or not self.observing or self.changing:
+            return "group-unverified"
+        sender = self.store.inbound_sender(a.message_id)
+        # No await after the successful refresh above: classify against that one policy snapshot.
+        if sender is None or sender not in self.operators or self.operator_name(a.message_id) != a.operator:
+            return "authority"
+        return None
+
+    @staticmethod
+    def maintenance_stop_reason(stop: tuple[str, str, str]) -> str:
+        return {"busy": "native-busy", "stale": "changed-card", "decided": "native-conflict",
+                "not open": "not-open", "not approval": "not-approval",
+                "not an approver": "not-approver", "gate": "gate"}.get(stop[2], "read-unavailable")
+
+    async def reconcile_issuing(self, a: Attempt, row: AskRow) -> None:
+        """Only an exact native decision settles stranded issuance; untouched proves no retry right."""
+        settled, back = (await self.read_and_settle(a, row.bead or "")
+                         if self.approve_bead is not None else ("uncertain", None))
+        if settled == "recorded" and back is not None:
+            self.settle_maintenance_recorded(a, row, back)
+            return
+        with self.store.transaction():
+            self.ask_notice(a.ask_id, "issuance-unverified", a.message_id,
+                            f"Ask {a.ask_id}: decision issuance remains unverified. The original reply "
+                            "is preserved; no automatic replay or untouched settlement is permitted. "
+                            "Authenticated recovery is not available in this version.", a.message_id)
+        self.audit_quietly("ask", action="issuance-held", ask_id=a.ask_id, message_id=a.message_id,
+                           outcome=settled)
+
+    def settle_maintenance_recorded(self, a: Attempt, row: AskRow, back: Readout) -> None:
+        new_status, text = self.settlement("recorded", back, a, row.bead or "", "")
+        with self.store.transaction():
+            closed = self.store.close_attempt(a.ask_id, a.message_id,
+                                              expect_status="deciding", settled="recorded",
+                                              exit_status=None, new_status=new_status, outcome=text,
+                                              decided_by=a.operator)
+            if closed:
+                self.finish(a.message_id, "done", text, "ask")
+        if not closed:
+            self.conflict(a, "deciding")
+            return
+        self.audit_quietly("ask", action="reconciled", ask_id=a.ask_id, message_id=a.message_id,
+                           outcome="recorded", status=new_status, was="pending-maintenance")
+
+    async def retry_maintenance(self, ask_id: str, mid: str) -> None:
+        """Read native first: another valid decision wins; only an untouched exact card can retry."""
+        pending = self.store.maintenance_retry_at(ask_id, mid)
+        if pending is None or self.wallclock() < pending:
+            return
+        a, row = self.store.current_attempt(ask_id), self.store.ask(ask_id)
+        if a is None or a.message_id != mid or row is None or row.bead is None or row.status != "deciding":
+            return
+        # Backoff persists even on failed policy/readback, including across daemon restarts.
+        if not self.store.defer_maintenance(a, self.wallclock() + MAINTENANCE_RETRY_SECONDS):
+            return
+        if not operations.decision_allowed(self.store, ask_id):
+            # Withdrawal stops future issuance, but cannot attest what a previous child did.
+            # Read-only native evidence must still distinguish untouched from recorded/unknown.
+            settled, back = await self.read_and_settle(a, row.bead)
+            if settled == "recorded" and back is not None:
+                self.settle_maintenance_recorded(a, row, back)
+            elif settled == "untouched":
+                self.close_refused(a, "cancelled", "Source withdrew this approval request; "
+                                   "no native decision was recorded.", "source-withdrawn")
+            else:
+                self.hold_maintenance(a, "native-conflict" if settled == "blocked" else "read-unavailable")
+            return
+        reason = self.maintenance_authority_reason(a)
+        if reason is not None:
+            self.hold_maintenance(a, reason)
+            return
+        settled, back = await self.read_and_settle(a, row.bead)
+        if settled == "recorded" and back is not None:
+            self.settle_maintenance_recorded(a, row, back)
+            return
+        if settled != "untouched" or back is None:
+            self.hold_maintenance(a, "native-conflict" if settled == "blocked" else "read-unavailable")
+            return
+        stop = self.preflight(back, a, row.bead)
+        if stop is not None:
+            self.hold_maintenance(a, self.maintenance_stop_reason(stop))
+            return
+        await self.run_attempt(a, row, maintenance_retry=True, prechecked=back)
 
     def unverified(self, ask_id: str, attempt: str, bead: str) -> None:
         """A stranded attempt that cannot be read back: approve_bead was removed (say, for a rollback).
@@ -1917,6 +2493,13 @@ class Admind:
                                    "Nothing changed.")
             previous = self.store.get("latched")
             with self.store.transaction():
+                # A previous suspension write may have failed after the safety latch committed.
+                # Rearm must finish that fence before clearing the latch; failure keeps it set.
+                if previous is not None:
+                    for ask_id, mid, due in self.store.maintenance_pending():
+                        attempt = self.store.current_attempt(ask_id)
+                        if attempt is not None and attempt.message_id == mid:
+                            self.store.defer_maintenance(attempt, due, reason="latched")
                 self.store.set("expected_members", str(count))
                 self.store.delete("expected_members_provisional")
                 self.store.set("group_operators", json.dumps(sorted(confirmed)))
@@ -1974,7 +2557,20 @@ class Admind:
         self.reading = True     # acknowledged but not observing if latched; a rearm then restores it
 
     def on_event(self, event: object) -> None:
-        if isinstance(event, InboundMessage | ReactionAdded):    # one worker, one order (R27)
+        if isinstance(event, InboundMessage) and gateway_custody.command(event.message.text) is not None:
+            if (event.account_id_hex.lower() != self.account or event.group_id_hex.lower() != self.group
+                    or not self.refresh_authority()
+                    or event.message.sender.account_id_hex.lower() not in self.operators
+                    or not MESSAGE_ID.fullmatch(event.message.message_id_hex.lower())):
+                self.audit.write("gateway-custody", action="refused", reason="command-auth")
+                return
+            try:
+                self.custody_work.put_nowait(event)
+            except asyncio.QueueFull:
+                # No acknowledgment, consent or permit is manufactured at this
+                # boundary. Production enrollment must qualify native redelivery.
+                self.audit.write("gateway-custody", action="refused", reason="command-capacity")
+        elif isinstance(event, InboundMessage | ReactionAdded):    # one worker, one order (R27)
             self.work.put_nowait(event)
         elif isinstance(event, GroupStateChanged):
             if event.group_id_hex.lower() != self.group or event.change not in guard.MEMBERSHIP_CHANGES:
@@ -2022,6 +2618,16 @@ class Admind:
         if not MESSAGE_ID.fullmatch(mid):
             self.audit.write("drop", operator=verdict.operator, reason="malformed message id",
                              text=own_text(ev.message.text))
+            return
+        if gateway_custody.command(ev.message.text) is not None:
+            try:
+                self.custody_work.put_nowait(ev)
+            except asyncio.QueueFull:
+                self.audit.write("gateway-custody", action="refused", reason="command-capacity")
+            return
+        if (recovery.COMMAND.fullmatch(ev.message.text) is not None
+                and MESSAGE_ID.fullmatch(mid)):
+            await self.recovery_message(ev)
             return
         if not self.store.claim_inbound(mid, sender_key=ev.message.sender.account_id_hex.lower()):
             self.audit.write("drop", operator=verdict.operator, message_id=mid, reason="replayed message id",
@@ -2138,6 +2744,32 @@ class Admind:
                 self.touch_card(target)
                 self.finish(mid, "dropped", CONTROL_REFUSED, "refused")
             return
+        if text.strip() == "!fulfill":
+            try:
+                if not fulfillment.ENABLED or not self.authorised(mid):
+                    self.finish(mid, "done", "Fulfillment unavailable under current authorization.", "cmd")
+                    return
+                try:
+                    with self.store.transaction():
+                        result = self.store.fulfillment.confirm(
+                            target, principal=self.senders.get(mid, ""), message_id=mid)
+                        self.finish(mid, "done", result.message, "cmd")
+                except fulfillment.Invalid as exc:
+                    self.finish(mid, "done", "Fulfillment refused: " + str(exc), "cmd")
+                return
+            except sqlite3.Error as exc:
+                reason = "store unavailable"
+                self.audit_quietly("fulfillment", action="store-unavailable", error=type(exc).__name__)
+            except Exception as exc:  # noqa: BLE001 - rollback; fixed public text, audit error type only
+                reason = "internal error"
+                self.audit_quietly("fulfillment", action="handler-failed", error=type(exc).__name__)
+            # A persistent outage leaves the original inbound recoverable. Refusal delivery and
+            # successful confirmation settlement both receive the same bounded database protection.
+            try:
+                self.finish(mid, "done", "Fulfillment unavailable: " + reason + ".", "cmd")
+            except sqlite3.Error:
+                self.audit_quietly("fulfillment", action="store-unavailable")
+            return
         bump = self.store.bump_for_message(target)
         if bump is not None and (not text.startswith("!") or text[1:].split(maxsplit=1)[:1] in CARD_COMMANDS):
             self.bump_hint(mid, bump)                       # B6: never decided, answered or pasted
@@ -2171,6 +2803,10 @@ class Admind:
                 await self.decide(mid, cmd, target)
                 return
             if cmd.name == "asks":
+                if cmd.arg == "retire":
+                    from heterodyne.admind.retirement import retire
+                    await retire(self, mid, cmd.rest or "", target)
+                    return
                 await self.list_asks(mid, cmd.arg)
                 return
             if cmd.name == "answer":

@@ -1,0 +1,81 @@
+{
+  "actual_review_ordinal": 2,
+  "effort": "HIGH",
+  "verdict": "REVISE",
+  "raw_sha256": "8a7e323f8e672b085a752799f0ab8b7a5f2bab1d1a083146c9e269bfc4d0b5cf",
+  "review_base": "597a1d4aec3d4fc081e5774ff3ffc7aa33aa16be",
+  "review_head": "ae71b76c0ad3231365d22b8a3b2ad33a34398cd3",
+  "scope": "Author repairs only; no new review, scanner stage, native operation, live effect or deployment. Quality debt unwaived.",
+  "findings": [
+    {
+      "number": 1,
+      "original": "1. `scripts/scanner_recovery/runner.py:167`: The runtime socket/bus check in finish_scratch only looks at top-level entries of the private XDG_RUNTIME_DIR, and `path.is_socket()` follows symlinks, so nested sockets go undetected and external symlink targets get stat'ed.\n\n   Failure scenario: A test creates XDG_RUNTIME_DIR/heterodyne/ctl.sock or XDG_RUNTIME_DIR/dbus-x/bus. iterdir() only yields 'heterodyne', which is neither named 'bus' nor a socket, so the check passes and the stage can PASS. The ADR requires that no bus or runtime socket is exposed before or after. The archive only records that socket as 'excluded-special' and never holds. Separately, a top-level symlink r/x -> /run/user/UID/bus is followed by is_socket(), which inspects an external target and goes against the no-follow rule R1 #3 was fixed for.",
+      "status": "fixed",
+      "disposition": "Root repair retained: descriptor-relative depth-first traversal covers nested runtime sockets/bus and never stats a symlink target.",
+      "tests": "test_nested_runtime_socket_holds_and_still_archives; test_runtime_does_not_stat_external_link_target"
+    },
+    {
+      "number": 2,
+      "original": "2. `scripts/scanner_recovery/environment.py:326`: directory_entries opens a no-follow fd for every subdirectory of a directory and pushes them all onto `pending` before closing any, so open descriptors grow with directory width.\n\n   Failure scenario: With an explicit --basetemp, pytest puts every tmp_path directory directly under p/. About 2020 test functions here take tmp_path. Under the common 1024 soft RLIMIT_NOFILE (systemd/service default; Python does not raise it), archiving p/ hits EMFILE (OSError). finish_scratch then HOLDs every B1/B2 3373 attempt with 'Scratch preservation failed', using up a one-shot attempt. This shell has a 1M limit, which hides the problem. Fix: process depth-first, opening each child only when it is popped, so at most tree-depth fds are open.",
+      "status": "fixed",
+      "disposition": "Root repair retained: one owned descriptor per depth, not per directory width; 100-wide fixture enforces a low live-FD ceiling.",
+      "tests": "test_wide_scratch_archive_uses_depth_bounded_descriptors"
+    },
+    {
+      "number": 3,
+      "original": "3. `scripts/scanner_recovery/environment.py:248`: source_candidates picks shell/config files by suffix only, so test-reachable systemd unit files and extensionless shell/Python scripts are never offered as candidates, although the helper doc says 'every shell/config line' is included.\n\n   Failure scenario: deploy/store-helper/heterodyne-store-helper.socket and heterodyne-store-helper@.service (exercised by tests/test_deploy_store_helper.py), scripts/test-fast / test-full / test-changed (POSIX shell, no suffix) and spikes/s5/ws-request (python3 shebang, connects to the per-session socket) produce zero candidates. An inventory that covers the enumerated set exactly passes validate_inventory, while these endpoint/config sources were never shown to the controller.",
+      "status": "fixed",
+      "disposition": "Inventory includes .service/.socket and extensionless shebang sources alongside existing config/shell/Python candidates. Keyword discovery remains a review aid, not reachability proof.",
+      "tests": "test_extensionless_and_systemd_candidates; test_candidates_include_indirect_calls_shell_and_config"
+    },
+    {
+      "number": 4,
+      "original": "4. `scripts/scanner_recovery/runner.py:897`: The ADR requires 'Inventory, actual measured path lengths and margin' as evidence and says unexpected longer real paths must HOLD, but the runner only records statically reviewed maxima and never measures actual socket paths created during the run.\n\n   Failure scenario: A test binds a socket whose real path is longer than its reviewed derivation (say 95 bytes against a declared 89, or above 100 through an unlisted route). Nothing compares observed socket path lengths with the inventory. The archive lists surviving sockets as 'excluded-special' with no length or margin check, so the result PASSes without the required measured-length/margin evidence.",
+      "status": "fixed-helper-stage-admission-unproven",
+      "disposition": "Runner requires reconstructed source-reviewed maximum components and records actual encoded path bytes/margins under its literal base. Archive records surviving socket lengths and HOLDs over reviewed base maximum or 100. Test demonstrates below100 but above-reviewed HOLD. Removed transient sockets are not exhaustively observed. Complete source-backed reachable constructor/invocation coverage for the actual future scanner freeze remains mandatory and unfulfilled; no scanner stage admission or complete inventory is claimed. With several constructors sharing a base, surviving paths are compared to that base maximum; no automatic per-constructor attribution is claimed. That narrower runtime-observation gap is retained for stage admission, not waived by this helper-only repair.",
+      "tests": "test_required_worst_case_measurement_rejects_understatement; test_longer_surviving_socket_holds_even_below_absolute_budget; original exact100/101 probe"
+    },
+    {
+      "number": 5,
+      "original": "5. `scripts/scanner_recovery/environment.py:278`: validate_inventory lets a 'non-endpoint' row with just a reason string cover any candidate, including real tmux invocations and .sock/bind lines, so the ADR rule that every real tmux invocation must bind -S/-L or the audited guard is not enforced by the code.\n\n   Failure scenario: One derivation {kind:'non-endpoint', references:[all candidates], reason:'reviewed'} covers `TMUX_TMPDIR=/tmp tmux -L s9-10` and `sock.bind(...)` lines and is accepted. The plan-mode test fixture does exactly this for a '.sock' line. Unbound default-server tmux use or an unbounded socket path then reaches execution without a HOLD. Candidates that contain tmux or socket tokens should require a tmux or socket row.",
+      "status": "fixed",
+      "disposition": "Socket/tmux token references require corresponding bounded socket/isolation classification; a reason-only non-endpoint row cannot cover them. The old plan fixture now has an explicit bounded socket derivation, preserving all existing assertions. Controller reachability/isolation review remains real, not inferred from a boolean.",
+      "tests": "test_nonendpoint_cannot_cover_socket_or_tmux; test_missing_source_inventory_and_default_tmux_hold"
+    },
+    {
+      "number": 6,
+      "original": "6. `scripts/scanner_recovery/environment.py:280`: Allowed socket bases are only p/t/r/root, but HOME (layout 'h', the same 18-byte private child) is where the product's default state directory, and therefore admind's sockets, lives.\n\n   Failure scenario: config/paths.py:35 resolves state to $HOME/.local/state/heterodyne whenever XDG_STATE_HOME is unset, which it always is in the 14-key environment. Admind ctl/ask/wn-agent sockets reached through that default cannot be written as a socket derivation ('Unbound socket base'). The controller then has to mislabel them as non-endpoint or HOLD with no valid way through.",
+      "status": "fixed",
+      "disposition": "HOME h is an allowed private18-byte socket base; full suffix and separator budgets remain checked.",
+      "tests": "test_home_base_and_raw_inventory_hash"
+    },
+    {
+      "number": 7,
+      "original": "7. `scripts/scanner_recovery/runner.py:342`: run() kills the child's process group only on timeout. After a normal exit, surviving session descendants (daemons or servers spawned by tests) keep running while the runtime check and scratch archive read the scratch.\n\n   Failure scenario: A test leaves a background helper that keeps writing under p/ or holds a socket in r/. archive_scratch then fails with 'Scratch changed during archive' or FileNotFoundError, giving a spurious HOLD. Or the socket appears or disappears between the runtime check and the archive, so the evidence depends on timing. Fix: killpg the session (or verify it is empty) after every child, before finish_scratch.",
+      "status": "fixed-with-explicit-boundary",
+      "disposition": "Every child leader is observed via waitid WNOWAIT, then its group killed before reaping. Non-zombie group members must vanish before copying. Unconfirmed group quiescence refuses archive and retains scratch. This does not claim containment of descendants that deliberately create another session; actual fixture-owned tmux/server cleanup remains an isolation inventory obligation.",
+      "tests": "test_normal_exit_kills_descendant_before_return"
+    },
+    {
+      "number": 8,
+      "original": "8. `scripts/scanner_recovery/environment.py:306`: socket_path_budget_inventory.inventory_sha256 is a digest of the re-serialized canonical JSON, while the plan and the root release bind inventory_sha256 as the SHA of the raw file bytes, so one result carries two different 'inventory_sha256' values for the same inventory.\n\n   Failure scenario: A controller or auditor checks result.socket_path_budget_inventory.inventory_sha256 against the released inventory_sha256 and finds a mismatch for an unchanged inventory. That either triggers a false lineage HOLD or teaches reviewers to ignore the field. This weakens the 'same bytes parse+hash' claim. Fix: pass and record the raw-bytes hash.",
+      "status": "fixed",
+      "disposition": "Runner passes the same raw inventory bytes used by plan/release; result digest hashes those bytes rather than reserialized JSON.",
+      "tests": "test_home_base_and_raw_inventory_hash"
+    },
+    {
+      "number": 9,
+      "original": "9. `scripts/scanner_recovery/environment.py:57`: If create_layout fails after mkdtemp (root length over 16, a child mkdir failure, or a child path over 18), the scratch root is left in /tmp but layout stays None, so the root path is never recorded and finish_scratch never archives it.\n\n   Failure scenario: Any raise inside create_layout after mkdtemp leaves the result with private_runtime_layout=None and no trace of /tmp/hzXXXX. That conflicts with the ADR rule that the attempt records its literal private paths and keeps its directories for disposition. The orphaned directory then cannot be tied to the HOLD attempt.",
+      "status": "fixed",
+      "disposition": "Post-mkdtemp construction exceptions carry the partial layout and retained root into result.private_runtime_layout; absent runtime child is a HOLD diagnostic while independently archiving available root bytes. Failure before root identity can be established remains explicit preservation HOLD with literal root retained.",
+      "tests": "test_layout_failure_retains_created_root; test_partial_layout_is_archived_without_runtime_child"
+    },
+    {
+      "number": 10,
+      "original": "10. `scripts/scanner_recovery/runner.py:242`: The fix duplicates logic instead of reusing it. The original contract checks run in both validate_supplement and pinned_inputs:247-254, with SUPPLEMENT read and parsed twice. The H92 adjacency check re-implements the adjacency part of collection_check. The whole-tree source_candidates walk runs in plan validation and again in execute.\n\n    Failure scenario: Each check has two copies to keep in sync, and the two SUPPLEMENT reads mean the one validated in pinned_inputs is not the bytes later hashed into chain_identity. Every execute reads every .py, .sh and config file in the worktree twice. Fix: validate the single supplement_data parse once, factor adjacency into one helper used by both collection checks, and reuse the plan-time candidate map (re-verifying only its digest) at execute time.",
+      "status": "fixed",
+      "disposition": "One supplement parse is passed to pinned_inputs and validated once; duplicate original-contract checks removed. Both collections share adjacency_index. Candidate map is enumerated once and reused, with full referenced-file hashes and existing source drift guards checked before child.",
+      "tests": "existing supplement/order/adjacency/plan tests; full named36-case suite"
+    }
+  ]
+}

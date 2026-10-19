@@ -204,7 +204,7 @@ def test_full_action_data_retains_id_revision_origin_and_targets_without_context
 
 @pytest.mark.parametrize("tier", ["auto_approve", "escalate", "hard_deny"])
 def test_outward_floor_cannot_be_lowered_by_host(tier: str) -> None:
-    result = evaluate_policy(envelope(), CONFIG, PolicyFacts(SHA256), {"push_branch": tier}, {})
+    result = evaluate_policy(envelope(), CONFIG, PolicyFacts(SHA256, False), {"push_branch": tier}, {})
     assert result.tier == ("hard_deny" if tier == "hard_deny" else "escalate")
 
 
@@ -212,13 +212,15 @@ def test_permissions_widening_is_hard_deny_and_bad_policy_never_passes() -> None
     assert evaluate_policy(envelope(), CONFIG, PolicyFacts(SHA256, True), {}, {}).tier == "hard_deny"
     for override in ({"unknown": "auto_approve"}, {"push_branch": "unknown"}):
         with pytest.raises(ConfigError):
-            evaluate_policy(envelope(), CONFIG, PolicyFacts(SHA256), override, {})
+            evaluate_policy(envelope(), CONFIG, PolicyFacts(SHA256, False), override, {})
     with pytest.raises(InvalidAction):
         evaluate_policy(envelope(), CONFIG, PolicyFacts("bad"), {}, {})
 
 
 def test_restriction_and_hard_deny_have_no_approve_or_dispatch_route() -> None:
-    result = evaluate_policy(envelope(), CONFIG, PolicyFacts(SHA256), {}, {"hard_deny": ["push_branch"]})
+    result = evaluate_policy(
+        envelope(), CONFIG, PolicyFacts(SHA256, False), {}, {"hard_deny": ["push_branch"]}
+    )
     assert result.tier == "hard_deny" and adapter_refusal(envelope(), CONFIG) == "adapter-unavailable"
 
 
@@ -238,7 +240,7 @@ def test_denial_key_survives_prose_rewording_revision_and_session_generation() -
 
 
 def test_materiality_cannot_select_dispatch_or_turn_question_into_action() -> None:
-    original = Interpretation("heterodyne", "product-id", ("fix parser",), "question", False, False)
+    original = Interpretation("heterodyne", "product-id", ("fix parser",), "question", False, False, True)
     assert materiality(original, original).result == "minor"
     for change in ({"kind": "action"}, {"workstream": "another"}, {"repository_id": "other"},
                    {"requirements": ("delete data",)}, {"outward": True}, {"destructive": True},
@@ -261,7 +263,9 @@ def test_every_registered_kind_gets_outward_floor(action: object, facts: object)
         encoded(Envelope(1, action, facts, ORIGIN, "btq-ab123", 1)), CONFIG  # type: ignore
     )
     kind = msgspec.to_builtins(full.action)["type"]
-    assert evaluate_policy(full, CONFIG, PolicyFacts(SHA256), {kind: "auto_approve"}, {}).tier == "escalate"
+    assert evaluate_policy(
+        full, CONFIG, PolicyFacts(SHA256, False), {kind: "auto_approve"}, {}
+    ).tier == "escalate"
     assert evaluate_policy(full, CONFIG, PolicyFacts(SHA256, True), {}, {}).tier == "hard_deny"
 
 

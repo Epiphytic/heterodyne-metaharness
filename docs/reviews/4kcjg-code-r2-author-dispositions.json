@@ -1,0 +1,126 @@
+{
+  "schema": "author-review-dispositions.v1",
+  "review_ordinal": 2,
+  "review_effort": "FULL HIGH",
+  "actual_verdict": "REVISE",
+  "review_raw_sha256": "84225576cf7f91fe10d3b06b983eaff9faf36a549436205ff2c58b3396c87b9d",
+  "reviewed_head": "83f0bf0e0310cd80c76424100b37c14277eaaf1b",
+  "findings": [
+    {
+      "number": 1,
+      "finding": "1. `src/heterodyne/admind/daemon.py:1467`: record_not_spawned commits in its own transaction inside the except handler, and the overlay restore (hold_maintenance -> defer_maintenance) runs later in a separate transaction, so 'atomically mark that generation not-spawned and restore the previous eligible chain' (ADR \u00a723) is not atomic.\n\n   Failure scenario: A maintenance retry gets a cold or drifted cached_identity, so BtqError('unavailable') is raised with launched=False. record_not_spawned commits the proof at invocations=n+1. Then the process dies, or hold_maintenance raises (for example RuntimeError('maintenance pending capacity') from defer_maintenance, or an enqueue/notice error), before the overlay transaction commits. The ask is left at outcome='maintenance-issuing' with no ask_maintenance row. eligible() needs pending-maintenance or maintenance-held, and reconcile_issuing settles only an exact native decision, so a fully proven not-issued attempt holds its slot permanently. A sqlite error inside record_not_spawned also escapes the except block and skips the hold.\n\n",
+      "sha256": "7c25ef0fb6546b844a8aefce164c0327ac3062144d9d30d17f0109dd39cbcf20",
+      "disposition": "fixed",
+      "response": "Dedicated NotSpawned evidence and defer_maintenance now share one Store transaction. If overlay commit fails, the proof remains at its previous generation and issuance stays conservatively unknown. Notification publication is a later transaction.",
+      "tests": [
+        "test_not_spawned_proof_and_overlay_share_rollback"
+      ]
+    },
+    {
+      "number": 2,
+      "finding": "2. `src/heterodyne/admind/retirement.py:376`: publish_notice counts only 'pending' or 'sent with message_id' as usable, so transient outbox states ('delayed', 'quarantined', 'suppressed') are treated like 'failed'. A refreshing `!asks` then repairs a notice that will still be delivered, and moves the current mapping away from it.\n\n   Failure scenario: A suspended hold's notice N1 is in a rate-limited group with status='delayed'. The operator runs `!asks`: usable=False, so a repair notice N2 (key ...:repair:<seq>) is posted and maintenance_recovery_notices is rebound to N2. release_delayed then sends N1 and the operator replies to it with the correct token. select() joins only the current mapping (N2), so they get 'Retirement refused: reply to the current eligible held notice'. Each further `!asks` while N2 is also delayed or held adds another repair notice and another history row.\n\n",
+      "sha256": "32e34cf67e66606763de179be12724ba5bde40b2a251e5a4cb9be7e7612d245b",
+      "disposition": "fixed",
+      "response": "Delayed, quarantined and suppressed rows remain existing transport intents, even across proof generations. Only failed or unusable sent rows, or delivered stale-generation notices, may be replaced by explicit inspection; no automatic replay.",
+      "tests": [
+        "test_held_delivery_is_not_failed"
+      ]
+    },
+    {
+      "number": 3,
+      "finding": "3. `src/heterodyne/admind/daemon.py:1479`: record_hold now shares one transaction with hold_maintenance, which also runs the new publish_notice. Any notice-side exception rolls back the proof row after mark_maintenance_issuing has already committed in a separate transaction.\n\n   Failure scenario: An exact HOLD returns with invocations=n. mark_maintenance_issuing commits. Inside the joint transaction, publish_notice -> daemon.post/enqueue or bind_notice raises (an IntegrityError on maintenance_recovery_notices.outbox_key UNIQUE, a storage error, or a capacity RuntimeError in defer). The whole block rolls back, so the n-th HOLD proof is lost and the attempt stays maintenance-issuing with proof n-1 < generation n. Every later record_hold or eligible check fails, so the attempt can never be retired. Notice publication failure should not erase already-observed evidence; the ADR only requires the proof to be atomic with defer, not with notice I/O.\n\n",
+      "sha256": "6061ab94fe55b16a454e77ab4f7647eed29ed067dfcafe0a20d142e27cf73f9a",
+      "disposition": "fixed",
+      "response": "Closed HOLD proof and overlay commit before notice publication. Expected local notice failures are audited without erasing evidence; storage/overlay commit failure still preserves unknown issuance and grants no retry.",
+      "tests": [
+        "test_notice_error_cannot_erase_observed_hold",
+        "test_hold_persistence_failure_restart_never_consumes_or_replays"
+      ]
+    },
+    {
+      "number": 4,
+      "finding": "4. `src/heterodyne/admind/daemon.py:1095`: Plain `!asks` now, as a side effect, publishes a fresh recovery notice for every retryable overlay whose generation advanced since its last notice. Each one also adds a row to the never-pruned maintenance_notice_history table, so inspection causes unbounded fan-out and growth.\n\n   Failure scenario: With up to MAINTENANCE_CAPACITY=128 retryable overlays retrying every 30s, each `!asks` posts up to 128 new threaded notices and 128 new history rows (new token, new key retirement:<ask>:<token>). Repeated phone inspections flood the group and grow the outbox and history without limit. This contradicts the bounded one-active-proof/one-receipt storage the ADR (\u00a733) and docs describe, and an inspection command should not have mass-post side effects.\n\n",
+      "sha256": "777e75529977b7097168ab4fdd43d156a5873328a2da29529e9c253b46701cc4",
+      "disposition": "fixed",
+      "response": "An inspection snapshots pending overlays once, checks each eligibility once and publishes at most one new selector. Legacy maintenance_notice_history rows remain byte-preserved but no backfill or new history row is allocated. Current proof/mapping are replaceable; immutable existing outbox/attempt provenance and final receipts are retained. Older outbox tokens report a receipt only when the ask has a single historical attempt; ambiguous multi-attempt association refuses, while the exact selected token remains available. No new selector-history table/list is introduced.",
+      "tests": [
+        "test_inspection_publishes_at_most_one_and_scans_once",
+        "test_retry_notice_does_not_append_history",
+        "test_older_selector_never_reports_another_attempt_receipt"
+      ]
+    },
+    {
+      "number": 5,
+      "finding": "5. `src/heterodyne/admind/daemon.py:1466`: Positive not-spawned evidence is inferred in a broad `except Exception` from `issued and not launched and exc.word == \"unavailable\"`, instead of a dedicated exception type raised only at the two proven pre-spawn sites.\n\n   Failure scenario: Any future or refactored code between `issued = True` and spawn that raises BtqError('unavailable') before on_launch would be recorded as proven not-spawned and extend the retirement chain. Examples: an extra read, an adapter pre-check, or reusing read() logic (`code != 0 -> BtqError('unavailable')`). The security evidence relies on a reused generic error word. A distinct NotSpawned raised only by decide's cache-miss guard and _run's Popen OSError branch would make the proof structural.\n\n",
+      "sha256": "7e9ca28d5da2f356851d4e6c2e96ca9c8cad918bb257dfad9e2909959cfb2f96",
+      "disposition": "fixed",
+      "response": "Only structural NotSpawned from the two actual pre-spawn sites can extend coverage. A generic unavailable exception never proves non-issuance. Offline real-adapter tests patch spawn failure rather than execute native tools.",
+      "tests": [
+        "test_generic_unavailable_never_proves_not_spawned",
+        "test_real_adapter_structural_not_spawned_sites"
+      ]
+    },
+    {
+      "number": 6,
+      "finding": "6. `src/heterodyne/admind/retirement.py:419`: The existing-receipt and same-command idempotency lookup runs only after the fresh authorised() check and the inbound-thread check. Redelivery of the SAME command whose sender has since lost authority gets a deny reply and audit, not the existing receipt with no effects.\n\n   Failure scenario: Operator X retires an attempt (the receipt commits) and is then removed from the group. A recovery path, or redelivery that bypasses inbound dedup, replays X's command_id. retire() calls daemon.deny(command, 'retirement'), which emits a denial reply/audit for a command that already succeeded. ADR \u00a733 requires that 'Repeated delivery of the SAME authenticated command returns its existing receipt, without new notice/native calls/effects'.\n\n",
+      "sha256": "6f12275967f1ef6af2e9a666f0a4f1269e18de0fb89ad62d8d4a032efddb351f",
+      "disposition": "fixed",
+      "response": "Exact same-command receipt lookup precedes fresh authority. It checks persisted sender/thread against the committed receipt as well as command/token/notice; changed sender or selector does not replay. Different commands retain fresh authorization requirements.",
+      "tests": [
+        "test_same_command_replay_precedes_revoked_authority",
+        "test_same_command_replay_rejects_rebound_sender"
+      ]
+    },
+    {
+      "number": 7,
+      "finding": "7. `src/heterodyne/admind/retirement.py:477`: The reconciled branch of retire, and every ordinary close path (settle_maintenance_recorded, reconcile, refresh, close_refused), leave the attempt's maintenance_proofs row and maintenance_recovery_notices mapping in place. Only the retirement commit deletes them.\n\n   Failure scenario: An eligible attempt is reconciled as 'recorded' through `!asks retire`, or settled by a later retry or readback. Its proof row and current mapping stay forever. That contradicts 'remove only its exact maintenance overlay/proof' and the one-active-proof claim, and orphan rows accumulate per attempt. Correctness currently depends only on current_attempt() checks rather than on the state being cleaned up.\n\n",
+      "sha256": "4e69d35e183523fffdf82213a6332801ef85dc85cdb23138a7e54c08d8398e93",
+      "disposition": "fixed",
+      "response": "Store.close_attempt removes only the exact active proof/mapping on known terminal settlement in the same transaction, covering ordinary close and reconciliation. Uncertain settlement retains evidence and holds; immutable final receipts/attempt/outbox records are preserved.",
+      "tests": [
+        "test_terminal_close_removes_only_active_proof_mapping",
+        "test_unknown_postlaunch_failure_never_becomes_not_spawned"
+      ]
+    },
+    {
+      "number": 8,
+      "finding": "8. `src/heterodyne/admind/daemon.py:1104`: list_asks walks maintenance_pending() twice and calls current_attempt plus eligible (proof JSON parse, sha256 and 8-way validation) twice per overlay, once inside publish_notice and again for the listing line.\n\n   Failure scenario: With 128 overlays, each `!asks` does about 256 proof decodes and validations and two full overlay scans under the store lock on the event loop. Computing (attempt, proof) once in the first loop and reusing it for both publication and the listing line would halve the work and avoid the two passes disagreeing.\n\n",
+      "sha256": "3e4b30205bbc57f1d4ece0cfaed1effd7c96a80779b835c0b09ebba716485915",
+      "disposition": "fixed",
+      "response": "The single transaction-scoped inspection pass reuses each computed (attempt,proof) for publication and listing. No second pending scan or repeated eligibility parse.",
+      "tests": [
+        "test_inspection_publishes_at_most_one_and_scans_once"
+      ]
+    },
+    {
+      "number": 9,
+      "finding": "9. `src/heterodyne/admind/retirement.py:369`: publish_notice runs raw `daemon.store.db.execute` SQL from a daemon-level module function instead of a locked Store or Retirement accessor, repeating the R1 finding-10 pattern that Store.inbound_thread was added to fix.\n\n   Failure scenario: Both current callers happen to wrap publish_notice in store.transaction(), so the lock is held. Any new caller, such as a future reconcile or startup notice pass, would query outbox and mapping state without the store lock and could interleave with an enqueue/mark_sent in another thread. Moving the query into a @_locked Retirement method keeps lock discipline local.\n\n",
+      "sha256": "4336b1ad4ffa93e51d65ad37a2f6ad58e91bc15eb300824d9fce7724faffdbcd",
+      "disposition": "fixed",
+      "response": "Notice reads now use Retirement.notice under Store.lock. Mapping writes and publication use Store transactions even when called without an external transaction.",
+      "tests": [
+        "test_held_delivery_is_not_failed",
+        "test_notice_error_cannot_erase_observed_hold"
+      ]
+    },
+    {
+      "number": 10,
+      "finding": "10. `src/heterodyne/admind/retirement.py:133`: The proof body stores `consecutive`, which is always invocations - not_spawned and is validated only as that sum, so it is derivable state that carries no independent evidence.\n\n    Failure scenario: _proof() rejects any row where consecutive + not_spawned != invocations, so the field can never say anything the other two fields do not. It adds a hashed field, a validation clause and a misleading suggestion of separate chain tracking (the R1 #4/#10 concern) that future readers must keep in sync. Dropping it, or deriving it at read time, shrinks the canonical body and the checks.\n",
+      "sha256": "13c4ccd602145c68037eded60a9a1494cd295fa9c160e0aa7859097b924f7230",
+      "disposition": "fixed-with-legacy-compatibility",
+      "response": "New proof bodies derive holds as invocations-not_spawned and omit redundant consecutive. Existing bodies with consecutive remain readable only if its exact integer agrees; stored bytes/hashes/tokens and legacy rows are not migrated or rewritten. A newly observed generation uses the smaller canonical body.",
+      "tests": [
+        "test_legacy_proof_and_history_remain_readable_without_backfill"
+      ]
+    }
+  ],
+  "status": "AUTHOR REPAIRS; no subsequent review claimed",
+  "limits": [
+    "30-second current-generation token race remains; no authority widened",
+    "Changed captured adapter or missing historical proof remains HOLD; no chain healing",
+    "Legacy history preserved but no retry history appended",
+    "Undeployed offline PoC only; native unknown never becomes retirement proof",
+    "Quality metrics remain UNWAIVED; no acknowledgements or baseline resets",
+    "Old-generation selector reporting refuses if multiple historical attempts make association ambiguous; exact selected-token/same-command receipt remains usable."
+  ]
+}

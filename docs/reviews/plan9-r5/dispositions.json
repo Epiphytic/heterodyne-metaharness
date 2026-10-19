@@ -1,0 +1,56 @@
+[
+  {
+    "finding": 1,
+    "status": "OPEN_UNWAIVED",
+    "key": "hash_budget_reason",
+    "disposition": "Cumulative read-budget Hold is caught through ValueError and reported as tree_unavailable. The cap still stops reading, but its advertised reason is inaccurate. Read-time overrun regression remains missing."
+  },
+  {
+    "finding": 2,
+    "status": "OPEN_UNWAIVED",
+    "key": "versions_runtime_shape",
+    "disposition": "Typed versions tuple has no runtime shape guard; a string caller can get substring membership. Only correctly configured typed callers are in this offline PoC scope; no authority is admitted."
+  },
+  {
+    "finding": 3,
+    "status": "OPEN_UNWAIVED",
+    "key": "root_fd_runtime_shape",
+    "disposition": "Invalid non-int or overflowing fd can escape as raw ctypes/OverflowError rather than typed HOLD. The documented error-containment claim has this limitation."
+  },
+  {
+    "finding": 4,
+    "status": "OPEN_UNWAIVED",
+    "key": "manifest_semantic_coverage",
+    "disposition": "Entry equality does not establish executable entry_point, target or sources semantics. Projection describes only sampled entries, not usable installation validation or acquisition/loaded provenance."
+  },
+  {
+    "finding": 5,
+    "status": "OPEN_UNWAIVED",
+    "key": "read_time_budget_oracle",
+    "disposition": "The existing file-byte negative exercises declared-size preflight only. No claim that cumulative read-budget enforcement has a regression oracle; the documentation hash-budget coverage wording is too broad."
+  },
+  {
+    "finding": 6,
+    "status": "OPEN_UNWAIVED",
+    "key": "walk_cost",
+    "disposition": "entries_of walks and hashes more than rehash would; work is bounded by owner limits, without a latency or manifest-only-read claim."
+  },
+  {
+    "finding": 7,
+    "status": "OPEN_UNWAIVED",
+    "key": "public_projection_constructor",
+    "disposition": "A public dataclass is not unforgeable evidence. Consumers must not treat it as authorization; require_authority always HOLDs."
+  },
+  {
+    "finding": 8,
+    "status": "OPEN_UNWAIVED",
+    "key": "metadata_reason_catch",
+    "disposition": "Canonical-record Hold is redundantly caught and rewritten through ValueError. Reason distinctions are not preserved for future changes."
+  },
+  {
+    "finding": 9,
+    "status": "OPEN_UNWAIVED",
+    "key": "adapter_literal_drift",
+    "disposition": "The finite codex/claude literal is not shared with the adapter registry. Future adapter evolution needs an explicit synchronization change."
+  }
+]

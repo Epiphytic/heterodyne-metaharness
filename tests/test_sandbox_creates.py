@@ -2,7 +2,7 @@
 
 import json
 import os
-import select
+import selectors
 import subprocess
 import sys
 from collections.abc import Callable
@@ -105,7 +105,9 @@ print(book.put(sys.argv[3], sys.argv[4], how="operator", by="other-lane", at=4),
                                   BOX, kind], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         children.append(child)
         assert child.stdout is not None
-        assert select.select([child.stdout], [], [], 10)[0], "child did not reach the shared lock"
+        with selectors.DefaultSelector() as selector:
+            selector.register(child.stdout, selectors.EVENT_READ)
+            assert selector.select(10), "child did not reach the shared lock"
         assert child.stdout.readline().strip() == "blocked"
 
     monkeypatch.setattr(creates, "sync", sync)

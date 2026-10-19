@@ -1,0 +1,29 @@
+{
+  "ordinal": 1,
+  "kind": "actual FULL HIGH Claude /code-review",
+  "model": "opus",
+  "effort": "high",
+  "capture_kind": "manual-foreign-observed-stream-not-reserved-profile-proof",
+  "head": "f5c24bdb9589cc044a6ab6f008a951d146c0d9d7",
+  "base": "a5ea9cb3f37065890ce4e4dd33e9c64aca9eebc1",
+  "start_at": "2026-10-19T07:49:48.727964+00:00",
+  "result_at": "2026-10-19T07:56:36.196414+00:00",
+  "events": 85,
+  "source_unchanged": true,
+  "raw_sha256": "d468e450e4082393e365ff272286fef7e97894eb3715549640d4f376f181e7c9",
+  "stream_sha256": "a27989e5d846c810d9e70aeb27196af4391cf85ae89bc7626196651973929610",
+  "terminal_success": true,
+  "verdict": "10 findings; explicitly not an approval",
+  "privacy": "Public provenance omits home paths/full command; exact original command/start/result/stream retained privately with hashes.",
+  "original_sha256": {
+    "p4iwn-code-review-r1-high-result.json": "9a5f433ba1d2e6640b318b770b422009cfc7286ff22fbbde644d65225f91a64b",
+    "p4iwn-code-review-r1-high-start.json": "6b019dc9bc6a68d1e9ffd09bf725656f030cdb2a2f67d25cbd2df84f5a61a1bb",
+    "p4iwn-code-review-r1-high-stream.jsonl": "a27989e5d846c810d9e70aeb27196af4391cf85ae89bc7626196651973929610",
+    "p4iwn-code-review-r1-high.log": "d468e450e4082393e365ff272286fef7e97894eb3715549640d4f376f181e7c9"
+  },
+  "publication": {
+    "normalization": "Only operator home prefix normalized after install-agnostic hook refusal. Exact private raw preserved; public report not byte-identical.",
+    "original_report_sha256": "d468e450e4082393e365ff272286fef7e97894eb3715549640d4f376f181e7c9",
+    "published_report_sha256": "a27b7bd006668b5780bfd9d919b047412b05af218059663b0a03138591c5800e"
+  }
+}

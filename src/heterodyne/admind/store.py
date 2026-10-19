@@ -34,6 +34,12 @@ from heterodyne.admind.approvals import Attempt
 from heterodyne.admind.redact import redact, redact_continuation
 from heterodyne.fsutil import private_dir
 
+CAPACITY_ACTIVE_SQL = (
+    "(status IN ('open','answered','deciding','uncertain') AND NOT EXISTS "
+    "(SELECT 1 FROM ask_fulfillments f WHERE f.ask_id=asks.ask_id AND f.valid=1)) OR EXISTS "
+    "(SELECT 1 FROM ask_fulfillments f WHERE f.ask_id=asks.ask_id AND f.valid=0)"
+)
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS inbound (
@@ -125,6 +131,10 @@ CREATE TABLE IF NOT EXISTS ask_repeats (
     parts INTEGER NOT NULL,             -- this repeat's own chunk count (asks bump B11, B12)
     created_at TEXT NOT NULL,
     PRIMARY KEY (ask_id, request));
+-- An additive overlay keeps the existing ask status/attempt schema and current-attempt CAS intact.
+-- Presence proves the last invocation returned the exact pre-effect HOLD. Delete BEFORE retry launch.
+CREATE TABLE IF NOT EXISTS ask_maintenance (
+    ask_id TEXT PRIMARY KEY, message_id TEXT NOT NULL UNIQUE, retry_at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS notices (
     notice_id TEXT PRIMARY KEY,
     poster TEXT NOT NULL,
@@ -136,6 +146,32 @@ CREATE TABLE IF NOT EXISTS notices (
     created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS outbox_message_id ON outbox(message_id);
 """
+OPERATION_SCHEMA = """
+CREATE TABLE IF NOT EXISTS approval_operations (
+    operation_key TEXT PRIMARY KEY, source TEXT NOT NULL, journal TEXT NOT NULL,
+    operation TEXT NOT NULL, bead TEXT UNIQUE, context_digest TEXT, intent_hash TEXT NOT NULL,
+    uid INTEGER NOT NULL, withdrawn INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL DEFAULT 0,
+    receipt TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS approval_operation_asks (
+    ask_id TEXT PRIMARY KEY, operation_key TEXT NOT NULL,
+    FOREIGN KEY(operation_key) REFERENCES approval_operations(operation_key));
+CREATE INDEX IF NOT EXISTS approval_operation_lineage ON approval_operation_asks(operation_key);
+CREATE TABLE IF NOT EXISTS approval_operation_events (
+ seq INTEGER PRIMARY KEY, operation_key TEXT NOT NULL, action TEXT NOT NULL,
+ uid INTEGER NOT NULL, peer_pid INTEGER, created_at TEXT NOT NULL,
+ before_hash TEXT NOT NULL, after_hash TEXT NOT NULL,
+ FOREIGN KEY(operation_key) REFERENCES approval_operations(operation_key));
+CREATE TRIGGER IF NOT EXISTS approval_operation_revision AFTER UPDATE ON asks
+WHEN EXISTS (SELECT 1 FROM approval_operations WHERE bead=NEW.bead)
+BEGIN
+ UPDATE approval_operations SET revision=revision+1 WHERE bead=NEW.bead;
+END;
+CREATE TRIGGER IF NOT EXISTS approval_operation_insert AFTER INSERT ON asks
+BEGIN
+ UPDATE approval_operations SET revision=revision+1 WHERE bead=NEW.bead;
+END;
+"""
+
 # cxmkf K26: columns added to a database from before card kinds, in one transaction.
 _CXMKF_COLUMNS = (("outbox", "thread_key"), ("asks", "question_form"), ("asks", "choices"), ("asks", "links"),
                   ("ask_answers", "choice"))
@@ -143,6 +179,11 @@ _NOTICE_KEY = re.compile(r"\Anotice:([2-9a-hjkmnp-z]{6}):\d+\Z")
 THREAD_FALLBACKS = ("no-message-id", "parent-failed", "parent-missing", "parent-pending")
 REACTION_PREFIX = "r:"      # a reaction's inbound key is `r:<event id>` (relay delta R27)
 # Statuses that count toward the open-ask limit (relay spec R15). `blocked` is terminal and does not.
+MAINTENANCE_RETRY_SECONDS = 30.0
+MAINTENANCE_CAPACITY = 128
+MAINTENANCE_SUSPENDED = frozenset({"authority", "native-conflict", "changed-card", "not-open",
+                                   "not-approval", "not-approver", "gate", "latched"})
+
 ASK_ACTIVE = ("open", "answered", "deciding", "uncertain")
 # The outbox keys that make a delivered message a card (R7): a card chunk, a chunk of an ask's !details, or
 # a chunk of an `!asks repeat` (asks bump B12). The ID part is checked exactly, so a `reply()` key with the
@@ -321,6 +362,8 @@ class Store:
                 raise PermissionError(f"{path} is not the regular file that was opened")
         finally:
             os.close(fd)
+        self.path = path.absolute()
+        self.file_identity = (opened.st_dev, opened.st_ino)
         self.lock = threading.RLock()
         self._depth = 0         # open transaction() nesting, guarded by self.lock
         # check_same_thread=False: calls are serialized by self.lock (see _locked), not by thread.
@@ -356,10 +399,67 @@ class Store:
             self.db.close()
             raise
 
+        from heterodyne.admind.fulfillment import Lifecycle
+        self.fulfillment = Lifecycle(self)
+        try:
+            self.fulfillment.migrate()
+            self.db.executescript(OPERATION_SCHEMA)
+        except BaseException:
+            self.db.close()
+            raise
+
+        from heterodyne.admind.retirement import Retirement
+        self.retirement = Retirement(self)
+        try:
+            self.retirement.migrate()
+        except BaseException:
+            self.db.close()
+            raise
+
     def migrate_guard(self) -> None:
         from heterodyne.admind.guard_state import migrate
         with self.transaction():
             migrate(self.db)
+
+    @contextlib.contextmanager
+    def read_snapshot(self) -> Generator[sqlite3.Connection]:
+        """Independent read-only WAL transaction; no live connection or Store lock is held.
+
+        Called in a worker thread. The first SELECT fixes the snapshot; ordinary Store writes can
+        continue on the event loop. Neither renderer work nor cancellation can retain the live RLock.
+        The private owned parent remains the existing same-UID trust boundary.
+        """
+        info = self.path.stat(follow_symlinks=False)
+        if (not stat.S_ISREG(info.st_mode)
+                or (info.st_dev, info.st_ino) != self.file_identity):
+            raise RuntimeError("store identity changed")
+        with contextlib.closing(sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True,
+                                                isolation_level=None, timeout=1.0)) as db:
+            db.execute("PRAGMA query_only=ON")
+            db.execute("BEGIN")
+            try:
+                yield db
+            finally:
+                db.execute("ROLLBACK")
+
+    @staticmethod
+    def snapshot_ask(db: sqlite3.Connection, ask_id: str, max_bytes: int
+                     ) -> tuple[AskRow, str | None] | None:
+        """Bound materialization and obtain row/current attempt from the same independent snapshot."""
+        size = db.execute("SELECT length(CAST(body AS BLOB)) + length(CAST(title AS BLOB)) + "
+                          "coalesce(length(CAST(choices AS BLOB)),0) + "
+                          "coalesce(length(CAST(links AS BLOB)),0) + "
+                          "coalesce(length(CAST(outcome AS BLOB)),0) + "
+                          "coalesce(length(decided_by),0) + coalesce(length(attempt),0) FROM asks "
+                          "WHERE ask_id = ?", (ask_id,)).fetchone()
+        if size is None:
+            return None
+        if size[0] > max_bytes:
+            raise OverflowError("ask snapshot budget")
+        raw = db.execute(f"SELECT {_ASK}, attempt FROM asks WHERE ask_id = ?",  # noqa: S608
+                         (ask_id,)).fetchone()
+        return _ask(raw[:-1]), raw[-1]
+
 
     @_locked
     def close(self) -> None:
@@ -397,6 +497,12 @@ class Store:
             return message_id
         row = self.db.execute("SELECT reply_to FROM inbound WHERE message_id = ?", (message_id,)).fetchone()
         return None if row is None or row[0] is None else str(row[0])
+
+    @_locked
+    def inbound_thread(self, message_id: str) -> str | None:
+        """Actual persisted incoming reply target; unlike reply_target(), not outbound threading."""
+        row = self.db.execute("SELECT reply_to FROM inbound WHERE message_id=?", (message_id,)).fetchone()
+        return None if row is None else _opt_str(row[0])
 
     @_locked
     def set_inbound(self, message_id: str, status: str) -> None:
@@ -775,6 +881,45 @@ class Store:
         return [_ask(r) for r in rows]
 
     @_locked
+    def approval_lineage(self, bead: str, limit: int) -> list[AskRow]:
+        """Bounded approval history in insertion order, excluding unrelated question/merge asks."""
+        rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE bead=? AND kind='approval' "  # noqa: S608
+                               "ORDER BY rowid LIMIT ?", (bead, limit)).fetchall()
+        return [_ask(r) for r in rows]
+
+    @_locked
+    def capacity_asks(self) -> list[AskRow]:
+        """Separate capacity projection; raw status selectors retain their original meaning."""
+        rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE {CAPACITY_ACTIVE_SQL} "  # noqa: S608
+                               "ORDER BY created_at,rowid").fetchall()
+        return [_ask(r) for r in rows]
+
+    @_locked
+    def fulfilled_asks(self, limit: int = 20) -> list[AskRow]:
+        rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE EXISTS "  # noqa: S608
+            "(SELECT 1 FROM ask_fulfillments f WHERE f.ask_id=asks.ask_id AND f.valid=1) "
+            "ORDER BY created_at DESC,rowid DESC LIMIT ?", (limit,)).fetchall()
+        return [_ask(r) for r in rows]
+
+    @_locked
+    def remindable_asks(self) -> list[AskRow]:
+        rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE status='open' AND NOT EXISTS "  # noqa: S608
+            "(SELECT 1 FROM ask_fulfillments f WHERE f.ask_id=asks.ask_id) "
+            "ORDER BY created_at,rowid").fetchall()
+        return [_ask(r) for r in rows]
+
+    @_locked
+    def capacity_count(self) -> int:
+        return int(self.db.execute(f"SELECT COUNT(*) FROM asks WHERE {CAPACITY_ACTIVE_SQL}"  # noqa: S608
+                                   ).fetchone()[0])
+
+    @_locked
+    def inactive_asks(self, limit: int = 20) -> list[AskRow]:
+        rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE NOT ({CAPACITY_ACTIVE_SQL}) "  # noqa: S608
+                               "ORDER BY created_at DESC,rowid DESC LIMIT ?", (limit,)).fetchall()
+        return [_ask(r) for r in rows]
+
+    @_locked
     def recent_asks(self, limit: int) -> list[AskRow]:
         """The `limit` newest asks that are no longer active (R24)."""
         marks = ", ".join("?" * len(ASK_ACTIVE))
@@ -790,16 +935,26 @@ class Store:
     @_locked
     def set_ask(self, ask_id: str, status: str, *, outcome: str | None = None,
                 decided_by: str | None = None) -> None:
-        self.db.execute("UPDATE asks SET status = ?, outcome = ?, decided_by = ?, updated_at = ? "
-                        "WHERE ask_id = ?", (status, outcome, decided_by, now(), ask_id))
+        with self.transaction():
+            if self.fulfillment.protected(ask_id):
+                raise ValueError("already fulfilled; original answer retained")
+            self.db.execute("UPDATE asks SET status = ?, outcome = ?, decided_by = ?, updated_at = ? "
+                            "WHERE ask_id = ?", (status, outcome, decided_by, now(), ask_id))
+            self.fulfillment.retire_pending(ask_id, "status-changed")
 
     @_locked
     def add_answer(self, ask_id: str, kind: str, operator: str, message_id: str, text: str,
                    choice: str | None = None) -> None:
-        self.db.execute("INSERT INTO ask_answers(ask_id, seq, kind, operator, message_id, text, at, choice) "
-                        "VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM ask_answers WHERE ask_id = ?), "
-                        "?, ?, ?, ?, ?, ?)",
-                        (ask_id, ask_id, kind, operator, message_id, text, now(), choice))
+        with self.transaction():
+            if self.fulfillment.protected(ask_id):
+                raise ValueError("already fulfilled; original answer retained")
+            self.db.execute("INSERT INTO ask_answers(ask_id, seq, kind, operator, message_id, "
+                            "text, at, choice) "
+                            "VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM ask_answers "
+                            "WHERE ask_id = ?), "
+                            "?, ?, ?, ?, ?, ?)",
+                            (ask_id, ask_id, kind, operator, message_id, text, now(), choice))
+            self.fulfillment.retire_pending(ask_id, "stale-answers")
 
     @_locked
     def answers(self, ask_id: str) -> list[AnswerRow]:
@@ -937,18 +1092,27 @@ class Store:
                             "ORDER BY rowid DESC LIMIT 1", (ask_id, ask_id)).fetchone()
         return None if r is None else _ask(r)
 
+    @_locked
+    def operation_withdrawn(self, ask_id: str) -> bool:
+        """Source tombstone checked in the same transaction as every decision CAS."""
+        row = self.db.execute("SELECT o.withdrawn FROM approval_operations o JOIN asks a ON a.bead=o.bead "
+                              "WHERE a.ask_id=?", (ask_id,)).fetchone()
+        return row is not None and bool(row[0])
+
     # --- decision attempts (R23) ---------------------------------------------------------------
     @_locked
     def begin_attempt(self, a: Attempt) -> bool:
         """In one transaction: the ask `open -> deciding` with `attempt` set, the attempt row, and the
         inbound message `executing`. False, changing nothing, if the ask is not `open`."""
         with self.transaction():
+            if self.operation_withdrawn(a.ask_id) or self.fulfillment.protected(a.ask_id):
+                return False
             cur = self.db.execute("UPDATE asks SET status = 'deciding', attempt = ?, updated_at = ? "
                                   "WHERE ask_id = ? AND status = 'open'", (a.message_id, now(), a.ask_id))
             if cur.rowcount != 1:
                 return False
             self.db.execute("INSERT INTO ask_attempts(ask_id, message_id, action, operator, ref, digest, "
-                            "note, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                            "note, started_at, proof_capable_since_begin) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)",
                             (a.ask_id, a.message_id, a.action, a.operator, a.ref, a.digest, a.note, now()))
             self.db.execute("UPDATE inbound SET status = 'executing' WHERE message_id = ?", (a.message_id,))
             return True
@@ -977,12 +1141,113 @@ class Store:
             r = self.db.execute("SELECT status, attempt FROM asks WHERE ask_id = ?", (ask_id,)).fetchone()
             if r is None or r[0] != expect_status or r[1] != message_id:
                 return False
+            if self.fulfillment.protected(ask_id):
+                raise ValueError("already fulfilled; original answer retained")
+            if (new_status == "open" and settled in {"untouched", "refused"}
+                    and self.operation_withdrawn(ask_id)):
+                new_status = "cancelled"
+            self.db.execute("DELETE FROM ask_maintenance WHERE ask_id = ? AND message_id = ?",
+                            (ask_id, message_id))
+            if settled != "uncertain":
+                self.retirement.clear_active(ask_id, message_id)
             self.db.execute("UPDATE ask_attempts SET settled = ?, exit_status = COALESCE(?, exit_status) "
                             "WHERE ask_id = ? AND message_id = ?", (settled, exit_status, ask_id, message_id))
             self.db.execute("UPDATE asks SET status = ?, outcome = ?, decided_by = ?, attempt = ?, "
                             "updated_at = ? WHERE ask_id = ?",
-                            (new_status, outcome, decided_by, message_id if settled == "uncertain" else None,
+                            (new_status, None if outcome is None else redact(outcome), decided_by,
+                             message_id if settled == "uncertain" else None,
                              now(), ask_id))
+            return True
+
+    @_locked
+    def defer_maintenance(self, a: Attempt, retry_at: float, *, reason: str | None = None) -> bool:
+        """Retain the exact authenticated current attempt; no inbound completion or new allocation."""
+        with self.transaction():
+            row = self.ask(a.ask_id)
+            if row is None or row.status != "deciding" or self.current_attempt(a.ask_id) != a:
+                return False
+            if row.outcome is not None and row.outcome.startswith("maintenance-held:"):
+                return False
+            # Cleanup is a writer operation, never an inspection side effect.
+            self.db.execute("DELETE FROM ask_maintenance WHERE NOT EXISTS "
+                            "(SELECT 1 FROM asks a WHERE a.ask_id = ask_maintenance.ask_id "
+                            "AND a.attempt = ask_maintenance.message_id AND a.status = 'deciding')")
+            count = self.db.execute("SELECT COUNT(*) FROM ask_maintenance").fetchone()[0]
+            exists = self.db.execute("SELECT 1 FROM ask_maintenance WHERE ask_id = ?", (a.ask_id,)).fetchone()
+            if count >= MAINTENANCE_CAPACITY and exists is None:
+                raise RuntimeError("maintenance pending capacity")
+            self.db.execute("INSERT INTO ask_maintenance VALUES (?, ?, ?) ON CONFLICT(ask_id) "
+                            "DO UPDATE SET message_id = excluded.message_id, retry_at = excluded.retry_at",
+                            (a.ask_id, a.message_id, retry_at))
+            outcome = ("maintenance-held:" + reason
+                       if reason is not None and reason in MAINTENANCE_SUSPENDED else "pending-maintenance")
+            self.db.execute("UPDATE asks SET outcome = ?, updated_at = ? WHERE ask_id = ?",
+                            (outcome, now(), a.ask_id))
+            return True
+
+    def _maintenance_rows(self, *, retryable: bool = False) -> list[tuple[str, str, float]]:
+        rows = self.db.execute(
+            "SELECT m.ask_id, m.message_id, m.retry_at FROM ask_maintenance m JOIN asks a "
+            "ON a.ask_id = m.ask_id AND a.attempt = m.message_id AND a.status = 'deciding' "
+            "WHERE (? OR a.outcome = 'pending-maintenance') ORDER BY m.retry_at, m.ask_id LIMIT ?",
+            (not retryable, MAINTENANCE_CAPACITY)).fetchall()
+        return [(str(a), str(m), float(t)) for a, m, t in rows]
+
+    @_locked
+    def maintenance_pending(self) -> list[tuple[str, str, float]]:
+        """Read-only current overlays, including suspended holds; no implicit cleanup."""
+        return self._maintenance_rows()
+
+    @_locked
+    def maintenance_retryable(self) -> list[tuple[str, str, float]]:
+        return self._maintenance_rows(retryable=True)
+
+    @_locked
+    def maintenance_retry_at(self, ask_id: str, message_id: str, *,
+                             include_suspended: bool = False) -> float | None:
+        """Indexed exact lookup; inspections and retries never scan/delete the retention table."""
+        row = self.db.execute(
+            "SELECT m.retry_at FROM ask_maintenance m JOIN asks a ON a.ask_id = m.ask_id "
+            "AND a.attempt = m.message_id AND a.status = 'deciding' "
+            "WHERE m.ask_id = ? AND m.message_id = ? AND (? OR a.outcome = 'pending-maintenance')",
+            (ask_id, message_id, include_suspended)).fetchone()
+        return None if row is None else float(row[0])
+
+    @_locked
+    def issue_decision(self, a: Attempt, *, maintenance_retry: bool = False) -> bool:
+        """Persist an issuing marker before launch; a crash never grants a replay entitlement."""
+        with self.transaction():
+            if self.operation_withdrawn(a.ask_id):
+                return False
+            row = self.ask(a.ask_id)
+            if row is None or row.status != "deciding" or self.current_attempt(a.ask_id) != a:
+                return False
+            generation = self.retirement.generation(a)
+            if generation is None or generation[0] >= (1 << 63) - 1:
+                return False
+            if maintenance_retry:
+                if row.outcome != "pending-maintenance":
+                    return False
+                cur = self.db.execute("DELETE FROM ask_maintenance WHERE ask_id = ? AND message_id = ?",
+                                      (a.ask_id, a.message_id))
+                if cur.rowcount != 1:
+                    return False
+            self.db.execute("UPDATE ask_attempts SET invocations = invocations + 1 "
+                            "WHERE ask_id = ? AND message_id = ?", (a.ask_id, a.message_id))
+            outcome = "maintenance-issuing" if maintenance_retry else "decision-issuing"
+            self.db.execute("UPDATE asks SET outcome = ?, updated_at = ? WHERE ask_id = ?",
+                            (outcome, now(), a.ask_id))
+            return True
+
+    @_locked
+    def mark_maintenance_issuing(self, a: Attempt) -> bool:
+        """After a proven HOLD, retain that distinction before publishing its overlay and notice."""
+        with self.transaction():
+            row = self.ask(a.ask_id)
+            if row is None or row.status != "deciding" or self.current_attempt(a.ask_id) != a:
+                return False
+            self.db.execute("UPDATE asks SET outcome = 'maintenance-issuing', updated_at = ? "
+                            "WHERE ask_id = ?", (now(), a.ask_id))
             return True
 
     @_locked
@@ -1028,10 +1293,12 @@ class Store:
         return cur.rowcount
 
     @contextlib.contextmanager
-    def transaction(self) -> Generator[None]:
+    def transaction(self, *, read_only: bool = False) -> Generator[None]:
         """Run the block's store calls as one SQLite transaction: all of them commit, or (on any
         exception, a simulated crash included) none do. Re-entrant: a nested block joins the outer one.
-        The store lock is held throughout, so keep the block short and free of awaits."""
+        The store lock is held throughout, so keep the block short and free of awaits.
+        read_only uses a deferred snapshot without reserving the SQLite writer lock; its caller
+        must perform reads only. A nested block joins the already established snapshot."""
         with self.lock:
             if self._depth:
                 self._depth += 1
@@ -1040,7 +1307,7 @@ class Store:
                 finally:
                     self._depth -= 1
                 return
-            self.db.execute("BEGIN IMMEDIATE")
+            self.db.execute("BEGIN" if read_only else "BEGIN IMMEDIATE")
             self._depth = 1
             try:
                 yield

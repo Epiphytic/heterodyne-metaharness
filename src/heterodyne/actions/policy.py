@@ -2,27 +2,44 @@
 
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import cast
 
-from heterodyne.actions.codec import action_data, validate_interpretation, validate_policy_facts
+import msgspec
+
+from heterodyne.actions.codec import (
+    action_data,
+    validate_interpretation,
+    validate_policy_facts,
+    validate_request_inputs,
+)
 from heterodyne.actions.contracts import (
     REGISTRY,
     ActionConfig,
     Envelope,
+    Intent,
     Interpretation,
     Materiality,
+    Origin,
     PolicyFacts,
     PolicyResult,
+    Resolved,
     Tier,
 )
 from heterodyne.config.policy import RANK, effective_tiers
 
+DENIAL_DOMAIN = "plan5-denial-v2"
+
 _DEFAULT_TIERS = {"escalate": tuple(entry.kind for entry in REGISTRY)}
 
 
-def evaluate_policy(envelope: Envelope, config: ActionConfig, facts: PolicyFacts,
-                    host_overrides: Mapping[str, str], restrict: Mapping[str, Sequence[str]]) -> PolicyResult:
+def evaluate_policy(
+    envelope: Envelope,
+    config: ActionConfig,
+    facts: PolicyFacts,
+    host_overrides: Mapping[str, str],
+    restrict: Mapping[str, list[str]],
+) -> PolicyResult:
     """Host overrides/restrictions retain existing semantics, then apply the outward floor."""
     payload = action_data(envelope, config)
     facts = validate_policy_facts(facts)
@@ -49,9 +66,32 @@ def denial_key(envelope: Envelope, config: ActionConfig) -> str:
     Session scope survives generation changes. Ignore explanation, approval ID and request revision;
     retain all effect fields, immutable targets and host mapping revision.
     """
-    data = action_data(envelope, config)
-    key = {"domain": "plan5-denial-v1", "workstream": envelope.origin.workstream,
-           "session_key": envelope.origin.session_key, "action": data["action"], "resolved": data["resolved"]}
+    action_data(envelope, config)
+    return request_denial_key(Intent(1, envelope.action), envelope.origin, envelope.resolved, config)
+
+
+def request_denial_key(intent: Intent, origin: Origin, resolved_facts: Resolved, config: ActionConfig) -> str:
+    """Same denial identity before and after shell allocation; no synthetic approval identity."""
+    validate_request_inputs(intent, origin, resolved_facts, config)
+    action = cast(dict[str, object], msgspec.to_builtins(intent.action))
+    # Presentation aliases are not target identities. Preserve every actual effect field.
+    action = {key: value for key, value in action.items() if key not in {"repo", "target", "channel_ref"}}
+    resolved = cast(dict[str, object], msgspec.to_builtins(resolved_facts))
+    resolved = {
+        key: (
+            {k: v for k, v in cast(dict[str, object], value).items() if k != "alias"}
+            if isinstance(value, dict)
+            else value
+        )
+        for key, value in resolved.items()
+    }
+    key = {
+        "domain": DENIAL_DOMAIN,
+        "workstream": origin.workstream,
+        "session_key": origin.session_key,
+        "action": action,
+        "resolved": resolved,
+    }
     encoded = json.dumps(key, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 

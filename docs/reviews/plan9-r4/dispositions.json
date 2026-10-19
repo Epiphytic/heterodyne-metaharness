@@ -1,0 +1,69 @@
+{
+  "reviewed_head": "f7742d28889e2706bddaf5254ecc5e0c32b60118",
+  "actual_verdict": "APPROVE as a PoC",
+  "round": 4,
+  "effort": "medium",
+  "prior_reviews": "Two FULL HIGH, third MEDIUM; all original findings retained without resetting history.",
+  "findings": [
+    {
+      "ordinal": 1,
+      "finding": "`src/heterodyne/acceptance/source_adapters.py:140`: The comment at lines 131-132 says native diagnostics stay private and never expose raw prose, but NativeDiagnostic.gaps returns the native gap strings unchanged, and these include text taken from the bead.\n\n   Failure scenario: A capture whose ask.refs contains a ref like {'kind':'commit','id':['<arbitrary text>']} or unknown keys makes native ask_digest emit gaps such as \"ref id is not a non-empty string: [...]\" or \"ref has field(s) ... <key names>\". tuple(gaps) is returned through the operational diagnostic, with only the 1 MiB capture bound limiting its size, so arbitrary captured prose reaches callers despite the stated invariant.",
+      "disposition": "OPEN_UNWAIVED",
+      "scope": "Reviewer accepted diagnostics-only offline PoC. Not authority, release qualification or completion of collector task."
+    },
+    {
+      "ordinal": 2,
+      "finding": "`src/heterodyne/acceptance/source_adapters.py:129`: gate_valid is computed against capture.policy, which comes from the evidence itself, and correlate() never ties that policy to the binding envelope's policy principals or the attempt's sender_key/current_policy, so the approver set the native gate checks is self-asserted.\n\n   Failure scenario: A capture sets policy={'approvers':['mallory']} and approved_by='mallory', and a binding is built with decided_by/operator='mallory' while envelope.policy lists only 'op' (or the attempt has current_policy=False). validate() returns gate_valid=True and correlate() passes, so 'strict whole record/binding correlation' never checks the one input that decides the native gate.",
+      "disposition": "OPEN_UNWAIVED",
+      "scope": "Reviewer accepted diagnostics-only offline PoC. Not authority, release qualification or completion of collector task."
+    },
+    {
+      "ordinal": 3,
+      "finding": "`src/heterodyne/acceptance/source_adapters.py:101`: The replacements for _git_repo_present and _git do not keep native semantics: native returns False/None (a gap) for NUL in repo, args or stdin, and requires 'rev-parse --git-dir' to succeed, while the captured versions return True or the captured stdout and need no rev-parse read.\n\n   Failure scenario: Capture repos=['r\\x00x'] with matching cat-file/ls-tree reads. Native _git_repo_present('r\\x00x') returns False, giving the gap 'repo ... does not exist' and gate_valid=False. The captured repo_present returns True and the git lookup returns the captured commit/blob, so the digest has no gap and gate_valid=True. The claim of 'exact native implementations' fails on this input.",
+      "disposition": "OPEN_UNWAIVED",
+      "scope": "Reviewer accepted diagnostics-only offline PoC. Not authority, release qualification or completion of collector task."
+    },
+    {
+      "ordinal": 4,
+      "finding": "`src/heterodyne/acceptance/source_adapters.py:166`: Attempt correlation only looks at attempts whose ref equals via_ref: other recorded attempts (for example a recorded 'deny') are ignored, and attempt.started_at is never compared with authority.approved_at.\n\n   Failure scenario: The envelope has the matching approve attempt plus a second attempt with another ref, action='deny', settled='recorded', or the approve attempt's started_at is a day after approved_at. correlate() still returns the diagnostic. The 'native-time' test only fails because the metadata approved_at differs, so attempt timing is never actually checked.",
+      "disposition": "OPEN_UNWAIVED",
+      "scope": "Reviewer accepted diagnostics-only offline PoC. Not authority, release qualification or completion of collector task."
+    },
+    {
+      "ordinal": 5,
+      "finding": "`src/heterodyne/acceptance/source_adapters.py:109`: Executing the pinned source runs module-level code that does live host I/O: Path(__file__).resolve() on '/captured/bin/btq' (lstat/readlink) and Path.home() (reads HOME or the passwd database). This contradicts the module docstring's 'no live ... used', and the I/O-trap test does not cover it.\n\n   Failure scenario: On a host where /captured is a symlink or an unreadable mount, or where HOME is unset and the passwd lookup fails, exec raises OSError/RuntimeError (or KeyError from pwd) before the try block in validate(). That surfaces as a raw exception instead of Hold, and the host filesystem is consulted on every validate call.",
+      "disposition": "OPEN_UNWAIVED",
+      "scope": "Reviewer accepted diagnostics-only offline PoC. Not authority, release qualification or completion of collector task."
+    },
+    {
+      "ordinal": 6,
+      "finding": "`src/heterodyne/acceptance/source_adapters.py:138`: Only some exceptions from native execution are converted to Hold: AttributeError, IndexError/LookupError, RecursionError, and anything raised by _namespace/exec (which runs outside the try) escape raw. Separately, codec.Hold subclasses ValueError, so native approval_valid quietly catches any Hold raised inside it.\n\n   Failure scenario: A future-allowed native path or an odd capture shape raises AttributeError, or the exec-time module code fails. The caller gets an untyped exception instead of Hold('native_capture_unavailable'). Separately, any capture miss reached only inside approval_valid would be logged to the private stderr and turned into gate_valid=False instead of Hold.",
+      "disposition": "OPEN_UNWAIVED",
+      "scope": "Reviewer accepted diagnostics-only offline PoC. Not authority, release qualification or completion of collector task."
+    },
+    {
+      "ordinal": 7,
+      "finding": "`tests/test_acceptance_source_adapters.py:275`: The stderr regression test only runs the gate_valid=True path, where native approval_valid prints nothing, and it never checks with capsys/capfd that rejection messages stay off the host stderr.\n\n   Failure scenario: If the namespace sys=SimpleNamespace(stderr=...) override were dropped, real rejections ('btq: approval ... rejected: ...') would write to process stderr, yet this test would still pass because no print happens on the passing path.",
+      "disposition": "OPEN_UNWAIVED",
+      "scope": "Reviewer accepted diagnostics-only offline PoC. Not authority, release qualification or completion of collector task."
+    },
+    {
+      "ordinal": 8,
+      "finding": "`tests/test_acceptance_source_adapters.py:199`: The parametrized refusal tests (here and at line 85) use a bare pytest.raises(Hold) with no match=, so a case can pass because of an unrelated failure.\n\n   Failure scenario: The 'native-time' case passes from the metadata approved_at mismatch, not from attempt timing. The 'float' or 'uncaptured' cases would also pass if an earlier check started raising for a different reason, so regressions in the specific guards go undetected.",
+      "disposition": "OPEN_UNWAIVED",
+      "scope": "Reviewer accepted diagnostics-only offline PoC. Not authority, release qualification or completion of collector task."
+    },
+    {
+      "ordinal": 9,
+      "finding": "`src/heterodyne/acceptance/source_adapters.py:150`: Repeated work: every validate() recompiles and re-executes the full ~2,750-line native source, correlate() parses the capture twice (inside validate, then again at line 150), and ask_digest runs twice per validate (once directly, once inside approval_valid).\n\n   Failure scenario: Each correlate costs a full compile plus module exec, two strict decodes of up to 1 MiB, and two full ref resolutions. Compiling once in __init__ (exec of a cached code object per call) and having validate return the parsed Capture would remove most of it.",
+      "disposition": "OPEN_UNWAIVED",
+      "scope": "Reviewer accepted diagnostics-only offline PoC. Not authority, release qualification or completion of collector task."
+    },
+    {
+      "ordinal": 10,
+      "finding": "`src/heterodyne/acceptance/source_adapters.py:110`: Altitude: isolation depends on patching module globals after exec and overwriting Queue.__init__. Any reachable native path that calls os, Path or open directly (for example _check_object_store) bypasses the capture, and only the hash pin keeps that true today.\n\n    Failure scenario: Native code that reaches os.stat or Path.read_text through a helper that was not patched does real host I/O despite the 'finite captured reads' claim, and the fix is another patch on the list. The deeper fix is a native pure core that takes an injected I/O provider.",
+      "disposition": "OPEN_UNWAIVED",
+      "scope": "Reviewer accepted diagnostics-only offline PoC. Not authority, release qualification or completion of collector task."
+    }
+  ]
+}

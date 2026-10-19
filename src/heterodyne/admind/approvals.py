@@ -10,7 +10,11 @@ anything is settled. The outcome of a decision is never parsed from its output: 
 """
 
 import asyncio
+import hashlib
+import json
+import os
 import re
+import stat
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -93,6 +97,13 @@ class BtqError(Exception):
         self.word = word
 
 
+class NotSpawned(BtqError):
+    """Structural proof that the decision adapter did not create a child."""
+
+    def __init__(self) -> None:
+        super().__init__("unavailable")
+
+
 @dataclass(frozen=True)
 class Attempt:
     ask_id: str
@@ -105,6 +116,34 @@ class Attempt:
 
 
 Settled = Literal["recorded", "untouched", "blocked"]
+
+
+@dataclass(frozen=True)
+class MaintenanceHold:
+    """Closed child result; empty legacy markers are never retirement evidence."""
+
+    stdout: bytes = b""
+    adapter_identity: str = ""
+
+
+def maintenance_hold(code: int, out: bytes) -> bool:
+    """Recognize only the closed, bounded pre-effect protocol, never a generic exit 75."""
+    if code != 75 or len(out) > 256:
+        return False
+
+    def unique(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        value: dict[str, object] = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("duplicate key")
+            value[key] = item
+        return value
+
+    try:
+        value = json.loads(out.decode("utf-8"), object_pairs_hook=unique)
+    except (UnicodeError, ValueError):
+        return False
+    return value == {"schema": "maintenance-hold.v1", "effect": "not-issued", "reason": "maintenance"}
 
 
 async def _read(stream: asyncio.StreamReader | None, cap: int) -> bytes:
@@ -140,6 +179,47 @@ async def _collect(child: reap.Child, cap: int) -> tuple[bytes, bytes]:
 class ApproveBead:
     def __init__(self, binary: Path) -> None:
         self.binary = binary
+        self._identity_cache: tuple[tuple[int, int, int, int, int], str] | None = None
+
+    @staticmethod
+    def _file_stamp(info: os.stat_result) -> tuple[int, int, int, int, int]:
+        return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+    def identity(self) -> str:
+        """Bounded actual adapter bytes, captured on both sides of the child; no caller identity."""
+        try:
+            current = self.binary.stat()
+            if not stat.S_ISREG(current.st_mode):
+                return ""
+            stamp = self._file_stamp(current)
+            if self._identity_cache is not None and self._identity_cache[0] == stamp:
+                return self._identity_cache[1]
+            fd = os.open(self.binary, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+            with os.fdopen(fd, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= 8 << 20:
+                    return ""
+                source = stream.read((8 << 20) + 1)
+                if self._file_stamp(info) != self._file_stamp(os.fstat(stream.fileno())):
+                    return ""
+            if not source or len(source) > 8 << 20:
+                return ""
+            identity = hashlib.sha256(source).hexdigest()
+            self._identity_cache = self._file_stamp(info), identity
+            return identity
+        except OSError:
+            return ""
+
+    def cached_identity(self) -> str:
+        """No file reads or await at the authority fence; drift disqualifies retirement proof."""
+        try:
+            current = self.binary.stat()
+        except OSError:
+            return ""
+        cached = self._identity_cache
+        if cached is None or not stat.S_ISREG(current.st_mode):
+            return ""
+        return cached[1] if cached[0] == self._file_stamp(current) else ""
 
     async def _run(self, argv: list[str], timeout: float, cap: int,
                    on_launch: Callable[[], None] | None) -> tuple[int, bytes, bytes]:
@@ -149,7 +229,7 @@ class ApproveBead:
         try:
             child = reap.spawn(argv)
         except OSError:
-            raise BtqError("unavailable") from None
+            raise NotSpawned() from None
         except BaseException:
             if on_launch is not None:
                 on_launch()
@@ -170,6 +250,9 @@ class ApproveBead:
     async def read(self, bead: str, on_launch: Callable[[], None] | None = None) -> Readout | Busy:
         """`approve-bead <bead> --json --gate-preview`: the readout, or Busy. Anything else is a BtqError,
         a preview that is null for an open, undecided bead, or present for any other, included."""
+        # Warm the content cache before the caller's final authority check. No await may be added
+        # between that check and decision spawn; decide uses the stat-validated cache synchronously.
+        await asyncio.to_thread(self.identity)
         code, out, _ = await self._run([str(self.binary), bead, "--json", "--gate-preview"], READ_SECONDS,
                                        MAX_READ_OUTPUT, on_launch)
         try:
@@ -187,10 +270,17 @@ class ApproveBead:
         return r
 
     async def decide(self, a: Attempt, bead: str,
-                     on_launch: Callable[[], None] | None = None) -> tuple[int, str]:
-        """Run the decision: (exit status, the first stderr line, redacted, at most MAX_LINE characters)."""
-        code, _, err = await self._run(decision_argv(self.binary, a, bead), DECIDE_SECONDS, MAX_OUTPUT,
+                     on_launch: Callable[[], None] | None = None) -> tuple[int, str] | MaintenanceHold:
+        """Return a closed pre-effect MaintenanceHold, or (exit status, redacted first stderr line)."""
+        if on_launch is None:
+            identity = await asyncio.to_thread(self.identity)
+        else:
+            identity = self.cached_identity()
+        code, out, err = await self._run(decision_argv(self.binary, a, bead), DECIDE_SECONDS, MAX_OUTPUT,
                                        on_launch)
+        if maintenance_hold(code, out):
+            after = await asyncio.to_thread(self.identity)
+            return MaintenanceHold(out, identity if identity == after else "")
         lines = err.decode("utf-8", "replace").splitlines()
         return code, quoted(lines[0].strip()) if lines else ""
 

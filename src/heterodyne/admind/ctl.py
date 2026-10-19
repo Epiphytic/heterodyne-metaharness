@@ -24,11 +24,12 @@ import stat
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from types import UnionType
-from typing import Any, Literal, NamedTuple, overload
+from typing import Any, Literal, NamedTuple, cast, overload
 
 import msgspec
 
 from heterodyne import platform
+from heterodyne.admind import operations
 from heterodyne.admind.audit import Audit
 from heterodyne.admind.settings import MAX_NAME
 from heterodyne.admind.settings import NAME_CONTROLS as CONTROL  # one contract with policy (B2)
@@ -57,9 +58,19 @@ class CtlUnavailable(Exception):
     """No daemon is listening (or it did not answer)."""
 
 
+class CtlInvalidReply(CtlUnavailable):
+    """A daemon replied, but its framing or schema was incompatible."""
+
+
+class CtlResponseTimeout(CtlUnavailable):
+    """A connected daemon did not finish a reply before the deadline."""
+
+
 class Peer(NamedTuple):
     """The connecting process, as far as the kernel says (audit only; R16)."""
     pid: int | None
+    uid: int | None = None
+    gid: int | None = None
 
 
 Handler = Callable[[CtlRequest], Awaitable[CtlReply]]
@@ -164,32 +175,64 @@ class JsonSocketServer[Req, Rep: msgspec.Struct]:
         task.add_done_callback(lambda done: self.handlers.pop(done, None))
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        operation_request = False
         try:
             try:
                 line = await asyncio.wait_for(reader.readline(), READ_SECONDS)
-                if len(line.rstrip(b"\n")) > self.max_request:      # the delimiter does not count
+                if len(line.rstrip(b"\n")) > self.max_request:
                     raise ValueError("request too long")
-                req: Req = msgspec.json.decode(line, type=self.request_type)
+                if self.kind == "ask":
+                    envelope = msgspec.json.decode(line)
+                    operation_request = (isinstance(envelope, dict)
+                                         and cast(dict[str, object], envelope).get("type")
+                                         == "approval.operation.v1")
+                if self.kind == "gateway-custody":
+                    from heterodyne.admind import gateway_custody
+
+                    req = cast(Req, gateway_custody.decode(
+                        line.rstrip(b"\n"), cast(type[gateway_custody.Request], gateway_custody.Request)))
+                elif self.kind == "maintenance-recovery":
+                    from heterodyne.admind import recovery
+
+                    req = cast(Req, recovery.decode(line, cast(type[recovery.Request], recovery.Request)))
+                elif operation_request:
+                    req = cast(Req, operations.decode(line))
+                else:
+                    req = msgspec.json.decode(line, type=self.request_type)
+                if self.kind == "ask":
+                    from heterodyne.admind import fulfillment
+                    if isinstance(cast(object, req), fulfillment.Request):
+                        fulfillment.strict_json(line, limit=self.max_request)
+            except operations.Invalid as error:
+                reply = cast(Rep, operations.Reply("refused", str(error)))
             except (TimeoutError, ValueError, msgspec.DecodeError):
-                reply = self.refused("malformed request")
+                reply = (cast(Rep, operations.Reply("refused", "malformed")) if operation_request
+                         else self.refused("malformed request"))
             else:
                 refusal = self.check(req)
                 if refusal is not None:
-                    reply = self.refused(refusal)
+                    reply = (cast(Rep, operations.Reply("refused", refusal)) if operation_request
+                             else self.refused(refusal))
                 else:
                     fields = self.describe(req)
                     self.audit.write(self.kind, **fields)     # redacted centrally (B16)
                     try:
-                        peer = Peer(platform.peer_pid(writer.get_extra_info("socket")))
+                        sock = writer.get_extra_info("socket")
+                        try:
+                            peer = Peer(*platform.peer_credentials_checked(sock))
+                        except OSError:
+                            peer = Peer(platform.peer_pid(sock))
                         reply = await self.handler(req, peer)
                     except Exception as exc:  # noqa: BLE001 - fixed wording; the type goes to the audit
                         self.audit.write(self.kind, action="handler-failed", op=fields.get("op"),
                                          error=type(exc).__name__)
-                        reply = self.failed()
+                        reply = (cast(Rep, operations.Reply("unavailable", "handler-failed"))
+                                 if operation_request else self.failed())
             data = msgspec.json.encode(reply)
             if len(data) > self.max_reply:
                 self.audit.write(self.kind, action="reply-too-large", size=len(data))
-                data = msgspec.json.encode(self.failed())
+                data = msgspec.json.encode(operations.Reply("unavailable", "reply-capacity")
+                                           if operation_request else self.failed())
             writer.transport.set_write_buffer_limits(high=0)   # drain() waits for an empty buffer
             writer.write(data + b"\n")
             await asyncio.wait_for(writer.drain(), WRITE_SECONDS)
@@ -238,23 +281,31 @@ def CtlServer(path: Path, handler: Handler, audit: Audit) -> JsonSocketServer[Ct
 
 @overload
 async def request(path: Path, req: msgspec.Struct, timeout: float = ..., *,
-                  max_reply: int = ...) -> CtlReply: ...
+                  max_reply: int = ..., require_uid: int | None = ...) -> CtlReply: ...
 @overload
 async def request[R](path: Path, req: msgspec.Struct, timeout: float = ..., *, reply_type: type[R],
-                     max_reply: int = ...) -> R: ...
+                     max_reply: int = ..., require_uid: int | None = ...) -> R: ...
 async def request(path: Path, req: msgspec.Struct, timeout: float = 300.0, *, reply_type: Any = CtlReply,
-                  max_reply: int = CTL_MAX_REPLY) -> Any:
+                  max_reply: int = CTL_MAX_REPLY, require_uid: int | None = None) -> Any:
     try:
         reader, writer = await asyncio.wait_for(
             asyncio.open_unix_connection(str(path), limit=max_reply + 2), 5)
     except (OSError, TimeoutError) as exc:
         raise CtlUnavailable(type(exc).__name__) from None
     try:
+        if require_uid is not None:
+            sock = writer.get_extra_info("socket")
+            if sock is None or platform.peer_credentials_checked(sock)[1] != require_uid:
+                raise CtlUnavailable("server-peer")
         writer.write(msgspec.json.encode(req) + b"\n")
         await writer.drain()
         line = await asyncio.wait_for(reader.readline(), timeout)
         return msgspec.json.decode(line, type=reply_type)
-    except (OSError, TimeoutError, ValueError, msgspec.DecodeError) as exc:     # ValueError: framing
+    except TimeoutError:
+        raise CtlResponseTimeout from None
+    except (ValueError, msgspec.DecodeError):  # ValueError: framing
+        raise CtlInvalidReply from None
+    except OSError as exc:
         raise CtlUnavailable(type(exc).__name__) from None
     finally:
         await hang_up(writer)

@@ -1577,6 +1577,16 @@ def _record_of(data: bytes) -> Record:
     return out
 
 
+def parse_record(data: bytes) -> Record:
+    """Decode the store's record format for read-only source consumers; no store is opened."""
+    return _record_of(data)
+
+
+def canonical_record(rec: Record) -> bytes:
+    """The store's exact canonical record encoding, shared with read-only source consumers."""
+    return _record_bytes(rec)
+
+
 INTENT_FIELDS = frozenset({"id", "adapter", "install", "digest", "root"})
 
 

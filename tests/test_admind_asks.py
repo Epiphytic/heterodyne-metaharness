@@ -219,7 +219,7 @@ def test_parse_asks_and_answer() -> None:
     for bad in ("!answer", "!answer k7m2", "!answer k7m2   \n "):
         with pytest.raises(commands.CommandError, match="Usage: !answer"):
             commands.parse(bad)
-    with pytest.raises(commands.CommandError, match=r"Usage: !asks \[bump\|repeat\]\."):
+    with pytest.raises(commands.CommandError, match=r"Usage: !asks \[bump\|repeat\|retire <proof-token>\]\."):
         commands.parse("!asks all")
     assert "!asks" in commands.HELP and "!answer <id> <text>" in commands.HELP
 

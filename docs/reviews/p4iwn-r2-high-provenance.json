@@ -1,0 +1,49 @@
+{
+  "review_ordinal": 2,
+  "review_kind": "actual Claude Opus built-in /code-review FULL HIGH",
+  "review_result": "10 findings; not an approval",
+  "private_raw_sha256": "b43720d0326925f167a59f4e5713e42226e8bc7286c3c71bb05e36e3d4093ac7",
+  "public_raw_sha256": "b43720d0326925f167a59f4e5713e42226e8bc7286c3c71bb05e36e3d4093ac7",
+  "normalization": "Only literal <operator-home> replaced with <operator-home>; no other report changes.",
+  "actual_start": {
+    "at": "2026-10-19T08:11:09.623671+00:00",
+    "head": "c478e0d399f41f653b04723f66876d9ce1974f9d",
+    "base": "a5ea9cb3f37065890ce4e4dd33e9c64aca9eebc1",
+    "cwd": "<operator-home>/.hermes/handoff/2026-10-15/codex/autonomous-resume/p4iwn-code-review-r2-high-inputs",
+    "source_cwd": "<operator-home>/repos/heterodyne-metaharness-v2-btq-btq-p4iwn",
+    "argv": [
+      "<operator-home>/.nvm/versions/node/v22.22.0/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+      "-p",
+      "--model",
+      "opus",
+      "--effort",
+      "high",
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--dangerously-skip-permissions",
+      "--disallowedTools",
+      "Agent,Task",
+      "--add-dir",
+      "<operator-home>/repos/heterodyne-metaharness-v2-btq-btq-p4iwn",
+      "--",
+      "/code-review FULL HIGH reasoning code review. Actual SECOND full code review. Author Codex. Read-only inspect complete a5ea9cb3f37065890ce4e4dd33e9c64aca9eebc1..c478e0d399f41f653b04723f66876d9ce1974f9d diff in <operator-home>/repos/heterodyne-metaharness-v2-btq-btq-p4iwn. Approved Q1 design fffc62d716f186e628547a4d9a32d9cf8ddee862 docs/adr/2026-10-18-gateway-durable-custody.md genuineapprovalbdij5. Read docs/plans/gateway-custody-registration-slice.md and actual first HIGH report/provenance/all10 dispositions. This is dormant partial offline product source, NOT complete task/production/native transport/enrollment/deployment. Fixes agreeing settle preserving original decision, authenticated contrary CAS rebase, immutable terminal bundles, post-expiry authentic nonconsumption plus exact predecessor tombstone before successor, failed/missing notices explicit HOLD and retained slots, undelivered includes failed/missing, fsync off shared Store lock with shared dedicated writer mutex, independent model-lock routing, exact256KiB payload framing. Fourteen regressions fail against signed predecessor f5c24bdb then141custody/324compatPASS. Configured411files0errors0warnings;258of261old tests byteexact, three synthetic fixture-only corrections retain every original assertion AST and disclosed predecessor hashes/diff. Quality50regressions33gating OPEN unwaived. Failed native notice has NO safe recovery adapter; physical256KiB reserve/native consumer ACK/intake durable redelivery/production source-publication enrollment/queue settlement remain OPEN HOLD. Do not conflate unavailable ports with implemented authority. Review concrete code correctness and approved scoped contract; preserve all noncritical findings and do not manufacture APPROVE. No edits/tests/probes/queue/nativeDB/service/live effects, delegation or independent network/model calls."
+    ],
+    "prompt": "/code-review FULL HIGH reasoning code review. Actual SECOND full code review. Author Codex. Read-only inspect complete a5ea9cb3f37065890ce4e4dd33e9c64aca9eebc1..c478e0d399f41f653b04723f66876d9ce1974f9d diff in <operator-home>/repos/heterodyne-metaharness-v2-btq-btq-p4iwn. Approved Q1 design fffc62d716f186e628547a4d9a32d9cf8ddee862 docs/adr/2026-10-18-gateway-durable-custody.md genuineapprovalbdij5. Read docs/plans/gateway-custody-registration-slice.md and actual first HIGH report/provenance/all10 dispositions. This is dormant partial offline product source, NOT complete task/production/native transport/enrollment/deployment. Fixes agreeing settle preserving original decision, authenticated contrary CAS rebase, immutable terminal bundles, post-expiry authentic nonconsumption plus exact predecessor tombstone before successor, failed/missing notices explicit HOLD and retained slots, undelivered includes failed/missing, fsync off shared Store lock with shared dedicated writer mutex, independent model-lock routing, exact256KiB payload framing. Fourteen regressions fail against signed predecessor f5c24bdb then141custody/324compatPASS. Configured411files0errors0warnings;258of261old tests byteexact, three synthetic fixture-only corrections retain every original assertion AST and disclosed predecessor hashes/diff. Quality50regressions33gating OPEN unwaived. Failed native notice has NO safe recovery adapter; physical256KiB reserve/native consumer ACK/intake durable redelivery/production source-publication enrollment/queue settlement remain OPEN HOLD. Do not conflate unavailable ports with implemented authority. Review concrete code correctness and approved scoped contract; preserve all noncritical findings and do not manufacture APPROVE. No edits/tests/probes/queue/nativeDB/service/live effects, delegation or independent network/model calls.",
+    "executable_sha256": "bc1aad9982c7b59c7d889ff92595d61cf46e0a6eae074cb551d932a989bcd222",
+    "capture_kind": "manual-foreign-observed-stream-not-reserved-profile-proof"
+  },
+  "actual_result": {
+    "at": "2026-10-19T08:18:07.148855+00:00",
+    "exit": 0,
+    "head": "c478e0d399f41f653b04723f66876d9ce1974f9d",
+    "source_unchanged": true,
+    "stream_sha256": "e523e6b8797ed2a56cc204d13550bf8557d00bb5a3ce4b5a839b9c38750cfd8a",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "events": 71,
+    "malformed_line_numbers": [],
+    "terminal_results": 1,
+    "terminal_success": true,
+    "log_sha256": "b43720d0326925f167a59f4e5713e42226e8bc7286c3c71bb05e36e3d4093ac7"
+  }
+}

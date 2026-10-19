@@ -1,0 +1,24 @@
+{
+  "schema": "plan5-c1-r1-inputs.v1",
+  "base": "77e3c4a833ea6385cc48bbda3fcea61b54bdf622",
+  "prior_head": "72c6d72d6eec71c57c568ee8ba83ee12526b0f0f",
+  "approved_design": {
+    "revision": "092c10221660605598bb41151b496bda0f0bfa38",
+    "path": "docs/designs/2026-10-18-plan5-next-finite-stage.md",
+    "sha256": "4b1aaf694b2b55f7f3141053c28792b21bfcdfae4ac1e18231888972ac90f8cf"
+  },
+  "raw_report_sha256": "297b7d11ced99dd0cc18d1f1c420a98c5e0499d308c49aa1c68a3a7c90d5f793",
+  "files": {
+    "src/heterodyne/actions/decisions.py": "c38beea64e3143c5e475406561d31ac4b4761ada7f420b31329a8a442afb3148",
+    "src/heterodyne/actions/dispatch.py": "d4ee549d19b2423568c60d85bcb6007d83e27899c15b60d69856fb2bcc2d55c1",
+    "src/heterodyne/actions/journal.py": "5adb19e4a16dde96225d5ea00bab7c246c4369e01e32fa07bdce3507a7db2680",
+    "src/heterodyne/actions/judgement.py": "59cad30b6caf21e87f95045a9997f9833dee61cf0957681501d1da07db99a6ea",
+    "tests/test_actions_c1.py": "ba5d69969d6f67ab47b8577643a064806c8d7a358bf9423bdfe1a81e27291424",
+    "tests/test_actions_p1_r4.py": "47881ce05cc3da9a6a31ec1457593be643fb6417c0efba344cd46efcf0ae2e0b",
+    "tests/test_actions_p1_r5.py": "9516f763807cecc38140f6177dd4dcdbf7e893a6628f16db69d46f34481e8950",
+    "tests/test_actions_c1_r1.py": "fd9b0847158815f45b1d44c156d9feef1b8a2749e07b6496a2660368d5ff2bbd"
+  },
+  "review": "R1 FULL HIGH actual REVISE; R2 not yet launched",
+  "quality": "UNWAIVED",
+  "adapters": "UNAVAILABLE"
+}

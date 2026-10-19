@@ -50,7 +50,7 @@ def peer_pid(sock: socket.socket | None, platform: str = sys.platform) -> int | 
         return None
     try:
         if platform.startswith("linux"):
-            return int(struct.unpack("3i", sock.getsockopt(socket.SOL_SOCKET, _SO_PEERCRED,
+            return int(struct.unpack("iII", sock.getsockopt(socket.SOL_SOCKET, _SO_PEERCRED,
                                                            struct.calcsize("3i")))[0])
         if platform == "darwin":
             return int(struct.unpack("i", sock.getsockopt(_SOL_LOCAL, _LOCAL_PEERPID,
@@ -60,20 +60,23 @@ def peer_pid(sock: socket.socket | None, platform: str = sys.platform) -> int | 
     return None
 
 
-def peer_pid_checked(sock: socket.socket) -> int:
-    """The host PID of the process at the other end of a connected Unix socket, by SO_PEERCRED, for a
-    decision (the agent-path probe channel). Raises OSError on any failure and off Linux: there is no
-    fallback, and the caller treats a failure as an unverified peer."""
-    if not sys.platform.startswith("linux"):
-        raise OSError("peer credentials need Linux")
+def peer_credentials_checked(sock: socket.socket | None) -> tuple[int, int, int]:
+    """Kernel-observed PID/UID/GID; no audit-only fallback may authenticate a new operation."""
+    if sock is None or not sys.platform.startswith("linux"):
+        raise OSError("peer credentials need a Linux socket")
     try:
-        cred = sock.getsockopt(socket.SOL_SOCKET, _SO_PEERCRED, struct.calcsize("3i"))
-        pid = int(struct.unpack("3i", cred)[0])
+        pid, uid, gid = struct.unpack("iII", sock.getsockopt(
+            socket.SOL_SOCKET, _SO_PEERCRED, struct.calcsize("iII")))
     except struct.error:
         raise OSError("peer credentials unreadable") from None
-    if pid <= 0:
-        raise OSError("no peer process")
-    return pid
+    if pid <= 0 or uid < 0 or gid < 0:
+        raise OSError("invalid peer credentials")
+    return pid, uid, gid
+
+
+def peer_pid_checked(sock: socket.socket) -> int:
+    """Checked PID wrapper retained for existing callers."""
+    return peer_credentials_checked(sock)[0]
 
 
 # SO_PEERPIDFD (Linux 6.5): 77 in the generic socket ABI. mips, parisc and sparc number it differently, so

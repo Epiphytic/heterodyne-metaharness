@@ -1,0 +1,48 @@
+# Gateway custody: dormant product service and control
+
+Partial source implementation of approved Q1 ADR fffc62d716f186e628547a4d9a32d9cf8ddee862, task btq-p4iwn. This is not task completion, production qualification, enrollment, activation or deployment.
+
+The closed descriptor/control/permit/nonconsumption contracts reject duplicate and unknown fields, floats/nonfinite values, malformed UTF8/surrogates, excessive depth, invalid UUID/hash/decimal clocks and invalid generation/window/linkage. Maintenance JSON/publication helpers are reused without borrowing maintenance authority. An absent independently installed source refuses before creating custody tables or notices.
+
+Registration binds exact canonical descriptor bytes, original actor, original boot/expiry and immutable GitHub evidence from the source-owned observation. Proposal/prefix uniqueness and lifetime limits (4096 overall,16/event) are transactional. The complete retained bundle includes notice, descriptor, decision/native command history, permits and renewal certificates; each mutation checks32KiB/bundle and128MiB aggregate payload. Notices have an independent32/hour and256-pending limit: creation time stays in the custody bundle and a fixed gateway-custody:<proposalSHA> outbox namespace never consumes generic notice quotas. No custody row enters the shared notices table. Registration and its system outbox message commit together; enqueue failure rolls back.
+
+Only exact native !custody settle/decline/revoke commands in the actual sent notice thread can change a proposal. The daemon binds actual account/group/current operator policy, separately from local socket peer identity and from ordinary asks. First decision, exact native event ID, contradictory replay, later revocation and compare-and-swap outcomes remain retained. A malformed or missing source/policy and changed source observation hold; decline-first cannot later become consent. Duplicate registration preserves the original material and decision history.
+
+The service reads publication roots/pins only from an installed source port, never RPC paths. Permit generations1..3 retain exact bytes before0600 immutable generation publication and current-pointer readback. A failed publication can repair the same retained generation/UUID; it cannot silently grant a new window. Renewals require the exact queue-owned, byte-identical nonconsumption/supersession pair, original boot/expiry, current native operator policy and matching source/enrollment/profile. Existing consumed/issuing/receipt evidence holds. Canonical certificate readback is mandatory. The product does not execute or retire queue work.
+
+Fixed paths beneath independently enrolled roots are generations/<proposalSHA>/<generation>.json and permits/<proposalSHA>.json. Queue-owned certificate paths are <proposalSHA>.nonconsumption-<previousGeneration>.json and <proposalSHA>.superseded-<previousGeneration>.json. No caller chooses a root or supplies certificate bytes. Secure existing-root/publication helpers refuse aliases, unsafe permissions and replacement conflicts.
+
+The separate same-UID gateway-custody.sock accepts only the closed register/status/permit DTO union with bounded framing. The CLI is socket-only, never an alternate SQLite writer. Strict decoding rejects duplicate JSON before dispatch. Blocking service work stays off the subscription event loop. Its own control lock and native-command queue do not wait on the model work lock; cancellation waits for its admitted local worker. The constructor has no migration/source-enrollment side effects. Default daemon source/publication ports are absent and mutations HOLD. Ordinary ask and maintenance routes retain their existing authority.
+
+## Outstanding acceptance and activation blockers
+
+- A genuine independently enrolled product source/publication adapter, complete pinned runtime and transport installation are absent. Synthetic fixture observations/policies/files are not native authority.
+- Actual Hermes native consumer ACK/resume, queue EX consumption/settlement and full composed enrollment are not implemented or qualified here. Independent Hermes work has its own remaining ports; no integrated capability is claimed.
+- The approved separate <=256KiB fixed batch/WAL/index reserve is not yet honestly enforced by shared SQLite. Payload counters do not prove that bound. This remains an implementation/qualification blocker; no physical reserve is fabricated.
+- The bounded256-item native-command queue audits overflow but does not prove source-owned durable redelivery or ACK custody. Production intake exhaustion/crash recovery needs composed native transport evidence. Overflow never implies consent or a permit.
+- Configured typing and disposable compatibility tests are evidence only. Quality-delta reports remain OPEN/unwaived, including complexity, duplication, API surface and changed daemon hotspots. No baseline reset or acknowledgment is used.
+
+All original tracked test files remain unchanged. Two original untracked custody test modules remain byte-identical; the newly added registration module has one explicitly authorized oracle correction: generic notice exhaustion must allow independently bounded custody registration. Its predecessor bytes/hash, exact diff and remaining assertion inventory are retained externally. New tests cover both quota directions. All RED, intermediate errors and predecessor typing diagnostics remain disclosed. No native communications, service change, installer execution, approval manufacture, deployment or model effect occurred.
+
+
+## Actual first HIGH repair boundary
+
+The first actual FULL HIGH review of signed f5c24bdb9589cc044a6ab6f008a951d146c0d9d7 reported ten findings; no approval was given. Exact report/provenance and all ten author dispositions are in docs/reviews/p4iwn-r1-*. This repair preserves the original decision through agreeing settlements, retains authenticated contrary commands across a CAS race, makes terminal rows immutable, requires post-window authentic renewal certificate pairs and retained product tombstones, exposes failed notices as recovery HOLD, counts all undelivered notices, moves fsync off the shared Store lock, and keeps custody routing independent of the model lock. It does not claim any production qualification or complete P4.
+
+The original shared contrary-command fixture incorrectly included agreeing settle; only that parameter was removed. The positive renewal fixtures now observe the old initiation window expiry and advance their synthetic current clock. Original bytes/hashes and exact diff are privately retained; all unrelated assertions remain intact. These are approved synthetic fixture corrections, not native evidence.
+
+Failed or missing notice recovery remains OPEN: duplicate registration refuses explicitly and status exposes retained outbox state. No automatic resend, slot reuse, deletion or absence-as-non-delivery is authorized. Production native readback/consumer ACK, actual queue integration, source enrollment and the physical separate 256KiB reserve remain required.
+
+## Actual second HIGH repair boundary
+
+The second actual FULL HIGH reviewed c478e0d399f41f653b04723f66876d9ce1974f9d and reported ten findings, explicitly without approval. Exact report (operator-home prefix normalized only), provenance and all ten ordered verbatim author dispositions are in docs/reviews/p4iwn-r2-*.
+
+Command/conflict diagnostics now have an 8 KiB sub-budget, and receipt admission preserves 8 KiB within the existing 32 KiB bundle for all three closed permits/certificates. This does not implement the separately required physical WAL/index reserve. Saturation holds without deleting history or revoking agreeing consent.
+
+Conflicting replay effects require current authority and actual notice thread. Duplicate registration refuses held or sent-without-native-ID notices without retry. Source BOOTTIME and boot identity enforce notice rate accounting; wall timestamps are presentation only. Legacy/missing/regressed/different-boot stamps count conservatively and may remain unavailable until genuine supported recovery/export; no silent quota reset.
+
+External authority/source callbacks run outside the publication mutex. Final row CAS plus publication stays serialized against revocation. Repeating the exact retained renewal request repairs the same generation from the authentic original queue pair. Complete exact published readback grants no new window and skips unnecessary file writes; partial repair still requires source certificates. Repeated policy/network callbacks remain OPEN cost, and production source/transport, native ACK/queue settlement, failed-notice recovery, physical reserve and intake redelivery remain HOLD. No original tracked tests changed in this repair.
+
+## Actual third review critical repair
+
+Actual MEDIUM R3 was not approval. Four new crash/durability regressions failed on signed predecessor715d9a6 and pass after the repair. Unsafe readback is not accepted as completion: it returns to the existing publisher, which alone repairs its exact own temporary hardlink alias and rejects arbitrary unsafe files. Exact matching complete readback fsyncs each parent directory before claiming durable completion; failures propagate and retries re-fsync. All existing tests remain unchanged. Custody158 tests pass, configured413 files have zero errors/warnings, Ruff/format/diff pass; three quality gates remain OPEN UNWAIVED. All ten R3 findings are preserved in reviews/p4iwn-r3-*. Eight other findings, including cross-boot quota lifetime holds and renewed-readback queue-state asymmetry, remain OPEN and prohibit production clearance. A further actual PoC review is required.

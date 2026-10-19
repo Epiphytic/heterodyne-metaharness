@@ -1,0 +1,16 @@
+{
+  "at": "2026-10-18T21:33:40.287687+00:00",
+  "exit": 0,
+  "head": "a05981dd23e48bd8622bab9a8d523c8d23335ab9",
+  "source_unchanged": true,
+  "stream_sha256": "3941d384c819e1004dba9cd217ce710e3dc4af29ca8beafbf3ab46aca67c0fd4",
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "events": 77,
+  "malformed_line_numbers": [],
+  "terminal_results": 1,
+  "terminal_success": true,
+  "log_sha256": "67e3081ca7b0eadb6709b77c408ed553edd8bff7f95095a2b5a17d64f4fda50d",
+  "reviewed_head": "a05981dd23e48bd8622bab9a8d523c8d23335ab9",
+  "scope": "Merged main retirement composition; standalone PoC accepted, actual executor separately gated",
+  "raw_sha256": "67e3081ca7b0eadb6709b77c408ed553edd8bff7f95095a2b5a17d64f4fda50d"
+}

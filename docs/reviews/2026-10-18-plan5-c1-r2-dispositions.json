@@ -1,0 +1,77 @@
+{
+  "schema": "author-dispositions.v1",
+  "review": "actual SECOND FULL HIGH REVISE, unchanged history",
+  "raw_sha256": "63a61d5c497bb0afda8aa7ce82e449af3a4922925b4a66972de6cf75eb6b13d1",
+  "findings": [
+    {
+      "number": 1,
+      "verbatim": "1. `src/heterodyne/actions/journal.py:412`: add_dispatch overwrites only the clock and deadline fields and accepts every other caller-supplied Dispatch field. A reconciliation child can be inserted already settled with reconciliation_effect='succeeded', and an initial dispatch can be inserted with forged reconciliation_lookups or launch_attempts.\n\n   Failure scenario: Parent dispatch is consumed and uncertain. The caller calls add_dispatch with msgspec.structs.replace(prepare_reconciliation(...), settled=True, cleanup_proven=True, reconciliation_effect='succeeded', reconciliation_cleanup_proven=True, evidence=DIGEST). The only checks are version==0 and state=='preparing', and _add_reconciliation never inspects the new child's settled or effect fields. The next parent lookup with reconciliation_key set to this child passes dispatch_transition's settled/cleanup/effect checks, and reconcile_lookup settles the parent 'succeeded' and releases resources without any ReconciliationReadback(read_only, invocation_finished). Likewise an initial dispatch with reconciliation_lookups=3 can be settled through DispatchRecovery with no real 1/5/30 lookups. Fix: rebuild the record with prepare()/prepare_reconciliation() from the sampled clock and require equality, as add_decision does with begin_decision.",
+      "verbatim_sha256": "cc9d2d69be5a7f3e334fd29e466dcea627a357eb9428f8da0bde430458b26a9c",
+      "disposition": "AUTHOR_REPAIRED_WITH_STATED_LIMITS",
+      "author": "FIXED: add_dispatch reconstructs prepare/prepare_reconciliation against the independently sampled fixed policy clock and requires equality of all lifecycle/effect fields. Initial records cannot import claim, result, recovery or lookup history. Reconciliation retirement identity lists remain inert inputs checked against every durable predecessor by the existing _add_reconciliation boundary; no worker-result facts are accepted from them. Existing duplicate identity refusal remains first."
+    },
+    {
+      "number": 2,
+      "verbatim": "2. `src/heterodyne/actions/journal.py:708`: The new absence-versus-success check only looks at retained reconciliation children. The parent's own retained worker report of effect='succeeded' (report() leaves it 'uncertain' when cleanup is unproven, and the effect is stored only in the dispatch-observation event) is never compared before an absence settlement.\n\n   Failure scenario: Consumed claim, then a report with DispatchReadback(effect='succeeded', evidence=D, cleanup_proven=False) leaves the parent uncertain. Three 'unknown' lookups follow. The operator then submits DispatchRecovery(effect_definitively_absent=True). There are no succeeded children, so both the journal check and settle_dispatch accept it. The parent settles 'failed' and the request can complete as absent, even though the journal holds machine evidence that the effect succeeded. This is the same contradiction P1 R11 #2 requires to HOLD.",
+      "verbatim_sha256": "de4ca0a35d3294319b2c3659ca8963369b21ff39eff767aef551b843f19c06b2",
+      "disposition": "AUTHOR_REPAIRED_WITH_STATED_LIMITS",
+      "author": "FIXED: absence recovery inspects the parent's retained dispatch readback observations as well as child outcomes. Any retained worker success conflicts with asserted absence and transaction rolls back with resources retained. Regression first records genuine independently supplied success with cleanup false, three unknown reads, then attempts authenticated absence."
+    },
+    {
+      "number": 3,
+      "verbatim": "3. `src/heterodyne/actions/decisions.py:52`: The denial-metadata 'closed grammar' is really a denylist. Variation selectors (U+FE00-FE0F, U+E0100-E01EF, category Mn), private-use (Co) and unassigned (Cn) code points are accepted anywhere, and the black-flag tag run has no length bound. Invisible payloads that secret_value cannot see therefore still pass.\n\n   Failure scenario: denial_reason = 'no' + ''.join(chr(0xE0100 + b) for b in b'sk-live-...') passes _metadata_controls_safe (Mn is not refused), passes the visible-character check because of 'no', and passes secret_value. It renders as 'no' and is persisted byte for byte as authenticated metadata. Likewise '🏴' + 64 tag characters encoding a lowercase-hex key + U+E007F passes, and the hex-key regex cannot match it. This reopens the hidden-text class from R1 #2.",
+      "verbatim_sha256": "ba66dfd82013de39e0566504f8179501d1ee5c586e1cca37152ea69cca4a7c83",
+      "disposition": "AUTHOR_REPAIRED_WITH_STATED_LIMITS",
+      "author": "FIXED WITH FINITE LANGUAGE LIMIT: private-use/unassigned code points and supplementary selectors refuse. FE0E/FE0F are allowed only immediately after a visible emoji base. Flag tags are an explicit finite set (gb, gbeng, gbsct, gbwls); gb preserves the existing bounded metadata fixture. Arbitrary/long payloads do not pass. This does not claim complete Unicode RGI support."
+    },
+    {
+      "number": 4,
+      "verbatim": "4. `src/heterodyne/actions/decisions.py:53`: Refusing every Cf character (ZWJ allowed only between emoji) also refuses ZWNJ U+200C and ZWJ in ordinary Persian, Hindi and Malayalam text. Design §4 Q0 R3 #5 only requires refusing reasons made up entirely of whitespace or format controls.\n\n   Failure scenario: An authenticated operator denies with the Persian reason 'نمی\\u{200C}خواهم' (contains U+200C) or a Devanagari conjunct that uses ZWJ. begin_decision raises decision-reason-unsafe, add_decision cannot admit the genuine denial, and the request stays pending instead of being denied.",
+      "verbatim_sha256": "bce2f3d4f3249c8ff330c33c091cef2f0b08992e82462fd92dd6ac2dcb5f4f5a",
+      "disposition": "AUTHOR_REPAIRED_WITH_STATED_LIMITS",
+      "author": "FIXED WITH FINITE LANGUAGE LIMIT: Arabic-letter ZWNJ and virama/letter Indic joiners are permitted in visible language context alongside the existing emoji grammar. Arbitrary Latin format insertion remains refused. Authenticated accepted bytes remain byte-identical; no transliteration or metadata rewrite."
+    },
+    {
+      "number": 5,
+      "verbatim": "5. `src/heterodyne/actions/journal.py:637`: With unconditional sampling, observation.now is always set, so the observation is never EMPTY_OBSERVATION. Every transition (including decision and stage steps with no caller observation) now writes a '-observation' event that repeats the clock already written in the '-clock' event.\n\n   Failure scenario: Each transition now costs 3 events (record, clock, observation) instead of 1–2, plus a capacity-recovery event during recovery. That spends the bounded MAX_EVENTS and the per-request TERMINAL_RESERVE=96 noticeably faster for the same lifecycle. The guard `if observation != EMPTY_OBSERVATION` is now dead. Write the observation event only when the caller supplied non-clock fields, or drop the duplicate clock.",
+      "verbatim_sha256": "2e2e0d49ac645c1791b3c2fd4ccd217902a61899089a3ea56b44cec435b4562b",
+      "disposition": "AUTHOR_REPAIRED_WITH_STATED_LIMITS",
+      "author": "FIXED WITH RETAINED ALLOCATION PROVENANCE: non-clock observation content controls persistence, with the finite allocation issuance/lookup observations retained for the existing historical allocation clock reader and null-field compatibility fixtures. Plain request stages and clock-only decision transitions no longer manufacture observation rows; all transitions still have independent clock events. This reduces redundant events without rewriting or dropping existing clock authority."
+    },
+    {
+      "number": 6,
+      "verbatim": "6. `src/heterodyne/actions/judgement.py:445`: The permission branch of current_projection calls _bind_checked only to get the policy floor. It computes and throws away the full canonical binding digest (state, judgement DTO, privacy, model). _identity also calls validate_request_inputs directly and then again through request_denial_key, before assemble_envelope decodes the same tuple again.\n\n   Failure scenario: Every permission projection does an extra full canonical encode and SHA-256 of the whole request state and privacy context, plus a redundant intent/origin/resolved/config validation pass. This adds to the unwaived P2 #10 repeated-decode cost. Split the floor evaluation from the digest, and drop the explicit validate_request_inputs call because request_denial_key already performs it.",
+      "verbatim_sha256": "63f85ecf52857eb2a6650b19b6fb887ca93627c4e092f19bd71282b7ee82b92e",
+      "disposition": "AUTHOR_REPAIRED_WITH_STATED_LIMITS",
+      "author": "FIXED: permission advisory projection evaluates its already-checked policy floor directly, without constructing the discarded binding digest. _identity removes the explicit validate_request_inputs pass because request_denial_key already performs it. Native identity/envelope and policy validation remain; there is no ambient prepared-state cache."
+    },
+    {
+      "number": 7,
+      "verbatim": "7. `src/heterodyne/actions/journal.py:731`: Now that _sample_clock always returns a Clock or raises, several pieces of code are dead: `if sampled is None: raise` in _recovery_clock, `sampled: Clock | None` and its None guard in _clock_event, the `proven` parameter of _dispatch_lookup_clock (both callers pass True), the first `data = encode_record(value)` in add_dispatch, and `if floor is None` in current_projection.\n\n   Failure scenario: Readers and the type checker still see optional-clock paths that cannot happen. A future caller of _dispatch_lookup_clock that relies on the default proven=False would silently skip clock provenance. This also adds to the unwaived journal complexity growth (28→31). Make the parameters non-optional and remove the dead branches.",
+      "verbatim_sha256": "a5ede2a99d86ecdcf9c12806a474aef056659be11608c5a77862506b1b0f8ece",
+      "disposition": "AUTHOR_REPAIRED_WITH_STATED_LIMITS",
+      "author": "FIXED: mandatory Clock signatures replace dead optional-clock branches; dispatch lookup always verifies retained clock provenance; the initial redundant pre-transaction dispatch encoding and unreachable permission floor None branch are removed. Required missing-clock refusal remains in _sample_clock."
+    },
+    {
+      "number": 8,
+      "verbatim": "8. `src/heterodyne/actions/journal.py:273`: The legacy denial-domain hold is copied into six places (get, add_request, _requests_for_approvals, request_transition, _identity, _denial_provenance). The new denial_domain field is also derivable: every legacy v1 denial_identity already fails comparison with request_denial_key, which embeds DENIAL_DOMAIN.\n\n   Failure scenario: _requests_for_approvals repeats get()'s decode and domain check, and any new decode path (for example _reconciliation_children-style raw msgspec.json.decode of Request rows) must remember to add the check or it silently lets legacy rows into effect paths. A single strict Request decode helper used by every read would remove these special cases.",
+      "verbatim_sha256": "91a17e21c3865d74d03b68493cc1028d6dddc3a5f09dc5d59209d4fe73de39e3",
+      "disposition": "AUTHOR_REPAIRED_WITH_STATED_LIMITS",
+      "author": "FIXED WITH BOUNDARY CHECKS RETAINED: _current_request is the single journal denial-domain check used after strict Request decoding on get, add_request, and matching approval scans. Redundant denial-provenance domain check is removed since the lookup already checks it. Independent pure reducer/projection domain checks remain intentional boundaries, not a bypass."
+    },
+    {
+      "number": 9,
+      "verbatim": "9. `src/heterodyne/actions/judgement.py:313`: This bug predates C1 but sits in a touched function. _bind_checked (and _bind around it) catch ValueError, and Refused is a ValueError subclass, so the fixed codes judgement-denied-intent, judgement-policy-refused, enrichment-repin-required and judgement-model-refused are always rewritten to judgement-binding-refused.\n\n   Failure scenario: assess or bind with an action whose denial_identity is in prior_denials, or with a stale enrichment repin, raises Refused('judgement-binding-refused'), never the documented denied-intent or repin diagnostic. Callers cannot tell a denied intent from a malformed binding. P2 R4 #8 required stable fixed diagnostics. No test asserts any of these codes, so they are unreachable. Re-raise Refused before the generic except.",
+      "verbatim_sha256": "f37194b691f8ab3d43194eaf190a1aade63bc13f68984ff0dc3c869aff2f01b1",
+      "disposition": "AUTHOR_REPAIRED_WITH_STATED_LIMITS",
+      "author": "FIXED: _bind and _bind_checked re-raise Refused before catching generic ValueError. Existing fixed refusal reasons survive; malformed non-domain inputs still become judgement-binding-refused. A model-label regression demonstrates the specific reason."
+    },
+    {
+      "number": 10,
+      "verbatim": "10. `tests/actions_journal_fixture.py:32`: Retained clock-provenance tests now run through a fixture that copies the caller's observation.now into the journal sampler. Tests named for clock independence, such as test_journal_checks_independent_actual_clock_not_reducer_clock (test_actions_p1_r3.py:162), therefore exercise the same caller-clock path P1 #1 removed.\n\n    Failure scenario: If production regressed to trusting observation.now for consume-claim, ready or allocation timing, these retained tests would still pass, because sampled time and caller time are identical under the fixture. Only the new C1 tests in test_actions_c1_r1.py use an independent sampler. The retained test names overstate what they protect.",
+      "verbatim_sha256": "723c589ad959908a824a34aa62be6a4772c342dc3cfad6c8a33ac4f5f28d1d7d",
+      "disposition": "AUTHOR_REPAIRED_WITH_STATED_LIMITS",
+      "author": "FIXED: the retained clock-independence test now supplies an independent journal sampler while both caller observation and reducer claim an earlier valid time. Production C1 clock-provenance regressions continue importing the real journal directly. The explicitly scripted adapter remains only for retained synthetic reducer scenarios and is not represented as adversarial provenance proof."
+    }
+  ]
+}

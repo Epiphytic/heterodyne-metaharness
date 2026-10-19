@@ -1,0 +1,20 @@
+{
+  "capture_kind": "manual-foreign-observed-stream-not-reserved-profile-proof",
+  "base": "1acc3bc4510fdd8283552e373f02542c2c531753",
+  "head": "6210ca73de783f2fdaf6c86b3adec00d5b0e0960",
+  "source_unchanged": true,
+  "started_at": "2026-10-18T22:22:33.632736+00:00",
+  "completed_at": "2026-10-18T22:24:27.503380+00:00",
+  "effort": "medium",
+  "model": "claude-opus",
+  "built_in_skill": "/code-review",
+  "question": "Are there any critical flaws with this, or is this good enough to implement as a PoC?",
+  "raw_sha256": "6a788887002abd9bf60fe67aeea101a1220d97ac4c97221e3c652cbb549e9575",
+  "stream_sha256": "d5cc33ec9acaec927f6272ac9e20be55fe9a6f753ec36e8bc8e0aa01d8fdf529",
+  "events": 41,
+  "terminal_success": true,
+  "actual_verdict": "APPROVE as a PoC",
+  "original_findings": 9,
+  "all_findings_open": true,
+  "executable_sha256": "bc1aad9982c7b59c7d889ff92595d61cf46e0a6eae074cb551d932a989bcd222"
+}
