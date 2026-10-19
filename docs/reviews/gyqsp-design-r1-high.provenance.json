@@ -1,0 +1,29 @@
+{
+  "actual_verdict": "REVISE",
+  "review_policy": "One actual HIGH; incorporation once; no second review/validation",
+  "reviewed_adr_sha256": "54c6e481b97e2bb023acf483564eb0c27bbb2bc83241acc571d0b47700d6b58e",
+  "raw_private_sha256": "e9fd361b668d496a007791aae9b0a2c064d4f906003667e1cd495cde5c5f6bd7",
+  "public_report_sha256": "e9fd361b668d496a007791aae9b0a2c064d4f906003667e1cd495cde5c5f6bd7",
+  "normalization": {
+    "literal_from": "operator home prefix (omitted for installation portability)",
+    "literal_to": "<operator-home>",
+    "occurrences": 0
+  },
+  "actual_result": {
+    "at": "2026-10-19T11:52:38.580051+00:00",
+    "exit": 0,
+    "head": "2c0c5b5b775ee652d2ce32c192091aa2314e5b32",
+    "source_unchanged": true,
+    "files": {
+      "docs/adr/2026-10-19-scanner-archive-logical-budget-poc.md": "54c6e481b97e2bb023acf483564eb0c27bbb2bc83241acc571d0b47700d6b58e"
+    },
+    "stream_sha256": "1a59b269fa9b239454af6029ac90985a511eb8cd9cfd87e0ae41b6f7a466586d",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "events": 93,
+    "malformed_line_numbers": [],
+    "terminal_results": 1,
+    "terminal_success": true,
+    "log_sha256": "e9fd361b668d496a007791aae9b0a2c064d4f906003667e1cd495cde5c5f6bd7"
+  },
+  "source_note": "Reviewer consulted mutable YG helper; report line numbers are historical context, not execution source pins."
+}
