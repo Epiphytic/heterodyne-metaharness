@@ -492,10 +492,15 @@ def test_new_ignores_the_replaced_sessions_late_session_start(
         await h.daemon.hooks.put(HookEvent("SessionStart", old))   # late, from the session being replaced
         await h.until(lambda: "ignored-other-session" in audit_text(h))   # handled while !new is pending
         release.set()
-        await h.until(lambda: "echo: next" in h.texts(), timeout=30)
+        await h.until(h.daemon.is_ready, timeout=30)
         assert h.agent.session_id != old
+        assert h.store.inbound_status(nxt) == "done"
+        assert dispatched(h).count(ref_id(nxt)) == 0
+        assert "echo: next" not in h.texts()
+        resent = await h.say("next")  # Explicit replacement settles the old prompt; resend in new context.
+        await h.until(lambda: "echo: next" in h.texts(), timeout=30)
         by_text = {r["text"]: r["reply_to_message_id_hex"] for r in h.fake.sent}
-        assert by_text["echo: next"] == nxt and dispatched(h).count(ref_id(nxt)) == 1
+        assert by_text["echo: next"] == resent and dispatched(h).count(ref_id(resent)) == 1
     run_with(tmp_path, scenario, lambda h: slow(monkeypatch, h, "new", started, release))
 
 

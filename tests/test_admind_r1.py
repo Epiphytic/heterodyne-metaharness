@@ -66,6 +66,9 @@ class FakeTmux:
     def has_session(self, name: str) -> bool:
         return name in self.sessions
 
+    def session_absent(self, name: str) -> bool:
+        return name not in self.sessions
+
     def new_session(self, name: str, cwd: Path, argv: list[str], set: Mapping[str, str] | None = None,
                     unset: Sequence[str] = ()) -> None:
         self.sessions.add(name)
@@ -155,10 +158,12 @@ class Unit:
         self.client = StubClient()
         self.build()
         self.store.set("agent_session", "S1")
-        self.agent.started("S1")
         self.store.set("operator_seen_at", now())
         self.store.set("launch_nonce", "ab" * 16)       # a pane without a current nonce is never adopted
         self.store.set("agent_account", self.settings.agent_account.key)    # nor one on another login
+        self.store.set("launch_kind", "startup")
+        self.store.set("launch_session", "S1")
+        assert self.agent.started("S1", "startup", "ab" * 16)
         self.daemon.ready_nonce = "ab" * 16
         self.daemon.ready.set()
         self.seq = 0
@@ -735,7 +740,7 @@ def test_compact_with_the_same_session_is_not_a_restart(tmp_path: Path) -> None:
     async def scenario() -> None:
         a, b = await busy_turn_with_a_held_prompt(u)
         busy = u.store.get("busy")
-        await u.daemon.on_hook(HookEvent("SessionStart", "S1", source="compact"))
+        await u.daemon.on_hook(HookEvent("SessionStart", "S1", source="compact", launch=u.agent.launch_nonce))
         await u.daemon.flush()
         assert u.store.get("in_flight") == a and u.store.get("anchor") == a
         assert u.store.get("busy") == busy                        # the turn is still running
@@ -750,11 +755,13 @@ def test_clear_keeps_the_restart_semantics(tmp_path: Path) -> None:
 
     async def scenario() -> None:
         a, b = await busy_turn_with_a_held_prompt(u)
-        await u.daemon.on_hook(HookEvent("SessionStart", "S1", source="clear"))
+        await u.daemon.on_hook(HookEvent("SessionStart", "S1", source="clear",
+                                         launch=u.agent.launch_nonce))
         await u.daemon.flush()
-        assert [(r) for _, _, r in u.outbox()] == [a]             # A abandoned, with a notice
-        assert u.tmux.pasted == ["prompt A", "prompt B"]          # and the held prompt goes out
-        assert u.store.get("in_flight") == b
+        assert u.store.get("in_flight") == a and u.store.get("anchor") == a
+        assert u.daemon.held == [(b, "prompt B")] and u.tmux.pasted == ["prompt A"]
+        assert not u.daemon.is_ready()
+        assert u.store.get("launch_hold") == "session-start-source-unqualified"
     run(scenario())
 
 
@@ -764,9 +771,14 @@ def test_startup_or_resume_of_the_same_idle_session_is_a_no_op(tmp_path: Path, s
     u.daemon.ready.clear()
 
     async def scenario() -> None:
-        await u.daemon.on_hook(HookEvent("SessionStart", "S1", source=source))
+        await u.daemon.on_hook(HookEvent("SessionStart", "S1", source=source,
+                                         launch=u.agent.launch_nonce))
         assert u.store.get("busy") is None and u.store.get("in_flight") is None
-        assert u.outbox() == [] and u.daemon.ready.is_set()
+        assert len(u.outbox()) == (0 if source == "startup" else 1)
+        if source != "startup":
+            assert "recovery is paused" in u.texts()[0]
+        assert u.daemon.ready.is_set() == (source == "startup")
+        assert (u.store.get("launch_hold") is None) == (source == "startup")
     run(scenario())
     assert f'"source": "{source}"' in u.audit_text()
 
@@ -778,8 +790,16 @@ def test_a_same_session_start_while_busy_or_of_unknown_source_is_a_restart(
 
     async def scenario() -> None:
         a, _ = await busy_turn_with_a_held_prompt(u)
-        await u.daemon.on_hook(HookEvent("SessionStart", "S1", source=source))
-        assert [r for _, _, r in u.outbox()] == [a] and u.store.get("anchor") is None
+        busy = u.store.get("busy")
+        await u.daemon.on_hook(HookEvent("SessionStart", "S1", source=source,
+                                         launch=u.agent.launch_nonce))
+        assert len(u.outbox()) == 1 and u.store.get("anchor") == a
+        assert "recovery is paused" in u.texts()[0]
+        assert u.store.get("busy") == busy and u.store.get("in_flight") == a
+        assert not u.daemon.is_ready()
+        assert u.daemon.stuck is not None
+        assert u.store.get("launch_hold") == ("startup-during-turn" if source == "startup"
+                                               else "session-start-source-unqualified")
     run(scenario())
     assert "bogus" not in u.audit_text()
 
@@ -789,10 +809,11 @@ def test_a_session_start_with_a_different_session_id_is_a_restart(tmp_path: Path
 
     async def scenario() -> None:
         a, _ = await busy_turn_with_a_held_prompt(u)
-        u.store.set("agent_session", "S2")                        # e.g. launched fresh after !new
-        await u.daemon.on_hook(HookEvent("SessionStart", "S2", source="compact"))
-        assert [r for _, _, r in u.outbox()] == [a] and u.store.get("session_started") == "S2"
-        assert u.store.get("busy") is None
+        busy = u.store.get("busy")
+        await u.daemon.on_hook(HookEvent("SessionStart", "S2", source="startup",
+                                         launch=u.agent.launch_nonce))
+        assert u.outbox() == [] and u.store.get("session_started") == "S1"
+        assert u.store.get("busy") == busy and u.store.get("in_flight") == a
     run(scenario())
 
 

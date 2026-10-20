@@ -1,0 +1,14 @@
+{
+  "authority": "Existing approved resume readiness design and full HIGH2 findings4,6,7; controller narrow migration",
+  "methods": {
+    "test_admind_r1.py": [
+      "test_startup_or_resume_of_the_same_idle_session_is_a_no_op",
+      "test_a_same_session_start_while_busy_or_of_unknown_source_is_a_restart"
+    ],
+    "test_admind_resume_policy_r1.py": [
+      "test_startup_hold_posts_notice_and_later_prompt_gets_held_reply_once"
+    ]
+  },
+  "retained_failure": "draft-compatibility-corrected.txt:102PASS6FAIL",
+  "behavior": "Immediate truthful notices; busy startup preserves original obligation and enters explicit recovery hold; no automatic replacement."
+}

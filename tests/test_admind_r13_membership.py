@@ -585,12 +585,18 @@ def test_restart_after_a_commit_authorises_from_the_group(tmp_path: Path) -> Non
 
     async def second(h: Harness) -> None:
         h.seq = 100         # the state directory is shared: a new harness must not reuse message IDs
+        await wait_until(lambda: h.daemon.stuck is not None)
+        await h.say("!new")
+        await wait_until(h.daemon.is_ready)
         await h.say("from b", SECOND_HEX)
         await wait_until(lambda: "echo: from b" in h.texts())
     run(tmp_path, second, lambda h: setattr(h.fake, "member_count", 3))
 
     async def third(h: Harness) -> None:
         h.seq = 200
+        await wait_until(lambda: h.daemon.stuck is not None)
+        await h.say("!new")
+        await wait_until(h.daemon.is_ready)
         await h.say("sneaky", SECOND_HEX)
         await h.say("from a")
         await wait_until(lambda: "echo: from a" in h.texts())

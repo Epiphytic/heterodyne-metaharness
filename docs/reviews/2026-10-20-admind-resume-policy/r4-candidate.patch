@@ -1,0 +1,13 @@
+diff --git a/tests/live/stub_admind.py b/tests/live/stub_admind.py
+index 2fd9b10..6fd4381 100644
+--- a/tests/live/stub_admind.py
++++ b/tests/live/stub_admind.py
+@@ -33,6 +33,9 @@ class StubTmux:
+     def has_session(self, name: str) -> bool:
+         return name in self.sessions
+
++    def session_absent(self, name: str) -> bool:
++        return name not in self.sessions
++
+     def new_session(self, name: str, cwd: Path, argv: list[str], **env: Any) -> None:
+         self.sessions.add(name)

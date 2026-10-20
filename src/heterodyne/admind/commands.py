@@ -120,6 +120,7 @@ class AgentControl(Protocol):
     def interrupt(self) -> None: ...
     def tail(self, lines: int) -> str: ...
     def alive(self) -> bool: ...
+    def recovery_status(self) -> str: ...
 
 
 class CommandRunner:
@@ -135,7 +136,7 @@ class CommandRunner:
     def run(self, cmd: Command) -> str:
         if cmd.name == "new":
             self.agent.new()
-            return "Started a fresh admin agent session."
+            return "Requested a fresh admin agent launch; startup acknowledgement is pending."
         if cmd.name == "interrupt":
             self.agent.interrupt()
             return "Sent Esc to the admin agent."
@@ -153,4 +154,5 @@ class CommandRunner:
         lines = [self.services.status(unit).line() for unit in self.restart_units]
         lines.append(f"wn-agent (admind): {'running' if self.wn_alive() else 'down'}")
         lines.append(f"admin agent: {'running' if self.agent.alive() else 'not running'}")
+        lines.append(f"admin agent recovery: {self.agent.recovery_status()}")
         return "\n".join(lines)

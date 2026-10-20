@@ -65,11 +65,11 @@ def test_an_adopted_hold_survives_a_second_restart_and_a_current_stop_releases_i
 
 def test_a_fresh_launch_is_not_held_by_the_adoption_rule(tmp_path: Path) -> None:
     u = Unit(tmp_path)
-    u.tmux.sessions.clear()                         # no pane: startup launches one
+    u.tmux.sessions.clear()                         # no pane: explicit !new is required
 
     async def scenario() -> None:
         restart(u)
-        await u.daemon.start_agent(startup=True)
+        await u.say("!new")
         assert not u.daemon.dispatch_blocked and u.store.get("busy") is None
         assert ADOPT_HOLD_NOTICE not in u.texts()
         ev = HookEvent("SessionStart", u.agent.session_id or "", source="startup",

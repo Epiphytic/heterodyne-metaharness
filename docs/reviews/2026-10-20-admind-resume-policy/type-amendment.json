@@ -1,0 +1,6 @@
+{
+  "file": "tests/test_admind_resume_policy_r2.py",
+  "before_sha256": "4e959acca87fd1cfa7ed48f3839eced950c1e53550f996be14261fc7cb053dd0",
+  "after_sha256": "9aa9c025ce2e6f11e518e16709c3f7853026b5dc33267fddf4a24ff1f79179ca",
+  "change": "test-only lambda parameter named mid to conform actual callable; capture outer mid as held_mid; same equality/body and unchanged assertions"
+}

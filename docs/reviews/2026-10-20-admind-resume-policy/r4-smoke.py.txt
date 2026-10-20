@@ -1,0 +1,18 @@
+import importlib.util, os, tempfile
+from pathlib import Path
+from fakes.settings import make_settings
+from heterodyne.admind.agent import AdminAgent
+from heterodyne.admind.store import Store
+with tempfile.TemporaryDirectory(prefix="als-",dir="/tmp") as td:
+ root=Path(td);os.environ["HZ_LIVE_ROOT"]=td
+ spec=importlib.util.spec_from_file_location("offline_stub_admind",Path.cwd()/"tests/live/stub_admind.py");mod=importlib.util.module_from_spec(spec);spec.loader.exec_module(mod)
+ settings=make_settings(root);store=Store(settings.state_dir/"admind.db");stub=mod.StubTmux("disposable")
+ agent=AdminAgent(stub,store,settings,settings.state_dir/"hook.sock")
+ assert agent.alive() is False
+ assert agent.ensure_running()=="startup-launch-requested"
+ assert agent.alive() is True
+ assert agent.ensure_running()=="adopted"
+ assert agent.started(agent.session_id,"startup",agent.launch_nonce)
+ assert agent.startup_acknowledged()
+ stub.kill("admin");assert agent.alive() is False
+ print("PASS actual StubTmux + AdminAgent absent/launch/adopt/acknowledgement/death; no tmux, subprocess, relay or service actions")

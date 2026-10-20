@@ -447,18 +447,17 @@ async def worker(store: Store) -> None:
             wake.clear()
             future = asyncio.get_running_loop().run_in_executor(executor, verify_pass, store)
             try:
-                count = await asyncio.shield(future)
+                await asyncio.wait({future})  # Cancellation leaves the executor future running.
+                count = future.result()
                 delay = 1 if count else 30
             except asyncio.CancelledError:
                 # Drain the running pass, but preserve shutdown even if it fails.
                 # Otherwise the supervisor retries forever with cancellation pending.
                 while not future.done():
                     try:
-                        await asyncio.shield(future)
+                        await asyncio.wait({future})
                     except asyncio.CancelledError:
                         continue  # Repeated shutdown requests cannot cancel the running pass.
-                    except Exception:  # noqa: BLE001 - retrieve failure below without replacing cancellation
-                        break
                 try:
                     future.result()
                 except (Exception, asyncio.CancelledError):  # noqa: BLE001 - preserve original cancellation

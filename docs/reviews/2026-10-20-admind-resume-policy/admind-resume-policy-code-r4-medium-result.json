@@ -1,0 +1,16 @@
+{
+  "exit": 0,
+  "events": 54,
+  "malformed_lines": [],
+  "terminals": 1,
+  "actual_skill_results": 1,
+  "successful_actual_skill": true,
+  "source_and_evidence_unchanged": true,
+  "freeze_unchanged": true,
+  "stream_sha256": "df517c1d5e5f9426dd7e77bd83e700974afba3d1537b350936cb481ffa67b881",
+  "actual_skill_sha256": "93675706d646ff23893ac27d486b3fc48f1affebbe5489e47ebbc373ac6c26d8",
+  "wrapper_sha256": "6fd0f81800ec829fa94db1090bc4b24faae82a3338493744d8b40ef1ec778bb3",
+  "terminal_subtypes": [
+    "success"
+  ]
+}

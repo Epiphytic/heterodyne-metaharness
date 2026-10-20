@@ -1,0 +1,31 @@
+{
+  "original_22_matches": {
+    "src/heterodyne/admind/agent.py": true,
+    "src/heterodyne/admind/commands.py": true,
+    "src/heterodyne/admind/daemon.py": true,
+    "src/heterodyne/admind/fulfillment_projection.py": true,
+    "tests/test_admind_agent.py": true,
+    "tests/test_admind_approvals.py": true,
+    "tests/test_admind_au11.py": true,
+    "tests/test_admind_commands.py": true,
+    "tests/test_admind_daemon.py": true,
+    "tests/test_admind_r1.py": true,
+    "tests/test_admind_r13_membership.py": true,
+    "tests/test_admind_t9r1.py": false,
+    "tests/test_admind_t9r10.py": true,
+    "tests/test_admind_t9r2.py": true,
+    "tests/test_admind_t9r3.py": true,
+    "tests/test_admind_t9r5.py": true,
+    "tests/test_admind_t9r8.py": true,
+    "tests/test_admind_t9r9.py": true,
+    "tests/test_admind_resume_policy.py": true,
+    "tests/test_admind_resume_policy_r1.py": true,
+    "docs/admind.md": true,
+    "tests/test_admind_resume_policy_r2.py": true
+  },
+  "all_other_t9r1_top_level_ASTs_identical": true,
+  "authorized_methods": [
+    "test_a_claude_that_never_sends_session_start_is_held_then_reported",
+    "test_a_claude_that_exits_at_once_is_held_without_waiting_for_the_timeout"
+  ]
+}

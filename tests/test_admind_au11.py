@@ -39,7 +39,7 @@ from tmux_guard import guarded_tmux, new_test_tmux
 from heterodyne.admind import cli, summarize
 from heterodyne.admind import redact as redact_module
 from heterodyne.admind.agent import SESSION, AdminAgent
-from heterodyne.admind.daemon import LOGIN_CHANGED_NOTICE, LOGIN_CHANGED_WHY
+from heterodyne.admind.daemon import LOGIN_CHANGED_NOTICE
 from heterodyne.admind.redact import LOGIN_DIR, redact, set_login_dirs
 from heterodyne.admind.settings import LOGIN_OVERRIDES, AdmindAccount
 from heterodyne.admind.store import Store
@@ -98,31 +98,22 @@ async def restart(u: Unit) -> None:
 
 def test_a_pane_on_another_login_is_replaced_at_startup_with_one_notice(tmp_path: Path) -> None:
     u = Unit(tmp_path)
-    seen: dict[str, str | None] = {}
 
     async def scenario() -> None:
         mid = await u.say("job A")
-        assert u.store.get("in_flight") == mid
         on_account_b(u)
-        real_kill = u.tmux.kill
-
-        def kill(name: str) -> None:
-            seen["replace_pending"] = committed(u, "replace_pending")
-            seen["pending_notice"] = committed(u, "pending_notice")
-            real_kill(name)
-        u.tmux.kill = kill                                  # type: ignore[method-assign]
+        old_nonce = u.agent.launch_nonce
+        kills: list[str] = []
+        u.tmux.kill = kills.append  # type: ignore[method-assign]
         await u.daemon.start_agent(startup=True)
-        assert seen == {"replace_pending": "login-changed", "pending_notice": "login-changed:1"}
-        assert u.store.get("in_flight") is None
-        assert (f"No reply to this message: {LOGIN_CHANGED_WHY}.", mid) in [(t, r) for _, t, r in u.outbox()]
-        assert u.store.get("agent_account") == ACCOUNT_B.key and u.agent.login_matches()
-        assert u.store.get("agent_session") != "S1"         # a fresh session, never a resume
-        assert u.store.get("replace_pending") is None and u.store.get("pending_notice") is None
-        assert "adopted" not in audited_actions(u) and "launched-login-changed" in audited_actions(u)
-        assert notices(u) == [("login-changed:1", LOGIN_CHANGED_NOTICE)]
-        await restart(u)                                    # the replacement is adopted; no second notice
-        assert "adopted" in audited_actions(u)
-        assert notices(u) == [("login-changed:1", LOGIN_CHANGED_NOTICE)]
+        assert kills == [] and u.tmux.has_session(SESSION)
+        assert u.store.get("agent_session") == "S1" and u.agent.launch_nonce == old_nonce
+        assert not u.agent.login_matches() and u.daemon.stuck is not None
+        assert u.store.get("in_flight") == mid  # denied launch cannot abandon obligations
+        assert notices(u) == [] and not u.daemon.is_ready()
+        assert u.store.get("launch_hold") == "resume-eligibility-unqualified"
+        await restart(u)
+        assert kills == [] and notices(u) == []
     run(scenario())
 
 
@@ -162,6 +153,8 @@ def crash_flush_before_commit(u: Unit) -> None:
 def test_the_notice_survives_a_crash_at_every_point(tmp_path: Path, point: str) -> None:
     u = Unit(tmp_path)
     on_account_b(u)
+    # Historical notice already committed before the new policy: still delivered once.
+    u.store.set("pending_notice", "login-changed:1")
 
     async def scenario() -> None:
         if point == "before-kill":
@@ -171,28 +164,25 @@ def test_the_notice_survives_a_crash_at_every_point(tmp_path: Path, point: str) 
         elif point == "after-clear":
             def crash() -> None:
                 raise Crash
-            u.daemon.flush_pending_notice = crash           # type: ignore[method-assign]
+            u.daemon.flush_pending_notice = crash  # type: ignore[method-assign]
         elif point == "in-flush":
             crash_flush_before_commit(u)
         if point == "after-flush":
+            u.agent.new()  # explicit owner operation; no automatic login replacement
             await u.daemon.start_agent(startup=True)
         else:
             with pytest.raises(Crash):
+                u.agent.new()
                 await u.daemon.start_agent(startup=True)
-            assert notices(u) == []                         # nothing was posted before the crash
+            assert notices(u) == []
             assert u.store.get("pending_notice") == "login-changed:1"
-        if point == "before-kill":
-            assert u.store.get("replace_pending") == "login-changed"
-            assert u.tmux.has_session(SESSION) and not u.agent.login_matches()    # the old pane
-        if point == "after-clear":
-            assert u.store.get("replace_pending") is None and u.agent.login_matches()
-        u.store = Store(u.settings.state_dir / "admind.db")     # the restarted process's own connection
+        u.store = Store(u.settings.state_dir / "admind.db")
         await restart(u)
         assert notices(u) == [("login-changed:1", LOGIN_CHANGED_NOTICE)]
-        assert u.agent.login_matches() and u.store.get("pending_notice") is None
-        assert u.store.get("agent_session") != "S1"
-        if point == "after-clear":
-            assert audited_actions(u)[-2:] == ["adopted", "adopted-hold"]   # the new pane, held
+        assert u.store.get("pending_notice") is None
+        if point in ("before-kill", "after-spawn"):
+            assert u.store.get("launch_hold") == "launch-unacknowledged"
+            assert not u.daemon.is_ready()  # uncertainty cannot authorize another launch
         await restart(u)
         assert len(notices(u)) == 1
     run(scenario())
@@ -201,12 +191,14 @@ def test_the_notice_survives_a_crash_at_every_point(tmp_path: Path, point: str) 
 def test_a_failed_start_still_posts_the_notice(tmp_path: Path) -> None:
     u = Unit(tmp_path)
     on_account_b(u)
+    u.store.set("pending_notice", "login-changed:1")
 
     def broken(*a: Any, **kw: Any) -> None:
-        raise OSError("tmux is broken")
-    u.tmux.new_session = broken                             # type: ignore[method-assign]
+        raise AssertionError("denied automatic start must never spawn")
+    u.tmux.new_session = broken  # type: ignore[method-assign]
     run(u.daemon.start_agent(startup=True))
     assert u.daemon.stuck is not None
+    assert u.store.get("agent_session") == "S1"
     assert notices(u) == [("login-changed:1", LOGIN_CHANGED_NOTICE)]
 
 
@@ -256,7 +248,7 @@ def test_a_stale_tmux_server_cannot_choose_the_panes_login(tmp_path: Path,
             overrides["agent_account"] = account
         s = make_settings(tmp_path, **overrides)
         agent = AdminAgent(tmux, Store(s.state_dir / "admind.db"), s, s.state_dir / "hook.sock")
-        assert agent.ensure_running() == "launched"
+        assert agent.ensure_running() == "startup-launch-requested"
         directory, present = logged(log)
         if account is None:
             assert directory == "<unset>" and present == {"CLAUDE_CODE_OAUTH_TOKEN"}  # today's token stays

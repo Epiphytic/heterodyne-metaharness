@@ -1702,8 +1702,15 @@ def test_reconcile_settles_received_message(tmp_path: Path) -> None:
     go(tmp_path, scenario, {BEAD: closed_by(mid)}, before_store=interrupted(tmp_path, mid, "received"))
 
     async def restarted(h: Harness) -> None:
+        # A recorded conversation without current readiness stays held. This
+        # approval-reconciliation test requests a new conversation explicitly.
+        await h.until(lambda: h.daemon.stuck is not None)
+        assert h.store.inbound_status(mid) == "done"
+        await h.say("!new")
+        await h.until(h.daemon.is_ready)
         await joined(h)
         assert row_text(h, f"restarted:{mid}") is None and restart_notices(h) == 0
+        assert h.store.inbound_status(mid) == "done"
     go(tmp_path, restarted, fresh=False)
 
 

@@ -33,6 +33,9 @@ class StubTmux:
     def has_session(self, name: str) -> bool:
         return name in self.sessions
 
+    def session_absent(self, name: str) -> bool:
+        return name not in self.sessions
+
     def new_session(self, name: str, cwd: Path, argv: list[str], **env: Any) -> None:
         self.sessions.add(name)
 

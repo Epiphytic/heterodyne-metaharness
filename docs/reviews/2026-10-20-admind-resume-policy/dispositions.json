@@ -1,0 +1,57 @@
+[
+  [
+    "1",
+    "FIXED",
+    "Use confirmed session_absent, preserve unknown liveness without a persistent hold."
+  ],
+  [
+    "2",
+    "FIXED",
+    "Daemon no longer converts arbitrary adoption exceptions into launch_hold; source owner alone persists issued-launch uncertainty."
+  ],
+  [
+    "3",
+    "PARTIAL",
+    "All old-login hooks stale, explicit truthful login-change notice. Existing pane is retained; automatically killing it would contradict approved no-auto-replacement design. No claim revoked process has stopped."
+  ],
+  [
+    "4",
+    "FIXED",
+    "SessionStart refusal sets in-memory stuck, clears readiness and posts stable hold notice immediately."
+  ],
+  [
+    "5",
+    "PARTIAL",
+    "Truthful undelivered retained-input wording, deduplicated notices. Durable original obligations retained per approved design; O(N) held scan remains OPEN."
+  ],
+  [
+    "6",
+    "FIXED_CONSERVATIVELY",
+    "Startup during persisted busy turn enters visible hold and preserves original turn. Cannot fabricate an incarnation/termination producer; operator can inspect/recover."
+  ],
+  [
+    "7",
+    "FIXED",
+    "Stable hold episode key over nonce/session/reason and fixed wording; no raw internal exception text."
+  ],
+  [
+    "8",
+    "FIXED",
+    "!new request notice before effects states request only; revoked held sender uses existing deny path."
+  ],
+  [
+    "9",
+    "OPEN",
+    "Redundant state retained; no metric-only rewrite of reviewed transaction schema."
+  ],
+  [
+    "10",
+    "OPEN",
+    "Hot-path SQLite reads remain; no unreviewed stale readiness cache."
+  ],
+  [
+    "lower",
+    "PARTIAL",
+    "Unreachable asyncio.wait exception branch removed and two stale operational documentation paragraphs updated. Legacy login drain/migration, real resume producer remain OPEN."
+  ]
+]
