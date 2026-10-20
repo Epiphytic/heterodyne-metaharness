@@ -1,0 +1,8 @@
+{
+  "sole_actual_design_review": "Claude Opus HIGH actual builtin code-review, REVISE10 incorporated once; no second review or validation",
+  "original_freeze_sha256": "34aa16070eb0461c29d87f0ec5371f2b8a91e62b27eafb27926990d277095982",
+  "incorporated_freeze_sha256": "94724cb6c041eb2dc3a3e8f8dfaa3ffda05cd360adce7bd06fe13f34ac523f97",
+  "original_proposal_sha256": "f2b7858b1eb2c2f7f5a02cb08a2ffc8628719eb76da0de1f1d338019ff950ecd",
+  "public_normalization": "Replace absolute service home with $SERVICE_HOME; no private evidence, account data or runtime sources published",
+  "production_authority": false
+}
