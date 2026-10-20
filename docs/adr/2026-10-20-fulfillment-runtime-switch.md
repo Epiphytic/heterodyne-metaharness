@@ -1,0 +1,75 @@
+# Default-off runtime control for legacy question fulfillment
+
+Status: proposed narrow amendment, sole actual Claude HIGH design review completed with REVISE, followed by this one author incorporation pass. No second review or validation. Separate genuine human design approval is still required; this document is not implementation, activation or deployment authority.
+
+## Problem and governing contract
+
+Approved activation design `f8a80b8fad51c0be015a797e11f4a968f90c4bfb:docs/designs/2026-10-18-fulfilled-question-activation.md` §§1/6 requires source to land disabled and genuine separately pinned deployment consent before producers are enabled. Its migration, immutable receipts, original answers/status, native-approval exclusion, finite verification and conservative counting remain binding. This amendment changes only how the selected daemon enables its existing legacy producer protocol.
+
+The enabled-source candidate based on `c66d030d9bd203580a31cff5d1e14792eaf74a9e` changed the global source constant to True. Actual first HIGH findings1/2 identify automatic enablement on restart and ordinary unmigrated fixture failures. That candidate will not merge as the activation mechanism; its exact source, tests, authorized expectation changes, failures and review remain historical evidence. Neither those tests nor this draft are deployment permission.
+
+## One production owner
+
+Host `config.toml` may contain:
+
+```toml
+[admind]
+# fulfillment_enabled = false  # omitted default; write true only after approved activation
+```
+
+Omission means False. The packaged defaults/defaults.toml MUST omit this key; only the host config.toml layer may select True. Keep the key omitted while disabled so older readers of the shared configuration continue to work. Only TOML boolean `true` or `false` is accepted: integers0/1, strings, floats, lists, tables and null-like programmatic values are configuration errors. Add the key to the existing closed ADMIND_KEYS, resolve it through existing `admind.settings.resolve`, and store `fulfillment_enabled: bool = False` in frozen `AdmindSettings`. Its default also protects trusted programmatic fixture construction; production configuration still passes the strict resolver. Existing host-only `[admind]` restrictions and environment override allowlist remain unchanged. No environment variable, workstream-layer key, CLI enable flag or automatic inference from schema/receipt presence is added.
+
+Every daemon uses its own immutable resolved settings object for its entire lifetime. Restart is required to change capability; no reload watcher, background mutation or per-request configuration lookup. Two daemons in one process can have different settings without cross-instance mutation.
+
+The final production owner is the instance setting alone. No `setting OR fulfillment.ENABLED`, fallback-to-global, source True default or monkeypatchable global override may enable a configured-off daemon. Delete the old ENABLED constant in the same implementation and migrate every existing monkeypatch seam, so stale monkeypatch.setattr calls fail loudly. A constant must not serve as a second production kill switch either: one setting has one meaning. Source-level Lifecycle primitives and their pure fixtures do not acquire authority through this setting. This supersedes the ENABLED=False reference in f8a80 §1, the ENABLED-based literal !fulfill interception in §3, and docs/admind-fulfillment.md:6: each maps to AdmindSettings.fulfillment_enabled alone, never setting AND/OR ENABLED.
+
+## Exact daemon behavior
+
+Replace the three current global capability checks consistently:
+
+| Existing source seam | False/default | True |
+| --- | --- | --- |
+| `Daemon.on_fulfillment` (`daemon.py:980–985`) | Existing typed unavailable reply/message `capability disabled`; ALL lifecycle operations including read-only Get/Inspect are disabled | Existing protocol validation and same-UID requirement remain unchanged; enabling does not authorize a caller |
+| `Daemon.post_ask` (`daemon.py:1069–1085`) | Preserve existing disabled ordinary posting/routing behavior and Store capacity predicates | Enforce original approved unmigrated-mode requirement; preserve conservative posting on damaged migrated projection |
+| `Daemon.handle` (`daemon.py:2841–2862`) | Literal `!fulfill` follows exact prefeature command/bump/ask routing | Existing durable sender/current authorization, latch/deny_rows, target/binding and transactional confirmation checks remain mandatory |
+
+This switch does not grant network send permission, override a latch, repair provenance, authenticate terminal receipts or relax validation. Existing local API UID behavior stays unchanged. No receipt/status/answer is fabricated when off or on. A request already committed before shutdown remains an immutable fact; turning off does not cancel, erase, repeat or infer absence of an operation.
+
+The damaged-projection posting defect in actual HIGH1 finding3 is an existing-design bugfix, not new semantics here: original activation §4.2 requires conservative unsuppressed capacity fallback and holds only fulfillment mutations/verified suppression on damaged v2. Exact unmigrated mode is distinct and retains approved migration-required refusal when producer-enabled. Exact error policy: fulfillment-migration-required refuses enabled question/merge posting; fulfillment-projection-unavailable uses conservative capacity. unsupported-schema and incompatible-schema continue to refuse rather than treat unknown core schema as safe. sqlite3.Error propagates as an operational error, never success or an empty count. This intentionally declines sole-review finding6’s suggested blanket fallback for unknown core schemas; no expansion of core-schema compatibility is authorized. Base Store failure remains an error, never an empty count. The switch neither changes schema nor weakens exact DDL verification.
+
+## Migration, verification and evidence are separate
+
+`admind ask fulfillment migrate --plan --json` and `--apply --json` remain explicit local administrative paths under their existing implementation. They do not consult the producer switch as deployment authority. True does not migrate; False does not prevent an independently authorized planned/quiesced migration. Ordinary Store open must not install the projection. Existing dedicated verification scheduling, conservative Store list/count membership, readback, immutable history and triggers remain as designed; they are not enabled/disabled by this producer setting.
+
+Deployment controller responsibilities remain: genuine separately authenticated deployment consent; exact source/config/consumer pins; stopped-writer quiescence and coherent backup/rollback custody; schema plan/classification and separately approved apply if actually needed; restart/readback; finite genuine receipt acceptance. Source default False permits delivery of repaired code before activation. Nothing here authorizes replay of the already executed morning deployment or any fresh operational step.
+
+Turning False and restarting disables the entire fulfillment protocol, including Get/Inspect, and the three entrypoints but preserves newest DB, projection, receipts, pending-intent history, audits, answers and decisions. Before a planned switch-off, while True, resolve every unknown apply outcome through exact-identity Get/Inspect, inspect/dispose pending intents, and drain or durably hold queued fulfillment notices using existing supported operations. A queued or already delivered notice cannot be retracted by this setting; after disable its !fulfill reply follows disabled/unknown-command routing and Dispose/Get/Inspect are unavailable. If a supported drain/hold cannot complete, planned switch-off stays held pending a deployment decision explicitly accepting and listing these residual notices/intents and unresolved outcomes. Emergency switch-off may be separately authorized with those exact effects disclosed; never invent a result for an unknown operation. It does not retract possibly issued notices or reconcile an unknown operation. Approved rollback restores qualified source/config only and retains newest coherent database/history; never restore a stale backup over later records. Known076/a73 backward-compatibility limits and forward validation remain unchanged. Before writing the key at all, inventory every consumer resolving [admind] from shared host config, including daemon, admind CLI, wsd/wsctl and harness approval readout via sandbox/build.py, and pin/upgrade all consumers to a key-aware release. An unknown or older consumer blocks writing the key. On rollback remove the key before ANY older consumer restarts, including an old daemon or CLI. The controller must check supported config compatibility when rolling back to an older release that does not recognize this new key; it must preserve the old/new pinned config and remove the unsupported key only as part of the exact separately approved rollback configuration. No arbitrary old release is declared compatible.
+
+## Implementation and test responsibilities
+
+Implementation owns settings.py, the three daemon call sites and focused configuration/capability tests. Reuse frozen settings and existing host-layer/unknown-key rejection; do not create a parallel config loader. Update operator example/documentation with the commented, omitted False default above. No migration/receipt/schema, V2 management presentation, lifecycle enum, native-approval, backfill, automatic completion or new transport scope is added.
+
+1. Resolver tests: omitted/False/True, strict invalid values, host-only workstream refusal and rejected attempted environment override; defaults on directly constructed trusted fixture settings remain False. Assert packaged defaults omit the key and only the host layer can select True.
+2. Two genuine daemon instances with different settings: all three entrypoints agree; the removed historical module constant cannot provide a bypass, and one instance cannot affect the other. No production global writes are introduced.
+3. Default-off ordinary unmigrated fixtures preserve their original assertions and disabled `!fulfill` routing. New enabled fixtures explicitly select True and perform migration while writers are quiescent BEFORE daemon opening; no blanket test migration or global autouse True.
+4. Existing tests that monkeypatch ENABLED migrate narrowly to fresh daemon/harness construction from make_settings(..., fulfillment_enabled=X) for each mode. Never replace .s or mutate settings after construction. Git diff is the record; include an itemized disposition of each changed assertion in code-review input. Do not silently weaken assertions. Restore an independent disabled local-wire regression (HIGH1 finding4).
+5. Repair the fresh latched/work_lock-held apply test separately from immutable duplicate readback (finding5). Test real owned ask_server union/wiring rather than hand-built protocol configuration (finding7). Existing UID/authentication checks remain asserted.
+6. Enabled tests assert exact migration-required diagnostic, unchanged approval posting, damaged-v2 conservative question/merge capacity behavior, exact refusal of unsupported/incompatible core schemas, propagation of sqlite3.Error, and actual new ask admission after a genuinely verified slot release. Do not represent external CLI migration under an already-open daemon as supported (finding6).
+7. Retain merged PR132 repeated-cancellation tests and original single-cancellation oracle; verifier drains repeated cancellation while permitting loop callbacks. Its bounded-verifier assumption remains disclosed.
+8. Switch-off tests assert Get/Inspect unavailability, unchanged committed history, pending-intent disposal before planned disable, and disabled routing of replies to already-issued notices. Config compatibility tests reject unknown-key old consumers and exercise omitted-default upgrade/rollback sequencing.
+9. Run affected legacy/config/fulfillment suites, configured typing and quality checks with baseline evidence; preserve failures and all historical quality debt. Existing HIGH1 findings8–10 and prior history receive explicit dispositions; a design amendment does not clear a code review.
+
+## Review and activation boundary
+
+This proposal resolves the source-default control ambiguity by keeping default False and moving enablement to exact immutable host configuration. It does not grant deployment approval or assert that enabled-source HIGH1 has passed. After the sole design review/incorporation and genuine human approval, the controller may admit implementation under its native dependency contract. Code repair/review retains its actual ordinal. Subsequent deployment ask must pin the approved amendment, repaired source/review, exact False→True configuration, selected legacy consumers/producers, migration applicability, downtime/backup, finite first genuine completion/terminal-attestation acceptance and rollback. No native approval or history is rewritten.
+
+## Source-grounded citations
+
+All source citations below refer to immutable Git commit c66d030d9bd203580a31cff5d1e14792eaf74a9e, and source-citations.json records its Git blob IDs and SHA256 values. Line references are navigational only. Separate uncommitted original-design fallback and test repairs were occurring concurrently in this Bead worktree during review; they are NOT runtime-switch implementation and are NOT covered by this design review. In particular the reviewed draft cited candidate test bytes instead of its committed baseline; this publication corrects that attribution. The source repair candidate needs its own continuing code reviews. No settings.py/runtime-switch implementation has begun.
+
+- `src/heterodyne/admind/settings.py:1–6,23–26,56–86,124–146`: existing host-only key owner, frozen DTO and resolver; `269–280` shows existing strict numeric rejection of bool rather than coercion. New strict bool parsing must be explicit, not inferred from integer parsing.
+- `src/heterodyne/config/layers.py:60–68,82–92`: environment allowlist and workstream rejection. Do not add a capability environment alias.
+- `src/heterodyne/admind/daemon.py:980–985,1079–1085,2849–2862`: exactly three existing global checks; `734–741` owns real request union.
+- `tests/test_admind_fulfillment.py:407–435`: committed baseline capability/UID/latch fixture and global monkeypatch; `439` onward covers enabled/disabled inbound modes. Those existing assertions need explicit oracle accounting during fixture migration.
+- Actual enabled-source HIGH1: `N/x84mg-enabled-legacy-code-r1-high-actual-skill-result.md`; findings1/2 motivate this amendment, finding3 is the original approved fallback bugfix, findings4–7 identify separate test/behavior repairs.
+- Existing deployment preparation and compatibility evidence: `N/x84mg-activation-deployment-plan-preparation/`, `N/x84mg-activation-consumer-inventory/`, `N/x84mg-repeated-cancel-repair/`, `N/admind-accepted-source-offline-rehearsal/`. Private runtime copies are not publication material or new authority.

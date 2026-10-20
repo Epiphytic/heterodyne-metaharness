@@ -1,0 +1,12 @@
+{
+  "review-start.json": {
+    "encoding": "gzip; decompressed bytes identical to original private review record",
+    "original_sha256": "7a39748cdbe5739bfc54e23afc5e35cc75599c405e2bcdfd45cc8688c56cafe3",
+    "archive_sha256": "9721cbe1a7638fc97a44b039d6b6a5267001cd47d36d02a5e6f622ff2a432128"
+  },
+  "review-stream.jsonl": {
+    "encoding": "gzip; decompressed bytes identical to original private review record",
+    "original_sha256": "1894b15d939771731b1b51a7100ee1570e3c27f38dd7720b41c5e98c427b4cc8",
+    "archive_sha256": "7b3686506835095d06319820e3938e0c11c6cd12e8dc37a22541f6d084230de5"
+  }
+}

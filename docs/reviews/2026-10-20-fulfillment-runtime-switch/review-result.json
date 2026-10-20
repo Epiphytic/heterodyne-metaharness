@@ -1,0 +1,16 @@
+{
+  "at": "2026-10-20T00:32:58.851639+00:00",
+  "exit": 0,
+  "head": "c66d030d9bd203580a31cff5d1e14792eaf74a9e",
+  "source_unchanged": true,
+  "files": {
+    "docs/designs/2026-10-20-fulfillment-runtime-switch.md": "6d5e538e673d04ee9b670838c48a0c9a3714698b121189e57e846e71b8562818"
+  },
+  "stream_sha256": "1894b15d939771731b1b51a7100ee1570e3c27f38dd7720b41c5e98c427b4cc8",
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "events": 102,
+  "malformed_line_numbers": [],
+  "terminal_results": 1,
+  "terminal_success": true,
+  "log_sha256": "e8e54144efe05b90c29fa2a3fd6f30b8d7d562ede88a776e4e42d0b2c79f58dc"
+}

@@ -1,0 +1,33 @@
+{
+  "revision": "c66d030d9bd203580a31cff5d1e14792eaf74a9e",
+  "files": {
+    "src/heterodyne/admind/settings.py": {
+      "blob": "29ebac755d68fdf5d2ffe69a9dfb6b7e0abcb9bc",
+      "sha256": "5f8838d254eed88257bd93ed14655011cff961fb5bb4255605ef6ae198031ae2"
+    },
+    "src/heterodyne/config/layers.py": {
+      "blob": "d2c6f03677cfc1fafba3be07bb8ef34498e19586",
+      "sha256": "4f701161db899952bf7d51ec6da4f9388c9ac28898041ff73d87480921179b2c"
+    },
+    "src/heterodyne/admind/daemon.py": {
+      "blob": "acae1dc2bdbe586c00e8abaef394bcb4800c3414",
+      "sha256": "da0e1f3f5d339c2200b27d750ea5d74817fd0f37321a013e6383e8c17098065e"
+    },
+    "tests/test_admind_fulfillment.py": {
+      "blob": "7217ae4ba891460c9a415184109e2049fd985fb8",
+      "sha256": "ac96300df3c5a833d52bca2d8a6abde47bbbc6d911a742fdaef94d00e4cc23ef"
+    },
+    "src/heterodyne/defaults/defaults.toml": {
+      "blob": "74df7cad368b69a8545816934af3a4f8df66501e",
+      "sha256": "f59663348eab0e4abc525310197e716b5bdac01c7ca37c702e58345fc0a8279d"
+    },
+    "src/heterodyne/sandbox/build.py": {
+      "blob": "2c2185500eb23d57f239ad1dc49f81b0907ba7ed",
+      "sha256": "7785896ff5163864965b9170b05e5f969b88052d4fc17eb03844832bd1037c00"
+    },
+    "docs/admind-fulfillment.md": {
+      "blob": "6378b6b164d2edcd4eebe83ef8ea433500b3922e",
+      "sha256": "8c2fac392d11cfa785396c55e2440f304e386d32c5680b27f362dd9b88766dbc"
+    }
+  }
+}

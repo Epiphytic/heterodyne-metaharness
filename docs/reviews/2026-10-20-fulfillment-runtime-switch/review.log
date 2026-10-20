@@ -1,0 +1,35 @@
+**Verdict: REVISE.** I ran the review with the built-in `Skill(code-review)` at `high` (not the plugin). It covered only the frozen design file, `docs/designs/2026-10-20-fulfillment-runtime-switch.md`, whose SHA256 matches `6d5e538e…`, at base/head `c66d030`. Everything was read-only: no edits, tests, services, DB, queue, network or comments.
+
+The core direction is sound. The amendment is a narrow change to the f8a80 design, which still governs. It uses one strict, default-off setting per daemon instance, owned by the existing `AdmindSettings` resolver and fixed for the daemon's lifetime. That setting gates the three existing capability paths, and migration stays separate from producers. It adds no new authority primitives. No authority port the source owns fails to hold when unavailable, and the design never treats caller JSON as authority. All 10 findings below are defects in the design itself. None is an external capability someone else has to provide, and the design does not depend on any owned production code path that is unavailable everywhere.
+
+**Findings (all of them, unchanged in substance):**
+
+1. **MEDIUM, line 46: cross-release compatibility.** The new key goes into the closed list of allowed `[admind]` keys. Any process on an older release that reads `[admind]` from the shared host `config.toml` will fail on an unknown key. That includes harness approval readout via `sandbox/build.py:179`, the admind CLI, and a rolled-back admind. Line 50 also tells operators to write `False` explicitly, which makes this more likely.
+   - **Fix:** leave the key out while it is False, and list every consumer that reads `[admind]` with its pinned release. Write the key only after all of them are upgraded, and on rollback remove it before any older binary restarts.
+2. **MEDIUM, line 46: True→False leaves live `!fulfill` notices.** Notices already queued in the outbox or delivered still say "Reply !fulfill". After switch-off, a reply parses as an unknown command (`commands.py:96`). Dispose is also disabled, so pending intents sit until they expire.
+   - **Fix:** while still True, Inspect and Dispose pending intents and drain or hold the outbox. Otherwise, explicitly accept and disclose this outcome.
+3. **MEDIUM, line 32: the False row also turns off read-only Get/Inspect.** When False, nothing can resolve an apply whose outcome is unknown, for example a response lost at shutdown. `daemon.py:982` gates every request.
+   - **Fix:** choose one and test it. Either require unknown outcomes to be resolved before switch-off, or keep same-UID read-only Get/Inspect available when False.
+4. **MEDIUM, line 24: keeping `fulfillment.ENABLED` "temporarily" hides broken tests.** 19 `monkeypatch.setattr(f, "ENABLED", …)` calls in 7 test files would become silent no-ops instead of failing. That repeats finding 4 from the earlier enabled-legacy code review.
+   - **Fix:** delete `ENABLED` in the same change, drop the "module constant" option from test item 2, and update `docs/admind-fulfillment.md:6`.
+5. **MEDIUM, line 67: the cited source can change under the design.** Details below; I confirmed them.
+   - **Fix:** pin citations to a commit, keep the finding-3/4 repairs on a separately reviewed candidate, and record that this review does not cover those edits.
+6. **LOW, line 38: the posting rule lists only some failure codes.** With fulfillment True, the rule covers "unmigrated" and "damaged v2" only. It doesn't cover `unsupported-schema`, `incompatible-schema` or `sqlite3.Error`, so damaged core tables could block all question/merge posting.
+   - **Fix:** only `fulfillment-migration-required` refuses; every other projection failure uses the conservative fallback; `sqlite3.Error` propagates. Test each code.
+7. **LOW, line 55: test item 4 replaces settings on a live daemon.** That contradicts "immutable for its entire lifetime".
+   - **Fix:** build a fresh daemon from `make_settings(..., fulfillment_enabled=X)` for each mode.
+8. **LOW, line 20: the packaged defaults file is not pinned.** "Omitted means False" isn't tied to `defaults/defaults.toml`. A `true` there would make every host that omits the key enable on restart.
+   - **Fix:** state that `defaults.toml` must not set the key, and add a test that only a host `config.toml` can produce True.
+9. **LOW, line 7: no list of what the amendment replaces.** The f8a80 references to `ENABLED` aren't mapped to the new setting: §1 line 13, §3 line 53 and `docs/admind-fulfillment.md:6`. An implementer could keep both gates (`setting AND ENABLED`).
+   - **Fix:** add a short list mapping each `ENABLED` reference to `AdmindSettings.fulfillment_enabled`.
+10. **LOW, line 55: the "assertion AST" archive is a new, undefined proof artifact.**
+    - **Fix:** require only an item-by-item disposition of each changed assertion in the code-review input, with git as the record.
+
+**Finding 5 details (confirmed read-only):** the design was frozen at 17:27:20. `daemon.py` was modified at 17:28:02 and `tests/test_admind_fulfillment.py` at 17:28:21.
+- `daemon.py` now hashes `b8aac879…` instead of the pinned `da0e1f3f…`.
+- The test file now hashes `9af1c759…` instead of the cited `181bdf69…`.
+- The worktree also has a modified `fulfillment_projection.py` and an untracked `tests/test_admind_fulfillment_enabled_integration.py`.
+
+That conflicts with the README's statement that source work on the switch hasn't started. The new test also uses the global `ENABLED` override this design says to migrate away from. None of these edits are covered by this review.
+
+This design review is not human design approval, deployment permission or a code review. Under your single-review rule, the author incorporates these findings once, with no follow-up validation.
