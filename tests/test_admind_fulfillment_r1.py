@@ -138,10 +138,9 @@ def test_daemon_notices_use_central_redaction_wake_and_durable_ownership(tmp_pat
 
     from heterodyne.admind import ctl
 
-    u = Unit(tmp_path)
+    u = Unit(tmp_path, fulfillment_enabled=True)
     try:
         seed(u.store, projection=True)
-        monkeypatch.setattr(f, "ENABLED", True)
         observed = []
         post = u.daemon.post
 
@@ -177,13 +176,12 @@ def test_inbound_confirmation_atomic_and_fixed_unavailable(tmp_path, monkeypatch
 
     from heterodyne.marmot.control import ReplyTo
 
-    u = Unit(tmp_path)
+    u = Unit(tmp_path, fulfillment_enabled=True)
     try:
         seed(u.store, projection=True, owned=True)
         proposed = propose(u.store)
         assert proposed.view is not None
         target = deliver(u.store, proposed.view["intent_id"])
-        monkeypatch.setattr(f, "ENABLED", True)
         event = msgspec.structs.replace(inbound("!fulfill", "f" * 64, OPERATOR_HEX), reply_to=ReplyTo(target))
         if failure == "sqlite":
 

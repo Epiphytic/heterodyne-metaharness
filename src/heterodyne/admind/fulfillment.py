@@ -26,7 +26,6 @@ if TYPE_CHECKING:
     from heterodyne.admind.store import Store
 
 SOCKET = "ask.sock"
-ENABLED = False
 MAX_REQUEST, MAX_REPLY, MAX_FILE = 65_536, 131_072, 24_576
 TOKEN = re.compile(r"[A-Za-z0-9._:-]{1,128}\Z")
 HEX = re.compile(r"[0-9a-f]{64}\Z")

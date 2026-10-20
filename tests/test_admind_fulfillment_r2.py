@@ -138,9 +138,8 @@ def test_fulfill_refusal_store_fault_is_recoverable_and_bug_not_called_store_out
 
     from heterodyne.marmot.control import ReplyTo
 
-    u = Unit(tmp_path)
+    u = Unit(tmp_path, fulfillment_enabled=True)
     try:
-        monkeypatch.setattr(f, "ENABLED", True)
 
         def confirm(*_args, **_kwargs):
             if fault == "programmer-error":

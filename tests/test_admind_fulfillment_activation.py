@@ -509,8 +509,7 @@ def test_fulfill_missing_durable_principal_or_latch_uses_existing_denial(tmp_pat
 
     from heterodyne.admind.fulfillment_projection import migrate
 
-    monkeypatch.setattr(f, "ENABLED", True)
-    unit = Unit(tmp_path)
+    unit = Unit(tmp_path, fulfillment_enabled=True)
     migrate(unit.store, apply=True)
     calls = []
     monkeypatch.setattr(unit.store.fulfillment, "confirm", lambda *a, **k: calls.append((a, k)))
@@ -532,7 +531,6 @@ def test_disabled_fulfill_reaches_legacy_command_parser(tmp_path, monkeypatch):
 
     from heterodyne.admind import commands
 
-    monkeypatch.setattr(f, "ENABLED", False)
     unit = Unit(tmp_path)
     calls = []
     original = commands.parse
@@ -606,8 +604,7 @@ def test_authenticated_fulfill_records_real_principal_or_denies_latch(tmp_path, 
 
     from heterodyne.admind.fulfillment_projection import migrate
 
-    monkeypatch.setattr(f, "ENABLED", True)
-    unit = Unit(tmp_path)
+    unit = Unit(tmp_path, fulfillment_enabled=True)
     migrate(unit.store, apply=True)
     try:
         seed(unit.store)

@@ -165,9 +165,8 @@ def test_get_unavailable_preserves_readable_receipt_and_stops_reconcile(tmp_path
     from heterodyne.admind import ctl
     from heterodyne.admind import fulfillment_cli as cli
 
-    unit = Unit(tmp_path)
+    unit = Unit(tmp_path, fulfillment_enabled=True)
     try:
-        monkeypatch.setattr(f, "ENABLED", True)
         p.migrate(unit.store, apply=True)
         seed(unit.store)
         apply(unit.store)
@@ -215,7 +214,6 @@ def test_verifier_runs_with_producers_disabled_and_wakes_without_poll_delay(tmp_
     try:
         seed(store)
         apply(store)
-        monkeypatch.setattr(f, "ENABLED", False)
         store.db.execute("UPDATE asks SET body=body")
         completed = []
         original = p.verify_pass

@@ -409,15 +409,14 @@ def test_daemon_local_capability_uid_latch_and_work_lock(tmp_path, monkeypatch):
 
     from heterodyne.admind import ctl
 
-    u = Unit(tmp_path)
+    off = Unit(tmp_path / "off")
+    u = Unit(tmp_path / "on", fulfillment_enabled=True)
     try:
         seed(u.store, projection=True)
         request = f.Apply(completion(u.store))
-        monkeypatch.setattr(f, "ENABLED", False)
-        disabled = run(u.daemon.on_fulfillment(request, ctl.Peer(123, os.getuid(), os.getgid())))
+        disabled = run(off.daemon.on_fulfillment(request, ctl.Peer(123, os.getuid(), os.getgid())))
         assert disabled.result == "unavailable"
         assert disabled.message == "capability disabled"
-        monkeypatch.setattr(f, "ENABLED", True)
         assert run(u.daemon.on_fulfillment(request, ctl.Peer(123))).result == "refused"
         assert (
             run(u.daemon.on_fulfillment(request, ctl.Peer(123, os.getuid() + 1, os.getgid()))).result
@@ -434,6 +433,7 @@ def test_daemon_local_capability_uid_latch_and_work_lock(tmp_path, monkeypatch):
         assert [row.ask_id for row in listed.asks] == ["abcd"]
         assert listed.asks[0].status == "answered"
     finally:
+        off.store.close()
         u.store.close()
 
 
@@ -444,7 +444,7 @@ def test_real_inbound_confirmation_uses_normal_auth_gates(tmp_path, monkeypatch,
 
     from heterodyne.marmot.control import ReplyTo
 
-    u = Unit(tmp_path)
+    u = Unit(tmp_path, fulfillment_enabled=mode != "disabled")
     try:
         seed(u.store, projection=True, owned=True)
         proposed = u.store.fulfillment.propose(
@@ -453,7 +453,6 @@ def test_real_inbound_confirmation_uses_normal_auth_gates(tmp_path, monkeypatch,
         assert proposed.view is not None
         intent = proposed.view["intent_id"]
         target = deliver(u.store, intent)
-        monkeypatch.setattr(f, "ENABLED", mode != "disabled")
         if mode == "latched":
             u.daemon.latch("fixture")
         event = inbound("!fulfill", "f" * 64, STRANGER if mode == "stranger" else OPERATOR_HEX)
@@ -518,9 +517,8 @@ def test_existing_socket_serves_both_strict_dtos_with_kernel_uid(tmp_path, monke
 
     from heterodyne.admind import ctl
 
-    u = Unit(tmp_path)
+    u = Unit(tmp_path, fulfillment_enabled=True)
     seed(u.store, projection=True)
-    monkeypatch.setattr(f, "ENABLED", True)
 
     async def body():
         server = ctl.JsonSocketServer(

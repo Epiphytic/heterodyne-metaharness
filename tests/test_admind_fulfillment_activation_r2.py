@@ -70,9 +70,8 @@ def test_notifications_cannot_shorten_worker_minimum_delay(tmp_path, monkeypatch
 
 
 def test_get_missing_remains_typed_refusal(tmp_path, monkeypatch):
-    unit = Unit(tmp_path)
+    unit = Unit(tmp_path, fulfillment_enabled=True)
     try:
-        monkeypatch.setattr(f, "ENABLED", True)
         p.migrate(unit.store, apply=True)
         reply = run(unit.daemon.on_fulfillment(f.Get("abcd"), ctl.Peer(123, os.getuid(), os.getgid())))
         assert (reply.result, reply.message) == ("refused", "missing")
@@ -135,9 +134,8 @@ def test_replacement_requires_new_consumed_owner_before_retiring_old(tmp_path, n
 
 
 def test_get_notice_observation_joins_view_read_snapshot(tmp_path, monkeypatch):
-    unit = Unit(tmp_path)
+    unit = Unit(tmp_path, fulfillment_enabled=True)
     try:
-        monkeypatch.setattr(f, "ENABLED", True)
         p.migrate(unit.store, apply=True)
         seed(unit.store)
         unit.store.fulfillment.propose(
@@ -159,9 +157,8 @@ def test_get_notice_observation_joins_view_read_snapshot(tmp_path, monkeypatch):
 
 
 def test_projection_damage_is_unavailable_without_losing_view(tmp_path, monkeypatch):
-    unit = Unit(tmp_path)
+    unit = Unit(tmp_path, fulfillment_enabled=True)
     try:
-        monkeypatch.setattr(f, "ENABLED", True)
         p.migrate(unit.store, apply=True)
         seed(unit.store)
         unit.store.db.execute("DROP TRIGGER fq2_asks_update")
@@ -174,9 +171,8 @@ def test_projection_damage_is_unavailable_without_losing_view(tmp_path, monkeypa
 
 
 def test_non_get_programming_failure_is_not_binding_refusal(tmp_path, monkeypatch):
-    unit = Unit(tmp_path)
+    unit = Unit(tmp_path, fulfillment_enabled=True)
     try:
-        monkeypatch.setattr(f, "ENABLED", True)
         p.migrate(unit.store, apply=True)
         seed(unit.store)
 
@@ -258,9 +254,8 @@ def test_reopened_migrated_connection_notifies_new_dirty_write(tmp_path):
 
 
 def test_unmigrated_get_holds_new_binding_without_migrating(tmp_path, monkeypatch):
-    unit = Unit(tmp_path)
+    unit = Unit(tmp_path, fulfillment_enabled=True)
     try:
-        monkeypatch.setattr(f, "ENABLED", True)
         seed(unit.store)
         reply = run(unit.daemon.on_fulfillment(f.Get("abcd"), ctl.Peer(123, os.getuid(), os.getgid())))
         assert (reply.result, reply.message) == ("unavailable", "fulfillment-migration-required")

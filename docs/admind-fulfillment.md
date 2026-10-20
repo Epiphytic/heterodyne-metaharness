@@ -3,7 +3,7 @@
 This implements the additive fulfilled-question lifecycle from the approved design
 `e8b5db3fb3e506ff909540dfb298b2c873446448`,
 `docs/designs/2026-10-16-fulfilled-question-lifecycle.md`.
-The daemon capability is **disabled** (`fulfillment.ENABLED = False`). This change
+The daemon capability is **disabled** (the omitted/default-False host setting `[admind] fulfillment_enabled`). This change
 does not install producer adapters, enable a service, migrate a live database, or
 authorize deployment.
 
@@ -92,3 +92,23 @@ the notice and revoked ownership suppresses it.
 Routine Store opens validate the current overlay schema without rebuilding receipt history. Daemon
 startup/roll-forward rebuilds the validity index before serving requests; backup/restore callers must
 complete that startup step before treating capacity projections as current.
+
+## Per-daemon capability configuration
+
+Keep `fulfillment_enabled` omitted in host `config.toml` while disabled. A boolean
+`true` enables the existing protocol only for the daemon constructed from that
+configuration; a restart is required. Workstream and environment overrides are
+unsupported. The setting grants no approval or migration authority. Upgrade every
+shared-config reader before writing the key; remove it before restarting an older
+reader during an approved rollback. Preserve the newest database and all history.
+
+Migration remains an explicit quiesced administrative operation independent of
+this switch. Enabling on an unmigrated store refuses all question and merge asks;
+complete the explicit quiesced migration before enabling and restarting, or ordinary
+question/merge posting stops. Approval asks do not require this projection.
+Before a planned disable, resolve unknown outcomes with Get/Inspect,
+dispose pending intents and drain or durably hold notices while enabled. Disabled
+Get/Inspect are unavailable and replies to already-issued notices use legacy
+routing. Unresolved notices or outcomes require an explicit deployment decision;
+the switch neither retracts them nor invents their result. No runtime activation
+is included in this source change.
