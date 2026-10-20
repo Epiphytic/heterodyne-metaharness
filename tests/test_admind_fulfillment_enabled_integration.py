@@ -24,8 +24,7 @@ from heterodyne.admind.store import Store
 
 @pytest.fixture
 def unit(tmp_path, monkeypatch):
-    monkeypatch.setattr(f, "ENABLED", True)
-    value = Unit(tmp_path)
+    value = Unit(tmp_path, fulfillment_enabled=True)
     yield value
     value.store.close()
 
@@ -85,7 +84,7 @@ def receipt_file(unit, tmp_path):
 
 
 def test_enabled_candidate_requires_explicit_disposable_migration(unit, capsys):
-    assert f.ENABLED is True
+    assert unit.settings.fulfillment_enabled is True
     seed(unit.store)
     before = unit.store.db.execute("SELECT sql FROM sqlite_master ORDER BY name").fetchall()
 

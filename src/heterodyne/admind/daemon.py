@@ -979,7 +979,7 @@ class Admind:
 
     async def on_fulfillment(self, req: fulfillment.Request, peer: ctl.Peer) -> fulfillment.Reply:
         """Separate opt-in protocol. No long-lived daemon lock or external operation is involved."""
-        if not fulfillment.ENABLED:
+        if not self.s.fulfillment_enabled:
             return fulfillment.Reply("unavailable", "capability disabled")
         try:
             fulfillment.Lifecycle.require_uid(peer.uid)
@@ -1076,7 +1076,7 @@ class Admind:
             return asks.refused(asks.management.REFUSED)
         if self.latched():
             return asks.refused(ASK_LATCHED)
-        if fulfillment.ENABLED:
+        if self.s.fulfillment_enabled:
             try:
                 self.store.fulfillment.require_projection()
             except fulfillment.Invalid as exc:
@@ -2849,7 +2849,7 @@ class Admind:
                 self.touch_card(target)
                 self.finish(mid, "dropped", CONTROL_REFUSED, "refused")
             return
-        if fulfillment.ENABLED and text.strip() == "!fulfill":
+        if self.s.fulfillment_enabled and text.strip() == "!fulfill":
             try:
                 if not self.authorised(mid) or not self.store.inbound_sender(mid):
                     with self.store.transaction():

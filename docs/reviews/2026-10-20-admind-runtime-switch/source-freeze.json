@@ -1,0 +1,20 @@
+{
+  "base": "018ebc94b1e4b66bd6431a54cc68ffa20e6097aa",
+  "files": {
+    "docs/admind-fulfillment.md": "dd278e0c033a9a9fe8e8dd53fb76ae741a5dab707fdafe0375e1b7a6845766c2",
+    "examples/config.toml": "138632552daa52e6a3d342f8f5edf5a3b89543f6efab1b7fc9630a13589bee4a",
+    "src/heterodyne/admind/daemon.py": "a679ebba66e864208b1d9c9b004350d4237376afce02e2e8993daf311426304a",
+    "src/heterodyne/admind/fulfillment.py": "a82ac4db2f37811a072d9dba8b26ba8353a65c1e35c3642c26ebfa02ccfa0b42",
+    "src/heterodyne/admind/settings.py": "77c967b713f60ea0674bb32d75461fa8d8a67909c2969197344b80b12fe4c4d7",
+    "tests/test_admind_fulfillment.py": "411de049ac7e6cfb8c1c3cf757d9152aed06896c5de1b55340c09b8666b4500d",
+    "tests/test_admind_fulfillment_activation.py": "a5ebd73c17fd78b14754712d0376d23f36c4b2134bb3f28edb052c3c76226b87",
+    "tests/test_admind_fulfillment_activation_r1.py": "be465ea6fe518560f29429eb82a09fb515d1247195d8ef88d0f21b1fc354da76",
+    "tests/test_admind_fulfillment_activation_r2.py": "5800c22e897b3116d1723d13e95389d5b70a7dcf665538846e110cf4fc37bceb",
+    "tests/test_admind_fulfillment_enabled_integration.py": "c8cc16eef221b14027c359c13bdb38604b7b7ace1f3f2698a3db6c7862843e10",
+    "tests/test_admind_fulfillment_r1.py": "e779fe1a60eb175b03592d4d5b85228b51cf5590e67a37c55d766807442eecf4",
+    "tests/test_admind_fulfillment_r2.py": "17d9eb2b297ed2f99c16d7543e2719a6ade5f0b19b5d2950ba0fe1e4db824fe9",
+    "tests/test_admind_r1.py": "9706a29c161e15336dd4e66c5ae4adfa75e180f63082335f7e5f560ef85cfa50",
+    "tests/test_admind_fulfillment_runtime_settings.py": "9781bb5751ba7826b5bc82060ead05e23f2a7fdcd67a794289846487292072a6",
+    "docs/configuration.md": "2ed90011396bd312cd4a5da230cdaf2e4e091bc9790ef9c3e059d446a1c77654"
+  }
+}

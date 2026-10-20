@@ -51,6 +51,7 @@ auth_token = { command = "<command-that-prints-the-token>" }
 
 # Admin override channel (ADR §8; see docs/admind.md). Host config only.
 [admind]
+# fulfillment_enabled = false  # Enable only after separately approved activation; restart required.
 profile = "reviewer"                  # the admin agent's profile; its adapter must be claude-code
 restart_units = ["<unit-name>.service"]   # the only units `!restart` accepts
 # Use a dedicated directory: Claude Code does not remember workspace trust for the home directory

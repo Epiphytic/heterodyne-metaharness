@@ -23,7 +23,7 @@ from heterodyne.services import UNIT_NAME
 ADMIND_KEYS = frozenset({"profile", "workdir", "restart_units", "chunk_chars", "alert_poll_seconds",
                          "group_check_seconds", "start_timeout_seconds", "turn_notice_seconds", "group_name",
                          "summarizer", "reply_verbatim_lines", "reply_verbatim_chars", "marmot",
-                         "approve_bead", "ask_bump_hours"})
+                         "approve_bead", "ask_bump_hours", "fulfillment_enabled"})
 MARMOT_KEYS = frozenset({"wn_agent", "home", "relays"})
 ADMIN_ADAPTERS = ("claude-code",)
 MAX_NAME = 128
@@ -81,11 +81,15 @@ class AdmindSettings:
     login_dirs: tuple[str, ...] = ()    # every named account's login directory, as redact matches it
     approve_bead: Path | None = None    # approval asks are refused without it (relay spec R5)
     ask_bump_hours: int = 12            # open asks are bumped after this many quiet hours; 0 never (B14)
+    fulfillment_enabled: bool = False
 
 
 def resolve(cfg: Config, env: Mapping[str, str]) -> AdmindSettings:
     admind = table_at(cfg.values, "admind", "config")
     _only(admind, ADMIND_KEYS, "[admind]")
+    fulfillment_enabled = admind.get("fulfillment_enabled", False)
+    if not isinstance(fulfillment_enabled, bool):
+        raise ConfigError("[admind] fulfillment_enabled must be a boolean")
     marmot = table_at(admind, "marmot", "config: admind")
     _only(marmot, MARMOT_KEYS, "[admind.marmot]")
 
@@ -142,6 +146,7 @@ def resolve(cfg: Config, env: Mapping[str, str]) -> AdmindSettings:
         agent_account=agent_account, summarizer_account=summarizer_account,
         login_dirs=login_dirs(cfg, env),
         approve_bead=_executable(admind.get("approve_bead")),
+        fulfillment_enabled=fulfillment_enabled,
         ask_bump_hours=_int(admind, "ask_bump_hours", 0, 720),
     )
 

@@ -144,9 +144,10 @@ def membership_change() -> Any:
 class Unit:
     """An Admind over fakes, with a running, idle admin agent and an operator already seen."""
 
-    def __init__(self, tmp_path: Path) -> None:
+    def __init__(self, tmp_path: Path, *, fulfillment_enabled: bool = False) -> None:
         self.tmp = tmp_path
-        self.settings = make_settings(tmp_path, reply_verbatim_lines=200, reply_verbatim_chars=60000)
+        self.settings = make_settings(tmp_path, reply_verbatim_lines=200, reply_verbatim_chars=60000,
+                                      fulfillment_enabled=fulfillment_enabled)
         self.store = Store(self.settings.state_dir / "admind.db")
         self.audit = Audit(self.settings.state_dir / "audit.jsonl")
         self.tmux = FakeTmux()
