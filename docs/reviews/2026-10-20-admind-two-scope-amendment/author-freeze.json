@@ -1,0 +1,65 @@
+{
+  "kind": "design-only sole-HIGH incorporation",
+  "created_utc": "2026-10-20T06:26:51.424837+00:00",
+  "original_draft_sha256": "1c6d8ee2e6d93ce5b5ef448e1f4f0af7383f0c5022e9b80da3b1ba23701fe29a",
+  "original_draft_retained_verbatim_in": "r1-dispositions.md",
+  "prior_freeze_unchanged": true,
+  "review_verdict": "REVISE",
+  "additional_review_or_validation": false,
+  "source_or_live_operations": false,
+  "inputs": [
+    {
+      "path": "$SERVICE_HOME/.hermes/handoff/2026-10-15/codex/autonomous-resume/717-private-scope-amendment/readonly-two-scope-preparation.py",
+      "bytes": 7652,
+      "sha256": "ff9dbd2eaf3298ac5a73a58800c34476bf26535f3523853387def2309eed3090"
+    },
+    {
+      "path": "$SERVICE_HOME/.hermes/handoff/2026-10-15/codex/autonomous-resume/717-private-scope-amendment/readonly-initial-capture-r02.json",
+      "bytes": 6282,
+      "sha256": "98d6eeeacaf124bc592a3b5d41f8ff8609b6e38d8a835749116db08777d7bb59"
+    },
+    {
+      "path": "$SERVICE_HOME/.hermes/handoff/2026-10-15/codex/autonomous-resume/717-private-scope-amendment/evidence.json",
+      "bytes": 3875,
+      "sha256": "760c907dddfc33ad5e15cd18dc1daeae4c72153ab92925f18ed75cf29a1d9b32"
+    },
+    {
+      "path": "$SERVICE_HOME/.hermes/handoff/2026-10-15/codex/autonomous-resume/717-private-scope-amendment/known-process-scope-metadata.json",
+      "bytes": 5652,
+      "sha256": "78762be5192ba41f4bddffc084e11349a1e6148a94411ac6249179b49992ad33"
+    },
+    {
+      "path": "$SERVICE_HOME/.hermes/handoff/2026-10-15/codex/autonomous-resume/717-private-scope-amendment/freeze.json",
+      "bytes": 1640,
+      "sha256": "734f8056301833081055d1e719912e86244f404044309199f6662d46485f7ad8"
+    },
+    {
+      "path": "$SERVICE_HOME/.hermes/handoff/2026-10-15/codex/autonomous-resume/717-private-scope-amendment-design-r1-high-wrapper-result.md",
+      "bytes": 4384,
+      "sha256": "30cfe01258c76d61b62997a5455a99305efad262c56458431ffc32ad2e743b91"
+    },
+    {
+      "path": "$SERVICE_HOME/.hermes/handoff/2026-10-15/codex/autonomous-resume/next-admind-reader-deployment-design/publication-checkout/docs/adr/2026-10-20-admind-reader-717-deployment.md",
+      "bytes": 26932,
+      "sha256": "981a97051f7e9762b0f1c03a149a0f5385df3e69a5080775691fca82c2a8d19a"
+    }
+  ],
+  "outputs": [
+    {
+      "path": "$SERVICE_HOME/.hermes/handoff/2026-10-15/codex/autonomous-resume/717-private-scope-amendment/design.md",
+      "bytes": 15354,
+      "sha256": "c91b664a4243e88534a62801f687cd13078ba4888cfa52d32e4e489bda3e3912"
+    },
+    {
+      "path": "$SERVICE_HOME/.hermes/handoff/2026-10-15/codex/autonomous-resume/717-private-scope-amendment/r1-dispositions.md",
+      "bytes": 19121,
+      "sha256": "739e547b6f33658170cc53b3dd1d71590faaad975b76a0b83c2b6114aa687035"
+    }
+  ],
+  "limitations": [
+    "Human amendment consent pending",
+    "Root initial-capture helper pinned; cessation/rollback collector still specified, not completed or qualified",
+    "No current writer cessation, lease or deployment readiness claimed",
+    "Non-atomic cgroup signal race explicitly disclosed"
+  ]
+}
