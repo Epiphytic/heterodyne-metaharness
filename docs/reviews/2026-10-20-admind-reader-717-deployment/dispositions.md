@@ -30,7 +30,7 @@ Author: One stop; capture systemd Result/code/status and configured timeout; tim
 
 admind/cli.py:72-77 `_load()` constructs Store(state_dir/'admind.db') for CLI operations. unit.py:18-20 says the admin agent's tmux 'runs in its own transient scope ... a stop or restart leaves the agent running'. With admind stopped, that agent, or a controller/hook running `admind ask ...`, can open and write the DB after the guard's before.db snapshot. The backup is then not final, and the guard's preservation comparison does not describe the live DB the 717 reader opens. Enumerate these clients (admin agent session, controller scripts, WSD, hooks) and stop or block them, or HOLD.
 
-Author: Explicit CLI/Store/controller, surviving tmux admin agent, WSD, hooks, ask.sock and alert producers, timers; unsupported exclusion HOLDs. Locations: §5A.
+Author: Explicit CLI/Store/controller, surviving tmux admin agent, WSD, hooks, ask.sock and alert producers, timers; unsupported exclusion HOLDs. Locations: §5A. Additive operational incorporation: deployed5db already documents daemon-first stopping of its private server. ADR§5A now specifies exact fresh sole-server identity/idle/native-session/headroom checks, conditional resume audit/SessionStart acknowledgement, and finite positively attributed writer no-start scope. Default/unknown sessions remain protected; unsupported exclusion still HOLDs. This is author clarification, not another review or reviewer approval.
 
 ## [6 MED] The draft rightly requires HOLD on an unmanaged WSD but names no probe, and --no-wsd turns off the installer's own probe. It also gives no rule for an active managed WSD, and misstates the WSD unit's release after deployment.
 

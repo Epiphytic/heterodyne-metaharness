@@ -1,0 +1,22 @@
+# Inert reference decoder; save separately only if decoding is desired.
+# Uses standard library only. It writes one explicitly selected private output.
+import base64
+import gzip
+import hashlib
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+index = int(sys.argv[2])
+out = pathlib.Path(sys.argv[3])
+manifest = json.loads((root / "raw-manifest.json").read_text())
+record = manifest["artifacts"][index]
+encoded = (root / record["stored_path"]).read_bytes()
+compressed = base64.b64decode(encoded, validate=False)
+raw = gzip.decompress(compressed)
+for data, key in [(encoded, "encoded"), (compressed, "gzip"), (raw, "decompressed")]:
+    assert len(data) == record[key]["bytes"]
+    assert hashlib.sha256(data).hexdigest() == record[key]["sha256"]
+with out.open("xb") as stream:
+    stream.write(raw)

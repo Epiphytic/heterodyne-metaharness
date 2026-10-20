@@ -1,0 +1,7 @@
+# Finding5 operational author clarification
+
+The deployed5db documents a daemon-first private-admin-server stop route. The readable ADR/checklist now specify its finite conditions; this is sole-review author incorporation, no second review or approval. The current research is not execution preflight, exclusion authority or a live operation. The deployment ask must expressly include this own-agent stop/resume scope.
+
+[Own-agent source research](own-agent-research.md) identifies the existing stop/resume implementation. [Default-session metadata research](default-session-research.md) rejects default-session destruction and universal same-UID writer assumptions. The research report’s earlier statement that a deployment deviation was still needed is preserved as historical; the current readable ADR makes the proposed finite consent explicit, without claiming it has been approved. Fresh exact identity, clean daemon stop, sole private-server stop, positive absence, no unsafe pending work, native identity/account/headroom checks, conditional resumed audit and SessionStart acknowledgement are all required. No stop was run here.
+
+Raw original reports, narrow source evidence and bounded session metadata are losslessly encoded, with all three hashes/sizes in [raw-manifest.json](raw-manifest.json). The existing inert decoder reference is supplied as text. The giant writer-discovery inventory is deliberately omitted. Existing raw review/D1/D2/history files were not rewritten. No code, native DB, session state, counters or services were changed.

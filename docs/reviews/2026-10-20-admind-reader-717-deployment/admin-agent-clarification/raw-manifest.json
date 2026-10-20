@@ -1,0 +1,86 @@
+{
+  "schema": "finding5-research-lossless.v1",
+  "readable_normalization": "Only the operator home prefix is replaced with <operator-home>. Exact raw bytes are preserved.",
+  "artifacts": [
+    {
+      "original_relative_to_design_evidence": "admin-agent-quiescence-research/report.md",
+      "stored_path": "raw/01-admin-agent-quiescence-research-report.md.gz.b64",
+      "encoded": {
+        "bytes": 3909,
+        "sha256": "9221eb75b314d8a874994e06352ca1f02cf23661ac3b96f91327be129ae07d9e"
+      },
+      "gzip": {
+        "bytes": 2930,
+        "sha256": "903b0cb57f0ca431ff93bfb8604c8557abf8bca54398335e24adcc74051d0d3c"
+      },
+      "decompressed": {
+        "bytes": 6536,
+        "sha256": "f9a8bef17eb52df96f69bb72cd9843fad80f11df5b8b695d265bf038ece73bd7"
+      }
+    },
+    {
+      "original_relative_to_design_evidence": "admin-agent-quiescence-research/deployed-daemon-methods.json",
+      "stored_path": "raw/02-admin-agent-quiescence-research-deployed-daemon-methods.json.gz.b64",
+      "encoded": {
+        "bytes": 2585,
+        "sha256": "5e8d6ec676505bb9b161b9ba8e93555d454119cf0d74260c5effd98321bd58c3"
+      },
+      "gzip": {
+        "bytes": 1938,
+        "sha256": "441d9a629ddc49f5f21832e011a39d8d718c4f8224fe902ebc742920e2075ac5"
+      },
+      "decompressed": {
+        "bytes": 5312,
+        "sha256": "4e3a771be7a034c8ba27e5a4ac1ec12ed375fa0b2423bda75d72fe485143ce7d"
+      }
+    },
+    {
+      "original_relative_to_design_evidence": "admin-agent-quiescence-research/inputs.json",
+      "stored_path": "raw/03-admin-agent-quiescence-research-inputs.json.gz.b64",
+      "encoded": {
+        "bytes": 1117,
+        "sha256": "92beba1c74d1eaf2366075e82eb46cdce606408301a206672136a75592ae0a01"
+      },
+      "gzip": {
+        "bytes": 837,
+        "sha256": "b260746824440a6d08c80848347de3fa6240346690317724d2f1c63d8fe2dfc2"
+      },
+      "decompressed": {
+        "bytes": 2396,
+        "sha256": "2baea7bc0d8e37b21de3cc5a2877888a267716c9512dae79cf6f3744cbb6ad70"
+      }
+    },
+    {
+      "original_relative_to_design_evidence": "default-session-metadata-research/report.md",
+      "stored_path": "raw/04-default-session-metadata-research-report.md.gz.b64",
+      "encoded": {
+        "bytes": 2773,
+        "sha256": "53d33fac085a2f3cf8f24f2c101c4b8d7701cf293670610770ec2aaccca62d1f"
+      },
+      "gzip": {
+        "bytes": 2079,
+        "sha256": "204ca9a336c381220804ce1309ee7e9bca835dcdd3c29f9f0152ed92acbff729"
+      },
+      "decompressed": {
+        "bytes": 4232,
+        "sha256": "83f25c373e0bc4f2f77f04d07219ecd8674e420490eaa5ad648a8c06f133db0f"
+      }
+    },
+    {
+      "original_relative_to_design_evidence": "default-session-metadata-research/metadata.json",
+      "stored_path": "raw/05-default-session-metadata-research-metadata.json.gz.b64",
+      "encoded": {
+        "bytes": 1149,
+        "sha256": "3b2c9dc0ecae30791075266be8f362cc8cbaf270c6d6a3ac5360ee9d34f5b811"
+      },
+      "gzip": {
+        "bytes": 859,
+        "sha256": "2cb5a356eba8d250f307421399e2000e14bbeb2ee1cf484ec08253d597047aee"
+      },
+      "decompressed": {
+        "bytes": 5074,
+        "sha256": "501c0bf2a6fdc2a4085f7b307646ba360981e536e91baf992206ac09fd16aa6f"
+      }
+    }
+  ]
+}
