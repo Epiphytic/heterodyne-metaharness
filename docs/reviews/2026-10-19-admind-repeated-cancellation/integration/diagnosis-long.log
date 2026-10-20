@@ -1,0 +1,61 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0 -- /tmp/7hokw-ci-python312/bin/python
+cachedir: .pytest_cache
+hypothesis profile 'default'
+rootdir: <operator-home>/repos/heterodyne-metaharness-v2-btq-btq-x84mg
+configfile: pyproject.toml
+plugins: hypothesis-6.168.3, xdist-3.8.0
+collecting ... collected 2 items
+
+tests/test_admind_approval_purpose.py::test_a_posted_card_and_its_repeat_carry_the_label[design-APPROVAL: design] FAILED [ 50%]
+
+=================================== FAILURES ===================================
+__ test_a_posted_card_and_its_repeat_carry_the_label[design-APPROVAL: design] __
+/usr/lib/python3.12/asyncio/tasks.py:520: in wait_for
+    return await fut
+           ^^^^^^^^^
+tests/fakes/fake_wn_agent.py:71: in poll
+    await asyncio.sleep(0.02)
+/usr/lib/python3.12/asyncio/tasks.py:665: in sleep
+    return await future
+           ^^^^^^^^^^^^
+E   asyncio.exceptions.CancelledError
+
+The above exception was the direct cause of the following exception:
+tests/test_admind_daemon.py:158: in body
+    await h.fake.wait_subscribed(10)
+tests/fakes/fake_wn_agent.py:72: in wait_subscribed
+    await asyncio.wait_for(poll(), timeout)
+/usr/lib/python3.12/asyncio/tasks.py:519: in wait_for
+    async with timeouts.timeout(timeout):
+/usr/lib/python3.12/asyncio/timeouts.py:115: in __aexit__
+    raise TimeoutError from exc_val
+E   TimeoutError
+
+During handling of the above exception, another exception occurred:
+tests/test_admind_approval_purpose.py:129: in test_a_posted_card_and_its_repeat_carry_the_label
+    go(tmp_path, scenario, chunk_chars=200)
+tests/test_admind_approvals.py:812: in go
+    h = run_with(tmp_path, scenario, before=two_operators, settings_overrides=overrides,
+tests/test_admind_daemon.py:168: in run_with
+    asyncio.run(body())
+/usr/lib/python3.12/asyncio/runners.py:194: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/asyncio/base_events.py:687: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests/test_admind_daemon.py:163: in body
+    await task
+src/heterodyne/admind/daemon.py:723: in run
+    await recovery_server.start()
+src/heterodyne/admind/ctl.py:114: in start
+    sock.bind(str(self.path))
+E   OSError: AF_UNIX path too long
+=========================== short test summary info ============================
+FAILED tests/test_admind_approval_purpose.py::test_a_posted_card_and_its_repeat_carry_the_label[design-APPROVAL: design] - OSError: AF_UNIX path too long
+!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!
+============================== 1 failed in 11.25s ==============================

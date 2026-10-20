@@ -1,0 +1,13 @@
+{
+  "file": "tests/test_admind_fulfillment_worker_cancel.py",
+  "original": {
+    "sha256": "f40be8bcf8f1fd2b7dc8b9bac255709ceac84d362667a1569787891df3a5759a",
+    "bytes": 1361
+  },
+  "current": {
+    "sha256": "f40be8bcf8f1fd2b7dc8b9bac255709ceac84d362667a1569787891df3a5759a",
+    "bytes": 1361
+  },
+  "byte_identical": true,
+  "assertion_ast_identical": true
+}

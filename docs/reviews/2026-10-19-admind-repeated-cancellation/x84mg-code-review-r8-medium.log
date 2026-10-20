@@ -1,0 +1,34 @@
+**Verdict: APPROVE.** I found no critical flaws. The repair fixes R7 finding 1 and is good enough to implement as a PoC, within the scope you set: source only, disabled, no activation authorization.
+
+**How this review was done.** The built-in `code-review` skill ran but produced nothing. It forked into a context with no shell, and base equals head (`2125775`), so there was no git diff to review. I reviewed the artifacts directly instead: `candidate.patch`, `report.md`, `freeze.json`, the patched `worker()` (`src/heterodyne/admind/fulfillment_projection.py:421-473`) and the untouched single-cancel test. I ran no tests or commands, and I did not re-check the frozen SHA256 values; I trusted `freeze.json` for them.
+
+## Why the R7 finding 1 deadlock is fixed
+- **Before:** the drain used a plain `await future`. A second `cancel()` cancelled that wrapped future, and the `CancelledError` escaped to the `finally` block. There, `executor.shutdown(wait=True)` blocked the event loop while the verifier thread was still waiting on a loop callback, so they deadlocked. The second cancel's message also replaced the original one.
+- **Now** (`:445-456`): the drain repeatedly awaits `asyncio.shield(future)`, so extra cancellations hit only the shield and the loop simply continues. The loop exits only when `future.done()` is true, so `shutdown(wait=True)` never blocks on a running pass. The other cancel points (`sleep(1)`, `wait_for(wake)`, `sleep(30)`) only run when no pass is in flight, so shutdown returns immediately there too.
+- **The original cancellation is preserved.** The bare `raise` re-raises the outer `CancelledError`, because the inner except blocks restore the outer exception when they finish. The test checks this: `args == ("original-cancellation",)`.
+- **Verifier failures and a cancelled future are retrieved** by `future.result()`. They are logged only with the existing constant warning, so no exception text leaks. The test asserts `retained-secret` never appears in the logs.
+
+## Tests
+- The new test uses the real worker and executor. The verifier calls back into the loop via `run_coroutine_threadsafe`, with a 2s bound, which is exactly the R7 deadlock shape. It covers both success and verifier failure.
+- The `sleep(0)` ordering is deterministic. The cancel queues the worker's wakeup before the scenario yields, so the second cancel lands in the drain loop as intended.
+- The red→green evidence fits the change. Per `freeze.json`, the old single-cancel test is byte-identical and its assertions are AST-identical.
+
+## Numbered findings (all non-critical)
+1. **Repeated cancellation can't force termination (design limit, not a defect).** If a verifier never finishes, shutdown hangs. This is the existing bounded-verifier assumption, and the report states it openly. The verifier is injectable, so this is not a code path that is always unavailable in production.
+2. **Avoidable complexity.** The `except Exception: break` (`:450-451`) is redundant: when the future raises, `future.done()` is already true. A loop around `await asyncio.wait({future})` would never raise the future's error and would need only the `CancelledError` branch. This feeds the OPEN quality delta (complexity 17→28, churn 0→4). Optional simplification.
+3. **No diagnostic for suppressed cancellations.** Repeat shutdown requests are swallowed silently. An operator watching a slow shutdown gets no sign the worker is draining a pass.
+4. **Rare edge:** a `BaseException` that isn't `Exception` or `CancelledError` (e.g. `SystemExit` raised inside the verifier thread) would replace the cancellation at `:453`. It's negligible for a PoC.
+5. **Coverage gap:** no test cancels during the backoff sleeps. Low risk, since no pass is running there.
+
+## Carried forward, still open and unwaived
+- The other five R7 findings.
+- All findings and repairs from rounds 1–6, including the FULL HIGH rounds 1 and 2.
+- The quality delta (complexity 17→28, churn 0→4).
+
+Nothing in this round closes or waives any of them.
+
+`★ Insight ─────────────────────────────────────`
+- The key move is splitting the *task's* cancellation from the *pass's* future. `shield` lets each cancel reach only the outer wrapper, so the worker can soak up any number of cancel requests while the thread finishes.
+- A bare `raise` after nested `try/except` blocks re-raises the *outer* exception being handled. That's why the original cancel message survives without storing it in a variable.
+- Blocking calls in `finally` (here `executor.shutdown(wait=True)`) are safe in async code only if you can guarantee the work they wait on doesn't need the event loop.
+`─────────────────────────────────────────────────`

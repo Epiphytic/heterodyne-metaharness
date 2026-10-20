@@ -1,0 +1,222 @@
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_ test_repeated_cancellation_keeps_loop_available_until_verifier_drains[False] _
+
+tmp_path = PosixPath('/tmp/x84-double-red/test_repeated_cancellation_kee0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7596bca88bf0>
+caplog = <_pytest.logging.LogCaptureFixture object at 0x7596bca88cb0>
+verifier_fails = False
+
+    @pytest.mark.parametrize("verifier_fails", [False, True])
+    def test_repeated_cancellation_keeps_loop_available_until_verifier_drains(
+        tmp_path, monkeypatch, caplog, verifier_fails
+    ):
+        started, release = threading.Event(), threading.Event()
+        callback_completed, callback_timed_out = threading.Event(), threading.Event()
+        store = Store(tmp_path / "admind.db")
+    
+        async def scenario():
+            loop = asyncio.get_running_loop()
+    
+            async def authority_callback():
+                return "disposable-authority-readback"
+    
+            def verifier(_store):
+                started.set()
+                assert release.wait(3), "disposable verifier was not released"
+                callback = asyncio.run_coroutine_threadsafe(authority_callback(), loop)
+                try:
+                    assert callback.result(timeout=2) == "disposable-authority-readback"
+                except TimeoutError:
+                    callback_timed_out.set()
+                    raise
+                callback_completed.set()
+                if verifier_fails:
+                    raise f.Invalid("retained-secret-must-not-enter-diagnostic")
+                return 0
+    
+            monkeypatch.setattr(projection, "verify_pass", verifier)
+            task = asyncio.create_task(projection.worker(store))
+            try:
+                assert await asyncio.to_thread(started.wait, 2)
+                task.cancel("original-cancellation")
+                await asyncio.sleep(0)  # First cancellation is draining the actual pass.
+                task.cancel("second-cancellation")
+                release.set()
+                with pytest.raises(asyncio.CancelledError) as cancelled:
+                    await asyncio.wait_for(task, 5)
+                assert cancelled.value.args == ("original-cancellation",)
+                assert callback_completed.is_set()
+                assert not callback_timed_out.is_set()
+            finally:
+                release.set()
+                if not task.done():
+                    task.cancel()
+                    await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 5)
+    
+        try:
+            with caplog.at_level(logging.WARNING, logger=projection.__name__):
+>               asyncio.run(scenario())
+
+tests/test_admind_fulfillment_worker_repeated_cancel.py:63: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/usr/lib/python3.12/asyncio/runners.py:194: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/asyncio/base_events.py:687: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+    
+        async def authority_callback():
+            return "disposable-authority-readback"
+    
+        def verifier(_store):
+            started.set()
+            assert release.wait(3), "disposable verifier was not released"
+            callback = asyncio.run_coroutine_threadsafe(authority_callback(), loop)
+            try:
+                assert callback.result(timeout=2) == "disposable-authority-readback"
+            except TimeoutError:
+                callback_timed_out.set()
+                raise
+            callback_completed.set()
+            if verifier_fails:
+                raise f.Invalid("retained-secret-must-not-enter-diagnostic")
+            return 0
+    
+        monkeypatch.setattr(projection, "verify_pass", verifier)
+        task = asyncio.create_task(projection.worker(store))
+        try:
+            assert await asyncio.to_thread(started.wait, 2)
+            task.cancel("original-cancellation")
+            await asyncio.sleep(0)  # First cancellation is draining the actual pass.
+            task.cancel("second-cancellation")
+            release.set()
+            with pytest.raises(asyncio.CancelledError) as cancelled:
+                await asyncio.wait_for(task, 5)
+>           assert cancelled.value.args == ("original-cancellation",)
+E           AssertionError: assert ('second-cancellation',) == ('original-cancellation',)
+E             
+E             At index 0 diff: 'second-cancellation' != 'original-cancellation'
+E             Use -v to get more diff
+
+tests/test_admind_fulfillment_worker_repeated_cancel.py:52: AssertionError
+_ test_repeated_cancellation_keeps_loop_available_until_verifier_drains[True] __
+
+tmp_path = PosixPath('/tmp/x84-double-red/test_repeated_cancellation_kee1')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7596bca89610>
+caplog = <_pytest.logging.LogCaptureFixture object at 0x7596bca89b50>
+verifier_fails = True
+
+    @pytest.mark.parametrize("verifier_fails", [False, True])
+    def test_repeated_cancellation_keeps_loop_available_until_verifier_drains(
+        tmp_path, monkeypatch, caplog, verifier_fails
+    ):
+        started, release = threading.Event(), threading.Event()
+        callback_completed, callback_timed_out = threading.Event(), threading.Event()
+        store = Store(tmp_path / "admind.db")
+    
+        async def scenario():
+            loop = asyncio.get_running_loop()
+    
+            async def authority_callback():
+                return "disposable-authority-readback"
+    
+            def verifier(_store):
+                started.set()
+                assert release.wait(3), "disposable verifier was not released"
+                callback = asyncio.run_coroutine_threadsafe(authority_callback(), loop)
+                try:
+                    assert callback.result(timeout=2) == "disposable-authority-readback"
+                except TimeoutError:
+                    callback_timed_out.set()
+                    raise
+                callback_completed.set()
+                if verifier_fails:
+                    raise f.Invalid("retained-secret-must-not-enter-diagnostic")
+                return 0
+    
+            monkeypatch.setattr(projection, "verify_pass", verifier)
+            task = asyncio.create_task(projection.worker(store))
+            try:
+                assert await asyncio.to_thread(started.wait, 2)
+                task.cancel("original-cancellation")
+                await asyncio.sleep(0)  # First cancellation is draining the actual pass.
+                task.cancel("second-cancellation")
+                release.set()
+                with pytest.raises(asyncio.CancelledError) as cancelled:
+                    await asyncio.wait_for(task, 5)
+                assert cancelled.value.args == ("original-cancellation",)
+                assert callback_completed.is_set()
+                assert not callback_timed_out.is_set()
+            finally:
+                release.set()
+                if not task.done():
+                    task.cancel()
+                    await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 5)
+    
+        try:
+            with caplog.at_level(logging.WARNING, logger=projection.__name__):
+>               asyncio.run(scenario())
+
+tests/test_admind_fulfillment_worker_repeated_cancel.py:63: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/usr/lib/python3.12/asyncio/runners.py:194: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/asyncio/base_events.py:687: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+    
+        async def authority_callback():
+            return "disposable-authority-readback"
+    
+        def verifier(_store):
+            started.set()
+            assert release.wait(3), "disposable verifier was not released"
+            callback = asyncio.run_coroutine_threadsafe(authority_callback(), loop)
+            try:
+                assert callback.result(timeout=2) == "disposable-authority-readback"
+            except TimeoutError:
+                callback_timed_out.set()
+                raise
+            callback_completed.set()
+            if verifier_fails:
+                raise f.Invalid("retained-secret-must-not-enter-diagnostic")
+            return 0
+    
+        monkeypatch.setattr(projection, "verify_pass", verifier)
+        task = asyncio.create_task(projection.worker(store))
+        try:
+            assert await asyncio.to_thread(started.wait, 2)
+            task.cancel("original-cancellation")
+            await asyncio.sleep(0)  # First cancellation is draining the actual pass.
+            task.cancel("second-cancellation")
+            release.set()
+            with pytest.raises(asyncio.CancelledError) as cancelled:
+                await asyncio.wait_for(task, 5)
+>           assert cancelled.value.args == ("original-cancellation",)
+E           AssertionError: assert ('second-cancellation',) == ('original-cancellation',)
+E             
+E             At index 0 diff: 'second-cancellation' != 'original-cancellation'
+E             Use -v to get more diff
+
+tests/test_admind_fulfillment_worker_repeated_cancel.py:52: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_admind_fulfillment_worker_repeated_cancel.py::test_repeated_cancellation_keeps_loop_available_until_verifier_drains[False]
+FAILED tests/test_admind_fulfillment_worker_repeated_cancel.py::test_repeated_cancellation_keeps_loop_available_until_verifier_drains[True]
+2 failed in 4.58s

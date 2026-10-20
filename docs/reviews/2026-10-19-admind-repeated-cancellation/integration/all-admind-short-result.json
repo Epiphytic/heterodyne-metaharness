@@ -1,0 +1,8 @@
+{
+  "returncode": 0,
+  "seconds": 547.9775886572897,
+  "pythonpath": "<operator-home>/repos/heterodyne-metaharness-v2-btq-btq-x84mg/src",
+  "basetemp": "/dev/shm/x84a",
+  "test_modules": 97,
+  "head": "b4bebc6990110e42300137de57f91c84b71f63a7"
+}

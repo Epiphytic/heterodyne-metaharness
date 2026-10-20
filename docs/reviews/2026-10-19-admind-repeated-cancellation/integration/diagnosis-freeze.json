@@ -1,0 +1,22 @@
+{
+  "source": "b4bebc6990110e42300137de57f91c84b71f63a7",
+  "scope": "read-only bounded disposable diagnostic",
+  "files": {
+    "long.log": "787a5980aae9abd4b7db5278127f08af69ad4d0e5c3826de56f4bcceeb9276d7",
+    "long.json": "ed28cf3ed49286dc12059a56cebce2614ebfe1c83e9bf89a3260d21bec7e5b37",
+    "short.log": "2fabea7fd202c0449a2ce137bde927916c1c5a8da51ac9d8167e25927c772ad5",
+    "short.json": "7bf4e4c70263a7f449ea5163c95a6bdaffff1a42a704f6cd0db8a13fd48451a9",
+    "report.md": "4fc85a34181c9a1a99e98fa1fb9715a9ca2ed68cfcad446f1e95679a2b8e69d1"
+  },
+  "results": {
+    "long_exit": 1,
+    "long_failed": 1,
+    "short_exit": 0,
+    "short_passed": 2
+  },
+  "limitations": [
+    "Later partial broad failures not classified",
+    "No full-suite source baseline",
+    "No source edits/live effects"
+  ]
+}

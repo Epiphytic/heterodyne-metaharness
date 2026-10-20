@@ -444,9 +444,16 @@ async def worker(store: Store) -> None:
             except asyncio.CancelledError:
                 # Drain the running pass, but preserve shutdown even if it fails.
                 # Otherwise the supervisor retries forever with cancellation pending.
+                while not future.done():
+                    try:
+                        await asyncio.shield(future)
+                    except asyncio.CancelledError:
+                        continue  # Repeated shutdown requests cannot cancel the running pass.
+                    except Exception:  # noqa: BLE001 - retrieve failure below without replacing cancellation
+                        break
                 try:
-                    await future
-                except Exception:  # noqa: BLE001 - pass failure cannot replace cancellation
+                    future.result()
+                except (Exception, asyncio.CancelledError):  # noqa: BLE001 - preserve original cancellation
                     logging.getLogger(__name__).warning("fulfillment-verification-failed-during-shutdown")
                 raise
             except Exception:  # noqa: BLE001 - bounded background-pass boundary, cancellation above
