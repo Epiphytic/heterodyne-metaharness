@@ -761,9 +761,13 @@ def test_a_leaked_fd_that_another_test_left_closing_meanwhile_is_no_leak(
     Scripted(monkeypatch, seam.child.pid, [
         {"environ": EACCES, "status": status_text("Z", 4), "stat": ("Z", PF_EXITING), "tasks": {}}])
     sleep = fake_time.sleep
+    collected = False
 
     def collecting(seconds: float) -> None:
-        gc.collect()
+        nonlocal collected
+        if not collected:
+            gc.collect()
+            collected = True
         sleep(seconds)
 
     monkeypatch.setattr(fake_time, "sleep", collecting)

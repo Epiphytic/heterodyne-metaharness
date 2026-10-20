@@ -1,0 +1,15 @@
+# Inert reference only. Run only after inspecting and choosing a destination.
+import base64, gzip, hashlib, json
+from pathlib import Path
+root = Path(__file__).parent
+for row in json.loads((root / "raw-manifest.json").read_text()):
+    stored = (root / row["public"]).read_bytes()
+    assert len(stored) == row["stored_bytes"]
+    assert hashlib.sha256(stored).hexdigest() == row["stored_sha256"]
+    compressed = base64.b64decode(stored.strip(), validate=True)
+    assert len(compressed) == row["gzip_bytes"]
+    assert hashlib.sha256(compressed).hexdigest() == row["gzip_sha256"]
+    original = gzip.decompress(compressed)
+    assert len(original) == row["raw_bytes"]
+    assert hashlib.sha256(original).hexdigest() == row["raw_sha256"]
+# Deliberately does not write decoded private paths.

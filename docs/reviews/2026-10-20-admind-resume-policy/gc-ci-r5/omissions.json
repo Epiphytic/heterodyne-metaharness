@@ -1,0 +1,26 @@
+[
+  {
+    "source": "<operator-home>/.hermes/handoff/2026-10-15/codex/autonomous-resume/admind-ci-gc-code-r5-medium-start.json",
+    "bytes": 7298,
+    "sha256": "dfe07c3704769af035b509c3b6a3846ee59969340a7cabee2515156726c49ec2",
+    "reason": "Transport/start/tool duplication omitted from public supplement; exact actual Skill body, wrapper and terminal result retained losslessly."
+  },
+  {
+    "source": "<operator-home>/.hermes/handoff/2026-10-15/codex/autonomous-resume/admind-ci-gc-code-r5-medium-stream.jsonl",
+    "bytes": 157180,
+    "sha256": "a62f750c77900d495e76b75201ae99c7b68cd98a9a419dd9332939343257ea49",
+    "reason": "Transport/start/tool duplication omitted from public supplement; exact actual Skill body, wrapper and terminal result retained losslessly."
+  },
+  {
+    "source": "<operator-home>/.hermes/handoff/2026-10-15/codex/autonomous-resume/admind-ci-gc-code-r5-medium-stderr.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "reason": "Transport/start/tool duplication omitted from public supplement; exact actual Skill body, wrapper and terminal result retained losslessly."
+  },
+  {
+    "source": "<operator-home>/.hermes/handoff/2026-10-15/codex/autonomous-resume/admind-ci-gc-code-r5-medium-actual-skill-tool-results.json",
+    "bytes": 4757,
+    "sha256": "bcf29a1ce620f094486254d08ac3a6b86773f76f7a6d69295029a9f1dcc109d9",
+    "reason": "Transport/start/tool duplication omitted from public supplement; exact actual Skill body, wrapper and terminal result retained losslessly."
+  }
+]
