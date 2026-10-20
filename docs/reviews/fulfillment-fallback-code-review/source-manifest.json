@@ -1,0 +1,46 @@
+{
+  "partial_freeze_sha256": "33bb16a8b9dbff4560cfe5a5d6dd7a9ca0a42a50a81dc30dd4754ff4de04a60b",
+  "readable_normalization": {
+    "operation": "operator home-prefix replaced by <operator-home> only in readable derivatives",
+    "originals": "exact raw encoded gzip evidence"
+  },
+  "review3": "ACTUAL APPROVE as default-off source PoC; all six new findings OPEN",
+  "reviewed_five_hashes": {
+    "src/heterodyne/admind/daemon.py": "b8aac8790b404d27944fdba241b35d924aa80ad9bd7aa2aa2999b22b445a2147",
+    "src/heterodyne/admind/fulfillment.py": "95a391903e21b22b6b385e9e1ed920004d28c92e950d2b4672d77c59fbe3e38d",
+    "src/heterodyne/admind/fulfillment_projection.py": "06738808759f9ae5333fc466981d88edd721c1372424bbb00f737a8ccf1d4431",
+    "tests/test_admind_fulfillment.py": "9af1c759375406b28d51d1b09e4cd7b8333fef58751ae74b764f045d1cc9e961",
+    "tests/test_admind_fulfillment_enabled_integration.py": "c72e58e3e46f352d87c2747bf9c674f9826524c09d1e98a7bf588e1ccee12ea1"
+  },
+  "root_final_checks": "evidence/x84mg-fallback-r2-final-checks/results.json.gz",
+  "snapshot_storage": {
+    "source/src/heterodyne/admind/daemon.py": "source/src/heterodyne/admind/daemon.py.txt",
+    "source/src/heterodyne/admind/fulfillment_projection.py": "source/src/heterodyne/admind/fulfillment_projection.py.txt",
+    "source/tests/test_admind_fulfillment.py": "source/tests/test_admind_fulfillment.py.txt",
+    "source/tests/test_admind_fulfillment_enabled_integration.py": "source/tests/test_admind_fulfillment_enabled_integration.py.txt"
+  },
+  "source": {
+    "src/heterodyne/admind/daemon.py": {
+      "bytes": 232971,
+      "sha256": "b8aac8790b404d27944fdba241b35d924aa80ad9bd7aa2aa2999b22b445a2147"
+    },
+    "src/heterodyne/admind/fulfillment_projection.py": {
+      "bytes": 21177,
+      "sha256": "06738808759f9ae5333fc466981d88edd721c1372424bbb00f737a8ccf1d4431"
+    },
+    "tests/test_admind_fulfillment.py": {
+      "bytes": 23700,
+      "sha256": "9af1c759375406b28d51d1b09e4cd7b8333fef58751ae74b764f045d1cc9e961"
+    },
+    "tests/test_admind_fulfillment_enabled_integration.py": {
+      "bytes": 18534,
+      "sha256": "c72e58e3e46f352d87c2747bf9c674f9826524c09d1e98a7bf588e1ccee12ea1"
+    }
+  },
+  "unchanged_disabled": {
+    "bytes": 39849,
+    "path": "src/heterodyne/admind/fulfillment.py",
+    "scope": "unchanged disabled source excluded from candidate source copies",
+    "sha256": "95a391903e21b22b6b385e9e1ed920004d28c92e950d2b4672d77c59fbe3e38d"
+  }
+}

@@ -1,0 +1,26 @@
+[
+  {
+    "bytes": 35,
+    "input": "x84mg-fallback-r2-repair/.ruff_cache/.gitignore",
+    "reason": "cache artifact",
+    "sha256": "9e3a60f1e6ec4ae60215c11d54b171392745ec25e9dded433d5bd921363af316"
+  },
+  {
+    "bytes": 268,
+    "input": "x84mg-fallback-r2-repair/.ruff_cache/0.16.9/1248553548196019171",
+    "reason": "cache artifact",
+    "sha256": "589d046882783efd7dbd398ff75e9c189bb54a6f14f8f5e03a6fd0216ab27cf4"
+  },
+  {
+    "bytes": 268,
+    "input": "x84mg-fallback-r2-repair/.ruff_cache/0.16.9/14358541429222763633",
+    "reason": "cache artifact",
+    "sha256": "5a964ab07fffe43968aa915e79ba1141fc700282057fc834fd0bd045ef23108c"
+  },
+  {
+    "bytes": 43,
+    "input": "x84mg-fallback-r2-repair/.ruff_cache/CACHEDIR.TAG",
+    "reason": "cache artifact",
+    "sha256": "5953156d7e0c564a427251316eaf26f8870e6483ae2197f916b630e4f93e31ae"
+  }
+]

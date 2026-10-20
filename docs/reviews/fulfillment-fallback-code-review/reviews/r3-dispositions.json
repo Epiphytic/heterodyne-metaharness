@@ -1,0 +1,74 @@
+[
+  {
+    "author_disposition": "OPEN: shipped-False assertion gap. Source remains False; no post-gate test edit or waiver.",
+    "finding_verbatim": {
+      "failure_scenario": "Someone flips fulfillment.py:29 to `ENABLED = True` again, as happened in the rejected r1 variant. Every test monkeypatches ENABLED, so none fails: grep finds no test that checks the default (the only reference without monkeypatch is `assert f.ENABLED is True` inside the enabled fixture). Production would then turn on Apply/Propose, and post_ask would refuse posts on every unmigrated store, with a green suite. Fix: add `assert f.ENABLED is False` before the monkeypatch, or a separate one-line test of the default.",
+      "file": "tests/test_admind_fulfillment.py",
+      "line": 416,
+      "summary": "F23 [Medium] The test edit removes the only check that the shipped default of fulfillment.ENABLED is False. The old assertion relied on the real default; the new one forces ENABLED=False with monkeypatch first."
+    },
+    "number": 23,
+    "status": "OPEN",
+    "waived": false
+  },
+  {
+    "author_disposition": "OPEN: manual DDL restoration is unsafe because it can resurrect old verification stamps. No owned reset exists; future quiesced recovery needs separate design.",
+    "finding_verbatim": {
+      "failure_scenario": "A receipt is applied and verified (capacity 0). Then `DROP TRIGGER fq2_answers_insert` happens (this exact case is in the new test matrix). While the trigger is missing, a new answer row is added to the fulfilled ask, either by the daemon or by a legacy writer. The generation is not bumped and valid=1 stays. An operator then restores the exact trigger SQL by hand, because no owned repair path exists (see F25). validate() passes, and SUPPRESSED matches on the unchanged epoch and generation, so the ask is suppressed against answers that were never verified. Fix: any repair or re-validation path must change the meta epoch (or mark every receipt dirty), and the README should say manual DDL restoration is unsafe.",
+      "file": "src/heterodyne/admind/fulfillment_projection.py",
+      "line": 147,
+      "summary": "F24 [Low-Medium] Fixing a damaged projection by hand brings old verifications back to life. validate() checks only the exact DDL text and the meta row, and the epoch is never changed, so verifications stamped before the damage count again once the DDL is restored."
+    },
+    "number": 24,
+    "status": "OPEN",
+    "waived": false
+  },
+  {
+    "author_disposition": "OPEN: damaged projection has no owned quiesced reset/epoch-rotation route; damage recovery remains a separate design item, not manual operator SQL.",
+    "finding_verbatim": {
+      "failure_scenario": "After any damage, Apply, Propose and confirm are refused and capacity suppression is gone for good. To recover, the operator must hand-write SQL to drop up to 5 tables, the index and 12 triggers. At that point validate() raises 'fulfillment-migration-required', and post_ask (daemon.py:1083) refuses every question/merge post while ENABLED, which is worse than the damaged state. This needs operator SQL, which the project rules say Liam will not run by hand. Fix for the PoC: either document that damage is terminal and recovery is a design item, or add an owned, quiesced, epoch-rotating reset command (not auto-repair).",
+      "file": "src/heterodyne/admind/fulfillment_projection.py",
+      "line": 139,
+      "summary": "F25 [Low-Medium] Once the projection is damaged, the owned code offers no way back. migrate refuses whenever any fragment exists, and no reset or repair command exists. The only manual recovery (dropping every fragment) turns 'posting available' into 'posting refused' until a quiesced `migrate --apply`."
+    },
+    "number": 25,
+    "status": "OPEN",
+    "waived": false
+  },
+  {
+    "author_disposition": "OPEN: runtime comment overstates fallback. Guaranteed fallback covers only known trigger-compatible metadata/trigger damage. Dropping trigger-target tables also breaks answers/updates/cancel even with ENABLED=False.",
+    "finding_verbatim": {
+      "failure_scenario": "Drop fulfillment_generations, fulfillment_verifications or fulfillment_dirty. validate() reports 'fulfillment-projection-unavailable', post_ask falls through as if posting were safe, and the insert fails on 'no such table'. Every ask_answers insert or update and every asks update on an existing ask fails too, through fq2_answers_* and fq2_asks_update, whatever ENABLED is set to. test_missing_trigger_target_table_fails_post_without_repair only covers AskPost, so the wider failure of inbound answers and cancel is untested and undocumented. Fix: reword the comment and README to say 'trigger-intact damage only', and add one test for inbound answers or cancel under a dropped target table.",
+      "file": "src/heterodyne/admind/daemon.py",
+      "line": 1084,
+      "summary": "F26 [Low] The new comment overstates the result: 'The Store's conservative count keeps ordinary posting available' is false for the trigger-target-table cases, which the new test now pins as 'failed'. That damage also breaks answer recording, ask updates and cancel, not just posting."
+    },
+    "number": 26,
+    "status": "OPEN",
+    "waived": false
+  },
+  {
+    "author_disposition": "OPEN: stray fq2_* trigger detection and migration post-validation gap remains unmodified.",
+    "finding_verbatim": {
+      "failure_scenario": "The store has an extra trigger such as `fq2_custom` but no projection objects. validate() raises 'migration-required' (not a known fragment), and migrate --apply creates the DDL and commits with changed=True. The next validate() counts 13 fq2_ triggers instead of 12 and raises 'fulfillment-projection-unavailable'. So migration reports success, but Apply is refused and suppression is unavailable from the first moment. Fix: call validate(db) inside the apply transaction before COMMIT (roll back on failure), or include the `fq2_*` GLOB in the fragment check.",
+      "file": "src/heterodyne/admind/fulfillment_projection.py",
+      "line": 183,
+      "summary": "F27 [Low] The fragment check only knows the 17 exact DDL names, and migrate_connection never calls validate() after applying. A stray `fq2_*` trigger, or any extra object with a name it doesn't list, lets migrate report changed=True and leaves the store immediately 'unavailable'."
+    },
+    "number": 27,
+    "status": "OPEN",
+    "waived": false
+  },
+  {
+    "author_disposition": "OPEN: damage-path Get/Propose/confirm coverage remains incomplete, including prior F13 gap.",
+    "finding_verbatim": {
+      "failure_scenario": "A later change that made Get or Propose treat 'projection-unavailable' like the post_ask fallback (proceeding instead of holding) would pass. Of the paths that change state, only Apply is shown to hold under damage. Fix: extend the damage matrix with Get (expect 'unavailable'/'fulfillment-projection-unavailable') and Propose (expect refused).",
+      "file": "tests/test_admind_fulfillment_enabled_integration.py",
+      "line": 291,
+      "summary": "F28 [Low] Under damage, the integration tests check only Apply and AskPost. Get is not checked, even though its reply text changes from 'fulfillment-migration-required' to 'fulfillment-projection-unavailable' for a store with the meta table missing but other fragments present. Propose and !fulfill confirm are not checked either (the rest of prior F13)."
+    },
+    "number": 28,
+    "status": "OPEN",
+    "waived": false
+  }
+]
