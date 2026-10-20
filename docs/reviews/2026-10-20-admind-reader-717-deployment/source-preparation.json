@@ -1,0 +1,8 @@
+{
+  "commit": "71713d8a3e35da7a297948c45351360bbc0de37c",
+  "checkout": "<operator-home>/.hermes/handoff/2026-10-15/codex/autonomous-resume/next-admind-reader-deployment-design/execution/exact717",
+  "clean": true,
+  "installer_sha256": "48b87826530a282ab0ad5ccbbb4bbb0c3c3c2f5acd4bf89bf13dfe39945bdf1e",
+  "guard_archive_sha256": "6d4c09f816760e4c9e472c182ab07bbe29bc53e3f7da27c0de935c0b680dbaa4",
+  "effects": "isolated source worktree creation only; no live services/DB/config, no deployment authority"
+}

@@ -1,0 +1,20 @@
+{
+  "schema": "reader-deployment-design-review-provenance.v1",
+  "actual_rounds": 1,
+  "actual_verdict": "REVISE",
+  "reasoning": "high",
+  "model_requested": "opus",
+  "builtin_skill": "code-review",
+  "reviewed_draft_sha256": "f6a043fec1d471e9a31b7755d280c7a9fe2ee2754b9b929c718dad4f4f165bd5",
+  "result": {
+    "head": "71713d8a3e35da7a297948c45351360bbc0de37c",
+    "source_unchanged": true,
+    "events": 108,
+    "terminal_success": true,
+    "stream_sha256": "d7822004e8f99a370cd23d37a8c5221b0b373f9d456cf44b36f5da3222c11171",
+    "log_sha256": "6f55f358fdbabcd49dea6dcb09f305f477212e55d8cfd0617890f3ec9305e60e"
+  },
+  "readable_normalization": "Only the literal operator home prefix is replaced by <operator-home>; exact originals remain encoded. No other redaction or reconstructed raw report.",
+  "incorporation": "Final incorporated draft SHA256 6077d23bc9c997d2cf3daa9b4b0fce14df75664696bc0e06c73d38c0ec395436 and incorporation freeze SHA256 6b8abda6778aa7f3d8e5323163d6b0476c22a44b16ea9fbd8f36471fa5030360 preserved as raw. Controller publishes readable design/dispositions separately. No second review or validation.",
+  "authority": "Neither review nor source evidence grants human deployment approval, quiescence, installation, activation or rollback permission."
+}
