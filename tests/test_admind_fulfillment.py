@@ -413,10 +413,10 @@ def test_daemon_local_capability_uid_latch_and_work_lock(tmp_path, monkeypatch):
     try:
         seed(u.store, projection=True)
         request = f.Apply(completion(u.store))
-        assert (
-            run(u.daemon.on_fulfillment(request, ctl.Peer(123, os.getuid(), os.getgid()))).result
-            == "unavailable"
-        )
+        monkeypatch.setattr(f, "ENABLED", False)
+        disabled = run(u.daemon.on_fulfillment(request, ctl.Peer(123, os.getuid(), os.getgid())))
+        assert disabled.result == "unavailable"
+        assert disabled.message == "capability disabled"
         monkeypatch.setattr(f, "ENABLED", True)
         assert run(u.daemon.on_fulfillment(request, ctl.Peer(123))).result == "refused"
         assert (

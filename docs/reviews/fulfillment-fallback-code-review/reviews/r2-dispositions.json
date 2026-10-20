@@ -1,0 +1,122 @@
+[
+  {
+    "number": 11,
+    "finding_verbatim": {
+      "file": "src/heterodyne/admind/daemon.py",
+      "line": 1083,
+      "summary": "F11 [Medium] The fallback lets posting proceed for every 'fulfillment-projection-unavailable' case. For some of those cases the insert itself then fails, so the claim 'known damaged derived projection -> ordinary posting stays available' is false.",
+      "failure_scenario": "On a migrated store, drop fulfillment_generations, fulfillment_verifications or fulfillment_dirty. validate() reports the row mismatch at fulfillment_projection_projection.py:144 as 'fulfillment-projection-unavailable', and post_ask now falls through. store.insert_ask then fires fq2_asks_insert, whose body inserts into, deletes from or updates those tables. SQLite keeps a trigger whose body names a dropped table and raises 'no such table' when it runs, so the transaction rolls back and the client gets a failed reply, not 'posted'. Ask-answer inserts and status updates hit the same error through fq2_answers_* and fq2_asks_update. The six new regressions only cover damage where the triggers still run (a missing trigger, a bad meta row, a missing meta table), so the matrix does not prove the stated contract. Fix: narrow the claim and disposition to damage where the triggers still run, and add a test that pins the dropped-table result (failed, not posted), or get a design decision."
+    },
+    "disposition": "Externally qualified all three dropped trigger-target tables: post failed, no new ask and no schema repair. Claims narrowed to surviving-trigger-compatible damage."
+  },
+  {
+    "number": 12,
+    "finding_verbatim": {
+      "file": "tests/test_admind_fulfillment_enabled_integration.py",
+      "line": 291,
+      "summary": "F12 [Low-Medium] The damaged-projection test never shows a suppression being removed, because the damage happens before any receipt is applied or verified, so it cannot tell conservative fallback counting from normal counting.",
+      "failure_scenario": "capacity_count()==1 before the apply and ==2 after posting would hold even if capacity_predicate wrongly returned the suppressing predicate, since 'abcd' has no receipt and SUPPRESSED cannot match. A regression that made a damaged projection still suppress, for example validate() returning normally for one damage type, passes this test. The store-level test at test_admind_fulfillment_activation.py:357 covers suppression for a dropped index, a bad scheme and a deleted meta row, but not DROP TABLE fulfillment_projection_meta or a dropped trigger at the daemon level. Fix: apply and verify a receipt first (capacity 0), then damage it, then assert capacity returns to 1 and a post succeeds."
+    },
+    "disposition": "Externally qualified six-case actual applied/verified receipt matrix capacity0\u2192damage1\u2192post2, immutable receipt/answer retained. Exact replay correctly remains already-applied; original separate six tests retain fresh-Apply projection-unavailable assertions. First erroneous replay-refusal expectation6FAIL5PASS retained; root-directed correction affects new test only."
+  },
+  {
+    "number": 13,
+    "finding_verbatim": {
+      "file": "src/heterodyne/admind/fulfillment_projection.py",
+      "line": 133,
+      "summary": "F13 [Low] The new missing-meta-with-fragments check has no direct test for the 'no schema repair' half of the contract, and other README claims are not tested either.",
+      "failure_scenario": "No test runs `migrate --apply` (or migrate_connection) on a store whose meta table was dropped while other projection objects remain, then asserts the refusal and an unchanged sqlite_master. A future change that took the 'not exists -> create everything' path, or added CREATE IF NOT EXISTS, would repair the schema without any test failing. There is also no test that an sqlite3.Error raised inside require_projection reaches post_ask as an error, and no integration test that Propose or !fulfill confirm hold on a damaged projection; only Apply is checked."
+    },
+    "disposition": "Externally qualified missing-meta migration plan/apply refusal with unchanged sqlite_master plus injected require_projection SQLite error failed-post. Propose/confirm damaged-path integration remains OPEN."
+  },
+  {
+    "number": 14,
+    "finding_verbatim": {
+      "file": "src/heterodyne/admind/fulfillment_projection.py",
+      "line": 133,
+      "summary": "F14 [Low] The fragment check in validate() is a copy of the one in migrate_connection (lines 181-184): the same names list, placeholders and sqlite_master IN query.",
+      "failure_scenario": "Two copies of the DDL-name derivation and fragment query can drift. If one gains or loses a name, or changes how it splits CREATE UNIQUE statements, then validate() and migrate disagree on 'unavailable' versus 'migration-required', and the operator sees post_ask accept a store that migrate refuses, or the reverse. Fix: one helper such as `_fragments_present(db)` with a module-level `NAMES = tuple(s.split()[2] for s in DDL)`, used by both."
+    },
+    "disposition": "OPEN, unwaived; intentionally outside bounded repair."
+  },
+  {
+    "number": 15,
+    "finding_verbatim": {
+      "file": "src/heterodyne/admind/daemon.py",
+      "line": 1083,
+      "summary": "F15 [Low] post_ask decides between falling back and refusing by comparing the exception's message text to a literal that also appears in four places in fulfillment_projection.py.",
+      "failure_scenario": "If the projection code is renamed or reworded, or a new projection-damage code is added (for example 'missing-generation' from stamp_current), the daemon silently starts refusing all question/merge posts again, or starts posting through a state it should refuse, with no type check catching it. Fix: a ProjectionUnavailable(Invalid) subclass or a shared constant, or a projection_state() result the daemon branches on."
+    },
+    "disposition": "OPEN, unwaived; intentionally outside bounded repair."
+  },
+  {
+    "number": 16,
+    "finding_verbatim": {
+      "file": "src/heterodyne/admind/daemon.py",
+      "line": 1084,
+      "summary": "F16 [Low] The fallback is silent: post_ask writes no audit entry when it posts through a damaged projection. The worker logs the same 'fulfillment-verification-unavailable' line for a damaged store and an unmigrated one, and migrate refuses to repair.",
+      "failure_scenario": "After the projection is damaged, the daemon runs in conservative mode indefinitely: fulfillment mutations hold and capacity is unsuppressed. Nothing in the audit or a status alert tells the operator it is damaged rather than unmigrated, and no tool repairs it. Repair tooling is an external capability this candidate does not provide (not an implementation defect), but a one-line audit ('projection-unavailable-fallback') would make the hold visible."
+    },
+    "disposition": "OPEN, unwaived; intentionally outside bounded repair."
+  },
+  {
+    "number": 17,
+    "finding_verbatim": {
+      "file": "src/heterodyne/admind/daemon.py",
+      "line": 1081,
+      "summary": "F17 [Low] Each post runs the projection check twice, about 20 sqlite_master/meta queries each time: once in require_projection() and again inside capacity_count() via capacity_predicate(). The new branch also adds an extra query to every unmigrated-store check.",
+      "failure_scenario": "Under ask_post_lock, every question/merge post repeats the same check twice. AskList calls capacity_predicate twice more (capacity_asks plus inactive_asks), and on unmigrated or meta-less stores each of those now runs the extra fragment query. It is cheap, but it is redundant I/O on a serialized path. Fix: compute the projection state once per post and pass the chosen predicate along."
+    },
+    "disposition": "OPEN, unwaived; intentionally outside bounded repair."
+  },
+  {
+    "number": 18,
+    "finding_verbatim": {
+      "file": "src/heterodyne/admind/daemon.py",
+      "line": 1079,
+      "summary": "F18 [Info] The new fallback branch cannot run in production: fulfillment.ENABLED is a False source constant and this candidate has no runtime switch, so only tests that monkeypatch it reach the branch. This is a missing external capability, not an implementation defect.",
+      "failure_scenario": "No production daemon built from this tree ever runs the code at daemon.py:1079-1086 or the enabled integration paths. They depend on the separately published default-off switch design (aee72a4, pending genuine human approval p5r9/btq-pzr7d). The validate() change does reach production through capacity_predicate, view and the worker, but those treat 'unavailable' and 'migration-required' the same way, so production behaviour does not change. The candidate should not be described as qualifying any production activation."
+    },
+    "disposition": "OPEN, unwaived; intentionally outside bounded repair."
+  },
+  {
+    "number": 19,
+    "finding_verbatim": {
+      "file": "tests/test_admind_fulfillment_enabled_integration.py",
+      "line": 259,
+      "summary": "F19 [Low] Prior #9 is still open: this is the fourth copy of the git-archive/tar/PYTHONPATH legacy harness, and `git archive` depends on the current working directory.",
+      "failure_scenario": "Running pytest from outside the repo root, or from a worktree whose cwd is not the repository, makes `git archive <rev> src` fail or archive the wrong repo. Fixes such as adding `git -C` do not reach the other three copies (test_admind_fulfillment_activation.py:221/:267, _r1.py:289). This copy also replaces the whole env, where the others extend os.environ."
+    },
+    "disposition": "OPEN, unwaived; intentionally outside bounded repair."
+  },
+  {
+    "number": 20,
+    "finding_verbatim": {
+      "file": "tests/test_admind_fulfillment_enabled_integration.py",
+      "line": 33,
+      "summary": "F20 [Low] Prior #7 is fixed with a limit: socket_server still copies the production ask_server wiring by hand (f.SOCKET in place of asks.ASK_SOCKET, the request union, check, describe) instead of sharing a factory with daemon.run.",
+      "failure_scenario": "If daemon.py:734-741 changes its union, describe, limits or socket name, these 'real socket' tests keep passing against the stale copy. Fix: extract an Admind method that builds the ask JsonSocketServer, and call it from both run() and the test."
+    },
+    "disposition": "OPEN, unwaived; intentionally outside bounded repair."
+  },
+  {
+    "number": 21,
+    "finding_verbatim": {
+      "file": "src/heterodyne/admind/fulfillment.py",
+      "line": 325,
+      "summary": "F21 [Low, existing] require_projection() runs validate() on the shared store.db without taking store.lock. post_ask now relies on its result to decide whether to fall back.",
+      "failure_scenario": "The verifier runs verify_pass in a ThreadPoolExecutor and writes inside store.transaction on the same connection (check_same_thread=False). post_ask's validate() on the event-loop thread can interleave with that open transaction and read its uncommitted state, or hit a transient sqlite3 error that surfaces as a failed post. Wrapping the body in `with self.store.lock:`, as binding() and protected() already do, would serialize it."
+    },
+    "disposition": "OPEN, unwaived; intentionally outside bounded repair."
+  },
+  {
+    "number": 22,
+    "finding_verbatim": {
+      "file": "src/heterodyne/admind/daemon.py",
+      "line": 1080,
+      "summary": "F22 [Low, conventions] <operator-home>/CLAUDE.md says 'Commit at every rest state (before HITL pauses, status reports, completions)', but the reviewed source and tests are uncommitted working-tree changes at a review/status rest state.",
+      "failure_scenario": "The frozen candidate exists only as modified files plus one untracked file. Any later hook stash, worktree cleanup or rebase can lose or change it; the README notes an earlier run was already disrupted by hook stashing. Holding off on commits during the run was deliberate, but it goes against the quoted rule."
+    },
+    "disposition": "OPEN, unwaived; intentionally outside bounded repair."
+  }
+]

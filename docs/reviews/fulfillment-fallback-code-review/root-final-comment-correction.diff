@@ -1,0 +1,13 @@
+--- external-candidate-v2
++++ root-final-source
+@@ -133,8 +133,8 @@
+         names = [statement.split()[2] for statement in DDL]
+         marks = ",".join("?" for _ in names)
+         fragments = db.execute(
+-            f"SELECT 1 FROM sqlite_master WHERE name IN ({marks}) LIMIT 1",
+-            names,  # noqa: S608 - finite literal schema names only
++            f"SELECT 1 FROM sqlite_master WHERE name IN ({marks}) LIMIT 1",  # noqa: S608 - finite literal schema names only
++            names,
+         ).fetchone()
+         if fragments:
+             raise f.Invalid("fulfillment-projection-unavailable")

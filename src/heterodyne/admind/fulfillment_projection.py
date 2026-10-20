@@ -130,6 +130,14 @@ def validate(db: sqlite3.Connection) -> tuple[str, str | None]:
     f.validate_schema_db(db)
     present = db.execute("SELECT 1 FROM sqlite_master WHERE name='fulfillment_projection_meta'").fetchone()
     if not present:
+        names = [statement.split()[2] for statement in DDL]
+        marks = ",".join("?" for _ in names)
+        fragments = db.execute(
+            f"SELECT 1 FROM sqlite_master WHERE name IN ({marks}) LIMIT 1",  # noqa: S608 - finite literal schema names only
+            names,
+        ).fetchone()
+        if fragments:
+            raise f.Invalid("fulfillment-projection-unavailable")
         raise f.Invalid("fulfillment-migration-required")
     for statement in DDL:
         name = statement.split()[2]

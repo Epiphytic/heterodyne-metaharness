@@ -1080,7 +1080,10 @@ class Admind:
             try:
                 self.store.fulfillment.require_projection()
             except fulfillment.Invalid as exc:
-                return asks.refused(str(exc))
+                if str(exc) != "fulfillment-projection-unavailable":
+                    return asks.refused(str(exc))
+                # Damaged derived verification cannot suppress capacity. The
+                # Store's conservative count keeps ordinary posting available.
         if self.store.capacity_count() >= asks.MAX_OPEN:
             return asks.refused(ASK_TOO_MANY)
         if self.store.ask_posted_since(asks.hour_ago()) >= asks.MAX_PER_HOUR:
