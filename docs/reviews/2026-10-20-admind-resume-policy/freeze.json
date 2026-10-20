@@ -1,0 +1,96 @@
+{
+  "status": "frozen-source; broad qualification pending",
+  "source_pins": {
+    "src/heterodyne/admind/agent.py": {
+      "sha256": "321cdcb7d8a7aad18bc85af91fd028597f068565344493cac5d5dfe81a632137",
+      "bytes": 12572
+    },
+    "src/heterodyne/admind/commands.py": {
+      "sha256": "b3b2ec955429fdf9e4d950589651c5681a9317b06ceae75cdd2fa88d16806c8b",
+      "bytes": 7034
+    },
+    "src/heterodyne/admind/daemon.py": {
+      "sha256": "da4a6cb287ff3bccdd50abfe936a6bf93904e3a1e1363decf3af8e65f6286bfa",
+      "bytes": 241697
+    },
+    "src/heterodyne/admind/fulfillment_projection.py": {
+      "sha256": "3d532540a5350c5b5bfa00b25eabced1cb27e6a5b9fbf0e2d3d1db632aeeae20",
+      "bytes": 21121
+    },
+    "tests/test_admind_agent.py": {
+      "sha256": "ba4d47e5adef8bd4913e754a5ebce6e49ef8eafccdcf6ced70667a8594b2a85d",
+      "bytes": 14268
+    },
+    "tests/test_admind_approvals.py": {
+      "sha256": "99c9c9786feafed8349274bbb104ca1163d75bfc2e3a78514640936f64770d7a",
+      "bytes": 103239
+    },
+    "tests/test_admind_au11.py": {
+      "sha256": "47fd76fa844d10bb47b4a83360b5addb66aba37dcf6f9258aa6aead481725acc",
+      "bytes": 19226
+    },
+    "tests/test_admind_commands.py": {
+      "sha256": "75f251e0dd39386e137fac13fe5f109ccb10c11d0aac6bc9c4782ac34b5f1b16",
+      "bytes": 4483
+    },
+    "tests/test_admind_daemon.py": {
+      "sha256": "478fde2976cd42837a6965896969265ba0c335a1c0f291d9587e6deb70e995eb",
+      "bytes": 43517
+    },
+    "tests/test_admind_r1.py": {
+      "sha256": "3f352de6ca135720abab59d57bd9730bf8a794874d3b894ef7431a618fb37134",
+      "bytes": 39589
+    },
+    "tests/test_admind_r13_membership.py": {
+      "sha256": "1b89f90e8f1ea99b6b1295e248fae5b2d8a47e31a5487aebde272cfd1ee01ec4",
+      "bytes": 30205
+    },
+    "tests/test_admind_t9r1.py": {
+      "sha256": "872c6d384d11bfd9e509e8f365ae3f3a13c50380b51ae16ed6783f786d6520c6",
+      "bytes": 8957
+    },
+    "tests/test_admind_t9r10.py": {
+      "sha256": "d129d300928b166c61cfe8bb3e5f8a107818b52955f9f96a952e162c4276fb9b",
+      "bytes": 5793
+    },
+    "tests/test_admind_t9r2.py": {
+      "sha256": "ffd4fa8da83676c6ca8472ae271bb0de2be8fab209c1a6db14e620e4ed66552f",
+      "bytes": 15765
+    },
+    "tests/test_admind_t9r3.py": {
+      "sha256": "020787fe9cfb7f782ae39c80200d4191d2fdd1dd38d17f8606c9089f5246dbe2",
+      "bytes": 9802
+    },
+    "tests/test_admind_t9r5.py": {
+      "sha256": "d3fb08477799c584808dc01eb77835a6fe14a9938c2f40638de2c0c36b7ec178",
+      "bytes": 17859
+    },
+    "tests/test_admind_t9r8.py": {
+      "sha256": "5fe0ce77cef24ad27c259e78ac3732d914dad8ad620da5cb42404e75dbbee9e4",
+      "bytes": 5260
+    },
+    "tests/test_admind_t9r9.py": {
+      "sha256": "f57300f5d5787638aef08d8e30dd96b110f71f2eafe58b4c099e20cb9aa40a42",
+      "bytes": 9683
+    },
+    "tests/test_admind_resume_policy.py": {
+      "sha256": "626107ad38f849cf11f8377824d7f83f37389d3297227c7cb217a7a43144725f",
+      "bytes": 9748
+    },
+    "tests/test_admind_resume_policy_r1.py": {
+      "sha256": "4c6518327f834ff9e3620d658358f639f4680160c279365a56df563b77467829",
+      "bytes": 3144
+    },
+    "docs/admind.md": {
+      "sha256": "2236748b49b9e8337e3550e72db1ff597272fbdd5cecf4d428ec885253636ce0",
+      "bytes": 120993
+    },
+    "tests/test_admind_resume_policy_r2.py": {
+      "sha256": "4e959acca87fd1cfa7ed48f3839eced950c1e53550f996be14261fc7cb053dd0",
+      "bytes": 5941
+    }
+  },
+  "evidence_inventory_sha256": "9f78bd23adbe6f7e82a1dfde10a61a8b2baf14c1cc468c21aa77730e99b6dd84",
+  "source_count": 22,
+  "evidence_count": 29
+}

@@ -1,0 +1,7 @@
+{
+  "methods": [
+    "test_a_claude_that_never_sends_session_start_is_held_then_reported",
+    "test_a_claude_that_exits_at_once_is_held_without_waiting_for_the_timeout"
+  ],
+  "reason": "Exactly two legacy notification oracles; preserve no-relaunch, one stable notice, readiness gate and undelivered received input assertions; migrate factual wording to current hold contract."
+}

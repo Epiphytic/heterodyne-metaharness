@@ -5,6 +5,7 @@ import socket
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+import pytest
 from fakes.settings import make_settings
 
 from heterodyne.admind.agent import AdminAgent, AgentStuck
@@ -34,6 +35,9 @@ class FakeTmux:
 
     def has_session(self, name: str) -> bool:
         return name in self.sessions
+
+    def session_absent(self, name: str) -> bool:
+        return name not in self.sessions
 
     def new_session(self, name: str, cwd: Path, argv: list[str], set: Mapping[str, str] | None = None,
                     unset: Sequence[str] = ()) -> None:
@@ -77,17 +81,19 @@ def make_agent(tmp_path: Path) -> tuple[AdminAgent, FakeTmux, Store]:
 
 def test_launch_resume_adopt_and_new(tmp_path: Path) -> None:
     agent, tmux, store = make_agent(tmp_path)
-    assert agent.ensure_running() == "launched"
+    assert agent.ensure_running() == "startup-launch-requested"
     sid = agent.session_id
     assert sid is not None and tmux.sessions["admin"][1:3] == ["--session-id", sid]
     settings = json.loads((tmp_path / "state" / "admind" / "claude-settings.json").read_text())
     assert set(settings["hooks"]) == {"SessionStart", "UserPromptSubmit", "Stop"}
     assert agent.ensure_running() == "adopted"
-    agent.started(sid)
-    tmux.dead.add("admin")                      # crashed after a successful start
-    assert agent.ensure_running() == "resumed"
-    assert tmux.sessions["admin"][1:3] == ["--resume", sid]
-    assert agent.new() == "launched"
+    assert agent.started(sid, "startup", agent.launch_nonce)
+    tmux.dead.add("admin")
+    with pytest.raises(AgentStuck, match="resume-eligibility-unqualified"):
+        agent.ensure_running()
+    assert tmux.sessions["admin"][1:3] == ["--session-id", sid]
+    assert store.get("launches_without_start") == "1"
+    assert agent.new() == "new-launch-requested"
     assert agent.session_id != sid
 
 
@@ -104,7 +110,7 @@ def agent_on(tmp_path: Path, store: Store, tmux: FakeTmux, account: AdmindAccoun
 
 def test_no_account_keeps_the_argv_and_clears_only_the_selector(tmp_path: Path) -> None:
     agent, tmux, store = make_agent(tmp_path)
-    assert agent.ensure_running() == "launched"
+    assert agent.ensure_running() == "startup-launch-requested"
     sid = agent.session_id
     assert sid is not None
     assert tmux.sessions["admin"] == interactive_argv("claude", agent.settings.profile, session_id=sid,
@@ -117,7 +123,7 @@ def test_no_account_keeps_the_argv_and_clears_only_the_selector(tmp_path: Path) 
 def test_an_account_sets_its_directory_and_clears_the_overrides(tmp_path: Path) -> None:
     _, tmux, store = make_agent(tmp_path)
     agent = agent_on(tmp_path, store, tmux, ACCOUNT_B)
-    assert agent.ensure_running() == "launched"
+    assert agent.ensure_running() == "startup-launch-requested"
     assert tmux.env["admin"] == ({"CLAUDE_CONFIG_DIR": "/accounts/b"}, ACCOUNT_B.unset)
     assert store.get("agent_account") == ACCOUNT_B.key and agent.login_matches()
 
@@ -127,57 +133,46 @@ def test_a_session_started_on_another_login_is_not_resumed(tmp_path: Path) -> No
     old.ensure_running()
     sid = old.session_id
     assert sid is not None
-    old.started(sid)
+    assert old.started(sid, "startup", old.launch_nonce)
     tmux.dead.add("admin")
-    agent = agent_on(tmp_path, store, tmux, ACCOUNT_B)       # config now names account b
+    agent = agent_on(tmp_path, store, tmux, ACCOUNT_B)
     assert not agent.login_matches()
-    assert agent.ensure_running() == "launched-login-changed"
-    assert agent.session_id != sid
-    assert tmux.sessions["admin"][1:3] == ["--session-id", agent.session_id]
-    tmux.dead.add("admin")                                   # the next relaunch resumes, on b
-    assert agent.session_id is not None
-    agent.started(agent.session_id)
-    assert agent.ensure_running() == "resumed"
+    with pytest.raises(AgentStuck, match="resume-eligibility-unqualified"):
+        agent.ensure_running()
+    assert agent.session_id == sid and not agent.login_matches()
+    assert tmux.sessions["admin"][1:3] == ["--session-id", sid]
+    assert agent.new() == "new-launch-requested"
+    assert agent.session_id != sid and agent.login_matches()
 
 
 def test_a_store_from_before_au11_never_resumes(tmp_path: Path) -> None:
     agent, tmux, store = make_agent(tmp_path)
     store.set("agent_session", "S1")
-    agent.started("S1")                         # no agent_account: unknown, not assumed default
+    assert not agent.started("S1")
     assert not agent.login_matches()
-    assert agent.ensure_running() == "launched-login-changed"
-    assert agent.session_id != "S1"
-    assert tmux.sessions["admin"][1:3] == ["--session-id", agent.session_id]
+    with pytest.raises(AgentStuck, match="resume-eligibility-unqualified"):
+        agent.ensure_running()
+    assert agent.session_id == "S1" and not tmux.has_session("admin")
 
 
 def test_crash_loop_stops_after_three_launches(tmp_path: Path) -> None:
-    agent, tmux, _ = make_agent(tmp_path)
-    for _ in range(3):
-        tmux.kill("admin")
-        agent.ensure_running()
+    agent, tmux, store = make_agent(tmp_path)
+    agent.ensure_running()
     tmux.kill("admin")
-    try:
+    with pytest.raises(AgentStuck):
         agent.ensure_running()
-    except AgentStuck:
-        pass
-    else:
-        raise AssertionError("expected AgentStuck")
-    assert agent.new() == "launched"            # !new resets the counter
+    assert store.get("launches_without_start") == "1"  # ceiling is not a retry target
+    assert agent.new() == "new-launch-requested"
+    assert store.get("launches_without_start") == "1"
 
 
 def test_crash_loop_keeps_the_dead_pane_for_tail(tmp_path: Path) -> None:
-    agent, tmux, _ = make_agent(tmp_path)
-    for _ in range(3):
-        tmux.kill("admin")
+    agent, tmux, store = make_agent(tmp_path)
+    agent.ensure_running()
+    tmux.dead.add("admin")
+    with pytest.raises(AgentStuck):
         agent.ensure_running()
-    tmux.dead.add("admin")                      # the pane exited and is retained
-    try:
-        agent.ensure_running()
-    except AgentStuck:
-        pass
-    else:
-        raise AssertionError("expected AgentStuck")
-    assert tmux.has_session("admin")
+    assert tmux.has_session("admin") and store.get("launches_without_start") == "1"
     assert agent.tail(5) == "screen of admin, 5 lines"
 
 

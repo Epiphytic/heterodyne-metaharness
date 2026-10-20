@@ -25,8 +25,6 @@ async def invoke(args: list[str], event: str, **extra: object) -> None:
     assert await asyncio.to_thread(hook_main, args, payload) == 0
 
 
-
-
 def instrument(u: Unit) -> tuple[asyncio.Event, asyncio.Event]:
     """(flushed, reached): `reached` is set when hook_loop starts its flush (the event is handled);
     `flushed` when that flush completes."""
@@ -37,12 +35,13 @@ def instrument(u: Unit) -> tuple[asyncio.Event, asyncio.Event]:
         reached.set()
         await real_flush()
         flushed.set()
-    u.daemon.flush = flush                              # type: ignore[method-assign]
+
+    u.daemon.flush = flush  # type: ignore[method-assign]
     return flushed, reached
 
 
 @contextlib.asynccontextmanager
-async def serving(u: Unit):                             # type: ignore[no-untyped-def]
+async def serving(u: Unit):  # type: ignore[no-untyped-def]
     server = HookServer(u.settings.state_dir / "hook.sock", u.daemon.hooks, u.audit)
     await server.start()
     loop_task = asyncio.create_task(u.daemon.hook_loop())
@@ -57,29 +56,39 @@ async def serving(u: Unit):                             # type: ignore[no-untype
 
 # --- 3. a Stop from an old launch ---
 
+
 def test_a_stop_from_an_old_launch_without_text_does_not_use_the_transcript_fallback(tmp_path: Path) -> None:
     u = Unit(tmp_path)
     flushed, _ = instrument(u)
     transcript = tmp_path / "S1.jsonl"
-    transcript.write_text(json.dumps({"type": "assistant", "message": {
-        "content": [{"type": "text", "text": "the replacement's text"}]}}) + "\n")
+    transcript.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "the replacement's text"}]},
+            }
+        )
+        + "\n"
+    )
 
     async def scenario() -> None:
         async with serving(u):
-            await u.daemon.start_agent(relaunch=True)
+            await u.say("!new")
             args = hook_args(u.agent.settings_file)
-            await fire(args, "SessionStart", flushed, source="startup")
+            await fire(args, "SessionStart", flushed, source="startup", session_id=u.agent.session_id)
             a = await u.say("job")
-            await fire(args, "UserPromptSubmit", flushed, prompt="job")
-            old = [*args[:args.index("--launch") + 1], LONG_AGO, *args[args.index("--launch") + 2:]]
-            await fire(old, "Stop", flushed, transcript_path=str(transcript))
+            await fire(args, "UserPromptSubmit", flushed, prompt="job", session_id=u.agent.session_id)
+            old = [*args[: args.index("--launch") + 1], LONG_AGO, *args[args.index("--launch") + 2 :]]
+            await fire(old, "Stop", flushed, transcript_path=str(transcript), session_id=u.agent.session_id)
             assert u.store.get("anchor") == a and u.store.get("busy") is not None
             assert "the replacement's text" not in u.texts()
             assert "stale" in u.audit_text()
+
     run(scenario())
 
 
 # --- 2. relaunch readiness ---
+
 
 class Gate:
     """Blocks a fake tmux call (in the supervision thread) until released; `entered` is an asyncio event."""
@@ -94,11 +103,12 @@ class Gate:
         assert self.release.wait(10)
 
 
-def relaunch_rig(u: Unit, gate_on: str, loop: asyncio.AbstractEventLoop,
-                 armed: list[bool]) -> tuple[Gate, set[str]]:
+def relaunch_rig(
+    u: Unit, gate_on: str, loop: asyncio.AbstractEventLoop, armed: list[bool]
+) -> tuple[Gate, set[str]]:
     gate = Gate(loop)
     dead: set[str] = set()
-    u.tmux.pane_dead = lambda name: name in dead        # type: ignore[method-assign]
+    u.tmux.pane_dead = lambda name: name in dead  # type: ignore[method-assign]
     real = getattr(u.tmux, gate_on)
     kill, new_session = u.tmux.kill, u.tmux.new_session
 
@@ -120,8 +130,9 @@ def relaunch_rig(u: Unit, gate_on: str, loop: asyncio.AbstractEventLoop,
             wrapped(name, cwd, argv, **env)
         else:
             new_session(name, cwd, argv, **env)
-    u.tmux.kill = kill_and_revive                       # type: ignore[method-assign]
-    u.tmux.new_session = new_session_gated              # type: ignore[method-assign]
+
+    u.tmux.kill = kill_and_revive  # type: ignore[method-assign]
+    u.tmux.new_session = new_session_gated  # type: ignore[method-assign]
     return gate, dead
 
 
@@ -135,17 +146,19 @@ def test_an_old_launchs_session_start_during_relaunch_does_not_ready_the_replace
         armed = [False]
         gate, dead = relaunch_rig(u, "kill", asyncio.get_running_loop(), armed)
         async with serving(u):
-            await u.daemon.start_agent(relaunch=True)
+            await u.say("!new")
             first = hook_args(u.agent.settings_file)
-            await fire(first, "SessionStart", flushed, source="startup")
+            await fire(first, "SessionStart", flushed, source="startup", session_id=u.agent.session_id)
             assert u.daemon.ready.is_set()
-            dead.add("admin")                           # the pane died; supervision relaunches
+            dead.add("admin")  # the pane died; supervision relaunches
             armed[0] = True
-            check = asyncio.create_task(u.daemon.check_agent())
-            await asyncio.wait_for(gate.entered.wait(), 10)     # ensure_running is killing the old pane
+            check = asyncio.create_task(u.say("!new"))
+            await asyncio.wait_for(gate.entered.wait(), 10)  # ensure_running is killing the old pane
             # The OLD launch's hook, now: it waits for the turn-state lock the relaunch holds.
-            old_hook = asyncio.create_task(invoke(first, "SessionStart", source="resume"))
-            held_job = asyncio.create_task(u.say("held job"))       # queues behind the dispatch lock too
+            old_hook = asyncio.create_task(
+                invoke(first, "SessionStart", source="startup", session_id=u.agent.session_id)
+            )
+            held_job = asyncio.create_task(u.say("held job"))  # queues behind the dispatch lock too
             gate.release.set()
             await asyncio.wait_for(check, 10)
             await asyncio.wait_for(old_hook, 10)
@@ -157,9 +170,14 @@ def test_an_old_launchs_session_start_during_relaunch_does_not_ready_the_replace
             now[0] += u.daemon.ready_timeout + 1
             await u.daemon.check_agent()
             assert "ready-timeout" in u.audit_text()
+            assert u.daemon.stuck is not None
+            await u.say("!new")
             second = hook_args(u.agent.settings_file)
-            await fire(second, "SessionStart", flushed, source="resume")
-            assert u.daemon.ready.is_set() and u.tmux.pasted[-1] == "held job"
+            await fire(second, "SessionStart", flushed, source="startup", session_id=u.agent.session_id)
+            assert u.daemon.ready.is_set() and "held job" not in u.tmux.pasted
+            await u.say("resent job with context")
+            assert u.tmux.pasted[-1] == "resent job with context"
+
     run(scenario())
 
 
@@ -171,25 +189,29 @@ def test_the_replacements_early_session_start_during_launch_is_accepted(tmp_path
         armed = [False]
         gate, dead = relaunch_rig(u, "new_session", asyncio.get_running_loop(), armed)
         async with serving(u):
-            await u.daemon.start_agent(relaunch=True)
+            await u.say("!new")
             first = hook_args(u.agent.settings_file)
-            await fire(first, "SessionStart", flushed, source="startup")
+            await fire(first, "SessionStart", flushed, source="startup", session_id=u.agent.session_id)
             dead.add("admin")
             armed[0] = True
-            check = asyncio.create_task(u.daemon.check_agent())
-            await asyncio.wait_for(gate.entered.wait(), 10)     # the replacement is being started
+            check = asyncio.create_task(u.say("!new"))
+            await asyncio.wait_for(gate.entered.wait(), 10)  # the replacement is being started
             second = hook_args(u.agent.settings_file)
             assert second != first
             # The replacement is already up and fires its SessionStart; it waits for the relaunch's lock.
-            hook = asyncio.create_task(invoke(second, "SessionStart", source="resume"))
+            hook = asyncio.create_task(
+                invoke(second, "SessionStart", source="startup", session_id=u.agent.session_id)
+            )
             gate.release.set()
             await asyncio.wait_for(check, 10)
             await asyncio.wait_for(hook, 10)
             assert u.daemon.ready.is_set()
+
     run(scenario())
 
 
 # --- 4. malformed launch values ---
+
 
 def test_a_malformed_launch_is_dropped_without_restarting_the_hook_loop(tmp_path: Path) -> None:
     u = Unit(tmp_path)
@@ -197,17 +219,21 @@ def test_a_malformed_launch_is_dropped_without_restarting_the_hook_loop(tmp_path
 
     async def scenario() -> None:
         async with serving(u) as loop_task:
-            await u.daemon.start_agent(relaunch=True)
+            await u.say("!new")
             args = hook_args(u.agent.settings_file)
-            await fire(args, "SessionStart", flushed, source="startup")
+            await fire(args, "SessionStart", flushed, source="startup", session_id=u.agent.session_id)
             sock = str(u.settings.state_dir / "hook.sock")
             for extra in ({"launch": "é"}, {"launch": "abc"}, {"launch": "A" * 32}, {"launch": 7}):
-                frame = {"hook_event_name": "Stop", "session_id": "S1",
-                         "last_assistant_message": "malformed", **extra}
+                frame = {
+                    "hook_event_name": "Stop",
+                    "session_id": "S1",
+                    "last_assistant_message": "malformed",
+                    **extra,
+                }
                 reader, writer = await asyncio.open_unix_connection(sock)
                 writer.write(json.dumps(frame).encode() + b"\n")
                 await writer.drain()
-                assert await reader.read() == b""           # no ok: the frame was dropped
+                assert await reader.read() == b""  # no ok: the frame was dropped
                 writer.close()
             assert u.daemon.hooks.empty() and "malformed" not in u.texts()
             # an event that reaches the loop with a non-ASCII launch is contained too
@@ -215,6 +241,9 @@ def test_a_malformed_launch_is_dropped_without_restarting_the_hook_loop(tmp_path
             await u.daemon.hooks.put(HookEvent("Stop", "S1", last_assistant_message="odd", launch="é"))
             await asyncio.wait_for(flushed.wait(), 10)
             assert not loop_task.done()
-            await fire(args, "Stop", flushed, last_assistant_message="still alive")
+            await fire(
+                args, "Stop", flushed, last_assistant_message="still alive", session_id=u.agent.session_id
+            )
             assert "still alive" in u.texts()
+
     run(scenario())

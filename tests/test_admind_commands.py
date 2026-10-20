@@ -21,6 +21,9 @@ class Agent:
     def alive(self) -> bool:
         return True
 
+    def recovery_status(self) -> str:
+        return "startup-ready; future resume unqualified"
+
 
 class Services:
     def __init__(self) -> None:

@@ -1,0 +1,47 @@
+[
+  {
+    "path": "docs/reviews/2026-10-20-admind-resume-policy/admind-resume-policy-code-r1-high-actual-skill-result.md",
+    "bytes": 8367,
+    "sha256": "4f60e0b37713ca260aab2aa95cf564e86917f6d4a5aee1bdaa6556232b475056"
+  },
+  {
+    "path": "docs/reviews/2026-10-20-admind-resume-policy/admind-resume-policy-code-r1-high-wrapper-result.md",
+    "bytes": 5666,
+    "sha256": "0f46eab8c164a9f58d1aab149dc7233b9bd4ea9d2c02a89ef853c7250827f796"
+  },
+  {
+    "path": "docs/reviews/2026-10-20-admind-resume-policy/admind-resume-policy-code-r2-high-actual-skill-result.md",
+    "bytes": 10703,
+    "sha256": "00859c13607352a99814f6476c16075a64ac89b94f159dcef9efcc24f634e7bb"
+  },
+  {
+    "path": "docs/reviews/2026-10-20-admind-resume-policy/admind-resume-policy-code-r2-high-wrapper-result.md",
+    "bytes": 4712,
+    "sha256": "f47f9a755e5dfcd488bddaa019d532abe2885dc0ab9443e4fe03ec49869ca5a7"
+  },
+  {
+    "path": "docs/reviews/2026-10-20-admind-resume-policy/admind-resume-policy-code-r3-medium-actual-skill-result.md",
+    "bytes": 8380,
+    "sha256": "dbee09c5892246a8031b8bda37774495177899addff694aa427e3004f7686b59"
+  },
+  {
+    "path": "docs/reviews/2026-10-20-admind-resume-policy/admind-resume-policy-code-r3-medium-wrapper-result.md",
+    "bytes": 4134,
+    "sha256": "24229ea179b937c3cdd800fddb19f8f4f73cb33b8e2670763d8f83a4d696683f"
+  },
+  {
+    "path": "docs/reviews/2026-10-20-admind-resume-policy/admind-resume-policy-code-r4-medium-actual-skill-result.md",
+    "bytes": 4888,
+    "sha256": "93675706d646ff23893ac27d486b3fc48f1affebbe5489e47ebbc373ac6c26d8"
+  },
+  {
+    "path": "docs/reviews/2026-10-20-admind-resume-policy/admind-resume-policy-code-r4-medium-wrapper-result.md",
+    "bytes": 3629,
+    "sha256": "6fd0f81800ec829fa94db1090bc4b24faae82a3338493744d8b40ef1ec778bb3"
+  },
+  {
+    "path": "docs/reviews/2026-10-20-admind-resume-policy/dispositions.json",
+    "bytes": 1805,
+    "sha256": "36f54dd3a70f361e33d7d581422b74a7c9c68b2b174ac963ae4158799fb0f492"
+  }
+]

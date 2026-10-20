@@ -1,0 +1,9 @@
+[
+  "<OPERATOR_HOME>/repos/heterodyne-metaharness-v2-btq-btq-x84mg/.venv/bin/python",
+  "-m",
+  "pytest",
+  "-q",
+  "tests/test_admind_t9r1.py",
+  "tests/live/test_isolation_offline.py",
+  "--basetemp=/tmp/apstub"
+]

@@ -1,0 +1,29 @@
+diff --git a/home/openclaw/.hermes/handoff/2026-10-15/codex/autonomous-resume/admind-live-stub-protocol-repair/before-test_admind_t9r1.py b/home/openclaw/repos/heterodyne-metaharness-admind-resume-publication/tests/test_admind_t9r1.py
+index 2b2747f..df67f08 100644
+--- a/home/openclaw/.hermes/handoff/2026-10-15/codex/autonomous-resume/admind-live-stub-protocol-repair/before-test_admind_t9r1.py
++++ b/home/openclaw/repos/heterodyne-metaharness-admind-resume-publication/tests/test_admind_t9r1.py
+@@ -94,14 +94,14 @@ def test_a_claude_that_never_sends_session_start_is_held_then_reported(tmp_path:
+         await u.daemon.check_agent()
+         assert launches == [] and u.daemon.stuck is not None
+         assert not u.daemon.ready.is_set()
+-        notices = [t for t in u.texts() if "not running" in t]
++        notices = [t for t in u.texts() if "recovery is paused" in t]
+         assert len(notices) == 1 and "!new" in notices[0]
+         clock.now += 10 * limit
+         await u.daemon.check_agent()
+-        assert launches == [] and len([t for t in u.texts() if "not running" in t]) == 1
++        assert launches == [] and len([t for t in u.texts() if "recovery is paused" in t]) == 1
+         mid = await u.say("anyone there?")
+         assert u.store.inbound_status(mid) == "received"
+-        assert any("Not delivered: the admin agent is not running" in t for t in u.texts())
++        assert any("Not delivered: admin agent recovery is paused" in t for t in u.texts())
+     run(scenario())
+
+
+@@ -114,7 +114,7 @@ def test_a_claude_that_exits_at_once_is_held_without_waiting_for_the_timeout(tmp
+         for _ in range(4):
+             await u.daemon.check_agent()
+             assert launches == [] and u.daemon.stuck is not None
+-        assert len([t for t in u.texts() if "not running" in t]) == 1
++        assert len([t for t in u.texts() if "recovery is paused" in t]) == 1
+     run(scenario())

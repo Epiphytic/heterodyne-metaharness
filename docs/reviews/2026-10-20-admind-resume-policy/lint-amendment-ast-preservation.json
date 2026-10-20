@@ -1,0 +1,27 @@
+{
+  "tests/test_admind_t9r8.py": {
+    "before": "5fe0ce77cef24ad27c259e78ac3732d914dad8ad620da5cb42404e75dbbee9e4",
+    "after": "708fb7b9e02aff4e5ba49b48facb78648086928b39ed75bb5029e5bc39e08fb9",
+    "executable_ast_unchanged_except_two_unused_import_names": true
+  },
+  "tests/test_admind_t9r9.py": {
+    "before": "f57300f5d5787638aef08d8e30dd96b110f71f2eafe58b4c099e20cb9aa40a42",
+    "after": "5de96cd8680e82af9ebde3bbfe435b87199e555f93a07de077aad1fa149188f3",
+    "executable_ast_unchanged_except_two_unused_import_names": true
+  },
+  "tests/test_admind_t9r2.py": {
+    "before": "ffd4fa8da83676c6ca8472ae271bb0de2be8fab209c1a6db14e620e4ed66552f",
+    "after": "2b58ab500a92b843537d8d9d5448da337c4189d2e02be7566538cb02e4721b0f",
+    "executable_ast_unchanged_except_two_unused_import_names": true
+  },
+  "tests/test_admind_t9r3.py": {
+    "before": "020787fe9cfb7f782ae39c80200d4191d2fdd1dd38d17f8606c9089f5246dbe2",
+    "after": "e55e128faabcdf4c6edb0a811432bade2105ed021150e9a750de0835774f65e7",
+    "executable_ast_unchanged_except_two_unused_import_names": true
+  },
+  "tests/test_admind_t9r1.py": {
+    "before": "0865e42c92ff09f3e52b75f82611d4919ecfc1a86da73abcf41ef1813e366964",
+    "after": "b50aa11ea07782fb4ccfb7cdc3c367c63061e5f234de247dfa7b1e59a56223d9",
+    "executable_ast_unchanged_except_two_unused_import_names": true
+  }
+}

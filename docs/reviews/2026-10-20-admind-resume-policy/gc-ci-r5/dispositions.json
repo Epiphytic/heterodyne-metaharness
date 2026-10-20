@@ -1,0 +1,46 @@
+[
+  {
+    "ordinal": 1,
+    "finding": {
+      "file": "tests/test_sandbox_hostread.py",
+      "line": 784,
+      "summary": "The fix targets a guessed cause (repeated whole-heap gc.collect pushing past the sleeper's 60s wall-clock CAP), but the CI failure only shows the child exited with code 0. wait_for_release also returns 0 at once if the lifeline can't be opened, and as soon as LOCK_SH succeeds, so the real cause may be untouched.",
+      "failure_scenario": "CI: child returncode 0 with events == [] (failed-ci.log:202-211). If the child exited because the escapes lifeline was missing or released early, rather than at CAP, the single-GC change does nothing and kept_at_the_deadline:688 still fails intermittently. The report itself says no local RED and no timing measurement was done."
+    },
+    "status": "OPEN",
+    "disposition": "Retained without waiver; supplemental source-level PoC approval does not establish the cause or remove this debt."
+  },
+  {
+    "ordinal": 2,
+    "finding": {
+      "file": "tests/test_sandbox_hostread.py",
+      "line": 688,
+      "summary": "The test still depends on a real sleeper outliving a wall-clock 60s backstop (tests/fakes/sleeper.py:36, which says 'no proof relies on it') while recover runs about 200 simulated iterations. One gc.collect over a large heap from the full suite, plus slow CI, can still hit the cap.",
+      "failure_scenario": "Full 9000-test suite on a loaded runner: the first gc.collect over the accumulated heap plus about 200 /proc scan iterations take more than 60s of real time. The sleeper hits CAP and exits 0, and `seam.child.poll() is None` fails again. A sturdier fix would stop the test's correctness from depending on CAP, for example by raising CAP or not asserting child liveness through a wall-clock backstop."
+    },
+    "status": "OPEN",
+    "disposition": "Retained without waiver; supplemental source-level PoC approval does not establish the cause or remove this debt."
+  },
+  {
+    "ordinal": 3,
+    "finding": {
+      "file": "tests/test_sandbox_hostread.py",
+      "line": 769,
+      "summary": "One gc.collect() still runs finalizers for every object other tests left behind, in the middle of recover and after `before` was taken. Any finalizer that opens an fd (or leaves a cycle that does) makes none_left(before) fail for reasons unrelated to hostread.",
+      "failure_scenario": "Another test leaves a cyclic object whose __del__ or weakref finalizer opens a file, log handler or socket. The forced collect on the first sleep opens a new fd that wasn't in `before`, so kept_at_the_deadline's none_left(before) fails nondeterministically depending on test order."
+    },
+    "status": "OPEN",
+    "disposition": "Retained without waiver; supplemental source-level PoC approval does not establish the cause or remove this debt."
+  },
+  {
+    "ordinal": 4,
+    "finding": {
+      "file": "tests/test_sandbox_hostread.py",
+      "line": 764,
+      "summary": "The `collected` latch and `nonlocal` duplicate state FakeTime already tracks: `fake_time.sleeps` is 0 exactly on the first sleep.",
+      "failure_scenario": "Unneeded mutable closure state. `if fake_time.sleeps == 0: gc.collect()` before calling `sleep(seconds)` does the same job without the latch and nonlocal."
+    },
+    "status": "OPEN",
+    "disposition": "Retained without waiver; supplemental source-level PoC approval does not establish the cause or remove this debt."
+  }
+]

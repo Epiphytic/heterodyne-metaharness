@@ -1,19 +1,10 @@
-"""The persistent admin agent session (ADR 0001 §8; plan decision D8).
+"""The source-owned persistent admin agent.
 
-One interactive `claude` runs in tmux session `admin` on admind's private tmux server. Its session ID is
-recorded in the store:
-- `ensure_running` adopts a live session, but only one that has a current launch nonce and no unfinished
-  replacement (the store's `replace_pending`, written in the same transaction that abandoned the old
-  turn and cleared only once the replacement pane is started);
-- it resumes the recorded ID (with `--resume`) once that ID has been seen to start, and only on the login
-  it was launched on (the store's `agent_account`, the credential key written with each launch nonce):
-  Claude keeps transcripts in its login directory, so a resume elsewhere can't succeed;
-- otherwise it launches with a fresh ID;
-- every launch gets a fresh nonce, carried by its hook command, so events of an earlier launch are
-  recognised as stale;
-- three launches in a row without a SessionStart hook raise AgentStuck until `new()`.
-It runs as the service user, unsandboxed, with permission prompts bypassed: a deliberate operator
-decision (§8).
+A matching startup acknowledgement establishes current readiness, never future
+resumability. Automatic replacement/resume is default-denied because a supported
+positive eligibility producer is absent. Existing authenticated !new requests one
+fresh launch and resets the outer three-launch ceiling. All automatic callers use
+ensure_running; its refusal occurs before kill, new identity or another attempt.
 """
 
 import os
@@ -30,7 +21,7 @@ from heterodyne.agents.claude_code import interactive_argv
 
 SESSION = "admin"
 TMUX_SOCKET = "heterodyne-admind"
-TMUX_SCOPE = "heterodyne-admind-tmux"   # prefix of the transient systemd scopes that hold the tmux server
+TMUX_SCOPE = "heterodyne-admind-tmux"  # prefix of the transient systemd scopes that hold the tmux server
 MAX_LAUNCHES_WITHOUT_START = 3
 
 
@@ -43,9 +34,15 @@ def tmux_launcher(settings: AdmindSettings) -> Callable[[], tuple[str, ...]] | N
     On launchd nothing is needed (None): tmux daemonises with setsid and launchd does not kill by cgroup."""
     if settings.service_manager != "systemd":
         return None
-    return lambda: (shutil.which("systemd-run") or "systemd-run", "--user", "--scope", "--collect",
-                    "--quiet", f"--unit={TMUX_SCOPE}-{uuid.uuid4().hex[:12]}",
-                    "--description=heterodyne admind private tmux server (admin agent)")
+    return lambda: (
+        shutil.which("systemd-run") or "systemd-run",
+        "--user",
+        "--scope",
+        "--collect",
+        "--quiet",
+        f"--unit={TMUX_SCOPE}-{uuid.uuid4().hex[:12]}",
+        "--description=heterodyne admind private tmux server (admin agent)",
+    )
 
 
 class AgentStuck(RuntimeError):
@@ -53,9 +50,16 @@ class AgentStuck(RuntimeError):
 
 
 class TmuxLike(Protocol):
+    def session_absent(self, name: str) -> bool: ...
     def has_session(self, name: str) -> bool: ...
-    def new_session(self, name: str, cwd: Path, argv: list[str], set: Mapping[str, str] | None = None,
-                    unset: Sequence[str] = ()) -> None: ...
+    def new_session(
+        self,
+        name: str,
+        cwd: Path,
+        argv: list[str],
+        set: Mapping[str, str] | None = None,
+        unset: Sequence[str] = (),
+    ) -> None: ...
     def pane_dead(self, name: str) -> bool: ...
     def paste(self, name: str, text: str) -> None: ...
     def send_key(self, name: str, key: str) -> None: ...
@@ -86,7 +90,7 @@ class AdminAgent:
         self.store.delete("launch_nonce")
 
     def alive(self) -> bool:
-        return self.tmux.has_session(SESSION) and not self.tmux.pane_dead(SESSION)
+        return not self.tmux.session_absent(SESSION) and not self.tmux.pane_dead(SESSION)
 
     def _write_settings(self) -> None:
         tmp = self.settings_file.with_name(f".{self.settings_file.name}.tmp")
@@ -104,57 +108,175 @@ class AdminAgent:
         """Why an earlier run began replacing the pane without finishing (a fixed word), or None."""
         return self.store.get("replace_pending")
 
+    def startup_acknowledged(self) -> bool:
+        """Current launch acknowledgement only; never a persistence/resume capability."""
+        nonce = self.launch_nonce
+        return (
+            nonce is not None
+            and self.login_matches()
+            and self.store.get("launch_kind") == "startup"
+            and self.store.get("launch_session") == self.session_id
+            and self.store.get("launch_ack_nonce") == nonce
+            and self.store.get("launch_ack_session") == self.session_id
+            and self.store.get("launch_hold") is None
+        )
+
+    def recovery_status(self) -> str:
+        """Public fixed vocabulary; never disclose persisted identities or account paths."""
+        origin = self.store.get("conversation_origin")
+        conversation = (
+            "explicitly replaced"
+            if origin == "explicitly-replaced"
+            else ("original" if origin == "original" else "origin unknown")
+        )
+        if self.store.get("launch_hold") is not None:
+            return (
+                f"HOLD; conversation {conversation}; future resume unqualified; authenticated !new required"
+            )
+        state = "startup-ready" if self.startup_acknowledged() else "startup acknowledgement pending"
+        return state + f"; conversation {conversation}; future resume unqualified"
+
+    def hold_launch(self, why: str) -> None:
+        """A source-owned terminal launch hold; only authenticated !new clears it."""
+        if self.store.get("launch_hold") is None:
+            self.store.set("launch_hold", why)
+
+    def _refuse_launch(self, why: str) -> None:
+        self.hold_launch(why)
+        raise AgentStuck(f"admin agent recovery held ({why}); use !tail, then !new")
+
     def ensure_running(self, relaunch: bool = False) -> str:
-        """`relaunch` skips adoption: a live pane that never reported SessionStart is replaced, under the
-        same crash-loop limit as any other launch. So does an unfinished replacement (`replace_pending`,
-        persisted by whoever abandoned the old pane's turn): the old pane may still be busy and is never
-        adopted. A pane with no current launch nonce is never adopted either. The intent is cleared only
-        after the replacement pane is started with its own nonce, so a crash before that repeats it."""
+        """Adopt a current pane or launch a first/explicitly requested fresh startup.
+
+        No supported positive resume-eligibility producer exists. A recorded session,
+        SessionStart or caller-written eligibility flag cannot authorize automatic
+        resume/replacement. Refuse BEFORE kill, identity mutation or attempt spending.
+        An issued fresh launch is never replayed after a crash, including pending !new.
+        """
+        if self.store.get("launch_hold") is not None:
+            raise AgentStuck("admin agent recovery held; use !tail, then !new")
         pending = self.replace_pending()
-        if relaunch and pending is None:
-            self.store.set("replace_pending", "relaunch")
-            pending = "relaunch"
-        if (pending is None and self.alive() and self.session_id is not None
-                and self.launch_nonce is not None):
+        if (
+            not relaunch
+            and pending is None
+            and self.store.get("launch_issued") is None
+            and self.alive()
+            and self.login_matches()
+            and self.session_id is not None
+            and self.launch_nonce is not None
+        ):
             return "adopted"
-        if pending == "new":    # !new: a new session, and a fresh crash-loop count
-            self.store.delete("agent_session")
-            self.store.set("launches_without_start", "0")
+        intent = self.store.get("launch_new_intent")
+        if pending == "new" and intent is not None:
+            self._refuse_launch("launch-unacknowledged")
+        recorded = any(
+            self.store.get(key) is not None
+            for key in (
+                "agent_session",
+                "session_started",
+                "launch_nonce",
+                "launch_kind",
+                "launch_session",
+                "agent_account",
+                "launches_without_start",
+                "launch_issued",
+                "launch_new_intent",
+                "launch_attempt_intent",
+                "launch_ack_nonce",
+                "launch_ack_session",
+                "launch_resume_eligibility",
+            )
+        )
+        if relaunch or pending is not None or recorded:
+            self._refuse_launch("resume-eligibility-unqualified")
+        return self._request_startup(fresh=False)
+
+    def _request_startup(self, *, fresh: bool) -> str:
+        """Issue durably once; only the explicit new() path may request replacement.
+
+        The new intent and its consumption commit together with the launch binding,
+        before any external effect. Automatic entrypoints never infer replacement
+        permission from a persisted pending intent.
+        """
         launches = int(self.store.get("launches_without_start") or "0")
-        if launches >= MAX_LAUNCHES_WITHOUT_START:   # checked first: the dead pane stays for !tail
-            raise AgentStuck(f"the admin agent did not start after {launches} launches; use !tail, then !new")
-        self.tmux.kill(SESSION)  # a dead pane kept for !tail, or a session admind has no record of
-        sid = self.session_id
-        started = sid is not None and self.store.get("session_started") == sid
-        login_changed = not self.login_matches() and (started or pending == "login-changed")
-        resume = started and not login_changed
-        if sid is None or not resume:
-            sid = str(uuid.uuid4())
-            self.store.set("agent_session", sid)
-        self.store.set("launches_without_start", str(launches + 1))
+        if fresh:
+            launches = 0
+        if launches >= MAX_LAUNCHES_WITHOUT_START:
+            self._refuse_launch("launch-budget-exhausted")
+        sid = str(uuid.uuid4())
         account = self.settings.agent_account
         with self.store.transaction():
-            self.store.set("launch_nonce", new_launch_nonce())   # before the settings: hooks carry it
+            if fresh:
+                intent = new_launch_nonce()
+                self.store.set("replace_pending", "new")
+                self.store.set("launch_new_intent", intent)
+                self.store.set("launch_attempt_intent", intent)
+                self.store.set("conversation_origin", "explicitly-replaced")
+                self.store.delete("launch_hold")
+            else:
+                self.store.set("conversation_origin", "original")
+            self.store.set("agent_session", sid)
+            self.store.set("launches_without_start", str(launches + 1))
+            self.store.set("launch_nonce", new_launch_nonce())
             self.store.set("agent_account", account.key)
-        self._write_settings()
-        argv = interactive_argv(self.settings.adapter_binary, self.settings.profile, session_id=sid,
-                                resume=resume, settings_file=self.settings_file, name=SESSION)
-        self.tmux.new_session(SESSION, self.settings.workdir, argv, set=account.set, unset=account.unset)
-        self.store.delete("replace_pending")     # established: nonce installed, pane started
-        if resume:
-            return "resumed"
-        return "launched-login-changed" if login_changed else "launched"
+            self.store.set("launch_kind", "startup")
+            self.store.set("launch_issued", self.launch_nonce or "")
+            self.store.set("launch_session", sid)
+            self.store.set("launch_resume_eligibility", "unqualified")
+            self.store.delete("launch_ack_nonce")
+            self.store.delete("launch_ack_session")
+        # Issued state precedes every external operation. Any uncertainty is held.
+        try:
+            self.tmux.kill(SESSION)
+            self._write_settings()
+            argv = interactive_argv(
+                self.settings.adapter_binary,
+                self.settings.profile,
+                session_id=sid,
+                resume=False,
+                settings_file=self.settings_file,
+                name=SESSION,
+            )
+            self.tmux.new_session(SESSION, self.settings.workdir, argv, set=account.set, unset=account.unset)
+        except Exception:
+            self.hold_launch("launch-unacknowledged")
+            raise
+        with self.store.transaction():
+            self.store.delete("replace_pending")
+            self.store.delete("launch_issued")
+        return "new-launch-requested" if fresh else "startup-launch-requested"
 
-    def started(self, session_id: str) -> None:
-        self.store.set("session_started", session_id)
-        self.store.set("launches_without_start", "0")
+    def started(self, session_id: str, source: str = "startup", nonce: str | None = None) -> bool:
+        """Accept only this source-owned startup's exact current acknowledgement.
+
+        Hook authentication remains the daemon/socket boundary. A startup ack is
+        current readiness only, never durable resume eligibility. No positive resume
+        branch exists until a separately approved capability producer is implemented.
+        """
+        if (
+            source != "startup"
+            or nonce is None
+            or nonce != self.launch_nonce
+            or session_id != self.session_id
+            or not self.login_matches()
+            or self.store.get("launch_kind") != "startup"
+            or self.store.get("launch_session") != session_id
+            or self.store.get("launch_hold") is not None
+        ):
+            return False
+        with self.store.transaction():
+            self.store.set("session_started", session_id)
+            self.store.set("launch_ack_session", session_id)
+            self.store.set("launch_ack_nonce", nonce)
+        return True
 
     def new(self) -> str:
-        self.store.set("replace_pending", "new")     # before the kill: a crash after it repeats the !new
-        self.tmux.kill(SESSION)
-        self.store.delete("agent_session")
-        self.store.set("launches_without_start", "0")
-        return self.ensure_running()
+        """Existing authenticated owner operation: accept one explicit fresh launch.
+
+        A persisted intent is consumed before kill/spawn; restart cannot replay it.
+        Only this operation clears sticky recovery hold and the outer launch budget.
+        """
+        return self._request_startup(fresh=True)
 
     def send(self, text: str) -> None:
         self.tmux.paste(SESSION, text)

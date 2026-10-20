@@ -1,0 +1,1 @@
+PASS actual StubTmux + AdminAgent absent/launch/adopt/acknowledgement/death; no tmux, subprocess, relay or service actions

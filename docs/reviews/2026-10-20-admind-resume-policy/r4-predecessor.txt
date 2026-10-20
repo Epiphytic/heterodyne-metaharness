@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "<OPERATOR_HOME>/.hermes/handoff/2026-10-15/codex/autonomous-resume/admind-live-stub-protocol-repair/smoke.py", line 11, in <module>
+    assert agent.alive() is False
+           ~~~~~~~~~~~^^
+  File "<OPERATOR_HOME>/repos/heterodyne-metaharness-admind-resume-publication/src/heterodyne/admind/agent.py", line 93, in alive
+    return not self.tmux.session_absent(SESSION) and not self.tmux.pane_dead(SESSION)
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'StubTmux' object has no attribute 'session_absent'

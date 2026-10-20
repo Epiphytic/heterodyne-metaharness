@@ -1,0 +1,40 @@
+{
+  "final-broad-command.json": {
+    "original_sha256": "9280d7fe8c6930e91baa5fa75aae9c0607f8fb21360a9521fe6b2aaf24fee644",
+    "published_sha256": "b5fdc8d542351b3c07e74e2297d2e68c842be3b95ce52c936fa573586788a0fe",
+    "transformation": "host-neutral paths; local actor label in diagnostic only"
+  },
+  "r4-change-check-summary.json": {
+    "original_sha256": "9a44d0830e3d1f7aedb674c945afd48494f0e4c11a34adb61f1f342708bc7f68",
+    "published_sha256": "c9b4e7f5bd1de2b870dd6fb188927ab7adc0d9b9277d48704aeef78b2f8faf8b",
+    "transformation": "host-neutral paths; local actor label in diagnostic only"
+  },
+  "r4-tests-command.json": {
+    "original_sha256": "496add812b500b42351cd2b3882609634b40ea11dfcddf38a0d470a8eb57c049",
+    "published_sha256": "738e0863825f58ce8f5c1a1c17f2219e5661a9782a3c4369cff0ff9cb1d0d4ce",
+    "transformation": "host-neutral paths; local actor label in diagnostic only"
+  },
+  "predecessor-broad-exit.json": {
+    "original_sha256": "7e762611c9aaae096e61c0583d49b6387176d8a13a8d735bb2868a0815e2e236",
+    "published_sha256": "313b903c56856ace7814e54c73d6ffaf18310461707208f476144105dd854f70",
+    "transformation": "host-neutral paths; local actor label in diagnostic only"
+  },
+  "predecessor-broad-command.json": {
+    "original_sha256": "44d377131b0ae488dcb4c8070b4991136de2ab06b3eaa9d984e452537a90b7d5",
+    "published_sha256": "3d8017ec6a4325f94421bc6231a5cee2cfe323a44414aa47f79bcb93ae2a7da6",
+    "transformation": "host-neutral paths; local actor label in diagnostic only"
+  },
+  "r4-predecessor.txt": {
+    "original_sha256": "46cbaa98ce90d6c2eec8d4a0a2d41d35878665ba0559c7e54aadc35c02e76192",
+    "published_sha256": "52a931a4448d1262d07848deec2d0093d43a3272f9600843649441016aaa6cfa",
+    "transformation": "host-neutral paths; local actor label in diagnostic only"
+  },
+  "r4-candidate.patch": {
+    "original_sha256": "9a044f37707b02bdc25f88aedd6c1710e88dc0630f75405a330e79cf6277ae7f",
+    "transformation": "archive trailing whitespace normalized; source bytes not changed"
+  },
+  "r4-oracle-repair.patch": {
+    "original_sha256": "1af968cbe1b38b51ead208bc26dc8985f444ce0576cfbfcfc3a13b8004f2bce9",
+    "transformation": "archive trailing whitespace normalized; source bytes not changed"
+  }
+}

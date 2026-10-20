@@ -1,0 +1,32 @@
+{
+  "test_admind_r1.py": {
+    "changed_methods": [
+      "test_startup_or_resume_of_the_same_idle_session_is_a_no_op",
+      "test_a_same_session_start_while_busy_or_of_unknown_source_is_a_restart"
+    ],
+    "added_methods": [
+      "session_absent"
+    ],
+    "all_other_method_AST_exact": true,
+    "before_sha256": "78c7a289a1fd44844492e5aa60e82790f1491057454e0bfa6775626cbf44f161",
+    "after_sha256": "3f352de6ca135720abab59d57bd9730bf8a794874d3b894ef7431a618fb37134"
+  },
+  "test_admind_resume_policy_r1.py": {
+    "changed_methods": [
+      "test_startup_hold_posts_notice_and_later_prompt_gets_held_reply_once"
+    ],
+    "added_methods": [],
+    "all_other_method_AST_exact": true,
+    "before_sha256": "dff1231d2d98f5fef8adf7c2395d7817442125f09e8f62825337ca83805b6875",
+    "after_sha256": "4c6518327f834ff9e3620d658358f639f4680160c279365a56df563b77467829"
+  },
+  "test_admind_agent.py": {
+    "changed_methods": [],
+    "added_methods": [
+      "session_absent"
+    ],
+    "all_other_method_AST_exact": true,
+    "before_sha256": "41e87f831023cee63d73f34fc9d854b210fa9ccc875d55701dcd39570f1909bf",
+    "after_sha256": "ba4d47e5adef8bd4913e754a5ebce6e49ef8eafccdcf6ced70667a8594b2a85d"
+  }
+}

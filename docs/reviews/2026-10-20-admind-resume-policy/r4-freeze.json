@@ -1,0 +1,96 @@
+{
+  "source_pins": {
+    "src/heterodyne/admind/agent.py": "321cdcb7d8a7aad18bc85af91fd028597f068565344493cac5d5dfe81a632137",
+    "src/heterodyne/admind/commands.py": "b3b2ec955429fdf9e4d950589651c5681a9317b06ceae75cdd2fa88d16806c8b",
+    "src/heterodyne/admind/daemon.py": "da4a6cb287ff3bccdd50abfe936a6bf93904e3a1e1363decf3af8e65f6286bfa",
+    "src/heterodyne/admind/fulfillment_projection.py": "3d532540a5350c5b5bfa00b25eabced1cb27e6a5b9fbf0e2d3d1db632aeeae20",
+    "tests/test_admind_agent.py": "ba4d47e5adef8bd4913e754a5ebce6e49ef8eafccdcf6ced70667a8594b2a85d",
+    "tests/test_admind_approvals.py": "99c9c9786feafed8349274bbb104ca1163d75bfc2e3a78514640936f64770d7a",
+    "tests/test_admind_au11.py": "47fd76fa844d10bb47b4a83360b5addb66aba37dcf6f9258aa6aead481725acc",
+    "tests/test_admind_commands.py": "75f251e0dd39386e137fac13fe5f109ccb10c11d0aac6bc9c4782ac34b5f1b16",
+    "tests/test_admind_daemon.py": "478fde2976cd42837a6965896969265ba0c335a1c0f291d9587e6deb70e995eb",
+    "tests/test_admind_r1.py": "3f352de6ca135720abab59d57bd9730bf8a794874d3b894ef7431a618fb37134",
+    "tests/test_admind_r13_membership.py": "1b89f90e8f1ea99b6b1295e248fae5b2d8a47e31a5487aebde272cfd1ee01ec4",
+    "tests/test_admind_t9r1.py": "0865e42c92ff09f3e52b75f82611d4919ecfc1a86da73abcf41ef1813e366964",
+    "tests/test_admind_t9r10.py": "d129d300928b166c61cfe8bb3e5f8a107818b52955f9f96a952e162c4276fb9b",
+    "tests/test_admind_t9r2.py": "ffd4fa8da83676c6ca8472ae271bb0de2be8fab209c1a6db14e620e4ed66552f",
+    "tests/test_admind_t9r3.py": "020787fe9cfb7f782ae39c80200d4191d2fdd1dd38d17f8606c9089f5246dbe2",
+    "tests/test_admind_t9r5.py": "d3fb08477799c584808dc01eb77835a6fe14a9938c2f40638de2c0c36b7ec178",
+    "tests/test_admind_t9r8.py": "5fe0ce77cef24ad27c259e78ac3732d914dad8ad620da5cb42404e75dbbee9e4",
+    "tests/test_admind_t9r9.py": "f57300f5d5787638aef08d8e30dd96b110f71f2eafe58b4c099e20cb9aa40a42",
+    "tests/test_admind_resume_policy.py": "626107ad38f849cf11f8377824d7f83f37389d3297227c7cb217a7a43144725f",
+    "tests/test_admind_resume_policy_r1.py": "4c6518327f834ff9e3620d658358f639f4680160c279365a56df563b77467829",
+    "docs/admind.md": "2236748b49b9e8337e3550e72db1ff597272fbdd5cecf4d428ec885253636ce0",
+    "tests/test_admind_resume_policy_r2.py": "4e959acca87fd1cfa7ed48f3839eced950c1e53550f996be14261fc7cb053dd0",
+    "tests/live/stub_admind.py": "ac8b139998e4a5a694c55bcf3eb7b945ccdb5748de45f7a99ccb58921a45c9ba"
+  },
+  "artifacts": {
+    "admind-resume-policy-code-r3-medium-actual-skill-result.md": {
+      "sha256": "dbee09c5892246a8031b8bda37774495177899addff694aa427e3004f7686b59"
+    },
+    "oracle-migration.json": {
+      "sha256": "073309dba4ca223a542905cbcecf31d7b2106a7bad368268fc5b80ceac15af3b"
+    },
+    "admind-resume-policy-code-r1-high-actual-skill-result.md": {
+      "sha256": "4f60e0b37713ca260aab2aa95cf564e86917f6d4a5aee1bdaa6556232b475056"
+    },
+    "change-check-summary.json": {
+      "sha256": "9a44d0830e3d1f7aedb674c945afd48494f0e4c11a34adb61f1f342708bc7f68"
+    },
+    "admind-resume-policy-code-r2-high-actual-skill-result.md": {
+      "sha256": "00859c13607352a99814f6476c16075a64ac89b94f159dcef9efcc24f634e7bb"
+    },
+    "report.md": {
+      "sha256": "37acbc425d0681e5eefcc25e1c56886d405dbe46a738a08618d7ddfe24f7f9c5"
+    },
+    "repaired.txt": {
+      "sha256": "0452a2a15550d8886e7c945e1744ca0cfa8001b351ed1a90e82f0de7bf718d08"
+    },
+    "admind-resume-policy-code-r2-high-wrapper-result.md": {
+      "sha256": "f47f9a755e5dfcd488bddaa019d532abe2885dc0ab9443e4fe03ec49869ca5a7"
+    },
+    "predecessor.txt": {
+      "sha256": "46cbaa98ce90d6c2eec8d4a0a2d41d35878665ba0559c7e54aadc35c02e76192"
+    },
+    "before-test_admind_t9r1.py": {
+      "sha256": "872c6d384d11bfd9e509e8f365ae3f3a13c50380b51ae16ed6783f786d6520c6"
+    },
+    "admind-resume-policy-code-r1-high-wrapper-result.md": {
+      "sha256": "0f46eab8c164a9f58d1aab149dc7233b9bd4ea9d2c02a89ef853c7250827f796"
+    },
+    "quality.txt": {
+      "sha256": "2eb58871951b3cbe8b5167185da0f51bdcbbd0bd49886f8b08ed61a20a990b6e"
+    },
+    "before-stub_admind.py": {
+      "sha256": "32dcb48ad4c48fff84f1b0045ce97800e89370994d2388861a7cc8deff12c47d"
+    },
+    "candidate.patch": {
+      "sha256": "9a044f37707b02bdc25f88aedd6c1710e88dc0630f75405a330e79cf6277ae7f"
+    },
+    "tests-result.txt": {
+      "sha256": "cd5fc4c48ee1b8cf8867485aefbdf01550ae1301e44778e5045e6c92242dfa8a"
+    },
+    "change-check.txt": {
+      "sha256": "6fe79fcbc4337321252b6cd77a4ac436efd9c8ca3331e7929ac4c7418de5eb88"
+    },
+    "smoke.py": {
+      "sha256": "bf6294479573d8d19b8cae94a8843dc9ae52c2d2a2160f4a0ff7ac41f6f03b37"
+    },
+    "admind-resume-policy-code-r3-medium-wrapper-result.md": {
+      "sha256": "24229ea179b937c3cdd800fddb19f8f4f73cb33b8e2670763d8f83a4d696683f"
+    },
+    "oracle-repair.patch": {
+      "sha256": "1af968cbe1b38b51ead208bc26dc8985f444ce0576cfbfcfc3a13b8004f2bce9"
+    },
+    "tests-exit.json": {
+      "sha256": "5bc232b82de377a5655a39a2af9d7ae0fc868de5b9df957e18905cb914606c88"
+    },
+    "tests-command.json": {
+      "sha256": "496add812b500b42351cd2b3882609634b40ea11dfcddf38a0d470a8eb57c049"
+    },
+    "assertion-preservation.json": {
+      "sha256": "4af4145949cbd010854691b8b6038f9f90cf044d1a15e1cae8ae893fb9aafd22"
+    }
+  },
+  "status": "source-only; live unqualified; broad running excluded"
+}

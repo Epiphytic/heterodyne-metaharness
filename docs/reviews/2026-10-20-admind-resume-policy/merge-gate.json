@@ -1,0 +1,36 @@
+{
+  "at": "2026-10-20T11:18:01.351634+00:00",
+  "source_hashes_unchanged": true,
+  "source_count": 23,
+  "broad": {
+    "files": 102,
+    "passed": 2847,
+    "seconds": 1242.3,
+    "exit": 0
+  },
+  "code_review": "reviewer=Claude-Opus author=Codex mode=cross-model",
+  "rounds": [
+    "FULL HIGH1",
+    "FULL HIGH2",
+    "MEDIUM3 exact PoC question",
+    "supplemental MEDIUM4 critical stub repair"
+  ],
+  "gate": "source-only approved; no deployment or native resume qualification",
+  "quality": "128 gates OPEN; no clean-quality claim",
+  "preserved_public_main_runtime_configuration": true,
+  "publication_lint_amendment": {
+    "files": 5,
+    "production_source_unchanged": true,
+    "test_assertions_ast_preserved": true,
+    "focused_passed": 38,
+    "seconds": 10.82,
+    "ruff": "whole repository PASS",
+    "pyright": "whole repository PASS 0 errors/warnings"
+  },
+  "test_callable_amendment": {
+    "test_only": true,
+    "focused_passed": 12,
+    "seconds": 5.55,
+    "production_unchanged": true
+  }
+}

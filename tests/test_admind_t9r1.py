@@ -14,7 +14,6 @@ import pytest
 from test_admind_r1 import Unit, run
 
 from heterodyne.admind.audit import Audit
-from heterodyne.admind.hook import HookEvent
 from heterodyne.admind.store import Store, private_dir
 from heterodyne.services import UnitStatus
 
@@ -28,14 +27,14 @@ def test_rearm_after_an_explicit_latch_restores_observing_without_a_restart(tmp_
     async def scenario() -> None:
         task = asyncio.create_task(u.daemon.inbound_loop())
         try:
-            await u.client.acked.wait()                 # subscription acknowledged, explicit latch remains
+            await u.client.acked.wait()  # subscription acknowledged, explicit latch remains
             assert u.daemon.latched() and not u.daemon.may_post()
-            u.client.member_count = 1             # count is observational
-            u.store.delete("latched")                   # what `admind rearm` does
-            assert await u.daemon.check_group()         # the periodic check passes
+            u.client.member_count = 1  # count is observational
+            u.store.delete("latched")  # what `admind rearm` does
+            assert await u.daemon.check_group()  # the periodic check passes
             assert u.daemon.observing and u.daemon.may_post()
             await u.say("hello")
-            assert u.tmux.pasted == ["hello"]           # dispatch resumed
+            assert u.tmux.pasted == ["hello"]  # dispatch resumed
             u.daemon.post("k", "posted", None, owner=None)
             await u.daemon.outbox_pass()
             assert "posted" in [s.text for s in u.client.sent]
@@ -43,6 +42,7 @@ def test_rearm_after_an_explicit_latch_restores_observing_without_a_restart(tmp_
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+
     run(scenario())
 
 
@@ -54,10 +54,12 @@ def test_a_passing_check_before_the_subscription_is_acknowledged_does_not_observ
     async def scenario() -> None:
         assert not await u.daemon.check_group()
         assert not u.daemon.observing
+
     run(scenario())
 
 
 # --- agent supervision (decision D8) ---
+
 
 class Clock:
     def __init__(self) -> None:
@@ -78,81 +80,73 @@ def supervised_unit(tmp_path: Path) -> tuple[Unit, Clock, list[str]]:
     def new_session(name: str, cwd: Path, argv: list[str], **env: Any) -> None:
         launches.append(name)
         original(name, cwd, argv, **env)
-    u.tmux.new_session = new_session                    # type: ignore[method-assign]
+
+    u.tmux.new_session = new_session  # type: ignore[method-assign]
     return u, clock, launches
 
 
-def test_a_claude_that_never_sends_session_start_is_relaunched_then_reported(tmp_path: Path) -> None:
+def test_a_claude_that_never_sends_session_start_is_held_then_reported(tmp_path: Path) -> None:
     u, clock, launches = supervised_unit(tmp_path)
-    u.daemon.ready.clear()                              # launched, no SessionStart yet
+    u.daemon.ready.clear()
     limit = u.daemon.ready_timeout
 
     async def scenario() -> None:
         await u.daemon.check_agent()
-        assert launches == []                           # still within the readiness window
-        for n in range(1, 4):
-            clock.now += limit + 1
-            await u.daemon.check_agent()
-            assert len(launches) == n and u.daemon.stuck is None
-            assert not u.daemon.ready.is_set()
+        assert launches == [] and u.daemon.stuck is None
         clock.now += limit + 1
-        await u.daemon.check_agent()                    # the fourth failure meets the crash-loop limit
-        assert len(launches) == 3 and u.daemon.stuck is not None
-        notices = [t for t in u.texts() if "not running" in t]
+        await u.daemon.check_agent()
+        assert launches == [] and u.daemon.stuck is not None
+        assert not u.daemon.ready.is_set()
+        notices = [t for t in u.texts() if "recovery is paused" in t]
         assert len(notices) == 1 and "!new" in notices[0]
         clock.now += 10 * limit
-        await u.daemon.check_agent()                    # no tight loop: it waits for !new
-        assert len(launches) == 3 and len([t for t in u.texts() if "not running" in t]) == 1
-        await u.say("anyone there?")                    # a message now gets the stuck reply, not a hang
-        assert any("Not delivered: the admin agent is not running" in t for t in u.texts())
+        await u.daemon.check_agent()
+        assert launches == [] and len([t for t in u.texts() if "recovery is paused" in t]) == 1
+        mid = await u.say("anyone there?")
+        assert u.store.inbound_status(mid) == "received"
+        assert any("Not delivered: admin agent recovery is paused" in t for t in u.texts())
+
     run(scenario())
 
 
-def test_a_claude_that_exits_at_once_is_relaunched_without_waiting_for_the_timeout(tmp_path: Path) -> None:
+def test_a_claude_that_exits_at_once_is_held_without_waiting_for_the_timeout(tmp_path: Path) -> None:
     u, _clock, launches = supervised_unit(tmp_path)
     u.daemon.ready.clear()
-    u.tmux.pane_dead = lambda name: True                # type: ignore[method-assign]
+    u.tmux.pane_dead = lambda name: True  # type: ignore[method-assign]
 
     async def scenario() -> None:
-        for n in range(1, 4):
+        for _ in range(4):
             await u.daemon.check_agent()
-            assert len(launches) == n
-        await u.daemon.check_agent()
-        assert len(launches) == 3 and u.daemon.stuck is not None
-        assert any("not running" in t for t in u.texts())
+            assert launches == [] and u.daemon.stuck is not None
+        assert len([t for t in u.texts() if "recovery is paused" in t]) == 1
+
     run(scenario())
 
 
-def test_an_agent_that_dies_mid_turn_abandons_the_turn_and_releases_the_queue(tmp_path: Path) -> None:
+def test_an_agent_that_dies_mid_turn_preserves_the_turn_and_holds_the_queue(tmp_path: Path) -> None:
     u, _clock, launches = supervised_unit(tmp_path)
     dead: set[str] = set()
-    u.tmux.pane_dead = lambda name: name in dead        # type: ignore[method-assign]
-    original = u.tmux.new_session
-
-    def relaunch(name: str, cwd: Path, argv: list[str], **env: Any) -> None:
-        dead.discard(name)
-        original(name, cwd, argv, **env)
-    u.tmux.new_session = relaunch                       # type: ignore[method-assign]
+    u.tmux.pane_dead = lambda name: name in dead  # type: ignore[method-assign]
 
     async def scenario() -> None:
         first = await u.say("long job")
         assert u.store.get("in_flight") == first and u.store.get("busy") is not None
-        second = await u.say("next job")                # held behind the busy turn
+        second = await u.say("next job")
         assert u.daemon.held == [(second, "next job")]
         dead.add("admin")
         await u.daemon.check_agent()
-        assert any(t.startswith("No reply to this message") and "restarted" in t for t in u.texts())
-        assert [r for k, _t, r in u.outbox() if k.startswith("abandoned:")] == [first]
-        assert u.store.get("in_flight") is None and u.store.get("busy") is None
-        assert launches == ["admin"] and u.daemon.stuck is None
-        assert u.tmux.pasted == ["long job"]            # not yet: the relaunched agent is not ready
-        await u.daemon.on_hook(HookEvent("SessionStart", "S1", source="startup"))
+        assert not [r for k, _t, r in u.outbox() if k.startswith("abandoned:")]
+        assert u.store.get("in_flight") == first and u.store.get("busy") is not None
+        assert launches == [] and u.daemon.stuck is not None
         await u.daemon.flush()
-        assert u.tmux.pasted == ["long job", "next job"]    # the queue is released
+        assert u.tmux.pasted == ["long job"]
+        assert u.daemon.held == [(second, "next job")]
+        assert u.store.inbound_status(second) == "received"
+
     run(scenario())
 
 
-def test_agent_loop_polls_at_the_injected_interval_and_relaunches(tmp_path: Path) -> None:
+def test_agent_loop_polls_at_the_injected_interval_and_holds(tmp_path: Path) -> None:
     u, _clock, launches = supervised_unit(tmp_path)
     u.daemon.agent_poll = 0.25
     sleeps: asyncio.Queue[float] = asyncio.Queue()
@@ -161,20 +155,22 @@ def test_agent_loop_polls_at_the_injected_interval_and_relaunches(tmp_path: Path
     async def fake_sleep(delay: float) -> None:
         sleeps.put_nowait(delay)
         await go.get()
-    u.daemon._sleep = fake_sleep                        # type: ignore[method-assign]
+
+    u.daemon._sleep = fake_sleep  # type: ignore[method-assign]
 
     async def scenario() -> None:
         task = asyncio.create_task(u.daemon.agent_loop())
         try:
             assert await sleeps.get() == 0.25
-            u.tmux.sessions.discard("admin")            # the pane is gone
+            u.tmux.sessions.discard("admin")  # the pane is gone
             go.put_nowait(None)
-            assert await sleeps.get() == 0.25           # a full pass has run
-            assert launches == ["admin"]
+            assert await sleeps.get() == 0.25  # a full pass has run
+            assert launches == [] and u.daemon.stuck is not None
         finally:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+
     run(scenario())
 
 
@@ -182,9 +178,11 @@ def test_run_supervises_the_agent_loop(tmp_path: Path, monkeypatch: pytest.Monke
     u = Unit(tmp_path)
     names: list[str] = []
 
-    async def record(name: str, factory: object, audit: object, *,
-                     base: float = 1.0, cap: float = 30.0) -> None:
+    async def record(
+        name: str, factory: object, audit: object, *, base: float = 1.0, cap: float = 30.0
+    ) -> None:
         names.append(name)
+
     monkeypatch.setattr("heterodyne.admind.daemon.supervised", record)
     run(u.daemon.run())
     assert "agent" in names
@@ -192,13 +190,17 @@ def test_run_supervises_the_agent_loop(tmp_path: Path, monkeypatch: pytest.Monke
 
 # --- filesystem checks and output boundary ---
 
+
 def test_a_symlinked_state_directory_is_refused(tmp_path: Path) -> None:
     real = tmp_path / "real"
     real.mkdir()
     link = tmp_path / "state"
     link.symlink_to(real)
-    for build in (lambda: Audit(link / "audit.jsonl"), lambda: Store(link / "admind.db"),
-                  lambda: private_dir(link)):
+    for build in (
+        lambda: Audit(link / "audit.jsonl"),
+        lambda: Store(link / "admind.db"),
+        lambda: private_dir(link),
+    ):
         with pytest.raises(PermissionError):
             build()
     assert list(real.iterdir()) == []
@@ -249,4 +251,5 @@ def test_unit_status_line_passes_every_field_through_the_sanitizer() -> None:
 
 def test_ready_notice_does_not_promise_that_every_reply_is_threaded() -> None:
     from heterodyne.admind.daemon import READY_NOTICE
+
     assert "replies normally come back in thread" in READY_NOTICE

@@ -87,31 +87,29 @@ def test_an_old_session_start_that_waited_for_the_lock_cannot_ready_the_replacem
     u = Unit(tmp_path)
 
     async def scenario() -> None:
-        await u.daemon.start_agent(relaunch=True)                   # launch A (same session, resumed)
+        await u.say("!new")
         old_nonce = u.agent.launch_nonce
         assert old_nonce is not None and not u.daemon.ready.is_set()
         loop = asyncio.get_running_loop()
-        gate, state = Gate(loop), {"dead": True}
+        gate = Gate(loop)
+        kill = u.tmux.kill
 
-        def pane_dead(name: str) -> bool:
-            if state["dead"]:
-                state["dead"] = False
-                gate.wait()
-                return True                                          # supervision finds the pane dead
-            return False
-        u.tmux.pane_dead = pane_dead                                # type: ignore[method-assign]
-        check = asyncio.create_task(u.daemon.check_agent())          # holds the lock, awaiting alive()
+        def gated_kill(name: str) -> None:
+            gate.wait()
+            kill(name)
+        u.tmux.kill = gated_kill                                  # type: ignore[method-assign]
+        check = asyncio.create_task(u.say("!new"))
         await asyncio.wait_for(gate.entered.wait(), 10)
-        old = HookEvent("SessionStart", "S1", source="startup", launch=old_nonce)
-        hook = asyncio.create_task(u.daemon.route_hook(old))        # passes any early check, waits
-        await wait_until(lambda: lock_waiters(u.daemon.dispatch_lock) >= 1)     # parked on the lock
+        old = HookEvent("SessionStart", u.agent.session_id or "", source="startup", launch=old_nonce)
+        hook = asyncio.create_task(u.daemon.route_hook(old))
+        await wait_until(lambda: lock_waiters(u.daemon.dispatch_lock) >= 1)
         assert not hook.done()
         gate.release.set()
-        await asyncio.wait_for(check, 10)                           # the relaunch: same session, new nonce
+        await asyncio.wait_for(check, 10)
         await asyncio.wait_for(hook, 10)
-        assert u.agent.launch_nonce != old_nonce and u.agent.session_id == "S1"
-        assert not u.daemon.ready.is_set()                          # the replacement never reported in
-        assert u.store.get("launches_without_start") == "2"         # two launches, none reported in
+        assert u.agent.launch_nonce != old_nonce and u.agent.session_id not in (None, "S1")
+        assert not u.daemon.ready.is_set()
+        assert u.store.get("launches_without_start") == "1"
         assert "ignored-stale-launch" in u.audit_text()
     run(scenario())
 
