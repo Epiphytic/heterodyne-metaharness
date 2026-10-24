@@ -71,6 +71,42 @@ class Descriptor(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     expires_at: str
 
 
+class NativeEffect(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    ordinal: int
+    task_id: str
+    approval_id: str
+    family: Literal[
+        "create-approval", "create-member", "publish", "pin-claim",
+        "decision-metadata", "close-approval", "pin-metadata", "audit-comment", "pin-release",
+    ]
+    intent_envelope_sha256: str
+    plan_sha256: str
+    observation_sha256: str
+    verdict: Literal["observed-applied", "observed-unapplied"]
+
+
+class NativeDescriptor(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    schema: Literal["settle-approval-native.v1"]
+    proposal_id: str
+    operation: str
+    mode: Literal["settle-approval-native"]
+    enrollment_sha256: str
+    original_record_sha256: str
+    source_closure: str
+    effects_root: str
+    effect_count: int
+    local_records: list[Projection]
+    backup_before_sha256: None
+    failure_before_sha256: None
+    proof_set_sha256: str
+    result: Literal["complete"]
+    expires_at: str
+    native_effect: NativeEffect
+
+
+RecoveryDescriptor = Descriptor | NativeDescriptor
+
+
 class BackupOwner(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     pid: int
     start: int
@@ -102,33 +138,37 @@ class Certificate(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     observed_boottime_ns: int
 
 
-def target_snapshot(obj: Descriptor) -> str:
+def target_snapshot(obj: RecoveryDescriptor) -> str:
     """Expected snapshot; only the queue can attest its fresh observation under EX."""
-    return sha(
-        {
-            "schema": "maintenance-recovery-target-snapshot.v1",
-            **{
-                name: getattr(obj, name)
-                for name in (
-                    "mode",
-                    "operation",
-                    "original_record_sha256",
-                    "effects_root",
-                    "effect_count",
-                    "proof_set_sha256",
-                    "local_records",
-                    "backup_before_sha256",
-                    "failure_before_sha256",
-                    "enrollment_sha256",
-                    "source_closure",
-                )
-            },
-        }
-    )
+    value: dict[str, object] = {
+        "schema": "maintenance-recovery-target-snapshot.v1",
+        **{
+            name: getattr(obj, name)
+            for name in (
+                "mode",
+                "operation",
+                "original_record_sha256",
+                "effects_root",
+                "effect_count",
+                "proof_set_sha256",
+                "local_records",
+                "backup_before_sha256",
+                "failure_before_sha256",
+                "enrollment_sha256",
+                "source_closure",
+            )
+        },
+    }
+    if isinstance(obj, NativeDescriptor):
+        value.update(descriptor_schema=obj.schema, native_effect=obj.native_effect)
+    return sha(value)
 
 
 class Register(msgspec.Struct, frozen=True, tag="maintenance.recovery.register", forbid_unknown_fields=True):
-    descriptor: Descriptor
+    # Transport only: untagged struct unions are not supported by msgspec.
+    # check() and register() both require exact schema-specific conversion;
+    # this field is never accepted as validated descriptor data by itself.
+    descriptor: object
     proof_set_sha256: str
 
 
@@ -202,8 +242,15 @@ def stamp(value: str) -> datetime:
         raise Invalid("time") from None
 
 
-def descriptor(data: bytes) -> Descriptor:
-    obj = decode(data, Descriptor)
+def descriptor(data: bytes) -> RecoveryDescriptor:
+    raw = decode(data, dict[str, object])
+    schema = raw.get("schema")
+    if schema == "maintenance-recovery.v1":
+        obj: RecoveryDescriptor = decode(data, Descriptor)
+    elif schema == "settle-approval-native.v1":
+        obj = decode(data, NativeDescriptor)
+    else:
+        raise Invalid("descriptor-schema")
     for value in (obj.proposal_id, obj.operation):
         try:
             if str(uuid.UUID(value)) != value:
@@ -226,13 +273,16 @@ def descriptor(data: bytes) -> Descriptor:
         raise Invalid("duplicate-selector")
     expected = {
         "settle": "complete",
+        "settle-approval-native": "complete",
         "abandon-notice": "abandoned-diagnostic",
         "finish-health": "health-restored",
     }
     if obj.result != expected[obj.mode]:
         raise Invalid("result")
     health = obj.mode == "finish-health"
-    if health:
+    if isinstance(obj, NativeDescriptor):
+        native_descriptor(obj)
+    elif health:
         if (
             obj.effects_root is not None
             or obj.effect_count != 0
@@ -252,6 +302,21 @@ def descriptor(data: bytes) -> Descriptor:
         raise Invalid("mode-scope")
     stamp(obj.expires_at)
     return obj
+
+
+def native_descriptor(obj: NativeDescriptor) -> None:
+    """Only the latest unknown native effect; no local projection or replay."""
+    effect = obj.native_effect
+    if (obj.effect_count < 1 or effect.ordinal != obj.effect_count
+            or obj.local_records or not HEX.fullmatch(obj.effects_root)):
+        raise Invalid("native-scope")
+    for value in (effect.task_id, effect.approval_id):
+        if not re.fullmatch(r"[a-z][a-z0-9-]{0,31}-[0-9a-z]{5}", value):
+            raise Invalid("native-id")
+    if not all(HEX.fullmatch(value) for value in (
+        effect.intent_envelope_sha256, effect.plan_sha256, effect.observation_sha256,
+    )):
+        raise Invalid("native-hash")
 
 
 def check(req: Request) -> str | None:
@@ -627,7 +692,7 @@ class Service:
                 "terminal": None if row[3] is None else json.loads(row[3]),
             }
 
-    def live(self, obj: Descriptor, created: str | None = None) -> datetime:
+    def live(self, obj: RecoveryDescriptor, created: str | None = None) -> datetime:
         at = self.clock()
         if at.tzinfo is None or not math.isfinite(at.timestamp()):
             raise Invalid("clock")
@@ -638,7 +703,7 @@ class Service:
             raise Invalid("clock-rollback")
         return at
 
-    def original_provenance(self, obj: Descriptor, enrolled: Enrollment) -> str:
+    def original_provenance(self, obj: RecoveryDescriptor, enrolled: Enrollment) -> str:
         """Read local evidence only; the queue repeats fresh target validation under EX."""
         root = Path(enrolled.coordinator_root)
         if obj.mode != "finish-health":
@@ -1027,7 +1092,9 @@ class Service:
             self.get(req.proposal_sha256),
         )
 
-    def certificate(self, obj: Descriptor, req: Permit, old: dict[str, object], enrolled: Enrollment) -> None:
+    def certificate(
+        self, obj: RecoveryDescriptor, req: Permit, old: dict[str, object], enrolled: Enrollment
+    ) -> None:
         generation = old["generation"]
         folder = Path(enrolled.coordinator_root) / "recovery-v1"
         raw = private_read(folder / f"{req.proposal_sha256}.nonconsumption-{generation}.json")
@@ -1084,8 +1151,15 @@ def boot_ns() -> int:
     return time.clock_gettime_ns(time.CLOCK_BOOTTIME)
 
 
-def render(obj: Descriptor, actor: str, link: str | None, budget: int) -> str:
-    """Never shorten material scope; literal hashes are private unless a safe public link exists."""
+def display_hash(value: str) -> str:
+    """Display all digits of a typed public digest without changing global redaction."""
+    if not HEX.fullmatch(value):
+        raise Invalid("display-hash")
+    return " ".join(value[index:index + 8] for index in range(0, 64, 8))
+
+
+def render(obj: RecoveryDescriptor, actor: str, link: str | None, budget: int) -> str:
+    """Never shorten material scope; native observation digests use validated grouped display."""
     token = sha(obj)[:24]
     records = ", ".join(f"{p.action} {p.selector.type}:{p.selector.id}" for p in obj.local_records) or "none"
     consequences = (
@@ -1107,17 +1181,40 @@ def render(obj: Descriptor, actor: str, link: str | None, budget: int) -> str:
         f"Revoke: !maintenance revoke {token}",
         "An already issued permit may start recovery for 30 seconds after revoke.",
     ]
+    if isinstance(obj, NativeDescriptor):
+        effect = obj.native_effect
+        lines = [
+            "Native approval observation recovery consent",
+            "Approve: settle the latest unknown native effect using the recorded observation.",
+            f"Native task: {effect.task_id}; approval: {effect.approval_id}",
+            f"Observation: {effect.verdict}; write family: {effect.family}; ordinal: {effect.ordinal}",
+            f"Operation: {obj.operation}",
+            f"Original actor: {actor}",
+            "Earlier effects: terminal; this consent binds only the latest observed effect.",
+            "Required: original writer and descendants ended; consistent exact native projection.",
+            "Unapplied requires unchanged precondition after cessation; absence alone is insufficient.",
+            "No native replay; no command return code or causation is asserted.",
+            f"Intent envelope SHA256: {display_hash(effect.intent_envelope_sha256)}",
+            f"Plan SHA256: {display_hash(effect.plan_sha256)}",
+            f"Observation SHA256: {display_hash(effect.observation_sha256)}",
+            "SHA256 groups concatenate without spaces.",
+            f"Expires: {obj.expires_at}",
+            f"Reply: !maintenance settle {token}",
+            f"Revoke: !maintenance revoke {token}",
+            "An already issued permit may start recovery for 30 seconds after revoke.",
+        ]
     if link is not None:
         if not re.fullmatch(
             r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/blob/[0-9a-f]{40}/[A-Za-z0-9_./-]+", link
         ):
             raise Invalid("public-link")
-        lines.insert(5, "Exact proposal/source/proofs: " + link)
+        lines.insert(10 if isinstance(obj, NativeDescriptor) else 5, "Exact proposal/source/proofs: " + link)
     else:
         lines.insert(5, "Source closure: " + obj.source_closure)
         lines.insert(6, "Exact proposal: " + sha(obj))
     text = "\n".join(lines)
-    if len(text) > budget or len(lines) > 36 or redact(text) != text:
+    size = len(text.encode("utf-8")) if isinstance(obj, NativeDescriptor) else len(text)
+    if size > budget or len(lines) > 36 or redact(text) != text:
         raise Invalid("notice-material-unrepresentable")
     return text
 
