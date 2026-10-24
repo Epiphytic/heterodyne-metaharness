@@ -76,8 +76,15 @@ class NativeEffect(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     task_id: str
     approval_id: str
     family: Literal[
-        "create-approval", "create-member", "publish", "pin-claim",
-        "decision-metadata", "close-approval", "pin-metadata", "audit-comment", "pin-release",
+        "create-approval",
+        "create-member",
+        "publish",
+        "pin-claim",
+        "decision-metadata",
+        "close-approval",
+        "pin-metadata",
+        "audit-comment",
+        "pin-release",
     ]
     intent_envelope_sha256: str
     plan_sha256: str
@@ -104,7 +111,90 @@ class NativeDescriptor(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     native_effect: NativeEffect
 
 
-RecoveryDescriptor = Descriptor | NativeDescriptor
+class MarkerSnapshot(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    sha256: str
+    mode: int
+
+
+class PrimaryChildIntent(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    contract: Literal["primary-pickup-child.v1"]
+    source: str
+    executable: str
+    actor: str
+    kind: Literal["pause", "resume"]
+    path: str
+    before: MarkerSnapshot | None
+    after: MarkerSnapshot | None
+
+
+class PrimaryChildCoverage(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    schema: Literal["primary-child-local-coverage.v1"]
+    path: str
+    source: str
+    executable: str
+    actor: str
+
+
+class PrimaryChildObservation(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    ordinal: int
+    intent_envelope_sha256: str
+    intent_payload_sha256: str
+    intent: PrimaryChildIntent
+    observed: MarkerSnapshot | None
+    classification: Literal["observed-after", "observed-before", "observed-invariant", "observed-other"]
+    original_action_outcome: Literal["not-established"]
+    effects_after_root: str
+    coverage: PrimaryChildCoverage
+
+
+class PrimaryChildWrite(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    role: Literal[
+        "issuing-program", "permit-consumption", "proof", "effect", "receipt", "operation", "compaction"
+    ]
+    path: str
+    before_sha256: str | None
+    image_sha256: str
+    authority_bindings: list[
+        Literal["descriptor", "permit", "proposal_sha256", "permit_sha256", "authority_receipt_sha256"]
+    ]
+
+
+class PrimaryChildTerminalPlan(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    schema: Literal["maintenance-primary-child-terminal-plan.v1"]
+    proof: dict[str, object]
+    before_effect: dict[str, object]
+    after_effect: dict[str, object]
+    before_operation_sha256: str
+    after_operation: dict[str, object]
+    receipt: dict[str, object]
+    terminal: dict[str, object]
+
+
+class PrimaryChildDescriptor(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    schema: Literal["maintenance-primary-child-settlement.v1"]
+    proposal_id: str
+    proposal_generation: int
+    operation: str
+    mode: Literal["settle-primary-child"]
+    enrollment_sha256: str
+    original_record_sha256: str
+    source_closure: str
+    effects_root: str
+    effect_count: int
+    local_records: list[Projection]
+    backup_before_sha256: None
+    failure_before_sha256: None
+    proof_set_sha256: str
+    result: Literal["settled-observed"]
+    expires_at: str
+    primary_child: PrimaryChildObservation
+    terminal_plan: PrimaryChildTerminalPlan
+    allowed_writes: list[PrimaryChildWrite]
+    # Hash of the stable terminal plan, NOT of the future issuing program.
+    program_sha256: str
+
+
+RecoveryDescriptor = Descriptor | NativeDescriptor | PrimaryChildDescriptor
 
 
 class BackupOwner(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -162,7 +252,24 @@ def target_snapshot(obj: RecoveryDescriptor) -> str:
     if isinstance(obj, NativeDescriptor):
         value.update(
             schema="maintenance-recovery-native-target-snapshot.v1",
-            descriptor_schema=obj.schema, native_effect=obj.native_effect,
+            descriptor_schema=obj.schema,
+            native_effect=obj.native_effect,
+        )
+    elif isinstance(obj, PrimaryChildDescriptor):
+        value.update(
+            schema="maintenance-primary-child-target-snapshot.v1",
+            descriptor_schema=obj.schema,
+            **{
+                name: getattr(obj, name)
+                for name in (
+                    "proposal_id",
+                    "proposal_generation",
+                    "primary_child",
+                    "terminal_plan",
+                    "allowed_writes",
+                    "program_sha256",
+                )
+            },
         )
     return sha(value)
 
@@ -252,6 +359,8 @@ def descriptor(data: bytes) -> RecoveryDescriptor:
         obj: RecoveryDescriptor = decode(data, Descriptor)
     elif schema == "settle-approval-native.v1":
         obj = decode(data, NativeDescriptor)
+    elif schema == "maintenance-primary-child-settlement.v1":
+        obj = decode(data, PrimaryChildDescriptor)
     else:
         raise Invalid("descriptor-schema")
     for value in (obj.proposal_id, obj.operation):
@@ -277,6 +386,7 @@ def descriptor(data: bytes) -> RecoveryDescriptor:
     expected = {
         "settle": "complete",
         "settle-approval-native": "complete",
+        "settle-primary-child": "settled-observed",
         "abandon-notice": "abandoned-diagnostic",
         "finish-health": "health-restored",
     }
@@ -285,6 +395,8 @@ def descriptor(data: bytes) -> RecoveryDescriptor:
     health = obj.mode == "finish-health"
     if isinstance(obj, NativeDescriptor):
         native_descriptor(obj)
+    elif isinstance(obj, PrimaryChildDescriptor):
+        primary_child_descriptor(obj)
     elif health:
         if (
             obj.effects_root is not None
@@ -310,16 +422,449 @@ def descriptor(data: bytes) -> RecoveryDescriptor:
 def native_descriptor(obj: NativeDescriptor) -> None:
     """Only the latest unknown native effect; no local projection or replay."""
     effect = obj.native_effect
-    if (obj.effect_count < 1 or effect.ordinal != obj.effect_count
-            or obj.local_records or not HEX.fullmatch(obj.effects_root)):
+    if (
+        obj.effect_count < 1
+        or effect.ordinal != obj.effect_count
+        or obj.local_records
+        or not HEX.fullmatch(obj.effects_root)
+    ):
         raise Invalid("native-scope")
     for value in (effect.task_id, effect.approval_id):
         if not re.fullmatch(r"[a-z][a-z0-9-]{0,31}-[0-9a-z]{5}", value):
             raise Invalid("native-id")
-    if not all(HEX.fullmatch(value) for value in (
-        effect.intent_envelope_sha256, effect.plan_sha256, effect.observation_sha256,
-    )):
+    if not all(
+        HEX.fullmatch(value)
+        for value in (
+            effect.intent_envelope_sha256,
+            effect.plan_sha256,
+            effect.observation_sha256,
+        )
+    ):
         raise Invalid("native-hash")
+
+
+def primary_closed(value: object, keys: tuple[str, ...]) -> dict[str, object]:
+    """Business image objects are closed data, never a substitution program."""
+    if not isinstance(value, dict) or set(cast(dict[str, object], value)) != set(keys):
+        raise Invalid("primary-image-fields")
+    return cast(dict[str, object], value)
+
+
+def primary_child_writes(obj: PrimaryChildDescriptor) -> list[dict[str, object]]:
+    """Exact images except the enumerated same-proposal authority bindings."""
+    plan = msgspec.to_builtins(obj.terminal_plan)
+    proposal, operation = obj.proposal_id, obj.operation
+    roles: tuple[tuple[str, str, str | None, object, list[str]], ...] = (
+        (
+            "issuing-program",
+            f"recovery-v1/{proposal}.primary-issuing.json",
+            None,
+            {
+                "schema": "maintenance-primary-child-issuing-template.v1",
+                "descriptor": "$descriptor",
+                "permit": "$authenticated-permit",
+                "plan": plan,
+            },
+            ["descriptor", "permit"],
+        ),
+        (
+            "permit-consumption",
+            f"recovery-v1/{proposal}.primary-consumed.json",
+            None,
+            {
+                "schema": "maintenance-primary-child-consumption.v1",
+                "proposal_sha256": "$proposal-sha256",
+                "permit_sha256": "$authenticated-permit-sha256",
+            },
+            ["proposal_sha256", "permit_sha256"],
+        ),
+        ("proof", f"effect-proofs-v1/{sha(plan['proof'])}.json", None, plan["proof"], []),
+        (
+            "effect",
+            f"effects-v1/{operation}.{obj.effect_count:04d}.json",
+            sha(plan["before_effect"]),
+            plan["after_effect"],
+            [],
+        ),
+        (
+            "receipt",
+            f"recovery-v1/{proposal}.primary-receipt.json",
+            None,
+            plan["receipt"],
+            ["proposal_sha256", "authority_receipt_sha256"],
+        ),
+        (
+            "operation",
+            f"operations/{operation}.json",
+            obj.original_record_sha256,
+            plan["after_operation"],
+            [],
+        ),
+        ("compaction", f"terminal-v1/{operation}.json", None, plan["terminal"], []),
+    )
+    return [
+        dict(role=role, path=path, before_sha256=before, image_sha256=sha(image), authority_bindings=bindings)
+        for role, path, before, image, bindings in roles
+    ]
+
+
+def primary_child_descriptor(obj: PrimaryChildDescriptor) -> None:
+    """Validate the closed observation and stable plan; the queue proves live facts."""
+    child, intent = obj.primary_child, obj.primary_child.intent
+    if (
+        not 1 <= obj.effect_count <= 4096
+        or child.ordinal != obj.effect_count
+        or obj.local_records
+        or not 1 <= obj.proposal_generation <= 64
+        or len(canonical(obj)) > 65_536
+    ):
+        raise Invalid("primary-scope")
+    for snapshot in (intent.before, intent.after, child.observed):
+        if snapshot is not None and (
+            snapshot.sha256 != hashlib.sha256(b"").hexdigest() or snapshot.mode not in (0o600, 0o644)
+        ):
+            raise Invalid("primary-marker")
+    for value, name in ((intent.source, "beads.py"), (intent.executable, "btq"), (intent.path, "paused")):
+        if (
+            len(value) > 4096
+            or not Path(value).is_absolute()
+            or str(Path(value)) != value
+            or ".." in Path(value).parts
+            or Path(value).name != name
+            or not re.fullmatch(r"[\x21-\x7e]+", value)
+        ):
+            raise Invalid("primary-path")
+    try:
+        identity = intent.actor.split(":")[-1]
+        valid_actor = str(uuid.UUID(identity)) == identity
+    except ValueError:
+        valid_actor = False
+    if (
+        not valid_actor
+        or not re.fullmatch(r"[\x21-\x7e]{1,256}", intent.actor)
+        or "+" in intent.actor
+        or Path(intent.path).parent.name != hashlib.sha256(intent.actor.encode()).hexdigest()
+        or (intent.kind == "resume") != (intent.after is None)
+    ):
+        raise Invalid("primary-intent")
+    expected = (
+        "observed-invariant"
+        if child.observed == intent.before == intent.after
+        else "observed-after"
+        if child.observed == intent.after
+        else "observed-before"
+        if child.observed == intent.before
+        else "observed-other"
+    )
+    coverage = dict(
+        schema="primary-child-local-coverage.v1",
+        **{key: getattr(intent, key) for key in ("path", "source", "executable", "actor")},
+    )
+    if (
+        child.classification != expected
+        or child.intent_payload_sha256 != sha(intent)
+        or msgspec.to_builtins(child.coverage) != coverage
+        or not all(
+            HEX.fullmatch(value)
+            for value in (
+                child.intent_envelope_sha256,
+                child.effects_after_root,
+                obj.program_sha256,
+            )
+        )
+    ):
+        raise Invalid("primary-observation")
+    primary_child_plan(obj)
+    if msgspec.to_builtins(obj.allowed_writes) != primary_child_writes(obj):
+        raise Invalid("primary-write-bindings")
+    if obj.expires_at != stamp(obj.expires_at).strftime("%Y-%m-%dT%H:%M:%SZ"):
+        raise Invalid("primary-expiry")
+
+
+def primary_child_plan(obj: PrimaryChildDescriptor) -> None:
+    """Freeze every business image; only two receipt authority digest slots vary."""
+    plan, child = obj.terminal_plan, obj.primary_child
+    intent = child.intent
+    before = primary_closed(
+        plan.before_effect,
+        (
+            "schema",
+            "operation",
+            "ordinal",
+            "kind",
+            "subject",
+            "intent_sha256",
+            "source_closure",
+            "phase",
+            "evidence",
+        ),
+    )
+    primary_closed(plan.after_effect, tuple(before))
+    subject = {"type": "local", "id": child.intent_payload_sha256}
+    if (
+        before["schema"] != "maintenance-effect.v1"
+        or before["operation"] != obj.operation
+        or type(before["ordinal"]) is not int
+        or before["ordinal"] != obj.effect_count
+        or before["kind"] != "local"
+        or before["subject"] != subject
+        or before["intent_sha256"] != child.intent_payload_sha256
+        or before["source_closure"] != obj.source_closure
+        or before["phase"] not in ("issuing", "unknown")
+        or before["evidence"] is not None
+    ):
+        raise Invalid("primary-before-effect")
+    payload = dict(
+        schema="primary-child-observed-outcome.v1",
+        proposal_id=obj.proposal_id,
+        proposal_generation=obj.proposal_generation,
+        **{
+            key: getattr(child, key)
+            for key in (
+                "intent_envelope_sha256",
+                "intent_payload_sha256",
+                "intent",
+                "observed",
+                "classification",
+                "original_action_outcome",
+            )
+        },
+    )
+    proof = dict(
+        schema="maintenance-effect-proof.v1",
+        operation=obj.operation,
+        ordinal=obj.effect_count,
+        source_closure=obj.source_closure,
+        intent_sha256=child.intent_payload_sha256,
+        phase="observed-primary-child",
+        payload=msgspec.to_builtins(payload),
+    )
+    evidence = primary_closed(
+        plan.after_effect["evidence"], ("adapter_sha256", "proof_sha256", "result_id", "readback_sha256")
+    )
+    if not isinstance(evidence["adapter_sha256"], str) or not HEX.fullmatch(evidence["adapter_sha256"]):
+        raise Invalid("primary-adapter")
+    expected_evidence = dict(
+        adapter_sha256=evidence["adapter_sha256"],
+        proof_sha256=sha(proof),
+        result_id=sha(payload),
+        readback_sha256=sha(payload),
+    )
+    if (
+        plan.proof != proof
+        or evidence != expected_evidence
+        or plan.after_effect != dict(before, phase="observed-primary-child", evidence=expected_evidence)
+        or plan.before_operation_sha256 != obj.original_record_sha256
+        or sha(plan) != obj.program_sha256
+    ):
+        raise Invalid("primary-proof-images")
+    operation = primary_closed(
+        plan.after_operation,
+        (
+            "schema",
+            "operation",
+            "action",
+            "actor",
+            "source_closure",
+            "state",
+            "ordinal",
+            "intent_sha256",
+            "owner",
+        ),
+    )
+    primary_owner(operation["owner"])
+    if (
+        operation["schema"] != "maintenance-operation.v1"
+        or operation["operation"] != obj.operation
+        or operation["action"] not in ("hermes.task", "harness.cli.task_dispatch")
+        or operation["actor"] != intent.actor
+        or operation["source_closure"] != obj.source_closure
+        or operation["state"] != "complete"
+        or type(operation["ordinal"]) is not int
+        or operation["ordinal"] != obj.effect_count
+        or operation["intent_sha256"] != child.intent_payload_sha256
+    ):
+        raise Invalid("primary-operation-image")
+    receipt = plan.receipt
+    primary_closed(
+        receipt,
+        (
+            "schema",
+            "proposal_sha256",
+            "authority_receipt_sha256",
+            "operation",
+            "original_record_sha256",
+            "effects_before_root",
+            "effects_after_root",
+            "effect_count",
+            "proof_set_sha256",
+            "result",
+            "original_action_outcome",
+            "prepared_by",
+            "prepared_at",
+        ),
+    )
+    primary_owner(receipt["prepared_by"])
+    prepared = receipt["prepared_at"]
+    if not isinstance(prepared, str) or prepared != stamp(prepared).strftime("%Y-%m-%dT%H:%M:%SZ"):
+        raise Invalid("primary-prepared-time")
+    expected_receipt = dict(
+        schema="maintenance-primary-child-receipt.v1",
+        proposal_sha256="$proposal-sha256",
+        authority_receipt_sha256="$authenticated-permit-sha256",
+        operation=obj.operation,
+        original_record_sha256=obj.original_record_sha256,
+        effects_before_root=obj.effects_root,
+        effects_after_root=child.effects_after_root,
+        effect_count=obj.effect_count,
+        proof_set_sha256=obj.proof_set_sha256,
+        result="settled-observed",
+        original_action_outcome="not-established",
+        prepared_by=receipt["prepared_by"],
+        prepared_at=prepared,
+    )
+    if receipt != expected_receipt or type(receipt["effect_count"]) is not int:
+        raise Invalid("primary-receipt-image")
+    primary_child_terminal(obj)
+
+
+def primary_owner(value: object) -> None:
+    owner = primary_closed(value, ("pid", "start", "boot"))
+    try:
+        valid = isinstance(owner["boot"], str) and str(uuid.UUID(owner["boot"])) == owner["boot"]
+    except ValueError:
+        valid = False
+    if (
+        not valid
+        or type(owner["pid"]) is not int
+        or owner["pid"] <= 0
+        or type(owner["start"]) is not int
+        or owner["start"] < 0
+    ):
+        raise Invalid("primary-owner")
+
+
+def primary_child_terminal(obj: PrimaryChildDescriptor) -> None:
+    terminal = obj.terminal_plan.terminal
+    keys = (
+        "schema",
+        "operation",
+        "original",
+        "original_sha256",
+        "effect_count",
+        "effects_root",
+        "effects",
+        "adapter_verdicts",
+        "primary_child_intents",
+    )
+    if "approval_native_intents" in terminal:
+        keys += ("approval_native_intents",)
+    primary_closed(terminal, keys)
+    if (
+        terminal["schema"] != "maintenance-terminal.v1"
+        or terminal["operation"] != obj.operation
+        or terminal["original"] != obj.terminal_plan.after_operation
+        or terminal["original_sha256"] != sha(obj.terminal_plan.after_operation)
+        or type(terminal["effect_count"]) is not int
+        or terminal["effect_count"] != obj.effect_count
+        or terminal["effects_root"] != obj.primary_child.effects_after_root
+    ):
+        raise Invalid("primary-terminal")
+    if not isinstance(terminal["effects"], list) or not isinstance(terminal["adapter_verdicts"], list):
+        raise Invalid("primary-terminal-effects")
+    effects = cast(list[object], terminal["effects"])
+    verdicts = cast(list[object], terminal["adapter_verdicts"])
+    if (
+        len(effects) != obj.effect_count
+        or len(verdicts) != obj.effect_count
+        or sha(effects) != terminal["effects_root"]
+    ):
+        raise Invalid("primary-terminal-effects")
+    phases = {
+        "not-started",
+        "refused-pre-effect",
+        "admitted-local",
+        "finished-native",
+        "observed-native",
+        "reconciled",
+        "abandoned-diagnostic",
+        "finished-pickup-hook",
+        "finished-controller-files",
+        "finished-primary-pickup",
+        "finished-primary-child",
+        "observed-primary-child",
+    }
+    for ordinal, (raw_effect, raw_verdict) in enumerate(zip(effects, verdicts, strict=True), 1):
+        if not isinstance(raw_effect, list) or not isinstance(raw_verdict, list):
+            raise Invalid("primary-terminal-effects")
+        effect, verdict = cast(list[object], raw_effect), cast(list[object], raw_verdict)
+        if (
+            len(effect) != 2
+            or type(effect[0]) is not int
+            or effect[0] != ordinal
+            or not isinstance(effect[1], str)
+            or not HEX.fullmatch(effect[1])
+            or len(verdict) != 3
+            or type(verdict[0]) is not int
+            or verdict[0] != ordinal
+            or not isinstance(verdict[1], str)
+            or verdict[1] not in phases
+        ):
+            raise Invalid("primary-terminal-effects")
+        evidence = primary_closed(
+            verdict[2], ("adapter_sha256", "proof_sha256", "result_id", "readback_sha256")
+        )
+        for key in ("adapter_sha256", "proof_sha256", "readback_sha256"):
+            value = evidence[key]
+            if key == "readback_sha256" and value is None:
+                continue
+            if not isinstance(value, str) or not HEX.fullmatch(value):
+                raise Invalid("primary-terminal-evidence")
+        result_id = evidence["result_id"]
+        if result_id is not None and (
+            not isinstance(result_id, str) or not re.fullmatch(r"[\x21-\x7e]{1,256}", result_id)
+        ):
+            raise Invalid("primary-terminal-evidence")
+    if effects[-1] != [obj.effect_count, sha(obj.terminal_plan.after_effect)] or verdicts[-1] != [
+        obj.effect_count,
+        "observed-primary-child",
+        obj.terminal_plan.after_effect["evidence"],
+    ]:
+        raise Invalid("primary-terminal-last")
+    for name, extended in (("primary_child_intents", True), ("approval_native_intents", False)):
+        raw_rows = terminal.get(name, [])
+        if not isinstance(raw_rows, list):
+            raise Invalid("primary-retained-intents")
+        rows = cast(list[object], raw_rows)
+        if len(rows) > 4097:
+            raise Invalid("primary-retained-intents")
+        names: set[str] = set()
+        for row in rows:
+            entry = primary_closed(
+                row, ("name", "sha256", "pre_effect_orphan") if extended else ("name", "sha256")
+            )
+            filename, digest = entry["name"], entry["sha256"]
+            if (
+                not isinstance(filename, str)
+                or not re.fullmatch(re.escape(obj.operation) + r"\.[0-9]{4}\.json", filename)
+                or filename in names
+                or not isinstance(digest, str)
+                or not HEX.fullmatch(digest)
+                or extended
+                and type(entry["pre_effect_orphan"]) is not bool
+            ):
+                raise Invalid("primary-retained-intents")
+            names.add(filename)
+        if extended and not any(
+            row
+            == dict(
+                name=f"{obj.operation}.{obj.effect_count:04d}.json",
+                sha256=obj.primary_child.intent_envelope_sha256,
+                pre_effect_orphan=False,
+            )
+            for row in rows
+        ):
+            raise Invalid("primary-retained-coverage")
 
 
 def check(req: Request) -> str | None:
@@ -1141,9 +1686,13 @@ class Service:
             or observed > self.boottime()
         ):
             raise Invalid("certificate")
-        for suffix in ("consumed", "issuing", "receipt"):
-            if os.path.lexists(folder / f"{req.proposal_sha256}.{suffix}.json"):
-                raise Invalid("consumption-unknown")
+        stems = [(req.proposal_sha256, "")]
+        if isinstance(obj, PrimaryChildDescriptor):
+            stems.append((obj.proposal_id, "primary-"))
+        for stem, prefix in stems:
+            for suffix in ("consumed", "issuing", "receipt"):
+                if os.path.lexists(folder / f"{stem}.{prefix}{suffix}.json"):
+                    raise Invalid("consumption-unknown")
 
     def publish_permit(self, key: str, data: bytes) -> None:
         value = decode(data, dict[str, object])
@@ -1164,9 +1713,53 @@ def boot_ns() -> int:
     return time.clock_gettime_ns(time.CLOCK_BOOTTIME)
 
 
+def primary_marker_text(value: MarkerSnapshot | None) -> str:
+    return "absent" if value is None else f"present, empty (sha256 of empty bytes), mode {value.mode:04o}"
+
+
+def primary_child_card(obj: PrimaryChildDescriptor, actor: str, token: str) -> list[str]:
+    """Display material observations and write roles without claiming command success."""
+    child, intent = obj.primary_child, obj.primary_child.intent
+    if actor != intent.actor:
+        raise Invalid("primary-actor-mismatch")
+    writes = "; ".join(
+        f"{entry.role}: "
+        + ("effect-proofs-v1/[linked proof SHA256].json" if entry.role == "proof" else entry.path)
+        for entry in obj.allowed_writes
+    )
+    marker_root = str(Path(intent.path).parent.parent)
+    marker_formula = f"{marker_root}/SHA256(original actor UTF-8, lowercase hex)/paused"
+    return [
+        "Primary pickup child observation settlement consent",
+        "Approve: record this observation and settle the interrupted operation; never rerun the child.",
+        f"Operation: {obj.operation}; proposal generation: {obj.proposal_generation}; "
+        f"ordinal: {child.ordinal}",
+        f"Original actor: {actor}; original request: {intent.kind}",
+        f"Marker path derivation (not literal): {marker_formula}",
+        f"Retained before: {primary_marker_text(intent.before)}",
+        f"Retained after: {primary_marker_text(intent.after)}",
+        f"Observed: {primary_marker_text(child.observed)}; classification: {child.classification}",
+        "Original action outcome: not-established. Observation does not prove execution or causation.",
+        f"Source: {intent.source}; child: {intent.executable}",
+        "Queue must verify ended owner/child, exact route/local coverage and all earlier terminal proofs.",
+        "Admind checks enrollment, original-record binding and consent; not these observation proof claims.",
+        f"Allowed coordinator writes: {writes}",
+        "Proof/effect/operation/terminal images are fixed; only named same-proposal permit bindings vary.",
+        "No marker, DB, Hermes or pickup setting changes; no native replay or automatic resume.",
+        "Exact hashes/images and binding slots are in the linked descriptor; "
+        "the permit binds that descriptor.",
+        f"Expires: {obj.expires_at}",
+        f"Reply: !maintenance settle {token}",
+        f"Revoke: !maintenance revoke {token}",
+        "An already issued permit may start recovery for 30 seconds after revoke.",
+    ]
+
+
 def render(obj: RecoveryDescriptor, actor: str, link: str | None, budget: int) -> str:
     """Keep exact scope in the linked proposal; never exempt text from redaction."""
-    native = isinstance(obj, NativeDescriptor)
+    native = isinstance(obj, (NativeDescriptor, PrimaryChildDescriptor))
+    if isinstance(obj, PrimaryChildDescriptor) and link is None:
+        raise Invalid("primary-evidence-link-required")
     if native and link is None:
         raise Invalid("native-evidence-link-required")
     token = sha(obj)[:24]
@@ -1191,10 +1784,12 @@ def render(obj: RecoveryDescriptor, actor: str, link: str | None, budget: int) -
             f"Revoke: !maintenance revoke {token}",
             "An already issued permit may start recovery for 30 seconds after revoke.",
         ]
+    elif isinstance(obj, PrimaryChildDescriptor):
+        lines = primary_child_card(obj, actor, token)
     else:
-        records = ", ".join(
-            f"{p.action} {p.selector.type}:{p.selector.id}" for p in obj.local_records
-        ) or "none"
+        records = (
+            ", ".join(f"{p.action} {p.selector.type}:{p.selector.id}" for p in obj.local_records) or "none"
+        )
         consequences = (
             "Diagnostic may already be delivered; never resend it. Other native effects stay held."
             if obj.mode == "abandon-notice"
@@ -1227,7 +1822,7 @@ def render(obj: RecoveryDescriptor, actor: str, link: str | None, budget: int) -
         lines.insert(5, "Source closure: " + obj.source_closure)
         lines.insert(6, "Exact proposal: " + sha(obj))
     text = "\n".join(lines)
-    size = len(text.encode("utf-8")) if isinstance(obj, NativeDescriptor) else len(text)
+    size = len(text.encode("utf-8")) if native else len(text)
     if size > budget or len(lines) > 36 or redact(text) != text:
         raise Invalid("notice-material-unrepresentable")
     return text
