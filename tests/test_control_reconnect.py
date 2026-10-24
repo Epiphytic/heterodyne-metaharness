@@ -52,7 +52,9 @@ def test_owned_subscription_closes_exact_writer_and_reader_without_canceling_par
                 await task
             assert await owner.close(time.monotonic() + 0.1)
             assert owner.closed and owner.writer is original
-            assert not asyncio.current_task().cancelling()
+            current = asyncio.current_task()
+            assert current is not None
+            assert not current.cancelling()
         finally:
             if not task.done():
                 task.cancel()

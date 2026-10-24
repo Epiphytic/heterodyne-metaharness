@@ -22,15 +22,22 @@ def test_failed_reader_cycle_has_bounded_safe_lifecycle_audit(tmp_path: Path) ->
         h = Harness(tmp_path)
         d = h.daemon
         backoff = asyncio.Event()
-        d._sleep = lambda _: backoff.wait()
+        async def sleep(_: float) -> None:
+            await backoff.wait()
 
-        async def fail(*args):
+        d._sleep = sleep
+
+        async def fail(generation: int, deadline: float | None, owned: Subscription) -> None:
             raise ControlError("private detail must not escape", "unverified")
 
         d.read_subscription = fail
         supervisor = asyncio.create_task(d.inbound_loop())
         try:
-            await until(lambda: d.ingress_snapshot().snapshot.tasks[0].phase == "backoff")
+            def backing_off() -> bool:
+                snapshot = d.ingress_snapshot().snapshot
+                return snapshot is not None and snapshot.tasks[0].phase == "backoff"
+
+            await until(backing_off)
             rows = [json.loads(line) for line in h.audit.path.read_text().splitlines()]
             lifecycle = [row for row in rows if row.get("kind") == "subscribe"]
             assert len(lifecycle) == 1
@@ -57,13 +64,19 @@ def test_reconnect_refusals_and_failure_audited_but_status_quiet(tmp_path: Path)
             req = ingress.Request("admind.ingress.request.v1", "reconnect", d.ingress.instance,
                                   d.sub_gen, request_id)
             async with d.work_lock:
-                assert (await ingress.request(path, req)).operation.result == "busy"
+                busy = await ingress.request(path, req)
+                assert busy.operation is not None
+                assert busy.operation.result == "busy"
             stale = ingress.Request(req.schema, req.op, "0" * 32, req.generation, str(uuid.uuid4()))
-            assert (await ingress.request(path, stale)).operation.reason == "stale"
+            stale_reply = await ingress.request(path, stale)
+            assert stale_reply.operation is not None
+            assert stale_reply.operation.reason == "stale"
             d.reconnect.records[request_id] = Operation(d.ingress.instance, d.sub_gen + 1,
                                                       request_id, "failed", "shutdown")
-            assert (await ingress.request(path, req)).operation.reason == "request-conflict"
-            async def fail(*args):
+            conflict = await ingress.request(path, req)
+            assert conflict.operation is not None
+            assert conflict.operation.reason == "request-conflict"
+            async def fail(req: ingress.Request) -> ingress.Result:
                 raise RuntimeError("not for audit")
             d.ingress_reconnect = fail
             server.handler = ingress.server(path, h.audit, d.ingress_snapshot, fail).handler
@@ -117,9 +130,11 @@ def test_unknown_teardown_notice_once_and_exact_original_retained(tmp_path: Path
         await h.fake.start()
         supervisor = asyncio.create_task(d.inbound_loop())
         close = None
+        transport = None
         try:
             await until(lambda: d.reading)
             reader, transport = d.reconnect.reader, d.reconnect.transport
+            assert reader is not None and transport is not None
             close = transport.close
             transport.close = AsyncMock(return_value=False)
             reader.cancel()
@@ -136,7 +151,7 @@ def test_unknown_teardown_notice_once_and_exact_original_retained(tmp_path: Path
             assert d.reconnect.reader is reader and d.reconnect.transport is transport
             assert d.post.call_count == 1
         finally:
-            if close is not None:
+            if close is not None and transport is not None:
                 transport.close = close
             await stop(supervisor)
             await h.fake.stop()
@@ -167,6 +182,7 @@ def test_generation_advances_once_per_actual_natural_replacement(tmp_path: Path)
         try:
             await until(lambda: d.reading)
             reader, generation = d.reconnect.reader, d.sub_gen
+            assert reader is not None
             reader.cancel()
             await until(lambda: d.reconnect.reader is not reader and d.reading)
             assert d.sub_gen == generation + 1

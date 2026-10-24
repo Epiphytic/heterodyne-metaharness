@@ -34,6 +34,7 @@ def test_terminal_replacement_reader_releases_admission_without_deadline_wait(tm
             assert operation in done, "terminal reader must not retain all three locks until deadline"
             assert not d.reconnect.intent
             assert not any(lock.locked() for lock in (d.work_lock, d.transition_lock, d.custody_lock))
+            assert admitted.operation is not None
             assert d.reconnect.records[admitted.operation.request_id].reason == "failed-observation"
         finally:
             await stop(operation)
@@ -124,6 +125,7 @@ def test_accepted_audit_failure_does_not_fabricate_transport_uncertainty(tmp_pat
             await until(lambda: not d.reconnect.intent)
             assert failed
             assert not d.reconnect.teardown_unknown, "audit failure is not failed transport cessation"
+            assert admitted.operation is not None
             assert d.reconnect.records[admitted.operation.request_id].reason != "failed-teardown"
             await until(lambda: d.reading)
         finally:

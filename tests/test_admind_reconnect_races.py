@@ -69,14 +69,17 @@ def test_socket_close_does_not_cancel_accepted_lifecycle(tmp_path: Path) -> None
             req = ingress.Request("admind.ingress.request.v1", "reconnect", d.ingress.instance,
                                   d.sub_gen, str(uuid.uuid4()))
             reply = await ingress.request(tmp_path / "ingress.sock", req)
+            assert reply.operation is not None
             assert reply.operation.result == "accepted"
             lifecycle = d.reconnect.operation
+            assert lifecycle is not None
             await until(lambda: d.count_lock.locked())
             await server.close()
             assert lifecycle is d.reconnect.operation and not lifecycle.done()
             assert d.reconnect.intent and not d.reading
             h.fake.info_gate.set()
             await until(lambda: lifecycle.done())
+            assert req.request_id is not None
             assert d.reconnect.records[req.request_id].state == "observing"
             assert not supervisor.done()
         finally:
@@ -98,10 +101,13 @@ def test_real_supervisor_shutdown_during_cutover_releases_all_locks(tmp_path: Pa
             result = await d.reconnect.admit(d.ingress.instance, d.sub_gen, str(uuid.uuid4()))
             await until(lambda: d.count_lock.locked())
             await stop(supervisor)
+            assert d.reconnect.operation is not None
+            assert result.operation is not None
             assert d.reconnect.operation.done()
             assert d.reconnect.records[result.operation.request_id].reason == "shutdown"
             assert not d.reconnect.intent
             assert all(not lock.locked() for lock in (d.work_lock, d.transition_lock, d.custody_lock))
+            assert d.reconnect.reader is not None and d.reconnect.transport is not None
             assert d.reconnect.reader.done() and d.reconnect.transport.closed
         finally:
             await stop(supervisor)
@@ -118,11 +124,13 @@ def test_cancel_accepted_operation_before_first_instruction_releases_admission(t
         assert result.result == "accepted"
         # create_task() has not run: cancellation here cannot execute coroutine finally.
         operation = d.reconnect.operation
+        assert operation is not None
         operation.cancel()
         with pytest.raises(asyncio.CancelledError):
             await operation
         assert not d.reconnect.intent
         assert all(not lock.locked() for lock in (d.work_lock, d.transition_lock, d.custody_lock))
+        assert result.operation is not None
         assert d.reconnect.records[result.operation.request_id].state == "failed"
     asyncio.run(scenario())
 

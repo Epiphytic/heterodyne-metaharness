@@ -5,6 +5,7 @@ import contextlib
 import time
 import uuid
 from pathlib import Path
+from typing import cast
 from unittest.mock import AsyncMock
 
 import msgspec
@@ -14,7 +15,7 @@ from test_admind_ingress_observation import message
 
 from heterodyne.admind import ingress
 from heterodyne.admind.ingress_reconnect import Capacity, RetainedQueue
-from heterodyne.marmot.control import InboundMessage
+from heterodyne.marmot.control import InboundMessage, Subscription
 
 
 async def until(predicate) -> None:
@@ -40,12 +41,14 @@ def test_real_socket_cutover_is_owned_deduplicated_and_does_not_change_asks(tmp_
         try:
             await until(lambda: d.reading)
             original_reader, original_transport = d.reconnect.reader, d.reconnect.transport
+            assert original_reader is not None and original_transport is not None
             generation = d.sub_gen
             req = ingress.Request(
                 "admind.ingress.request.v1", "reconnect", d.ingress.instance, generation, str(uuid.uuid4())
             )
             # Transport socket returns accepted; lifecycle is retained by supervisor.
             reply = await ingress.request(tmp_path / "ingress.sock", req)
+            assert reply.operation is not None
             assert reply.operation.result == "accepted"
             await until(lambda: not d.reconnect.intent)
             assert original_reader.done() and original_transport.closed
@@ -53,6 +56,7 @@ def test_real_socket_cutover_is_owned_deduplicated_and_does_not_change_asks(tmp_
             assert d.reading and d.group_ok and d.observing and d.acked
             assert not supervisor.done()
             repeat = await ingress.request(tmp_path / "ingress.sock", req)
+            assert repeat.operation is not None
             assert repeat.operation.result == "observing"
             assert d.sub_gen > generation
             assert d.store.db.execute("SELECT count(*) FROM asks").fetchone()[0] == 0
@@ -76,21 +80,22 @@ def test_busy_preserves_generation_and_worker_waiter_retains_dequeued_event(tmp_
             assert not d.reconnect.intent and not d.reconnect.records
         d.reconnect.paused = True
         d.reconnect.ready.clear()
-        d.on_message = AsyncMock()
+        on_message = AsyncMock()
+        d.on_message = on_message
         event = message(h)
         d.work.put_nowait(event)
         used = d.ingress_capacity.used
         worker = asyncio.create_task(d.worker_loop())
         try:
             await until(lambda: d.work.qsize() == 0)
-            assert not d.work_lock.locked() and not d.on_message.called
+            assert not d.work_lock.locked() and not on_message.called
             assert d.ingress_capacity.used == used
             assert d.work.full() is False
             d.acked = d.reading = d.group_ok = True
             d.reconnect.observed(d.sub_gen)
-            await until(lambda: d.on_message.called)
+            await until(lambda: on_message.called)
             await d.work.join()
-            d.on_message.assert_awaited_once_with(event)
+            on_message.assert_awaited_once_with(event)
             assert d.ingress_capacity.used == 0
         finally:
             await stop(worker)
@@ -184,6 +189,7 @@ def test_stale_ack_cannot_reopen_and_group_wait_uses_shared_deadline(tmp_path: P
             result = await d.reconnect.admit(d.ingress.instance, d.sub_gen, str(uuid.uuid4()))
             assert result.result == "accepted"
             await until(lambda: not d.reconnect.intent)
+            assert result.operation is not None
             assert d.reconnect.records[result.operation.request_id].reason == "failed-observation"
             assert not d.reading and not d.observing
             assert not d.work_lock.locked()
@@ -231,7 +237,8 @@ def test_automatic_teardown_cannot_invalidate_concurrent_accepted_cutover(tmp_pa
                     await release.wait()
                 return True
 
-        d.reconnect.transport = GatedTransport()
+        # Deliberate transport-boundary fake implements only close(), the exercised method.
+        d.reconnect.transport = cast(Subscription, GatedTransport())
         supervisor = asyncio.create_task(d.inbound_loop())
         try:
             await entered.wait()
@@ -264,10 +271,12 @@ def test_accepted_audit_failure_keeps_gates_closed_and_releases_owned_locks(tmp_
         h.audit.write = fail
         result = await d.reconnect.admit(d.ingress.instance, d.sub_gen, str(uuid.uuid4()))
         await until(lambda: not d.reconnect.intent)
+        assert result.operation is not None
         assert d.reconnect.records[result.operation.request_id].reason == "failed-observation"
         assert not d.reconnect.teardown_unknown
         assert d.reconnect.paused and not d.reading
         assert all(not lock.locked() for lock in (d.work_lock, d.transition_lock, d.custody_lock))
+        assert d.reconnect.operation is not None
         await d.reconnect.operation
 
     asyncio.run(scenario())
