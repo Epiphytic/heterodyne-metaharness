@@ -25,6 +25,7 @@ from heterodyne.admind import (
     fulfillment,
     fulfillment_cli,
     gateway_custody_cli,
+    ingress,
     initialised,
     links,
     recovery_cli,
@@ -399,12 +400,14 @@ def _settings_only() -> AdmindSettings:
 
 def _with_settings(args: argparse.Namespace) -> int:
     # Client-only operations never open the daemon database.
-    if args.command in ("ask", "notice", "maintenance-recovery", "gateway-custody"):
+    if args.command in ("ask", "notice", "maintenance-recovery", "gateway-custody", "ingress"):
         try:
             s = _settings_only()
         except hconfig.ConfigError as exc:
             print(f"config error: {show(str(exc), False)}", file=sys.stderr)
             return EX_CONFIG
+        if args.command == "ingress":
+            return ingress_command(s)
         if args.command == "maintenance-recovery":
             return recovery_cli.command(s, args)
         if args.command == "gateway-custody":
@@ -425,6 +428,16 @@ def _with_settings(args: argparse.Namespace) -> int:
     if args.command == "operators":
         return ask_daemon(s, ctl.CtlRequest(args.action, args.name))
     return run(s, store, audit)
+
+
+def ingress_command(s: AdmindSettings) -> int:
+    try:
+        reply = asyncio.run(ingress.request(s.state_dir / ingress.SOCKET))
+    except ctl.CtlUnavailable:
+        print("admind: ingress status unavailable", file=sys.stderr)
+        return EX_UNAVAILABLE
+    print(msgspec.json.encode(reply).decode())
+    return 0 if reply.result == "ok" else EX_UNAVAILABLE
 
 
 def run(s: AdmindSettings, store: Store, audit: Audit) -> int:
@@ -556,6 +569,10 @@ def build_parser() -> argparse.ArgumentParser:
         "gateway-custody", help="register or inspect independently enrolled custody consent"))
     _notice_parser(sub.add_parser("notice", help="post an FYI to the operators; no reply is requested"))
     units.add_arguments(sub.add_parser("unit", help="print a systemd user unit for this install"))
+    status = sub.add_parser("ingress", help="read local ingress observations; not delivery clearance")
+    ingress_sub = status.add_subparsers(dest="ingress_command", required=True, parser_class=_QuietParser)
+    ingress_sub.add_parser("status", help="read a memory-only snapshot").add_argument(
+        "--json", action="store_true", required=True)
     sub.add_parser("initialised", help="exit 0 if admind init has run, 1 if not, 2 if it can't tell")
     hook = sub.add_parser("hook", help="(internal) forward an agent hook event to admind")
     hook.add_argument("--socket")

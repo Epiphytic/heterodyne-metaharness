@@ -95,9 +95,13 @@ def event(key, text=None):
 
 
 def daemon(service):
+    from heterodyne.admind import ingress
     from heterodyne.admind.daemon import Admind
 
     d = Mock(spec=Admind)
+    d.ingress = ingress.Observation()
+    d.transition_lock = asyncio.Lock()
+    d._ingress_lock = Admind._ingress_lock.__get__(d, Admind)
     d.gateway_custody = service
     d.account, d.group = ACCOUNT, GROUP
     d.operators = {SENDER: "synthetic independent operator"}
