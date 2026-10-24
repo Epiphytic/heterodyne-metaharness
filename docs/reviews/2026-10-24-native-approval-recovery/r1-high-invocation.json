@@ -1,0 +1,40 @@
+{
+  "at": "2026-10-24T15:55:59.078561+00:00",
+  "head": "8ba561c72c70e0c95947a766a0fc10417c68b801",
+  "base": "5db4c0c27c51b4e3db5a5dee8ab94ef25d3af156",
+  "cwd": "${HOME}/.hermes/handoff/2026-10-15/codex/autonomous-resume/admind-native-recovery-code-r1-high-20261024-inputs",
+  "source_cwd": "${HOME}/repos/admind-settlement-contract-20261024",
+  "files": {
+    "src/heterodyne/admind/recovery.py": "00f76101b8645f887d4c6dc2d365fbbda7a9feaa9bbda4b10abf049082a01842",
+    "tests/test_admind_native_recovery.py": "2afce9bed038c0f9dcc4e3122694d2d52dc9ffba66d37ddae1ceae8a865a377c"
+  },
+  "argv": [
+    "${HOME}/.nvm/versions/node/v22.22.0/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+    "-p",
+    "--model",
+    "opus",
+    "--effort",
+    "high",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--dangerously-skip-permissions",
+    "--tools",
+    "Read,Bash,Skill,Agent,ReportFindings",
+    "--strict-mcp-config",
+    "--mcp-config",
+    "{\"mcpServers\":{}}",
+    "--add-dir",
+    "${HOME}/repos/admind-settlement-contract-20261024",
+    "--",
+    "Invoke actual built-in Skill tool skill=code-review, not plugin code-review:code-review. Use HIGH reasoning for code review round 1 of closed approval-native observational recovery descriptor and operator card contract. Review correctness, security, integration and tests across the complete frozen diff. Read-only source review: no edits, commits, tests, services, live DB/queue, network sends or GitHub comments. No second review or validation of the review. Preserve actual findings and all historical reports. Do not reset earlier review rounds. No automatic APPROVE; report blockers honestly or explicitly clear the reviewed source. Codex author, Claude Opus reviewer. W=${HOME}/repos/admind-settlement-contract-20261024 base=5db4c0c27c51b4e3db5a5dee8ab94ef25d3af156 head=8ba561c72c70e0c95947a766a0fc10417c68b801 Exact source SHA256={\"src/heterodyne/admind/recovery.py\": \"00f76101b8645f887d4c6dc2d365fbbda7a9feaa9bbda4b10abf049082a01842\", \"tests/test_admind_native_recovery.py\": \"2afce9bed038c0f9dcc4e3122694d2d52dc9ffba66d37ddae1ceae8a865a377c\"}\nCode-only first review. Approved design docs/designs/2026-10-24-hermes-pending-approval-authoring.md at7df8735aceb091a0527711420b6734b6f43583d7 in Hermes repository; genuine separate human92v5 yes15:10:19Z. Existing design exactlyoneHIGHreview incorporated; do not run designreview. Frozen8ba561c72c70e0c95947a766a0fc10417c68b801 against exactinstalledproductsource5db4c0c. Only2changedfiles,117focusedtestsPASS0.71s, Ruff/pyright/diffPASS. Newsettle-approval-native.v1 descriptor retains commonfields, exactmode/result and closed native_effect fields ordinal/task_id/approval_id/family/intent_envelope_sha256/plan_sha256/observation_sha256/verdict. Nine finite operationfamilies; observed-applied/observed-unapplied informational settlement only, never reissue unknown mutation. Card actual task/approval/family/verdict/action displayedfirst, hashes8groups8hex avoiding existingglobal64hexredactor; preserveglobalredactor/auth/currentmembership/thread/conflictingreply/30spermit/generationchecks. Generic complexity delta and shorttestduplicate acknowledged, assess actual risk. No production snapshot/fence observerqualification yet; queue/Hermes integrations parallel separate slices and futurecombinedreview. No sourcepush/deployment/nativeDB/server writes allowed fromreview. Read existing dependencies as necessary from worktree, tests are supplied receipt not permission rerun. Delegate read-only reviews only, explicitly no tests or commands mutating any state even disposable. Source PoCclearance separate productionqualification. Review actual descriptor acceptance, strictunknownschema/scalarbound validation, cardrender/budget/redaction behavior, existing auth compatibility and test adequacy."
+  ],
+  "prompt": "Invoke actual built-in Skill tool skill=code-review, not plugin code-review:code-review. Use HIGH reasoning for code review round 1 of closed approval-native observational recovery descriptor and operator card contract. Review correctness, security, integration and tests across the complete frozen diff. Read-only source review: no edits, commits, tests, services, live DB/queue, network sends or GitHub comments. No second review or validation of the review. Preserve actual findings and all historical reports. Do not reset earlier review rounds. No automatic APPROVE; report blockers honestly or explicitly clear the reviewed source. Codex author, Claude Opus reviewer. W=${HOME}/repos/admind-settlement-contract-20261024 base=5db4c0c27c51b4e3db5a5dee8ab94ef25d3af156 head=8ba561c72c70e0c95947a766a0fc10417c68b801 Exact source SHA256={\"src/heterodyne/admind/recovery.py\": \"00f76101b8645f887d4c6dc2d365fbbda7a9feaa9bbda4b10abf049082a01842\", \"tests/test_admind_native_recovery.py\": \"2afce9bed038c0f9dcc4e3122694d2d52dc9ffba66d37ddae1ceae8a865a377c\"}\nCode-only first review. Approved design docs/designs/2026-10-24-hermes-pending-approval-authoring.md at7df8735aceb091a0527711420b6734b6f43583d7 in Hermes repository; genuine separate human92v5 yes15:10:19Z. Existing design exactlyoneHIGHreview incorporated; do not run designreview. Frozen8ba561c72c70e0c95947a766a0fc10417c68b801 against exactinstalledproductsource5db4c0c. Only2changedfiles,117focusedtestsPASS0.71s, Ruff/pyright/diffPASS. Newsettle-approval-native.v1 descriptor retains commonfields, exactmode/result and closed native_effect fields ordinal/task_id/approval_id/family/intent_envelope_sha256/plan_sha256/observation_sha256/verdict. Nine finite operationfamilies; observed-applied/observed-unapplied informational settlement only, never reissue unknown mutation. Card actual task/approval/family/verdict/action displayedfirst, hashes8groups8hex avoiding existingglobal64hexredactor; preserveglobalredactor/auth/currentmembership/thread/conflictingreply/30spermit/generationchecks. Generic complexity delta and shorttestduplicate acknowledged, assess actual risk. No production snapshot/fence observerqualification yet; queue/Hermes integrations parallel separate slices and futurecombinedreview. No sourcepush/deployment/nativeDB/server writes allowed fromreview. Read existing dependencies as necessary from worktree, tests are supplied receipt not permission rerun. Delegate read-only reviews only, explicitly no tests or commands mutating any state even disposable. Source PoCclearance separate productionqualification. Review actual descriptor acceptance, strictunknownschema/scalarbound validation, cardrender/budget/redaction behavior, existing auth compatibility and test adequacy.",
+  "executable_sha256": "bc1aad9982c7b59c7d889ff92595d61cf46e0a6eae074cb551d932a989bcd222",
+  "config_sha256": "ae2dad28d084f14bf6fab6de7c3c8fb0f4d8d763421aad292f6219532d41dd5d",
+  "capture_kind": "manual-foreign-observed-stream-not-reserved-profile-proof",
+  "_publication": {
+    "normalization": "Host home prefix replaced with ${HOME} for install-agnostic publication; original exact invocation/record retained privately. This copy is not byte-identical.",
+    "original_sha256": "647c0515b06b85d097400be5a6765d54fd50bc5e978542d245a0c2507e388ea5"
+  }
+}

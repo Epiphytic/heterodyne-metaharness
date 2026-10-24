@@ -1,0 +1,58 @@
+{
+  "source": "acd0a58bf98f9c72abd87b616812076a97ba4eda",
+  "base": "5db4c0c27c51b4e3db5a5dee8ab94ef25d3af156",
+  "author": "Codex",
+  "reviewer_models_exposed": [
+    "claude-opus-5-5"
+  ],
+  "builtin_skill_calls": [
+    {
+      "report": "admind-native-recovery-code-r1-high-20261024-stream.jsonl",
+      "input": {
+        "skill": "code-review",
+        "args": "high ${HOME}/repos/admind-settlement-contract-20261024 base=5db4c0c27c51b4e3db5a5dee8ab94ef25d3af156 head=8ba561c72c70e0c95947a766a0fc10417c68b801 \u2014 read-only review; no edits, commits, tests, services, network sends, or GitHub comments"
+      }
+    },
+    {
+      "report": "admind-native-recovery-code-r3-medium-20261024-stream.jsonl",
+      "input": {
+        "skill": "code-review",
+        "args": "medium ${HOME}/.hermes/handoff/2026-10-15/codex/autonomous-resume/admind-native-recovery-code-r3-medium-20261024.diff"
+      }
+    },
+    {
+      "report": "admind-native-recovery-code-r2-high-20261024-stream.jsonl",
+      "input": {
+        "skill": "code-review",
+        "args": "high ${HOME}/repos/admind-settlement-contract-20261024 base=5db4c0c27c51b4e3db5a5dee8ab94ef25d3af156 head=2e221dd54f01dcfd9f4edfe7d34350c9b2e8a2e0 \u2014 read-only source review round 2; no edits, no tests, no commands mutating state"
+      }
+    }
+  ],
+  "rounds": [
+    {
+      "round": 1,
+      "reasoning": "high",
+      "actual_verdict": "NOT CLEARED"
+    },
+    {
+      "round": 2,
+      "reasoning": "high",
+      "actual_verdict": "NOT CLEARED"
+    },
+    {
+      "round": 3,
+      "reasoning": "medium",
+      "question": "Are there any critical flaws with this, or is this good enough to implement as a PoC?",
+      "actual_verdict": "No critical flaws found; good enough as a source-only PoC, not deployment"
+    }
+  ],
+  "code_review": "Code-Review: reviewer=claude-opus-5-5 author=Codex mode=cross-model range=5db4c0c27c51b4e3db5a5dee8ab94ef25d3af156..acd0a58bf98f9c72abd87b616812076a97ba4eda",
+  "tests": "221 focused PASS1.32sec; Ruff/Pyright/diff/hooks PASS; qualityexit2 reported not pass",
+  "design": "https://github.com/Epiphytic/hermes-maintenance/blob/7df8735aceb091a0527711420b6734b6f43583d7/docs/designs/2026-10-24-hermes-pending-approval-authoring.md",
+  "human_design_approval": "Genuine Marmot92v5 implementation approval; no deployment approval inferred",
+  "deployment": "Not deployed/qualified. Final reviewer noncritical findings and production gates retained in r3-medium.md.",
+  "_publication": {
+    "normalization": "Host home prefix replaced with ${HOME} for install-agnostic publication; original exact invocation/record retained privately. This copy is not byte-identical.",
+    "original_sha256": "b9bfeab8ba0b5f9453eb8a339c0e30f00f85cc45cf8f68fc2e4eab9d35927f8b"
+  }
+}
