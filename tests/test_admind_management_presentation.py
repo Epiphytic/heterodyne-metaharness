@@ -8,7 +8,7 @@ import msgspec
 import pytest
 from fakes.settings import OPERATOR_HEX, make_settings, operator
 
-from heterodyne.admind import asks, binding, ctl
+from heterodyne.admind import asks, binding, ctl, ingress
 from heterodyne.admind.daemon import Admind
 from heterodyne.admind.store import Store
 
@@ -45,6 +45,7 @@ def daemon(tmp_path):
     d.s = make_settings(tmp_path)
     d.audit = Mock()
     d.latched = lambda: False
+    d.ingress = ingress.Observation()
 
     # Use actual transactional outbox API; no network, fake authority or native mutations.
     def post_parts(prefix: str, parts: list[str], lane: int = 1, *, owner: tuple[str, ...] | None) -> None:
