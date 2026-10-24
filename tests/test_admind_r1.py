@@ -28,7 +28,7 @@ from heterodyne.admind.commands import CommandRunner
 from heterodyne.admind.daemon import RESTARTED_NOTICE, UNCERTAIN, Admind
 from heterodyne.admind.hook import HookEvent
 from heterodyne.admind.store import Store, now
-from heterodyne.marmot.control import ControlClient, ControlError, InboundMessage, decode_event
+from heterodyne.marmot.control import ControlClient, ControlError, InboundMessage, Subscription, decode_event
 from heterodyne.marmot.nip19 import hex_to_npub
 from heterodyne.services import UnitStatus
 from heterodyne.tmux import Tmux, TmuxError, TmuxPasteUncertain
@@ -104,7 +104,7 @@ class StubClient:
         self.on_subscribe: Callable[[], None] | None = None
         self.acked = asyncio.Event()          # set once a subscription was acknowledged and confirmed
 
-    async def group_info(self, account: str, group: str) -> Any:
+    async def group_info(self, account: str, group: str, *, deadline: float | None = None) -> Any:
         if self.group_info_error is not None:
             raise self.group_info_error
         return SimpleNamespace(group_id_hex=group, member_count=self.member_count)
@@ -115,15 +115,25 @@ class StubClient:
         return SimpleNamespace(message_ids_hex=[hashlib.sha256(f"{len(self.sent)}".encode()).hexdigest()])
 
     async def subscribe(self, account: str, group: str,
-                        on_ack: Callable[[], Awaitable[None]] | None = None) -> AsyncIterator[Any]:
+                        on_ack: Callable[[], Awaitable[None]] | None = None, *,
+                        deadline: float | None = None, owned: Subscription | None = None,
+                        on_connected: Callable[[], None] | None = None) -> AsyncIterator[Any]:
         self.subscribe_calls += 1
         if self.on_subscribe is not None:
             self.on_subscribe()
         if self.subscribe_failures > 0:
             self.subscribe_failures -= 1
             raise ControlError("wn-agent closed the connection", "socket_closed", True)
+        # No socket is created: the real owned handle stays empty and can
+        # positively close once this fake reader terminates.
+        if on_connected is not None:
+            on_connected()
         if on_ack is not None:
-            await on_ack()
+            if deadline is None:
+                await on_ack()
+            else:
+                async with asyncio.timeout_at(deadline):
+                    await on_ack()
         self.acked.set()
         while True:
             yield await self.events.get()

@@ -18,6 +18,7 @@ from test_admind_r1 import StubClient, Unit, run
 
 from heterodyne.admind.hook import HookServer, hook_main
 from heterodyne.config.secret_scan import show
+from heterodyne.marmot.control import Subscription
 
 # --- 1. group verification is bound to its subscription ---
 
@@ -34,7 +35,7 @@ class GatedClient(StubClient):
         self.acks: asyncio.Queue[int] = asyncio.Queue()
         self.calls = 0
 
-    async def group_info(self, account: str, group: str) -> Any:
+    async def group_info(self, account: str, group: str, *, deadline: float | None = None) -> Any:
         index = self.calls
         self.calls += 1
         if index < len(self.gates):
@@ -43,12 +44,20 @@ class GatedClient(StubClient):
         return SimpleNamespace(group_id_hex=group, member_count=self.member_count)
 
     async def subscribe(
-        self, account: str, group: str, on_ack: Callable[[], Awaitable[None]] | None = None
+        self, account: str, group: str, on_ack: Callable[[], Awaitable[None]] | None = None, *,
+        deadline: float | None = None, owned: Subscription | None = None,
+        on_connected: Callable[[], None] | None = None,
     ) -> AsyncIterator[Any]:
         drop: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         self.drops.append(drop)
+        if on_connected is not None:
+            on_connected()
         if on_ack is not None:
-            await on_ack()
+            if deadline is None:
+                await on_ack()
+            else:
+                async with asyncio.timeout_at(deadline):
+                    await on_ack()
         self.acks.put_nowait(len(self.drops) - 1)
         await drop
         return
