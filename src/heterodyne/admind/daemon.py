@@ -959,6 +959,7 @@ class Admind:
             retained_bytes=self.ingress_capacity.used,
             byte_accounting="normalized-retained",
             reconnect=next(reversed(self.reconnect.records.values()), "idle"),
+            teardown_unknown=self.reconnect.teardown_unknown,
             unavailable=("durable_disposition_completion", "last_error_category"),
         ))
 
@@ -3373,7 +3374,7 @@ class Admind:
         verified = await self.check_group(deadline=deadline)
         if generation != self.sub_gen or self.shutting_down:
             return
-        if not verified and not self.latched():
+        if not verified and (not self.latched() or self.reconnect.intent):
             raise ControlError("group could not be re-verified", "unverified", True)
         self.reading = True
         self.ingress.phase("reader", "reading")

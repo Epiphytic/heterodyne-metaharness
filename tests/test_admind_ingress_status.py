@@ -139,7 +139,11 @@ def test_actual_malformed_oversize_requests_never_call_snapshot_or_log_payload(
                 assert len(rows) == 1
                 assert rows[0]["action"] == "reconnect-refused" and rows[0]["reason"] == "malformed"
             else:
-                assert not audit.path.exists() or audit.path.read_bytes() == b""
+                rows = [msgspec.json.decode(line) for line in audit.path.read_bytes().splitlines()]
+                assert len(rows) == 1
+                assert rows[0]["action"] == "reconnect-protocol-failed"
+                assert rows[0]["reason"] == "malformed"
+            assert b"do-not-log" not in audit.path.read_bytes()
         finally:
             await server.close()
 

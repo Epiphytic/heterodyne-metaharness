@@ -121,7 +121,7 @@ class Reconnect:
         self.teardown_unknown = False
         self.running = False
         self._generation_reserved = False
-        self._last_audited_reader: asyncio.Task[None] | None = None
+        self._reader_audited = False
         self.recovery_seconds = RECOVERY_SECONDS
         self.teardown_seconds = TEARDOWN_SECONDS
 
@@ -166,8 +166,9 @@ class Reconnect:
             or recovering
         ):
             return Result("busy", "busy")
-        # No suspension is possible acquiring an asyncio.Lock known free in this
-        # event loop. The intent fence prevents any new participating admission.
+        # A previously woken waiter may still acquire a currently unlocked lock.
+        # Participating waiters recheck intent after acquiring and release before
+        # waiting for observation; this fence excludes new participating work.
         self.intent = True
         self.released.clear()
         held: list[asyncio.Lock] = []
@@ -219,14 +220,15 @@ class Reconnect:
             self.paused = True
             self.invalidate()
             self.records[record.request_id] = msgspec.structs.replace(
-                record, state="failed", reason="shutdown"
+                record, state="failed",
+                reason="shutdown" if self.d.shutting_down else "failed-observation"
             )
             self._release(held)
 
     def _reader_ended(self, reader: asyncio.Task[None]) -> None:
-        if reader is self._last_audited_reader:
+        if self._reader_audited:
             return
-        self._last_audited_reader = reader
+        self._reader_audited = True
         code = "stream_ended"
         if reader.cancelled():
             code = "reader_cancelled"
@@ -262,11 +264,16 @@ class Reconnect:
         self.invalidate()
         self._generation_reserved = False
         self.transport = Subscription()
+        self._reader_audited = False
         generation = self.d.sub_gen
         self.reader = asyncio.create_task(self.d.read_subscription(generation, deadline, self.transport))
 
     def _unknown_teardown(self) -> None:
-        """Retain exact custody; one bounded audit/outbox notice per unknown episode."""
+        """Retain exact custody and status; one fixed audit per unknown episode.
+
+        Outbox delivery requires observation, so cannot report this outage. No
+        notification is queued for delayed/stale delivery after recovery.
+        """
         first = not self.teardown_unknown
         self.teardown_unknown = True
         self.paused = True
@@ -274,15 +281,7 @@ class Reconnect:
         self.d.ingress.phase("reader", "failed")
         if first:
             self.d.audit_quietly("subscribe", action="teardown-unknown", code="close_timeout")
-            self.d.contained("ingress-notice-failed", lambda: self.d.post(
-                f"ingress-teardown:{self.d.ingress.instance}:{self.d.sub_gen}",
-                "Approval ingress is paused: closure of the original subscription is unconfirmed. "
-                "Queued events remain held; no replacement or replay has been attempted. "
-                "Inspect admind ingress status, then use admind ingress reconnect with its current "
-                "instance and generation and a fresh request UUID to retry closing that same subscription. "
-                "This does not clear execution holds or prove delivery of earlier replies.",
-                None, owner=None,
-            ))
+
 
     async def _wait_observing(self, deadline: float) -> bool:
         """A failed replacement is terminal promptly, even when ACK never arrived."""
@@ -325,7 +324,7 @@ class Reconnect:
         except TimeoutError:
             reason = "failed-observation"
         except asyncio.CancelledError:
-            reason = "shutdown"
+            reason = "shutdown" if d.shutting_down else "failed-observation"
             raise
         except Exception:
             # Only the actual teardown phase can establish uncertain old custody.

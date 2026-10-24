@@ -739,11 +739,15 @@ all execution holds. It never restarts wn-agent, replays answers or sends invite
 The shared recovery budget is 125 seconds, original teardown at most two seconds,
 and connection/write/ACK/group verification phases at most 30 seconds each within
 the remaining budget. Uncertain teardown retains the original handles and closed
-gates, with one bounded audit and system outbox escalation notice per unknown episode; a fresh
-exact-generation request retries that custody. The notice is advisory, not delivery proof. Observation failure
+gates, with `teardown_unknown=true` in status and one fixed audit per unknown episode; a fresh
+exact-generation request retries that custody. No operator notification is queued: normal outbox
+delivery requires observation and cannot deliver an alarm during this outage. An external observer
+must inspect status/audit; automatic notification remains a limitation, not an escalation guarantee. Observation failure
 returns control promptly when the replacement reader ends, or at the shared deadline,
-to the one automatic backoff supervisor. Unexpected loop faults retain transport custody and
-permit that supervisor to restart; they do not set the daemon shutdown flag. Only a current-generation
+to the one automatic backoff supervisor. Unexpected loop faults fail any retained cutover as `failed-observation`, run bounded exact-reader
+cleanup, and permit that supervisor to restart; they do not set the daemon shutdown flag.
+Cleanup keeps the original handles if cessation remains unknown. A failed group check during
+explicit reconnect ends the replacement reader promptly even when the daemon is latched. Only a current-generation
 ACK plus stable group verification can reopen workers. A stop cancels the retained
 cutover and prevents a replacement.
 
@@ -758,6 +762,7 @@ not a durable inbox: restart may lose unclaimed memory, and transport history or
 replay completeness remains unqualified.
 
 Reconnect mutation requests, refusals and handler failures are audited with fixed categories;
-status polls remain quiet. Invalid local reconnect selectors return usage error 2 before socket
+undecodable/oversize protocol input receives a fixed payload-free failure audit because it cannot
+be established as a status poll. Decoded status polls remain quiet, including status handler failures. Invalid local reconnect selectors return usage error 2 before socket
 access, distinct from an unavailable endpoint. Ended/failed reader cycles retain bounded lifecycle
 audit categories without peer error detail.

@@ -122,11 +122,10 @@ def test_stale_reader_retains_decoded_event_without_current_observation(
     asyncio.run(scenario())
 
 
-def test_unknown_teardown_notice_once_and_exact_original_retained(tmp_path: Path) -> None:
+def test_unknown_teardown_audited_status_and_no_stale_outbox_notice(tmp_path: Path) -> None:
     async def scenario() -> None:
         h = Harness(tmp_path)
         d = h.daemon
-        d.post = Mock()
         await h.fake.start()
         supervisor = asyncio.create_task(d.inbound_loop())
         close = None
@@ -141,15 +140,21 @@ def test_unknown_teardown_notice_once_and_exact_original_retained(tmp_path: Path
             await until(lambda: d.reconnect.teardown_unknown)
             assert d.reconnect.reader is reader and d.reconnect.transport is transport
             assert d.reconnect.paused and not d.reading
-            assert d.post.call_count == 1
-            text = d.post.call_args.args[1]
-            assert "fresh request UUID" in text and "does not clear execution holds" in text
-            # Retrying failed original closure cannot spam notices or create a replacement.
+            snapshot = d.ingress_snapshot().snapshot
+            assert snapshot is not None and snapshot.teardown_unknown
+            assert h.store.db.execute(
+                "SELECT count(*) FROM outbox WHERE key LIKE 'ingress-teardown:%'"
+            ).fetchone()[0] == 0
+            # Retrying failed original closure cannot create a delayed notice or replacement.
             result = await d.reconnect.admit(d.ingress.instance, d.sub_gen, str(uuid.uuid4()))
             assert result.result == "accepted"
             await until(lambda: not d.reconnect.intent)
             assert d.reconnect.reader is reader and d.reconnect.transport is transport
-            assert d.post.call_count == 1
+            rows = [json.loads(line) for line in h.audit.path.read_text().splitlines()]
+            assert sum(row.get("action") == "teardown-unknown" for row in rows) == 1
+            assert h.store.db.execute(
+                "SELECT count(*) FROM outbox WHERE key LIKE 'ingress-teardown:%'"
+            ).fetchone()[0] == 0
         finally:
             if close is not None and transport is not None:
                 transport.close = close

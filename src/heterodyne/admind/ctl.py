@@ -84,7 +84,8 @@ class JsonSocketServer[Req, Rep: msgspec.Struct]:
     def __init__(self, path: Path, handler: Callable[[Req, Peer], Awaitable[Rep]], audit: Audit, *,
                  kind: str, max_request: int, max_reply: int, request_type: type[Req] | UnionType,
                  check: Callable[[Req], str | None], refused: Callable[[str], Rep], failed: Callable[[], Rep],
-                 describe: Callable[[Req], dict[str, object]], audit_requests: bool = True) -> None:
+                 describe: Callable[[Req], dict[str, object]], audit_requests: bool = True,
+                 protocol_failure: Callable[[Req | None, str], None] | None = None) -> None:
         self.path = path
         self.handler = handler
         self.audit = audit
@@ -97,6 +98,7 @@ class JsonSocketServer[Req, Rep: msgspec.Struct]:
         self.failed = failed
         self.describe = describe
         self.audit_requests = audit_requests
+        self.protocol_failure = protocol_failure
         self.server: asyncio.Server | None = None
         self.created: tuple[int, ...] | None = None     # identity of the socket this instance bound
         self.handlers: dict[asyncio.Task[Any], asyncio.StreamWriter] = {}     # accepted connections
@@ -105,6 +107,11 @@ class JsonSocketServer[Req, Rep: msgspec.Struct]:
     def _request_audit(self, **fields: object) -> None:
         if self.audit_requests:
             self.audit.write(self.kind, **fields)
+
+    def _protocol_failed(self, req: Req | None, reason: str) -> None:
+        if self.protocol_failure is not None:
+            with contextlib.suppress(Exception):
+                self.protocol_failure(req, reason)
 
     async def start(self) -> None:
         """Bind the socket ourselves: asyncio's path-based start would follow a symlink at the path and
@@ -181,6 +188,7 @@ class JsonSocketServer[Req, Rep: msgspec.Struct]:
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         operation_request = False
+        decoded: Req | None = None
         try:
             try:
                 line = await asyncio.wait_for(reader.readline(), READ_SECONDS)
@@ -211,9 +219,11 @@ class JsonSocketServer[Req, Rep: msgspec.Struct]:
             except operations.Invalid as error:
                 reply = cast(Rep, operations.Reply("refused", str(error)))
             except (TimeoutError, ValueError, msgspec.DecodeError):
+                self._protocol_failed(None, "malformed")
                 reply = (cast(Rep, operations.Reply("refused", "malformed")) if operation_request
                          else self.refused("malformed request"))
             else:
+                decoded = req
                 refusal = self.check(req)
                 if refusal is not None:
                     reply = (cast(Rep, operations.Reply("refused", refusal)) if operation_request
@@ -242,6 +252,7 @@ class JsonSocketServer[Req, Rep: msgspec.Struct]:
             writer.write(data + b"\n")
             await asyncio.wait_for(writer.drain(), WRITE_SECONDS)
         except Exception as exc:  # noqa: BLE001 - one bad client must not end the server
+            self._protocol_failed(decoded, "connection-failed")
             with contextlib.suppress(Exception):     # the log may be what failed
                 self._request_audit(action="failed", error=type(exc).__name__)
         finally:

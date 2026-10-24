@@ -147,6 +147,7 @@ class Snapshot(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     retained_bytes: int | None = None
     byte_accounting: Literal["unavailable", "normalized-retained"] = "unavailable"
     reconnect: Operation | Literal["not-implemented", "idle"] = "not-implemented"
+    teardown_unknown: bool = False
     upstream_delivery_verified: Literal[False] = False
     history_replay_verified: Literal[False] = False
 
@@ -343,6 +344,10 @@ def server(
             mutation_audit(action="reconnect-handler-failed")
             raise
 
+    def protocol_failure(req: Request | None, reason: str) -> None:
+        if req is None or req.op == "reconnect":
+            mutation_audit(action="reconnect-protocol-failed", reason=reason)
+
     return ctl.JsonSocketServer(
         path,
         handle,
@@ -356,6 +361,7 @@ def server(
         failed=lambda: Reply("unavailable", "unavailable"),
         describe=lambda _: {},
         audit_requests=False,
+        protocol_failure=protocol_failure,
     )
 
 
