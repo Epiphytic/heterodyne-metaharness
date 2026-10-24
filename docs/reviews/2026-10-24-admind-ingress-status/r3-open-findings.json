@@ -1,0 +1,76 @@
+{
+  "actual_report_sha256": "0d065ad373540ece0eadddeaa008f3b4d14feb2f605183da3464e97b89126372",
+  "verdict": "good enough to implement as a PoC; no critical flaws found",
+  "findings": [
+    {
+      "ordinal": 1,
+      "actual": {
+        "file": "src/heterodyne/admind/daemon.py",
+        "line": 3419,
+        "summary": "In on_message, a custody command with a malformed message id counts dropped_malformed but neither authenticated_normal nor authenticated_custody, and a guard-dropped custody command counts dropped_guard instead of dropped_custody_guard. This contradicts the new docs line that dropped_guard counts only normal guard refusals.",
+        "failure_scenario": "A custody command reaches on_message (this fallback path is effectively dead today because on_event routes custody commands away). With a bad message id, the snapshot shows dropped_malformed=1 with no matching authentication count. If the guard drops it, dropped_guard increments, so the separate custody/normal accounting promised in docs/admind.md does not hold on this path."
+      },
+      "status": "OPEN_UNWAIVED"
+    },
+    {
+      "ordinal": 2,
+      "actual": {
+        "file": "src/heterodyne/admind/ingress.py",
+        "line": 73,
+        "summary": "COMPONENT_PHASES is a hand-written dict of untyped string frozensets, unlike the get_args-derived tables that R1 #9 introduced. A typo or a newly added WorkerPhase is not checked by the type checker. The .get(component, frozenset()) default is also redundant given the `component not in TASKS` check.",
+        "failure_scenario": "Someone adds a WorkerPhase such as 'waiting_transition_lock' and emits it for normal, but forgets COMPONENT_PHASES. Pyright passes, and Observation.phase raises ValueError inside worker_loop, which counts handler_failed for every message. A typo inside a frozenset entry likewise makes a valid phase impossible to emit, with no static error."
+      },
+      "status": "OPEN_UNWAIVED"
+    },
+    {
+      "ordinal": 3,
+      "actual": {
+        "file": "src/heterodyne/admind/ingress.py",
+        "line": 128,
+        "summary": "The other honesty fields on Snapshot (release, retained_bytes, byte_accounting, reconnect, upstream_delivery_verified, history_replay_verified) still have decode defaults, so a peer may omit them. This is the same 'optional on input' pattern R2 #2 fixed for the schema field.",
+        "failure_scenario": "A v1-incompatible peer omits byte_accounting and upstream_delivery_verified. msgspec fills in the honest defaults and the client accepts the reply. Because the defaults are Literal-pinned to the honest values, nothing false is printed, but the client never checks that the peer actually declared those markers."
+      },
+      "status": "OPEN_UNWAIVED"
+    },
+    {
+      "ordinal": 4,
+      "actual": {
+        "file": "src/heterodyne/admind/ingress.py",
+        "line": 325,
+        "summary": "request() relabels every CtlInvalidReply as 'ingress-schema', but the CLI catches CtlUnavailable and prints only 'ingress status unavailable', so a schema mismatch, a server-peer UID mismatch and a timeout all look the same to the operator.",
+        "failure_scenario": "An incompatible or older daemon answers ingress.sock without the v1 schema. The operator sees the same 'ingress status unavailable' and the same exit code as when the daemon is down, so a version mismatch is mistaken for an outage."
+      },
+      "status": "OPEN_UNWAIVED"
+    },
+    {
+      "ordinal": 5,
+      "actual": {
+        "file": "src/heterodyne/admind/daemon.py",
+        "line": 3416,
+        "summary": "on_message now calls gateway_custody.command(ev.message.text) twice on the same text, once to decide the authenticated_normal count and again for the custody branch.",
+        "failure_scenario": "Every authenticated normal message parses its text for a custody command twice. Computing it once into a local would also make the counter branch and the routing branch provably agree."
+      },
+      "status": "OPEN_UNWAIVED"
+    },
+    {
+      "ordinal": 6,
+      "actual": {
+        "file": "src/heterodyne/admind/daemon.py",
+        "line": 879,
+        "summary": "R2 #8 is still OPEN_UNWAIVED: the task-loop table picks ingress components by name string ('inbound'->reader, 'worker'->normal), and the custody and recovery create-task/register code is repeated by hand.",
+        "failure_scenario": "Renaming the 'inbound' or 'worker' table entry silently stops registering that task. Status then reports state 'unknown' with no error."
+      },
+      "status": "OPEN_UNWAIVED"
+    },
+    {
+      "ordinal": 7,
+      "actual": {
+        "file": "tests/test_admind_ingress_status.py",
+        "line": 366,
+        "summary": "R2 #9 is still partly open: the timing bound is relaxed to 1 s, but test_status_client_whole_operation_timeout_includes_send still stubs ctl.request, so no test runs a real send under the whole-operation timeout.",
+        "failure_scenario": "A regression where writer.drain() blocks past the 5 s client timeout (for example, a peer that never reads) would still pass the test named 'includes_send'."
+      },
+      "status": "OPEN_UNWAIVED"
+    }
+  ]
+}
