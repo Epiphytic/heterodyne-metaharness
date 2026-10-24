@@ -1,0 +1,22 @@
+I ran the built-in `code-review` skill at medium effort, read-only. I made no edits, commits, test runs, DB or service calls, network sends or comments.
+
+**Verdict: neither repair patch has a critical flaw, so the source is good enough to implement as a PoC.** That clears source PoC only. It doesn't cover deployment, production observer, real permit, the 30-second check or activation. The inherited approval-authoring ancestor stays **NOT CLEARED** and this review can't clear it. Earlier rounds (R1, R2 HIGH, R3 MEDIUM NOT CLEAR) stand as the record; this round is follow-up 1 on top of them.
+
+**The R3 blocker is fixed in queue `6f9f8c0`:**
+- `native_fence` now hands back the ownership lock it actually holds, and `settle_native` passes that same lock to compaction (`btq-maintenance.py:1830`). `abandon` passes its own held lock (`:2010`).
+- Compaction checks that it was given the same open lock file and locks it again, which doesn't conflict with itself. So the old self-lock HOLD is gone.
+- When `native_fence` skips the lock because the record is already terminal, no lock is passed. That's safe because compaction never reaches the stage-file cleanup step on that path.
+- The other callers (generic settle, `_resume_receipted`, lease finalize) were already passing their lock.
+
+**Hermes `a708371`:** the narrower catch is correct and `KeyboardInterrupt` still propagates.
+
+**Six non-critical findings.** The skill's summary line said five, but its list has six; all are listed here.
+
+1. **Stuck operation, fails closed** (`btq-maintenance.py:1200`): one state can never be settled. Effect N is recorded as "unknown" and a leftover stage file for N+1 exists. `prepare_primary` and `settle_primary` HOLD on that stage file before compaction can clean it up, so retries never get past it. It's safe, but stuck for good.
+2. **Hermes catch still has gaps** (`primary_inspection.py:308`): `subprocess.TimeoutExpired` (a hung git call) and `SyntaxError` (a corrupted `btq` file) still escape. The CLI would then print a raw traceback with the command and paths. Catching `subprocess.SubprocessError` and `SyntaxError` closes both.
+3. **One call still doesn't pass the lock** (`btq-maintenance.py:1291`): `settle_primary` calls compaction without the lock it holds. Today the check in finding 1 HOLDs first, so this can't happen yet. If finding 1 is fixed by relaxing that check, this path would self-lock after the permanent receipt is already written. Binding `as child` at line 1236 and passing it fixes it.
+4. **Test gap** (`test_primary_child_settlement.py:524`): no test covers the already-terminal path (no lock passed) or `_resume_receipted` with a leftover stage file.
+5. **Design debt** (`btq-primary-child-recovery.py:311`): if a caller forgets to pass the lock, cleanup quietly opens a second one. A caller already inside the fence then blocks on its own lock, which is how this blocker happened. Requiring the lock to be passed explicitly would make a forgotten lock fail loudly.
+6. **Design debt** (`btq-maintenance.py:1884`): `abandon`, `settle` and `_resume_receipted` each repeat the locking sequence that `native_fence` already wraps, with slightly different lock order. That duplication is why the lock was passed inconsistently.
+
+If you want a follow-up before or alongside the PoC: findings 2 and 3 are one-line fixes. Doing 3 first also makes the eventual fix for 1 safe.
