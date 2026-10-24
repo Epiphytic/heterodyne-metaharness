@@ -447,7 +447,6 @@ class Admind:
         self.ready_timeout = READY_TIMEOUT  # replaced in tests
         self.launched_at = self.clock()
         self.ingress = ingress.Observation(clock=lambda: self.clock())
-        self.ingress_available = False
         self.stuck: str | None = None
         self.not_ready_sent = False
         self.summary_wake = asyncio.Event()
@@ -823,8 +822,6 @@ class Admind:
                 # Diagnostics cannot make the existing daemon unavailable. The server
                 # refuses foreign leaves and only removes its own bound socket.
                 self.audit_quietly("ingress", action="unavailable", reason="bind")
-            else:
-                self.ingress_available = True
             recovery_server = ctl.JsonSocketServer(
                 self.s.state_dir / recovery.SOCKET,
                 self.on_recovery,
@@ -932,7 +929,6 @@ class Admind:
                 await recovery_server.close()
             if custody_server is not None:
                 await custody_server.close()
-            self.ingress_available = False
             await ingress_server.close()
             if control is not None:
                 await control.close()
@@ -1131,7 +1127,7 @@ class Admind:
                 return recovery.Reply("ok", "recovery status", service.get(req.proposal_sha256))
             if self.reconnect.intent:
                 return recovery.Reply("refused", "ingress-reconnect-busy")
-            async with self._ingress_lock("work", "recovery"):
+            async with self._ingress_lock("work", "recovery_control"):
                 if not await self.check_group() or self.recovery_authority() is None:
                     raise recovery.Invalid("authority")
                 # Hash the bounded source closure off the subscription event loop. Keep
@@ -2639,7 +2635,7 @@ class Admind:
                     if self.wallclock() < due:
                         delay = min(delay, max(1.0, due - self.wallclock()))
                         continue
-                    async with self._ingress_lock("work", "recovery"):
+                    async with self._ingress_lock("work", "maintenance"):
                         try:
                             await self.retry_maintenance(ask_id, mid)
                         except asyncio.CancelledError:
@@ -3407,7 +3403,7 @@ class Admind:
                 or event.message.sender.account_id_hex.lower() not in self.operators
                 or not MESSAGE_ID.fullmatch(event.message.message_id_hex.lower())
             ):
-                self.ingress.count("dropped_guard")
+                self.ingress.count("dropped_custody_guard")
                 self.audit.write("gateway-custody", action="refused", reason="command-auth")
                 return
             self.ingress.count("authenticated_custody")
@@ -3476,7 +3472,8 @@ class Admind:
                 text_chars=len(ev.message.text),
             )
             return
-        self.ingress.count("authenticated_normal")
+        if gateway_custody.command(ev.message.text) is None:
+            self.ingress.count("authenticated_normal")
         if not MESSAGE_ID.fullmatch(mid):
             self.ingress.count("dropped_malformed")
             self.audit.write(
@@ -3487,6 +3484,7 @@ class Admind:
             )
             return
         if gateway_custody.command(ev.message.text) is not None:
+            self.ingress.count("authenticated_custody")
             self._enqueue_ingress(ev, custody=True)
             return
         if recovery.COMMAND.fullmatch(ev.message.text) is not None and MESSAGE_ID.fullmatch(mid):

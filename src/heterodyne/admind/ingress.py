@@ -33,6 +33,8 @@ Owner = Literal[
     "membership",
     "rearm",
     "recovery",
+    "recovery_control",
+    "maintenance",
     "custody_control",
     "autobump",
     "reconnect",
@@ -64,6 +66,7 @@ CounterName = Literal[
     "reconnects",
     "dropped_self",
     "dropped_guard",
+    "dropped_custody_guard",
     "dropped_malformed",
     "dropped_replay",
     "dropped_capacity",
@@ -78,6 +81,17 @@ LOCKS: tuple[LockName, ...] = get_args(LockName)
 READER_PHASES = frozenset(get_args(ReaderPhase))
 WORKER_PHASES = frozenset(get_args(WorkerPhase))
 OWNERS = frozenset(get_args(Owner))
+COMPONENT_PHASES = {
+    "reader": READER_PHASES,
+    "normal": frozenset({
+        "waiting_queue", "waiting_work_lock", "waiting_observation", "handling", "failed", "stopped"
+    }),
+    "custody": frozenset({
+        "waiting_queue", "waiting_custody_lock", "waiting_observation", "handling", "failed", "stopped"
+    }),
+    "recovery": frozenset({"waiting_work_lock", "handling", "failed", "stopped"}),
+}
+UNAVAILABLE = ("queue_bytes", "durable_disposition_completion", "last_error_category")
 
 
 class Request(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -144,6 +158,15 @@ class Reply(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     operation: Result | None = None
 
 
+class _WireReply(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    # Convenience encoding defaults must never make the protocol version optional on input.
+    schema: Literal["admind.ingress.reply.v1"]
+    result: Literal["ok", "refused", "unavailable"]
+    reason: Literal["snapshot", "reconnect", "peer", "malformed", "unavailable"]
+    snapshot: Snapshot | None = None
+    operation: Result | None = None
+
+
 class Observation:
     """One event-loop-owned observer. Callers pass fixed labels, never event data."""
 
@@ -172,7 +195,7 @@ class Observation:
         self._marked[name] = self.clock()
 
     def phase(self, component: TaskName, value: Phase) -> None:
-        allowed = READER_PHASES if component == "reader" else WORKER_PHASES
+        allowed = COMPONENT_PHASES.get(component, frozenset())
         if component not in TASKS or value not in allowed:
             raise ValueError("unknown ingress phase")
         self._phases[component] = value
@@ -323,10 +346,16 @@ def _valid_snapshot(snapshot: Snapshot) -> bool:
         or tuple(t.name for t in snapshot.tasks) != TASKS
         or tuple(lock.name for lock in snapshot.locks) != LOCKS
         or tuple(counter.name for counter in snapshot.counters) != COUNTERS
+        or snapshot.unavailable != (
+            UNAVAILABLE[1:] if snapshot.byte_accounting == "normalized-retained" else UNAVAILABLE
+        )
+        or any(t.phase != "unknown" and t.phase not in COMPONENT_PHASES[t.name] for t in snapshot.tasks)
     ):
         return False
     numbers = (snapshot.generation, snapshot.membership_epoch, snapshot.normal_depth, snapshot.custody_depth)
     if any(not 0 <= number <= MAX_COUNTER for number in numbers):
+        return False
+    if (snapshot.byte_accounting == "normalized-retained") != (snapshot.retained_bytes is not None):
         return False
     if snapshot.retained_bytes is not None and not 0 <= snapshot.retained_bytes <= BYTE_LIMIT:
         return False
@@ -351,11 +380,13 @@ async def request(path: Path, req: Request | None = None) -> Reply:
                 path,
                 req,
                 timeout=CLIENT_SECONDS,
-                reply_type=Reply,
+                reply_type=_WireReply,
                 max_reply=MAX_REPLY,
                 require_uid=os.getuid(),
                 abort_close=True,
             )
+    except ctl.CtlInvalidReply:
+        raise ctl.CtlInvalidReply("ingress-schema") from None
     except TimeoutError:
         raise ctl.CtlUnavailable("ingress-unavailable") from None
     if (
@@ -378,4 +409,4 @@ async def request(path: Path, req: Request | None = None) -> Reply:
         raise ctl.CtlInvalidReply("ingress-schema")
     if reply.snapshot is not None and not _valid_snapshot(reply.snapshot):
         raise ctl.CtlInvalidReply("ingress-schema")
-    return reply
+    return Reply(reply.result, reply.reason, reply.snapshot, reply.schema, reply.operation)

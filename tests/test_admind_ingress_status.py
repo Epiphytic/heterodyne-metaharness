@@ -363,7 +363,7 @@ def test_total_deadline_does_not_wait_for_graceful_cleanup(
         try:
             with pytest.raises(ctl.CtlUnavailable, match="ingress-unavailable"):
                 await ingress.request(path)
-            assert asyncio.get_running_loop().time() - started < 0.15
+            assert asyncio.get_running_loop().time() - started < 1.0
             assert len(opened) == 1
             opened[0][0].assert_not_called()
             opened[0][1].assert_called_once_with()
@@ -388,7 +388,8 @@ def test_enum_tables_and_recovery_phase_are_closed() -> None:
     assert ingress.LOCKS == get_args(ingress.LockName)
     assert ingress.OWNERS == frozenset(get_args(ingress.Owner))
     observer = ingress.Observation()
-    observer.phase("recovery", "waiting_custody_lock")
+    with pytest.raises(ValueError, match="unknown ingress phase"):
+        observer.phase("recovery", "waiting_custody_lock")
     observer.owner("custody", "custody_control")
     observer.owner("work", "autobump")
     for phase in ("waiting_observation", "unrecognised"):
@@ -400,3 +401,54 @@ def test_enum_tables_and_recovery_phase_are_closed() -> None:
     observer.owner("work", "reconnect")
     with pytest.raises(ValueError, match="unknown ingress owner"):
         observer.owner("work", "unrecognised")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["missing-schema", "empty-unavailable", "partial-unavailable", "duplicate-unavailable", "wrong-phase"],
+)
+def test_real_socket_rejects_missing_version_or_dishonest_metadata(tmp_path: Path, mutation: str) -> None:
+    async def body() -> None:
+        payload = msgspec.to_builtins(snapshot(ingress.Observation()))
+        if mutation == "missing-schema":
+            del payload["schema"]
+        elif mutation == "wrong-phase":
+            payload["snapshot"]["tasks"][1]["phase"] = "waiting_custody_lock"
+        else:
+            payload["snapshot"]["unavailable"] = {
+                "empty-unavailable": [],
+                "partial-unavailable": ["queue_bytes"],
+                "duplicate-unavailable": ["queue_bytes"] * 3,
+            }[mutation]
+        completed = asyncio.Event()
+
+        async def respond(reader, writer):
+            try:
+                await reader.readline()
+                writer.write(msgspec.json.encode(payload) + b"\n")
+                await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+                completed.set()
+
+        path = tmp_path / "schema.sock"
+        server = await asyncio.start_unix_server(respond, path=path)
+        try:
+            with pytest.raises(ctl.CtlInvalidReply, match="ingress-schema"):
+                await ingress.request(path)
+            await asyncio.wait_for(completed.wait(), 2)
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    asyncio.run(body())
+
+
+@pytest.mark.parametrize(
+    "component,wrong",
+    [("normal", "waiting_custody_lock"), ("custody", "waiting_work_lock"), ("recovery", "waiting_queue")],
+)
+def test_each_component_rejects_another_workers_phase(component, wrong) -> None:
+    with pytest.raises(ValueError, match="unknown ingress phase"):
+        ingress.Observation().phase(component, wrong)

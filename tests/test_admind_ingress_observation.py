@@ -472,7 +472,6 @@ def test_diagnostic_bind_refusal_does_not_stop_daemon_or_unlink_foreign_leaf(
                     await asyncio.sleep(0.001)
             assert not task.done()
             assert (h.settings.state_dir / "ctl.sock").exists()
-            assert daemon.ingress_available is False
             assert path.lstat().st_ino == before.st_ino
             assert target.read_bytes() == b"private fixture"
             audit = daemon.audit.path.read_text()
@@ -489,5 +488,76 @@ def test_diagnostic_bind_refusal_does_not_stop_daemon_or_unlink_foreign_leaf(
             with pytest.raises(asyncio.CancelledError):
                 await task
         assert path.lstat().st_ino == before.st_ino
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("control", [False, True], ids=["maintenance", "recovery-control"])
+def test_later_lock_holders_do_not_claim_finished_startup_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, control: bool
+) -> None:
+    from heterodyne.admind import ctl, recovery
+
+    async def scenario() -> None:
+        daemon = Harness(tmp_path).daemon
+        entered = asyncio.Event()
+
+        async def finished() -> None:
+            return None
+
+        startup = asyncio.create_task(daemon._ingress_loop("recovery", finished))
+        daemon.ingress.task("recovery", startup)
+        await startup
+
+        async def blocked(*args: object, **kwargs: object) -> bool:
+            entered.set()
+            await asyncio.Event().wait()
+            return True
+
+        if control:
+            monkeypatch.setattr(daemon, "check_group", blocked)
+            task = asyncio.create_task(
+                daemon.on_recovery(recovery.Permit("a" * 64), ctl.Peer(os.getpid(), os.getuid(), os.getgid()))
+            )
+        else:
+            monkeypatch.setattr(daemon.store, "maintenance_retryable", lambda: [("a", "b", 0)])
+            monkeypatch.setattr(daemon, "retry_maintenance", blocked)
+            task = asyncio.create_task(daemon.maintenance_retry_loop())
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            value = daemon.ingress_snapshot().snapshot
+            assert value is not None
+            assert next(t for t in value.tasks if t.name == "recovery").state == "done"
+            assert next(lock for lock in value.locks if lock.name == "work").owner == (
+                "recovery_control" if control else "maintenance"
+            )
+            assert daemon.work_lock.locked()
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert not daemon.work_lock.locked()
+        final = daemon.ingress_snapshot().snapshot
+        assert final is not None
+        assert next(lock for lock in final.locks if lock.name == "work").owner == "none"
+
+    asyncio.run(scenario())
+
+
+def test_custody_auth_drops_and_fallback_auth_are_separate(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        h = Harness(tmp_path)
+        h.daemon.authorise({OPERATOR_HEX})
+        h.daemon.refresh_authority = Mock(return_value=True)
+        h.daemon.latched = Mock(return_value=False)
+        h.daemon.on_event(message(h, sender="ef" * 32, text="!custody settle " + "a" * 24))
+        count = counters(h)
+        assert count["dropped_custody_guard"] == 1
+        assert count["dropped_guard"] == 0
+        await h.daemon.on_message(message(h, text="!custody settle " + "a" * 24))
+        count = counters(h)
+        assert count["authenticated_custody"] == 1
+        assert count["authenticated_normal"] == 0
+        assert count["enqueued_custody"] == 1
 
     asyncio.run(scenario())

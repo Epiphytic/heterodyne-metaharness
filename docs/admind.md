@@ -693,8 +693,13 @@ observation gates, actual task states, work/transition/custody lock holders, que
 counts, and fixed progress/drop counters. A held lock whose category is not known
 reports `unknown`. Custody control and autobump have distinct holder categories;
 a custody worker waiting behind custody control reports `waiting_custody_lock`.
-Recovery task activity is observed through its actual task and work lock. Normal
-and custody queue/counter observations stay separate. `handler_failed` counts a
+Recovery task activity is observed through its actual startup task and work lock.
+Later maintenance retries and recovery socket control use distinct `maintenance`
+and `recovery_control` lock holders, even after startup recovery has finished.
+`dropped_guard` counts normal message/reaction guard refusals;
+`dropped_custody_guard` counts custody command-auth refusals. Authentication and
+enqueue counts distinguish normal and custody traffic; decoded input, capacity,
+and handler failures are shared observations. `handler_failed` counts a
 failed event once at its reader or normal/custody handler boundary, including
 caught custody source/store failures; cancellation is not an event failure.
 `connecting` precedes the connection/write milestone; `awaiting_ack` follows the
