@@ -10,12 +10,18 @@ import asyncio
 import contextlib
 import time
 from collections import OrderedDict, deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 import msgspec
 
-from heterodyne.marmot.control import InboundMessage, ReactionAdded, Subscription
+from heterodyne.marmot.control import (
+    KNOWN_ERROR_CODES,
+    ControlError,
+    InboundMessage,
+    ReactionAdded,
+    Subscription,
+)
 
 if TYPE_CHECKING:
     from heterodyne.admind.daemon import Admind
@@ -34,7 +40,6 @@ class Capacity:
     limit: int = BYTE_LIMIT
     used: int = 0
     episode: bool = False
-    changed: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 class RetainedQueue[T: InboundMessage | ReactionAdded](asyncio.Queue[T]):
@@ -61,14 +66,6 @@ class RetainedQueue[T: InboundMessage | ReactionAdded](asyncio.Queue[T]):
         self._sizes.append(size)
         self.capacity.used += size
 
-    async def put(self, item: T) -> None:
-        while True:
-            try:
-                self.put_nowait(item)
-                return
-            except asyncio.QueueFull:
-                await self.capacity.changed.wait()
-
     def get_nowait(self) -> T:
         item = super().get_nowait()
         self._inflight.append(self._sizes.popleft())
@@ -80,9 +77,6 @@ class RetainedQueue[T: InboundMessage | ReactionAdded](asyncio.Queue[T]):
         super().task_done()
         self.capacity.used -= self._inflight.popleft()
         self.capacity.episode = False
-        # A waiter on put() needs waking only when original completion frees a slot.
-        self.capacity.changed.set()
-        self.capacity.changed = asyncio.Event()
 
 
 class Operation(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -126,13 +120,17 @@ class Reconnect:
         self.records: OrderedDict[str, Operation] = OrderedDict()
         self.teardown_unknown = False
         self.running = False
+        self._generation_reserved = False
+        self._last_audited_reader: asyncio.Task[None] | None = None
         self.recovery_seconds = RECOVERY_SECONDS
         self.teardown_seconds = TEARDOWN_SECONDS
 
     def invalidate(self) -> None:
         d = self.d
         d.observing = d.acked = d.reading = d.group_ok = False
-        d.sub_gen += 1
+        if not self._generation_reserved:
+            d.sub_gen += 1
+            self._generation_reserved = True
         self.ready.clear()
 
     def observed(self, generation: int) -> None:
@@ -225,13 +223,31 @@ class Reconnect:
             )
             self._release(held)
 
+    def _reader_ended(self, reader: asyncio.Task[None]) -> None:
+        if reader is self._last_audited_reader:
+            return
+        self._last_audited_reader = reader
+        code = "stream_ended"
+        if reader.cancelled():
+            code = "reader_cancelled"
+        elif (exc := reader.exception()) is not None:
+            allowed = KNOWN_ERROR_CODES | {
+                "socket_io", "timeout", "frame_too_large", "unverified", "protocol_error",
+                "socket_closed", "agent_control_error", "unrecognised",
+            }
+            code = exc.code if isinstance(exc, ControlError) and exc.code in allowed else "reader_failed"
+        self.d.audit_quietly("subscribe", action="reconnect", code=code)
+
     async def _stop_reader(self, deadline: float) -> bool:
         task, transport = self.reader, self.transport
         if task is not None and not task.done():
             task.cancel()
         if transport is not None:
-            if not await transport.close(deadline):
-                return False
+            try:
+                if not await transport.close(deadline):
+                    return False
+            except Exception:
+                return False  # retain exact transport; a close error is not cessation
         if task is not None:
             done, _ = await asyncio.wait({task}, timeout=max(0.0, deadline - time.monotonic()))
             if not done:
@@ -244,9 +260,43 @@ class Reconnect:
         if self.reader is not None and not self.reader.done():
             raise RuntimeError("original subscription still owned")
         self.invalidate()
+        self._generation_reserved = False
         self.transport = Subscription()
         generation = self.d.sub_gen
         self.reader = asyncio.create_task(self.d.read_subscription(generation, deadline, self.transport))
+
+    def _unknown_teardown(self) -> None:
+        """Retain exact custody; one bounded audit/outbox notice per unknown episode."""
+        first = not self.teardown_unknown
+        self.teardown_unknown = True
+        self.paused = True
+        self.invalidate()
+        self.d.ingress.phase("reader", "failed")
+        if first:
+            self.d.audit_quietly("subscribe", action="teardown-unknown", code="close_timeout")
+            self.d.contained("ingress-notice-failed", lambda: self.d.post(
+                f"ingress-teardown:{self.d.ingress.instance}:{self.d.sub_gen}",
+                "Approval ingress is paused: closure of the original subscription is unconfirmed. "
+                "Queued events remain held; no replacement or replay has been attempted. "
+                "Inspect admind ingress status, then use admind ingress reconnect with its current "
+                "instance and generation and a fresh request UUID to retry closing that same subscription. "
+                "This does not clear execution holds or prove delivery of earlier replies.",
+                None, owner=None,
+            ))
+
+    async def _wait_observing(self, deadline: float) -> bool:
+        """A failed replacement is terminal promptly, even when ACK never arrived."""
+        reader = self.reader
+        if reader is None:
+            return False
+        ready = asyncio.create_task(self.ready.wait())
+        try:
+            async with asyncio.timeout_at(deadline):
+                await asyncio.wait({ready, reader}, return_when=asyncio.FIRST_COMPLETED)
+            return ready.done() and self.ready.is_set() and not reader.done()
+        finally:
+            ready.cancel()
+            await asyncio.gather(ready, return_exceptions=True)
 
     async def _cutover(self, record: Operation, held: list[asyncio.Lock]) -> None:
         d = self.d
@@ -257,18 +307,19 @@ class Reconnect:
         self.paused = True
         self.invalidate()
         self.changed.set()
+        stopped = False
         try:
-            d.audit.write("ingress", action="reconnect-accepted")
+            d.audit_quietly("ingress", action="reconnect-accepted")
             d.ingress.phase("reader", "closing")
             stopped = await self._stop_reader(min(deadline, time.monotonic() + self.teardown_seconds))
-            self.teardown_unknown = not stopped
             if not stopped:
+                self._unknown_teardown()
                 reason = "failed-teardown"
             elif not d.shutting_down:
+                self.teardown_unknown = False
                 self._start_reader(deadline)
-                async with asyncio.timeout_at(deadline):
-                    await self.ready.wait()
-                reason = "observing"
+                if await self._wait_observing(deadline):
+                    reason = "observing"
             else:
                 reason = "shutdown"
         except TimeoutError:
@@ -277,9 +328,12 @@ class Reconnect:
             reason = "shutdown"
             raise
         except Exception:
-            # Fixed public reason, retained original handles; never infer cessation.
-            self.teardown_unknown = True
-            reason = "failed-teardown"
+            # Only the actual teardown phase can establish uncertain old custody.
+            if not stopped:
+                self._unknown_teardown()
+                reason = "failed-teardown"
+            else:
+                reason = "failed-observation"
         finally:
             self.records[record.request_id] = msgspec.structs.replace(
                 record, state="observing" if reason == "observing" else "failed", reason=reason
@@ -293,6 +347,8 @@ class Reconnect:
         changed = asyncio.create_task(self.changed.wait())
         try:
             await asyncio.wait({sleeper, changed}, return_when=asyncio.FIRST_COMPLETED)
+            if sleeper.done():
+                sleeper.result()
             return changed.done()
         finally:
             for task in (sleeper, changed):
@@ -312,6 +368,7 @@ class Reconnect:
                     continue
                 if self.reader is None or self.reader.done():
                     if self.reader is not None:
+                        self._reader_ended(self.reader)
                         self.invalidate()
                         # Positive close must accompany reader cessation. This also
                         # fences natural teardown failures, not just explicit ones.
@@ -322,13 +379,10 @@ class Reconnect:
                         if self.intent or self.reader is not original:
                             continue
                         if not stopped:
-                            self.teardown_unknown = True
-                            self.paused = True
-                            self.invalidate()
+                            self._unknown_teardown()
                             continue
                         self.d.ingress.count("reconnects")
                         self.d.ingress.phase("reader", "backoff")
-                        self.invalidate()
                         self.changed.clear()
                         if await self._backoff(delay):
                             continue
@@ -349,11 +403,16 @@ class Reconnect:
                     if self.d.reading:
                         delay = 1.0
                     self.d.ingress.phase("reader", "failed")
+        except asyncio.CancelledError:
+            self.d.shutting_down = True
+            raise
         finally:
             self.running = False
-            self.d.shutting_down = True
+            self.paused = True
+            self.invalidate()
             if self.operation is not None and not self.operation.done():
                 self.operation.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await self.operation
-            await self._stop_reader(time.monotonic() + self.teardown_seconds)
+            if not await self._stop_reader(time.monotonic() + self.teardown_seconds):
+                self._unknown_teardown()

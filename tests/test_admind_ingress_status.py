@@ -117,7 +117,7 @@ def test_real_socket_poll_is_private_readonly_and_does_not_grow_audit(tmp_path: 
         b"x" * 4097,
     ],
 )
-def test_actual_malformed_oversize_requests_never_call_snapshot_or_audit(
+def test_actual_malformed_oversize_requests_never_call_snapshot_or_log_payload(
     tmp_path: Path, payload: bytes
 ) -> None:
     async def body() -> None:
@@ -134,7 +134,12 @@ def test_actual_malformed_oversize_requests_never_call_snapshot_or_audit(
             assert result == ingress.Reply("refused", "malformed")
             await ctl.hang_up(writer)
             called.assert_not_called()
-            assert not audit.path.exists() or audit.path.read_bytes() == b""
+            if payload == b'{"schema":"admind.ingress.request.v1","op":"reconnect"}':
+                rows = [msgspec.json.decode(line) for line in audit.path.read_bytes().splitlines()]
+                assert len(rows) == 1
+                assert rows[0]["action"] == "reconnect-refused" and rows[0]["reason"] == "malformed"
+            else:
+                assert not audit.path.exists() or audit.path.read_bytes() == b""
         finally:
             await server.close()
 

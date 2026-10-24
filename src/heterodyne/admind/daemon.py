@@ -3348,13 +3348,20 @@ class Admind:
             self.account, self.group, on_ack=acknowledged, deadline=deadline, owned=owned,
             on_connected=lambda: self.ingress.phase("reader", "awaiting_ack")
         ):
-            if generation != self.sub_gen:
-                return
+            stale = generation != self.sub_gen
             try:
-                self.on_event(event)
+                # Already decoded events retain their bounded original payload even
+                # across invalidation. Worker gates prevent claims before observation.
+                if stale and not isinstance(event, InboundMessage | ReactionAdded):
+                    self.ingress.count("decoded_any")
+                    self.audit_quietly("event", action="ignored", what="stale-generation")
+                else:
+                    self.on_event(event)
             except Exception as exc:  # noqa: BLE001 - isolated malformed local event
                 self.ingress.count("handler_failed")
-                self.audit.write("handler", action="failed", error=type(exc).__name__)
+                self.audit_quietly("handler", action="failed", error=type(exc).__name__)
+            if stale:
+                return
 
     async def confirm_observing(self, generation: int | None = None, deadline: float | None = None) -> None:
         """ACK and count are adopted only for the same subscription and membership epoch."""
@@ -3373,9 +3380,6 @@ class Admind:
         self.reconnect.observed(generation)
 
     def _enqueue_ingress(self, event: InboundMessage | ReactionAdded, *, custody: bool = False) -> None:
-        if self.reconnect.intent or self.reconnect.paused:
-            self.ingress.count("dropped_intake")
-            return  # intake is closed; no durable claim or success is manufactured
         try:
             if custody:
                 if not isinstance(event, InboundMessage):

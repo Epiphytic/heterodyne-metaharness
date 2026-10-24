@@ -5,6 +5,7 @@ supervisor; neither route reads approval authority or grants delivery clearance.
 """
 
 import asyncio
+import contextlib
 import math
 import os
 import time
@@ -313,14 +314,34 @@ def server(
 ) -> ctl.JsonSocketServer[Request, Reply]:
     """Fixed same-UID endpoint; status polls never append audit records."""
 
+    def mutation_audit(**fields: object) -> None:
+        # Logging failure must not manufacture a teardown outcome or skip safeguards.
+        with contextlib.suppress(Exception):
+            audit.write("ingress", **fields)
+
+    def validate(req: Request) -> str | None:
+        refusal = check(req)
+        if req.op == "reconnect" and refusal is not None:
+            mutation_audit(action="reconnect-refused", reason="malformed")
+        return refusal
+
     async def handle(req: Request, peer: ctl.Peer) -> Reply:
-        if peer.uid != os.getuid():
-            return Reply("refused", "peer")
         if req.op == "status":
-            return snapshot()
-        if reconnect is None:
-            return Reply("unavailable", "unavailable")
-        return Reply("ok", "reconnect", operation=await reconnect(req))
+            return snapshot() if peer.uid == os.getuid() else Reply("refused", "peer")
+        mutation_audit(action="reconnect-request")
+        try:
+            if peer.uid != os.getuid():
+                mutation_audit(action="reconnect-refused", reason="peer")
+                return Reply("refused", "peer")
+            if reconnect is None:
+                mutation_audit(action="reconnect-refused", reason="unavailable")
+                return Reply("unavailable", "unavailable")
+            result = await reconnect(req)
+            mutation_audit(action="reconnect-result", result=result.result, reason=result.reason)
+            return Reply("ok", "reconnect", operation=result)
+        except Exception:
+            mutation_audit(action="reconnect-handler-failed")
+            raise
 
     return ctl.JsonSocketServer(
         path,
@@ -330,7 +351,7 @@ def server(
         max_request=MAX_REQUEST,
         max_reply=MAX_REPLY,
         request_type=Request,
-        check=check,
+        check=validate,
         refused=lambda _: Reply("refused", "malformed"),
         failed=lambda: Reply("unavailable", "unavailable"),
         describe=lambda _: {},

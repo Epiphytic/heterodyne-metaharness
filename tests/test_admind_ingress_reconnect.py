@@ -264,7 +264,8 @@ def test_accepted_audit_failure_keeps_gates_closed_and_releases_owned_locks(tmp_
         h.audit.write = fail
         result = await d.reconnect.admit(d.ingress.instance, d.sub_gen, str(uuid.uuid4()))
         await until(lambda: not d.reconnect.intent)
-        assert d.reconnect.records[result.operation.request_id].reason == "failed-teardown"
+        assert d.reconnect.records[result.operation.request_id].reason == "failed-observation"
+        assert not d.reconnect.teardown_unknown
         assert d.reconnect.paused and not d.reading
         assert all(not lock.locked() for lock in (d.work_lock, d.transition_lock, d.custody_lock))
         await d.reconnect.operation

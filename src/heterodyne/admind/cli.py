@@ -437,6 +437,9 @@ def ingress_command(s: AdmindSettings, args: argparse.Namespace | None = None) -
             req = ingress.Request(
                 "admind.ingress.request.v1", "reconnect", args.instance, args.generation, args.request_id
             )
+            if ingress.check(req) is not None:
+                print("admind: invalid ingress reconnect selectors", file=sys.stderr)
+                return 2
         reply = asyncio.run(ingress.request(s.state_dir / ingress.SOCKET, req))
     except ctl.CtlUnavailable:
         print("admind: ingress status unavailable", file=sys.stderr)

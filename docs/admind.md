@@ -732,21 +732,32 @@ task, not restored delivery. Repeating that exact request returns its latest
 in-memory result even after its generation becomes old. The daemon retains at
 most 64 request records (pending records cannot be evicted); restart loses them.
 
-Reconnect closes normal and custody intake, retains queued and dequeued events,
+Reconnect closes new subscription intake, retains already decoded, queued and dequeued events,
 and waits for the exact original reader and transport to cease before opening a
 replacement. It preserves asks, attempts, membership authority, conversation and
 all execution holds. It never restarts wn-agent, replays answers or sends invites.
 The shared recovery budget is 125 seconds, original teardown at most two seconds,
 and connection/write/ACK/group verification phases at most 30 seconds each within
 the remaining budget. Uncertain teardown retains the original handles and closed
-gates; a fresh exact-generation request retries that custody. Observation failure
-returns control to the one automatic backoff supervisor. Only a current-generation
+gates, with one bounded audit and system outbox escalation notice per unknown episode; a fresh
+exact-generation request retries that custody. The notice is advisory, not delivery proof. Observation failure
+returns control promptly when the replacement reader ends, or at the shared deadline,
+to the one automatic backoff supervisor. Unexpected loop faults retain transport custody and
+permit that supervisor to restart; they do not set the daemon shutdown flag. Only a current-generation
 ACK plus stable group verification can reopen workers. A stop cancels the retained
 cutover and prevents a replacement.
 
 Each normal/custody queue admits at most 256 unfinished events, sharing 8 MiB of
 normalized retained bytes. Dequeue does not release capacity. Overflow is refused
 before Store claim, counted, and audited once per capacity episode; nothing is
-evicted. Intake-fenced frames are separately counted as `dropped_intake`. This is
+evicted. Already decoded messages/reactions remain bounded in these queues across intent or
+generation invalidation; workers cannot claim them until current observation. Stale non-message
+events are counted and audited without adopting membership observation. `dropped_intake` remains
+a compatibility counter, not a claim that buffered frames were discarded during cutover. This is
 not a durable inbox: restart may lose unclaimed memory, and transport history or
 replay completeness remains unqualified.
+
+Reconnect mutation requests, refusals and handler failures are audited with fixed categories;
+status polls remain quiet. Invalid local reconnect selectors return usage error 2 before socket
+access, distinct from an unavailable endpoint. Ended/failed reader cycles retain bounded lifecycle
+audit categories without peer error detail.
