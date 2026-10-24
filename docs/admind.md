@@ -672,3 +672,49 @@ approval prose is screened, including fields not printed on the card; only valid
 Marmot reference identities are exempt. Historical raw prose that would redact still refuses. New
 settlement outcomes are redacted in the existing atomic decision transaction, without changing their
 native status/actor/attempt identity. This interface requires deployment before use.
+
+## Read-only ingress status
+
+`admind ingress status --json` samples the running daemon through its same-user
+`<state>/admind/ingress.sock`. It does not rearm, reconnect, refresh policy, read
+message history, acquire dispatch locks, or contact the upstream transport. Polls
+append no request audit records. The request is limited to 4 KiB, its reply to
+16 KiB, and the cooperative client operation to five seconds, including cleanup.
+The diagnostic client aborts its transport rather than awaiting graceful close;
+this is not a hard scheduling or process-preemption guarantee. An absent endpoint, incompatible
+reply, foreign peer or timeout fails closed; an older installed release can lack
+this endpoint. A diagnostic socket bind failure leaves the main daemon running
+and records a fixed diagnostic-unavailable audit event; it does not unlink a
+foreign file or symlink.
+
+The closed JSON reply reports the current process's opaque instance identifier,
+monotonic ages, subscription generation and existing acknowledgement/reading/
+observation gates, actual task states, work/transition/custody lock holders, queue
+counts, and fixed progress/drop counters. A held lock whose category is not known
+reports `unknown`. Custody control and autobump have distinct holder categories;
+a custody worker waiting behind custody control reports `waiting_custody_lock`.
+Recovery task activity is observed through its actual task and work lock. Normal
+and custody queue/counter observations stay separate. `handler_failed` counts a
+failed event once at its reader or normal/custody handler boundary, including
+caught custody source/store failures; cancellation is not an event failure.
+`awaiting_ack` includes waiting for the transport connection because the existing
+subscription API exposes no separate connection milestone. `reconnects` counts
+ended/failed subscription cycles, not successful reconnects. Counters saturate
+with an overflow marker and reset with a new process instance. They are local
+observations, not a persistent history or receipt.
+
+Queue byte accounting, durable disposition completion, release authentication,
+and the last transport error category are unavailable. The `completed_normal`
+and `completed_custody` counters therefore remain zero: returning from a handler
+must not be interpreted as durable completion. `claimed` counts successful Store
+claims; `ask_answered` counts the local answer transaction returning, which does
+not establish end-to-end delivery or an independent durable completion receipt.
+`decoded_any` observes decoded events only, not raw transport frames. Task
+supervision can retry an existing background loop; the snapshot reports the
+current phase rather than a complete failure history.
+
+A responsive endpoint, quiet queues, or `reading=true` cannot establish transport
+health, current native-group equality, replay completeness, or permission to
+change anything. There is no reconnect subcommand in this status subset. Preserve
+the snapshot and escalate an unexplained receive gap through the existing
+operator approval/recovery process; this command grants no recovery authority.

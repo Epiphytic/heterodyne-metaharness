@@ -26,8 +26,9 @@ import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from functools import partial
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import msgspec
 
@@ -45,6 +46,7 @@ from heterodyne.admind import (
     gateway_custody_control,
     guard,
     guard_state,
+    ingress,
     membership,
     notices,
     operations,
@@ -441,6 +443,8 @@ class Admind:
         self.agent_poll = AGENT_POLL  # replaced in tests
         self.ready_timeout = READY_TIMEOUT  # replaced in tests
         self.launched_at = self.clock()
+        self.ingress = ingress.Observation(clock=lambda: self.clock())
+        self.ingress_available = False
         self.stuck: str | None = None
         self.not_ready_sent = False
         self.summary_wake = asyncio.Event()
@@ -798,6 +802,7 @@ class Admind:
         await self.check_group()
         server = self.make_server(self.s.state_dir / "hook.sock")
         control: ctl.JsonSocketServer[ctl.CtlRequest, ctl.CtlReply] | None = None
+        ingress_server = ingress.server(self.s.state_dir / ingress.SOCKET, self.audit, self.ingress_snapshot)
         recovery_server: ctl.JsonSocketServer[recovery.Request, recovery.Reply] | None = None
         custody_server: (
             ctl.JsonSocketServer[gateway_custody.Request, gateway_custody_control.Reply] | None
@@ -806,6 +811,14 @@ class Admind:
             await server.start()
             control = ctl.CtlServer(self.s.state_dir / ctl.CTL_SOCKET, self.on_ctl, self.audit)
             await control.start()
+            try:
+                await ingress_server.start()
+            except OSError:
+                # Diagnostics cannot make the existing daemon unavailable. The server
+                # refuses foreign leaves and only removes its own bound socket.
+                self.audit_quietly("ingress", action="unavailable", reason="bind")
+            else:
+                self.ingress_available = True
             recovery_server = ctl.JsonSocketServer(
                 self.s.state_dir / recovery.SOCKET,
                 self.on_recovery,
@@ -866,7 +879,15 @@ class Admind:
                     ("autobump", self.autobump_loop),
                     ("maintenance-retry", self.maintenance_retry_loop),
                 ):
-                    tg.create_task(self.guarded(supervised(name, loop, self.audit)))
+                    component: Literal["reader", "normal"] | None = (
+                        "reader" if name == "inbound" else "normal" if name == "worker" else None
+                    )
+                    if component is None:
+                        tg.create_task(self.guarded(supervised(name, loop, self.audit)))
+                    else:
+                        observed = partial(self._ingress_loop, component, loop)
+                        task = tg.create_task(self.guarded(supervised(name, observed, self.audit)))
+                        self.ingress.task(component, task)
                 # Verification is independent of whether producers are enabled.
                 from heterodyne.admind.fulfillment_projection import worker
 
@@ -881,8 +902,16 @@ class Admind:
                         )
                     )
                 )
-                tg.create_task(self.guarded(supervised("gateway-custody", self.custody_loop, self.audit)))
-                tg.create_task(self.guarded(self.reconcile_asks(snapshot)))
+
+                custody_observed = partial(self._ingress_loop, "custody", self.custody_loop)
+                custody_task = tg.create_task(
+                    self.guarded(supervised("gateway-custody", custody_observed, self.audit))
+                )
+                self.ingress.task("custody", custody_task)
+                recovery_task = tg.create_task(
+                    self.guarded(self._ingress_loop("recovery", partial(self.reconcile_asks, snapshot)))
+                )
+                self.ingress.task("recovery", recovery_task)
         except BaseException:
             self.shutting_down = True
             raise
@@ -897,9 +926,54 @@ class Admind:
                 await recovery_server.close()
             if custody_server is not None:
                 await custody_server.close()
+            self.ingress_available = False
+            await ingress_server.close()
             if control is not None:
                 await control.close()
             await server.close()
+
+    def ingress_snapshot(self) -> ingress.Reply:
+        """An event-loop-local sample; no authority refresh, store read or upstream request."""
+        return self.ingress.snapshot(
+            normal_depth=self.work.qsize(),
+            custody_depth=self.custody_work.qsize(),
+            locks={
+                "work": self.work_lock.locked(),
+                "transition": self.transition_lock.locked(),
+                "custody": self.custody_lock.locked(),
+            },
+            generation=self.sub_gen,
+            acked=self.acked,
+            reading=self.reading,
+            observing=self.observing,
+            group_ok=self.group_ok,
+            membership_epoch=self.membership_epoch,
+        )
+
+    @contextlib.asynccontextmanager
+    async def _ingress_lock(self, name: ingress.LockName, category: ingress.Owner) -> AsyncGenerator[None]:
+        # No await between recording/clearing the holder and the original lock boundary.
+        lock = {"work": self.work_lock, "transition": self.transition_lock, "custody": self.custody_lock}[
+            name
+        ]
+        async with lock:
+            self.ingress.owner(name, category)
+            try:
+                yield
+            finally:
+                self.ingress.owner(name, None)
+
+    async def _ingress_loop(self, name: ingress.TaskName, loop: Callable[[], Awaitable[None]]) -> None:
+        try:
+            await loop()
+        except asyncio.CancelledError:
+            self.ingress.phase(name, "stopped")
+            raise
+        except Exception:
+            self.ingress.phase(name, "failed")
+            raise
+        else:
+            self.ingress.phase(name, "stopped")
 
     async def on_ctl(self, req: ctl.CtlRequest) -> ctl.CtlReply:
         """A host command. The reply's message names the operator, so it is redacted like any output."""
@@ -945,7 +1019,7 @@ class Admind:
             gateway_custody.Service.peer(peer.uid)
             if why := gateway_custody.check(req):
                 raise gateway_custody.Invalid(why)
-            async with self.custody_lock:
+            async with self._ingress_lock("custody", "custody_control"):
                 if not isinstance(req, gateway_custody.GatewayCustodyStatus):
                     if (
                         not self.refresh_authority()
@@ -968,8 +1042,11 @@ class Admind:
 
     async def custody_message(self, ev: InboundMessage) -> None:
         """Native event only. It never joins generic prompt execution or ask slots."""
+        failed = True
         try:
-            async with self.custody_lock:
+            self.ingress.phase("custody", "waiting_custody_lock")
+            async with self._ingress_lock("custody", "custody"):
+                self.ingress.phase("custody", "handling")
                 service = gateway_custody_control.independent(self.gateway_custody, self.custody_authority)
                 outcome = await gateway_custody_control.worker(
                     lambda: service.message(
@@ -982,14 +1059,25 @@ class Admind:
                     )
                 )
                 self.audit.write("gateway-custody", action=outcome)
+                failed = False
         except gateway_custody.Invalid as exc:
             self.audit.write("gateway-custody", action="refused", reason=str(exc))
+            failed = False
         except (OSError, sqlite3.Error):
             self.audit.write("gateway-custody", action="unavailable")
+        except asyncio.CancelledError:
+            failed = False
+            raise
+        finally:
+            # One failed event, even if reporting that failure also raises.
+            if failed:
+                self.ingress.count("handler_failed")
 
     async def custody_loop(self) -> None:
         while True:
+            self.ingress.phase("custody", "waiting_queue")
             event = await self.custody_work.get()
+            self.ingress.phase("custody", "handling")
             try:
                 await self.custody_message(event)
             finally:
@@ -1006,7 +1094,7 @@ class Admind:
                 raise recovery.Invalid(why)
             if isinstance(req, recovery.Status):
                 return recovery.Reply("ok", "recovery status", service.get(req.proposal_sha256))
-            async with self.work_lock:
+            async with self._ingress_lock("work", "recovery"):
                 if not await self.check_group() or self.recovery_authority() is None:
                     raise recovery.Invalid("authority")
                 # Hash the bounded source closure off the subscription event loop. Keep
@@ -1652,6 +1740,8 @@ class Admind:
                 self.store.set_ask(ask_id, "answered")
                 self.touch(ask_id)
                 self.finish(mid, "done", said, "ask")
+        if action == "answered":
+            self.ingress.count("ask_answered")
         self.audit.write("ask", action=action, message_id=mid, ask_id=ask_id, chars=len(text), choice=choice)
 
     def answer_refusal(self, row: AskRow, text: str) -> str | None:
@@ -1769,7 +1859,7 @@ class Admind:
     async def autobump_loop(self) -> None:
         while True:
             await asyncio.sleep(self.autobump_seconds)
-            async with self.work_lock:
+            async with self._ingress_lock("work", "autobump"):
                 self.autobump()
 
     def autobump(self) -> None:
@@ -2433,8 +2523,11 @@ class Admind:
     async def reconcile_asks(self, snapshot: list[tuple[str, str, str]]) -> None:
         """The startup reconcile (R26): each ask of the snapshot `run()` took before any loop started,
         under `work_lock`, so never while the worker decides. It never raises."""
+        self.ingress.phase("recovery", "handling")
         for ask_id, attempt, status in snapshot:
-            async with self.work_lock:
+            self.ingress.phase("recovery", "waiting_work_lock")
+            async with self._ingress_lock("work", "recovery"):
+                self.ingress.phase("recovery", "handling")
                 await self.reconcile_quietly(ask_id, attempt, status, restarted=True)
 
     async def reconcile_quietly(self, ask_id: str, attempt: str, status: str, *, restarted: bool) -> None:
@@ -2509,7 +2602,7 @@ class Admind:
                     if self.wallclock() < due:
                         delay = min(delay, max(1.0, due - self.wallclock()))
                         continue
-                    async with self.work_lock:
+                    async with self._ingress_lock("work", "recovery"):
                         try:
                             await self.retry_maintenance(ask_id, mid)
                         except asyncio.CancelledError:
@@ -2925,7 +3018,7 @@ class Admind:
     async def change_membership(self, op: str, name: str) -> tuple[str, str]:
         """`admind operators add|remove NAME` (ADR 0001 §8, revision 13; B7, B18). Returns (result, message);
         the message is admind's own wording plus the operator's policy name (the caller redacts it)."""
-        async with self.transition_lock:
+        async with self._ingress_lock("transition", "membership"):
             refusal = self.membership_refusal()
             if refusal is not None:
                 return "refused", refusal
@@ -2954,7 +3047,7 @@ class Admind:
             policy = tuple(loaded.values())
             # Step 1: hold. The message in hand finishes first; then nothing new is dispatched or sent, and
             # a paste or a send already under way is waited for, before the count is read.
-            async with self.work_lock:
+            async with self._ingress_lock("work", "membership"):
                 self.changing = True
                 self.membership_epoch += 1
                 journaled = settled = False
@@ -3118,7 +3211,7 @@ class Admind:
         Preserve the confirmed operator set, intersected with policy. Count observations
         never settle a pending RPC or grant operator authority.
         """
-        async with self.transition_lock:
+        async with self._ingress_lock("transition", "rearm"):
             if not self.reading:
                 # Acknowledged is not enough: until confirm_observing returns, events wait unread in the
                 # stream, and a resubscription would drop them (Codex r3 finding 3).
@@ -3207,6 +3300,7 @@ class Admind:
             self.acked = False
             self.reading = False
             self.sub_gen += 1
+            self.ingress.phase("reader", "awaiting_ack")
             try:
                 async for event in self.client.subscribe(
                     self.account, self.group, on_ack=self.confirm_observing
@@ -3215,6 +3309,7 @@ class Admind:
                     try:
                         self.on_event(event)
                     except Exception as exc:  # noqa: BLE001 - one bad event must not end the subscription
+                        self.ingress.count("handler_failed")
                         self.audit.write("handler", action="failed", error=type(exc).__name__)
                 code = "stream-ended"
             except Exception as exc:  # noqa: BLE001 - ControlError, or anything the stream raised
@@ -3224,6 +3319,8 @@ class Admind:
             self.reading = False
             self.sub_gen += 1
             self.group_ok = False
+            self.ingress.count("reconnects")
+            self.ingress.phase("reader", "backoff")
             self.audit.write("subscribe", action="reconnect", code=code)
             await self._sleep(delay)
             delay = min(delay * 2, 30.0)
@@ -3232,12 +3329,15 @@ class Admind:
         """Called once a subscription is acknowledged, before any event is read: resubscribe first, then
         re-verify the group, then (and only then) observe. `group_info` reports a count, not members, so
         a swap during an outage that leaves the count at two is not detected (ADR 0001 §3.4)."""
+        self.ingress.phase("reader", "checking_group")
         self.acked = True  # check_group observes on success, here and on every later passing check
         if not await self.check_group() and not self.latched():
             raise ControlError("group could not be re-verified", "unverified", True)
         self.reading = True  # acknowledged but not observing if latched; a rearm then restores it
+        self.ingress.phase("reader", "reading")
 
     def on_event(self, event: object) -> None:
+        self.ingress.count("decoded_any")
         if isinstance(event, InboundMessage) and gateway_custody.command(event.message.text) is not None:
             if (
                 event.account_id_hex.lower() != self.account
@@ -3246,16 +3346,21 @@ class Admind:
                 or event.message.sender.account_id_hex.lower() not in self.operators
                 or not MESSAGE_ID.fullmatch(event.message.message_id_hex.lower())
             ):
+                self.ingress.count("dropped_guard")
                 self.audit.write("gateway-custody", action="refused", reason="command-auth")
                 return
+            self.ingress.count("authenticated_custody")
             try:
                 self.custody_work.put_nowait(event)
+                self.ingress.count("enqueued_custody")
             except asyncio.QueueFull:
                 # No acknowledgment, consent or permit is manufactured at this
                 # boundary. Production enrollment must qualify native redelivery.
                 self.audit.write("gateway-custody", action="refused", reason="command-capacity")
+                self.ingress.count("dropped_capacity")
         elif isinstance(event, InboundMessage | ReactionAdded):  # one worker, one order (R27)
             self.work.put_nowait(event)
+            self.ingress.count("enqueued_normal")
         elif isinstance(event, GroupStateChanged):
             if event.group_id_hex.lower() != self.group or event.change not in guard.MEMBERSHIP_CHANGES:
                 self.audit.write("event", action="ignored", what="group-change")
@@ -3272,14 +3377,18 @@ class Admind:
         Each holds `work_lock`: a membership transition waits for the message in hand, and the next one
         waits for the transition (B7), so a message is never denied just because a transition ran."""
         while True:
+            self.ingress.phase("normal", "waiting_queue")
             event = await self.work.get()
+            self.ingress.phase("normal", "waiting_work_lock")
             try:
-                async with self.work_lock:
+                async with self._ingress_lock("work", "normal"):
+                    self.ingress.phase("normal", "handling")
                     if isinstance(event, InboundMessage):
                         await self.on_message(event)
                     else:
                         await self.on_reaction(event)
             except Exception as exc:  # noqa: BLE001 - one bad message must not end the worker
+                self.ingress.count("handler_failed")
                 self.audit.write("handler", action="failed", error=type(exc).__name__)
 
     async def on_message(self, ev: InboundMessage) -> None:
@@ -3289,8 +3398,10 @@ class Admind:
         )
         mid = ev.message.message_id_hex.lower()
         if verdict.action == "ignore":
+            self.ingress.count("dropped_self")
             return
         if verdict.action == "drop":
+            self.ingress.count("dropped_guard")
             if verdict.operator is not None:  # an operator, while latched: logged in full, never acted on
                 self.audit.write(
                     "drop",
@@ -3309,7 +3420,9 @@ class Admind:
                 text_chars=len(ev.message.text),
             )
             return
+        self.ingress.count("authenticated_normal")
         if not MESSAGE_ID.fullmatch(mid):
+            self.ingress.count("dropped_malformed")
             self.audit.write(
                 "drop",
                 operator=verdict.operator,
@@ -3320,13 +3433,16 @@ class Admind:
         if gateway_custody.command(ev.message.text) is not None:
             try:
                 self.custody_work.put_nowait(ev)
+                self.ingress.count("enqueued_custody")
             except asyncio.QueueFull:
                 self.audit.write("gateway-custody", action="refused", reason="command-capacity")
+                self.ingress.count("dropped_capacity")
             return
         if recovery.COMMAND.fullmatch(ev.message.text) is not None and MESSAGE_ID.fullmatch(mid):
             await self.recovery_message(ev)
             return
         if not self.store.claim_inbound(mid, sender_key=ev.message.sender.account_id_hex.lower()):
+            self.ingress.count("dropped_replay")
             self.audit.write(
                 "drop",
                 operator=verdict.operator,
@@ -3335,6 +3451,7 @@ class Admind:
                 text=own_text(ev.message.text),
             )
             return
+        self.ingress.count("claimed")
         self.remember_sender(mid, ev.message.sender.account_id_hex.lower())
         text = ev.message.text
         self.audit.write("inbound", operator=verdict.operator, message_id=mid, text=own_text(text))
@@ -3357,8 +3474,10 @@ class Admind:
             ev, group_id=self.group, operators=self.operators, latched=self.latched()
         )
         if verdict.action == "ignore":
+            self.ingress.count("dropped_self")
             return
         if verdict.action == "drop":
+            self.ingress.count("dropped_guard")
             if verdict.operator is not None:  # an operator, while latched: logged in full, never acted on
                 self.audit.write(
                     "drop",
@@ -3374,7 +3493,9 @@ class Admind:
             )
             return
         event_id = (ev.event_id_hex or "").lower()
+        self.ingress.count("authenticated_normal")
         if not MESSAGE_ID.fullmatch(event_id):
+            self.ingress.count("dropped_malformed")
             self.audit.write(
                 "drop",
                 operator=verdict.operator,
@@ -3387,6 +3508,7 @@ class Admind:
         target = ev.target_message_id_hex.lower()
         target = target if MESSAGE_ID.fullmatch(target) else None
         if not self.store.claim_inbound(mid, target, sender_key=ev.actor.account_id_hex.lower()):
+            self.ingress.count("dropped_replay")
             self.audit.write(
                 "drop",
                 operator=verdict.operator,
@@ -3397,6 +3519,7 @@ class Admind:
                 emoji=own_text(ev.emoji),
             )
             return
+        self.ingress.count("claimed")
         self.remember_sender(mid, ev.actor.account_id_hex.lower())
         self.audit.write(
             "inbound",
@@ -3433,6 +3556,7 @@ class Admind:
                     self.touch(row.ask_id)
             self.audit.write("event", action="ignored", what="reaction", message_id=mid, ask_id=ask_id)
             return
+        self.ingress.count("correlated")
         if row.kind != "approval":
             await self.ask_reply(mid, row.ask_id, emoji, reaction=True)
             return
@@ -3508,6 +3632,7 @@ class Admind:
             return
         ask_id = self.store.ask_for_message(target)
         if ask_id is not None and not text.startswith("!"):
+            self.ingress.count("correlated")
             await self.ask_reply(mid, ask_id, text)  # R13/R14: never pasted to the agent
             return
         try:
