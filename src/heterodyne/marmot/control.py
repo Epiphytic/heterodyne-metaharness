@@ -10,6 +10,7 @@ metadata, never from the text (§3.4).
 import asyncio
 import contextlib
 import json
+import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
@@ -178,6 +179,51 @@ def decode_event(line: bytes, request_id: str) -> Event:
         raise ProtocolError(f"{kind}: {exc}") from exc
 
 
+def remaining(deadline: float | None, maximum: float | None) -> float | None:
+    """One absolute monotonic budget; absent deadlines keep existing timeout semantics."""
+    if deadline is None:
+        return maximum
+    value = max(0.0, deadline - time.monotonic())
+    return value if maximum is None else min(value, maximum, 30.0)
+
+
+class Subscription:
+    """Source-owned transport custody. A timeout never discards the original writer/task.
+
+    This handle owns only one local control connection, not the wn-agent process.
+    A completed reader AND positive close are required before a supervisor replaces it.
+    """
+
+    def __init__(self) -> None:
+        self.writer: asyncio.StreamWriter | None = None
+        self.closing: asyncio.Task[None] | None = None
+        self.closed = False
+
+    def attach(self, writer: asyncio.StreamWriter) -> None:
+        if self.writer is not None or self.closed:
+            raise RuntimeError("subscription transport already owned")
+        self.writer = writer
+
+    async def close(self, deadline: float | None = None) -> bool:
+        if self.closed:
+            return True
+        if self.writer is None:
+            # The reader must additionally be terminal before this is cessation evidence.
+            return True
+        if self.closing is None:
+            self.writer.close()
+            self.closing = asyncio.create_task(self.writer.wait_closed())
+        done, _ = await asyncio.wait({self.closing}, timeout=remaining(deadline, None))
+        if not done:
+            return False
+        try:
+            self.closing.result()
+        except OSError:
+            pass  # wait_closed completed with a terminal transport error
+        self.closed = True
+        return True
+
+
 class ControlClient:
     def __init__(self, socket_path: Path, token: str | None, timeout: float = 30.0) -> None:
         self.socket_path = socket_path
@@ -193,10 +239,11 @@ class ControlClient:
             raise ControlError("control frame too large", "frame_too_large")
         return frame
 
-    async def _open(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    async def _open(self, deadline: float | None = None) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         try:
             return await asyncio.wait_for(
-                asyncio.open_unix_connection(str(self.socket_path), limit=MAX_FRAME + 1), self.timeout)
+                asyncio.open_unix_connection(str(self.socket_path), limit=MAX_FRAME + 1),
+                remaining(deadline, self.timeout))
         except (OSError, TimeoutError) as exc:
             raise ControlError(f"cannot connect to wn-agent ({type(exc).__name__})",
                                "socket_io", True) from exc
@@ -217,20 +264,21 @@ class ControlClient:
             raise ControlError("wn-agent closed the connection", "socket_closed", True)
         return line
 
-    async def _write(self, writer: asyncio.StreamWriter, frame: bytes) -> None:
+    async def _write(self, writer: asyncio.StreamWriter, frame: bytes, deadline: float | None = None) -> None:
         writer.write(frame)
         try:
-            await asyncio.wait_for(writer.drain(), self.timeout)
+            await asyncio.wait_for(writer.drain(), remaining(deadline, self.timeout))
         except (OSError, TimeoutError) as exc:
             raise ControlError(f"cannot write to wn-agent ({type(exc).__name__})", "socket_io", True) from exc
 
-    async def call[T](self, payload: dict[str, Any], expected_type: str, kind: type[T]) -> T:
+    async def call[T](self, payload: dict[str, Any], expected_type: str, kind: type[T],
+                      *, deadline: float | None = None) -> T:
         request_id = uuid.uuid4().hex
         frame = self._frame(payload, request_id)
-        reader, writer = await self._open()
+        reader, writer = await self._open(deadline)
         try:
-            await self._write(writer, frame)
-            line = await self._readline(reader, self.timeout)
+            await self._write(writer, frame, deadline)
+            line = await self._readline(reader, remaining(deadline, self.timeout))
             if decode_head(line, request_id) != expected_type:
                 raise ProtocolError(f"unexpected response type for {payload['type']}")
             try:
@@ -240,14 +288,18 @@ class ControlClient:
         finally:
             writer.close()
             with contextlib.suppress(OSError):
-                await writer.wait_closed()
+                if deadline is None:
+                    await writer.wait_closed()
+                else:
+                    async with asyncio.timeout_at(deadline):
+                        await writer.wait_closed()
 
     async def account_list(self) -> AccountList:
         return await self.call({"type": "account_list"}, "account_list", AccountList)
 
-    async def group_info(self, account: str, group: str) -> GroupInfo:
+    async def group_info(self, account: str, group: str, *, deadline: float | None = None) -> GroupInfo:
         return await self.call({"type": "group_info", "account_id_hex": account, "group_id_hex": group},
-                               "group_info", GroupInfo)
+                               "group_info", GroupInfo, deadline=deadline)
 
     async def group_create(self, account: str, name: str, members: list[str]) -> GroupCreated:
         return await self.call({"type": "group_create", "account_id_hex": account, "name": name,
@@ -271,25 +323,43 @@ class ControlClient:
                                 "idempotency_key": key}, "final_sent", FinalSent)
 
     async def subscribe(self, account: str, group: str,
-                        on_ack: Callable[[], Awaitable[None]] | None = None) -> AsyncIterator[Event]:
+                        on_ack: Callable[[], Awaitable[None]] | None = None, *,
+                        deadline: float | None = None, owned: Subscription | None = None,
+                        on_connected: Callable[[], None] | None = None) -> AsyncIterator[Event]:
         """Yield inbound events until the connection ends, which raises a retryable ControlError.
         `on_ack` is awaited once the subscription is acknowledged and before the first event is read;
         if it raises, the subscription ends with that exception."""
         request_id = uuid.uuid4().hex
         frame = self._frame({"type": "subscribe_inbound", "account_id_hex": account,
                              "group_id_hex": group}, request_id)
-        reader, writer = await self._open()
+        reader, writer = await self._open(deadline)
+        if owned is not None:
+            owned.attach(writer)
         try:
-            await self._write(writer, frame)
-            ack = await self._readline(reader, self.timeout)
+            await self._write(writer, frame, deadline)
+            if on_connected is not None:
+                on_connected()
+            ack = await self._readline(reader, remaining(deadline, self.timeout))
             decode_head(ack, request_id)
             if msgspec.json.decode(ack, type=_Ack).type != "ack":
                 raise ProtocolError("subscribe_inbound was not acknowledged")
             if on_ack is not None:
-                await on_ack()
+                if deadline is None:
+                    await on_ack()
+                else:
+                    async with asyncio.timeout_at(deadline):
+                        await on_ack()
             while True:
                 yield decode_event(await self._readline(reader, None), request_id)
         finally:
-            writer.close()
-            with contextlib.suppress(OSError):
-                await writer.wait_closed()
+            if owned is not None:
+                # Retain a close task even if the caller cancels this reader during cleanup.
+                await owned.close(time.monotonic() + 2.0)
+            else:
+                writer.close()
+                with contextlib.suppress(OSError):
+                    if deadline is None:
+                        await writer.wait_closed()
+                    else:
+                        async with asyncio.timeout_at(deadline):
+                            await writer.wait_closed()

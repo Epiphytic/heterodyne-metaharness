@@ -47,7 +47,9 @@ def test_snapshot_needs_neither_store_nor_transport(tmp_path: Path) -> None:
     assert snapshot is not None
     assert snapshot.normal_depth == 1
     assert snapshot.custody_depth == 0
-    assert snapshot.retained_bytes is None
+    assert snapshot.retained_bytes == len(msgspec.json.encode(message(h)))
+    assert snapshot.byte_accounting == "normalized-retained"
+    assert "queue_bytes" not in snapshot.unavailable
     assert "durable_disposition_completion" in snapshot.unavailable
     assert "last_error_category" in snapshot.unavailable
     assert snapshot.upstream_delivery_verified is False

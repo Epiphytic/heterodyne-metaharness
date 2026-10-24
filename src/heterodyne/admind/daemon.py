@@ -47,6 +47,7 @@ from heterodyne.admind import (
     guard,
     guard_state,
     ingress,
+    ingress_reconnect,
     membership,
     notices,
     operations,
@@ -93,6 +94,7 @@ from heterodyne.marmot.control import (
     InboundMessage,
     PeerError,
     ReactionAdded,
+    Subscription,
 )
 from heterodyne.tmux import TmuxError, TmuxPasteUncertain
 
@@ -414,7 +416,8 @@ class Admind:
         # enrollment exists. Merely exposing the closed socket creates no authority.
         self.gateway_custody = gateway_custody.Service(store)
         self.custody_lock = asyncio.Lock()
-        self.custody_work: asyncio.Queue[InboundMessage] = asyncio.Queue(maxsize=256)
+        self.ingress_capacity = ingress_reconnect.Capacity()
+        self.custody_work = ingress_reconnect.RetainedQueue[InboundMessage](self.ingress_capacity)
         try:
             self.maintenance_recovery: recovery.Service | None = recovery.Service(
                 store, settings.state_dir / "maintenance-recovery"
@@ -425,7 +428,7 @@ class Admind:
         self.group = group
         self.hooks: asyncio.Queue[HookEvent | Delivery] = asyncio.Queue()
         # operator messages and reactions for worker_loop
-        self.work: asyncio.Queue[InboundMessage | ReactionAdded] = asyncio.Queue()
+        self.work = ingress_reconnect.RetainedQueue[InboundMessage | ReactionAdded](self.ingress_capacity)
         self.ready = asyncio.Event()
         self.ready_nonce: str | None = None  # the nonce of the launch that set `ready`
         self.hook_server: HookServer | None = None
@@ -500,6 +503,7 @@ class Admind:
             | None
         ) = None
         self.approve_bead = None if settings.approve_bead is None else ApproveBead(settings.approve_bead)
+        self.reconnect = ingress_reconnect.Reconnect(self)
 
     # --- state helpers -------------------------------------------------------------------------
     def mark_ready(self, nonce: str | None = None) -> None:
@@ -802,7 +806,9 @@ class Admind:
         await self.check_group()
         server = self.make_server(self.s.state_dir / "hook.sock")
         control: ctl.JsonSocketServer[ctl.CtlRequest, ctl.CtlReply] | None = None
-        ingress_server = ingress.server(self.s.state_dir / ingress.SOCKET, self.audit, self.ingress_snapshot)
+        ingress_server = ingress.server(
+            self.s.state_dir / ingress.SOCKET, self.audit, self.ingress_snapshot, self.ingress_reconnect
+        )
         recovery_server: ctl.JsonSocketServer[recovery.Request, recovery.Reply] | None = None
         custody_server: (
             ctl.JsonSocketServer[gateway_custody.Request, gateway_custody_control.Reply] | None
@@ -934,7 +940,7 @@ class Admind:
 
     def ingress_snapshot(self) -> ingress.Reply:
         """An event-loop-local sample; no authority refresh, store read or upstream request."""
-        return self.ingress.snapshot(
+        reply = self.ingress.snapshot(
             normal_depth=self.work.qsize(),
             custody_depth=self.custody_work.qsize(),
             locks={
@@ -950,18 +956,44 @@ class Admind:
             membership_epoch=self.membership_epoch,
         )
 
+        if reply.snapshot is None:
+            return reply
+        return msgspec.structs.replace(reply, snapshot=msgspec.structs.replace(
+            reply.snapshot,
+            retained_bytes=self.ingress_capacity.used,
+            byte_accounting="normalized-retained",
+            reconnect=next(reversed(self.reconnect.records.values()), "idle"),
+            unavailable=("durable_disposition_completion", "last_error_category"),
+        ))
+
+    async def ingress_reconnect(self, req: ingress.Request) -> ingress_reconnect.Result:
+        if req.instance is None or req.generation is None or req.request_id is None:
+            return ingress_reconnect.Result("refused", "stale")
+        return await self.reconnect.admit(req.instance, req.generation, req.request_id)
+
     @contextlib.asynccontextmanager
-    async def _ingress_lock(self, name: ingress.LockName, category: ingress.Owner) -> AsyncGenerator[None]:
-        # No await between recording/clearing the holder and the original lock boundary.
-        lock = {"work": self.work_lock, "transition": self.transition_lock, "custody": self.custody_lock}[
-            name
-        ]
-        async with lock:
-            self.ingress.owner(name, category)
-            try:
-                yield
-            finally:
-                self.ingress.owner(name, None)
+    async def _ingress_lock(
+        self, name: ingress.LockName, category: ingress.Owner
+    ) -> AsyncGenerator[None]:
+        locks = {"work": self.work_lock, "transition": self.transition_lock, "custody": self.custody_lock}
+        lock = locks[name]
+        # Historical waiting callers keep waiting. Never hold a critical lock
+        # while waiting for explicit recovery or renewed observation.
+        while True:
+            await self.reconnect.released.wait()
+            if category in ("normal", "custody"):
+                await self.reconnect.worker_ready(category)
+            await lock.acquire()
+            if self.reconnect.intent or (category in ("normal", "custody") and self.reconnect.paused):
+                lock.release()
+                continue
+            break
+        self.ingress.owner(name, category)
+        try:
+            yield
+        finally:
+            self.ingress.owner(name, None)
+            lock.release()
 
     async def _ingress_loop(self, name: ingress.TaskName, loop: Callable[[], Awaitable[None]]) -> None:
         try:
@@ -1017,6 +1049,8 @@ class Admind:
         """Own lock and worker: custody control cannot wait for a held model dispatcher."""
         try:
             gateway_custody.Service.peer(peer.uid)
+            if self.reconnect.intent:
+                raise gateway_custody.Invalid("ingress-reconnect-busy")
             if why := gateway_custody.check(req):
                 raise gateway_custody.Invalid(why)
             async with self._ingress_lock("custody", "custody_control"):
@@ -1079,6 +1113,7 @@ class Admind:
             event = await self.custody_work.get()
             self.ingress.phase("custody", "handling")
             try:
+                await self.reconnect.worker_ready("custody")
                 await self.custody_message(event)
             finally:
                 self.custody_work.task_done()
@@ -1094,6 +1129,8 @@ class Admind:
                 raise recovery.Invalid(why)
             if isinstance(req, recovery.Status):
                 return recovery.Reply("ok", "recovery status", service.get(req.proposal_sha256))
+            if self.reconnect.intent:
+                return recovery.Reply("refused", "ingress-reconnect-busy")
             async with self._ingress_lock("work", "recovery"):
                 if not await self.check_group() or self.recovery_authority() is None:
                     raise recovery.Invalid("authority")
@@ -2957,7 +2994,12 @@ class Admind:
         async with self.count_lock:
             return (await self.client.group_info(self.account, self.group)).member_count
 
-    async def check_group(self) -> bool:
+    async def check_group(self, *, deadline: float | None = None) -> bool:
+        phase_deadline = None if deadline is None else min(deadline, time.monotonic() + 30.0)
+        async with asyncio.timeout_at(phase_deadline):
+            return await self._check_group(phase_deadline)
+
+    async def _check_group(self, deadline: float | None) -> bool:
         """Adopt only a stable current subscription/epoch count. Observation never grants authority."""
         async with self.count_lock:
             generation, acked, epoch = self.sub_gen, self.acked, self.membership_epoch
@@ -2965,7 +3007,11 @@ class Admind:
                 self.audit_quietly("guard", action="group-check-deferred")
                 return False
             try:
-                count = (await self.client.group_info(self.account, self.group)).member_count
+                if deadline is None:
+                    info = await self.client.group_info(self.account, self.group)
+                else:
+                    info = await self.client.group_info(self.account, self.group, deadline=deadline)
+                count = info.member_count
             except ControlError:
                 if generation != self.sub_gen or epoch != self.membership_epoch or self.changing:
                     return False
@@ -2992,6 +3038,7 @@ class Admind:
                 self.store.set("expected_members", str(count))
                 self.store.delete("expected_members_provisional")
             self.group_ok = self.observing = True
+            self.reconnect.observed(generation)
             self.flush_membership_notice()
             self.wake.set()
             return True
@@ -3018,6 +3065,8 @@ class Admind:
     async def change_membership(self, op: str, name: str) -> tuple[str, str]:
         """`admind operators add|remove NAME` (ADR 0001 §8, revision 13; B7, B18). Returns (result, message);
         the message is admind's own wording plus the operator's policy name (the caller redacts it)."""
+        if self.reconnect.intent:
+            return "refused", "ingress reconnect is busy; nothing changed."
         async with self._ingress_lock("transition", "membership"):
             refusal = self.membership_refusal()
             if refusal is not None:
@@ -3211,6 +3260,8 @@ class Admind:
         Preserve the confirmed operator set, intersected with policy. Count observations
         never settle a pending RPC or grant operator authority.
         """
+        if self.reconnect.intent:
+            return "refused", "ingress reconnect is busy; nothing changed."
         async with self._ingress_lock("transition", "rearm"):
             if not self.reading:
                 # Acknowledged is not enough: until confirm_observing returns, events wait unread in the
@@ -3289,52 +3340,62 @@ class Admind:
 
     # --- inbound -------------------------------------------------------------------------------
     async def inbound_loop(self) -> None:
-        """Read the subscription and nothing else. Membership and admin events are acted on at once;
-        operator messages are only queued for worker_loop, so a slow command can never keep the reader
-        from seeing a membership change. A broken or ended stream means the group can no longer be
-        watched: group_ok and observing drop, and nothing is sent until the subscription is back and the
-        group re-verified (confirm_observing)."""
-        delay = 1.0
-        while True:
-            self.observing = False
-            self.acked = False
-            self.reading = False
-            self.sub_gen += 1
-            self.ingress.phase("reader", "awaiting_ack")
-            try:
-                async for event in self.client.subscribe(
-                    self.account, self.group, on_ack=self.confirm_observing
-                ):
-                    delay = 1.0
-                    try:
-                        self.on_event(event)
-                    except Exception as exc:  # noqa: BLE001 - one bad event must not end the subscription
-                        self.ingress.count("handler_failed")
-                        self.audit.write("handler", action="failed", error=type(exc).__name__)
-                code = "stream-ended"
-            except Exception as exc:  # noqa: BLE001 - ControlError, or anything the stream raised
-                code = exc.code if isinstance(exc, ControlError) else type(exc).__name__
-            self.observing = False
-            self.acked = False
-            self.reading = False
-            self.sub_gen += 1
-            self.group_ok = False
-            self.ingress.count("reconnects")
-            self.ingress.phase("reader", "backoff")
-            self.audit.write("subscribe", action="reconnect", code=code)
-            await self._sleep(delay)
-            delay = min(delay * 2, 30.0)
+        """One lifecycle supervisor owns automatic backoff and explicit cutover."""
+        await self.reconnect.run()
 
-    async def confirm_observing(self) -> None:
-        """Called once a subscription is acknowledged, before any event is read: resubscribe first, then
-        re-verify the group, then (and only then) observe. `group_info` reports a count, not members, so
-        a swap during an outage that leaves the count at two is not detected (ADR 0001 §3.4)."""
+    async def read_subscription(self, generation: int, deadline: float | None, owned: Subscription) -> None:
+        self.ingress.phase("reader", "connecting")
+        async def acknowledged() -> None:
+            await self.confirm_observing(generation, deadline)
+            await self.reconnect.released.wait()
+        async for event in self.client.subscribe(
+            self.account, self.group, on_ack=acknowledged, deadline=deadline, owned=owned,
+            on_connected=lambda: self.ingress.phase("reader", "awaiting_ack")
+        ):
+            if generation != self.sub_gen:
+                return
+            try:
+                self.on_event(event)
+            except Exception as exc:  # noqa: BLE001 - isolated malformed local event
+                self.ingress.count("handler_failed")
+                self.audit.write("handler", action="failed", error=type(exc).__name__)
+
+    async def confirm_observing(self, generation: int | None = None, deadline: float | None = None) -> None:
+        """ACK and count are adopted only for the same subscription and membership epoch."""
+        generation = self.sub_gen if generation is None else generation
+        if generation != self.sub_gen or self.shutting_down:
+            return
         self.ingress.phase("reader", "checking_group")
-        self.acked = True  # check_group observes on success, here and on every later passing check
-        if not await self.check_group() and not self.latched():
+        self.acked = True
+        verified = await self.check_group(deadline=deadline)
+        if generation != self.sub_gen or self.shutting_down:
+            return
+        if not verified and not self.latched():
             raise ControlError("group could not be re-verified", "unverified", True)
-        self.reading = True  # acknowledged but not observing if latched; a rearm then restores it
+        self.reading = True
         self.ingress.phase("reader", "reading")
+        self.reconnect.observed(generation)
+
+    def _enqueue_ingress(self, event: InboundMessage | ReactionAdded, *, custody: bool = False) -> None:
+        if self.reconnect.intent or self.reconnect.paused:
+            self.ingress.count("dropped_intake")
+            return  # intake is closed; no durable claim or success is manufactured
+        try:
+            if custody:
+                if not isinstance(event, InboundMessage):
+                    raise TypeError("custody requires a message")
+                self.custody_work.put_nowait(event)
+            else:
+                self.work.put_nowait(event)
+            self.ingress.count("enqueued_custody" if custody else "enqueued_normal")
+        except asyncio.QueueFull:
+            self.ingress.count("dropped_capacity")
+            if not self.ingress_capacity.episode:
+                if custody:
+                    self.audit.write("gateway-custody", action="refused", reason="command-capacity")
+                else:
+                    self.audit.write("ingress", action="capacity-refused")
+                self.ingress_capacity.episode = True
 
     def on_event(self, event: object) -> None:
         self.ingress.count("decoded_any")
@@ -3350,17 +3411,9 @@ class Admind:
                 self.audit.write("gateway-custody", action="refused", reason="command-auth")
                 return
             self.ingress.count("authenticated_custody")
-            try:
-                self.custody_work.put_nowait(event)
-                self.ingress.count("enqueued_custody")
-            except asyncio.QueueFull:
-                # No acknowledgment, consent or permit is manufactured at this
-                # boundary. Production enrollment must qualify native redelivery.
-                self.audit.write("gateway-custody", action="refused", reason="command-capacity")
-                self.ingress.count("dropped_capacity")
-        elif isinstance(event, InboundMessage | ReactionAdded):  # one worker, one order (R27)
-            self.work.put_nowait(event)
-            self.ingress.count("enqueued_normal")
+            self._enqueue_ingress(event, custody=True)
+        elif isinstance(event, InboundMessage | ReactionAdded):
+            self._enqueue_ingress(event)
         elif isinstance(event, GroupStateChanged):
             if event.group_id_hex.lower() != self.group or event.change not in guard.MEMBERSHIP_CHANGES:
                 self.audit.write("event", action="ignored", what="group-change")
@@ -3381,6 +3434,7 @@ class Admind:
             event = await self.work.get()
             self.ingress.phase("normal", "waiting_work_lock")
             try:
+                await self.reconnect.worker_ready("normal")
                 async with self._ingress_lock("work", "normal"):
                     self.ingress.phase("normal", "handling")
                     if isinstance(event, InboundMessage):
@@ -3390,6 +3444,8 @@ class Admind:
             except Exception as exc:  # noqa: BLE001 - one bad message must not end the worker
                 self.ingress.count("handler_failed")
                 self.audit.write("handler", action="failed", error=type(exc).__name__)
+            finally:
+                self.work.task_done()
 
     async def on_message(self, ev: InboundMessage) -> None:
         self.refresh_authority()
@@ -3431,12 +3487,7 @@ class Admind:
             )
             return
         if gateway_custody.command(ev.message.text) is not None:
-            try:
-                self.custody_work.put_nowait(ev)
-                self.ingress.count("enqueued_custody")
-            except asyncio.QueueFull:
-                self.audit.write("gateway-custody", action="refused", reason="command-capacity")
-                self.ingress.count("dropped_capacity")
+            self._enqueue_ingress(ev, custody=True)
             return
         if recovery.COMMAND.fullmatch(ev.message.text) is not None and MESSAGE_ID.fullmatch(mid):
             await self.recovery_message(ev)
