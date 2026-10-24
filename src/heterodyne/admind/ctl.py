@@ -84,7 +84,7 @@ class JsonSocketServer[Req, Rep: msgspec.Struct]:
     def __init__(self, path: Path, handler: Callable[[Req, Peer], Awaitable[Rep]], audit: Audit, *,
                  kind: str, max_request: int, max_reply: int, request_type: type[Req] | UnionType,
                  check: Callable[[Req], str | None], refused: Callable[[str], Rep], failed: Callable[[], Rep],
-                 describe: Callable[[Req], dict[str, object]]) -> None:
+                 describe: Callable[[Req], dict[str, object]], audit_requests: bool = True) -> None:
         self.path = path
         self.handler = handler
         self.audit = audit
@@ -96,10 +96,15 @@ class JsonSocketServer[Req, Rep: msgspec.Struct]:
         self.refused = refused
         self.failed = failed
         self.describe = describe
+        self.audit_requests = audit_requests
         self.server: asyncio.Server | None = None
         self.created: tuple[int, ...] | None = None     # identity of the socket this instance bound
         self.handlers: dict[asyncio.Task[Any], asyncio.StreamWriter] = {}     # accepted connections
         self.closing = False
+
+    def _request_audit(self, **fields: object) -> None:
+        if self.audit_requests:
+            self.audit.write(self.kind, **fields)
 
     async def start(self) -> None:
         """Bind the socket ourselves: asyncio's path-based start would follow a symlink at the path and
@@ -215,7 +220,7 @@ class JsonSocketServer[Req, Rep: msgspec.Struct]:
                              else self.refused(refusal))
                 else:
                     fields = self.describe(req)
-                    self.audit.write(self.kind, **fields)     # redacted centrally (B16)
+                    self._request_audit(**fields)     # redacted centrally (B16)
                     try:
                         sock = writer.get_extra_info("socket")
                         try:
@@ -224,13 +229,13 @@ class JsonSocketServer[Req, Rep: msgspec.Struct]:
                             peer = Peer(platform.peer_pid(sock))
                         reply = await self.handler(req, peer)
                     except Exception as exc:  # noqa: BLE001 - fixed wording; the type goes to the audit
-                        self.audit.write(self.kind, action="handler-failed", op=fields.get("op"),
+                        self._request_audit(action="handler-failed", op=fields.get("op"),
                                          error=type(exc).__name__)
                         reply = (cast(Rep, operations.Reply("unavailable", "handler-failed"))
                                  if operation_request else self.failed())
             data = msgspec.json.encode(reply)
             if len(data) > self.max_reply:
-                self.audit.write(self.kind, action="reply-too-large", size=len(data))
+                self._request_audit(action="reply-too-large", size=len(data))
                 data = msgspec.json.encode(operations.Reply("unavailable", "reply-capacity")
                                            if operation_request else self.failed())
             writer.transport.set_write_buffer_limits(high=0)   # drain() waits for an empty buffer
@@ -238,7 +243,7 @@ class JsonSocketServer[Req, Rep: msgspec.Struct]:
             await asyncio.wait_for(writer.drain(), WRITE_SECONDS)
         except Exception as exc:  # noqa: BLE001 - one bad client must not end the server
             with contextlib.suppress(Exception):     # the log may be what failed
-                self.audit.write(self.kind, action="failed", error=type(exc).__name__)
+                self._request_audit(action="failed", error=type(exc).__name__)
         finally:
             await hang_up(writer)
 
@@ -281,12 +286,14 @@ def CtlServer(path: Path, handler: Handler, audit: Audit) -> JsonSocketServer[Ct
 
 @overload
 async def request(path: Path, req: msgspec.Struct, timeout: float = ..., *,
-                  max_reply: int = ..., require_uid: int | None = ...) -> CtlReply: ...
+                  max_reply: int = ..., require_uid: int | None = ...,
+                  abort_close: bool = ...) -> CtlReply: ...
 @overload
 async def request[R](path: Path, req: msgspec.Struct, timeout: float = ..., *, reply_type: type[R],
-                     max_reply: int = ..., require_uid: int | None = ...) -> R: ...
+                     max_reply: int = ..., require_uid: int | None = ..., abort_close: bool = ...) -> R: ...
 async def request(path: Path, req: msgspec.Struct, timeout: float = 300.0, *, reply_type: Any = CtlReply,
-                  max_reply: int = CTL_MAX_REPLY, require_uid: int | None = None) -> Any:
+                  max_reply: int = CTL_MAX_REPLY, require_uid: int | None = None,
+                  abort_close: bool = False) -> Any:
     try:
         reader, writer = await asyncio.wait_for(
             asyncio.open_unix_connection(str(path), limit=max_reply + 2), 5)
@@ -308,4 +315,8 @@ async def request(path: Path, req: msgspec.Struct, timeout: float = 300.0, *, re
     except OSError as exc:
         raise CtlUnavailable(type(exc).__name__) from None
     finally:
-        await hang_up(writer)
+        if abort_close:
+            writer.close()
+            writer.transport.abort()
+        else:
+            await hang_up(writer)
