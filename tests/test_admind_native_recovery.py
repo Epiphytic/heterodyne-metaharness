@@ -163,9 +163,17 @@ def test_card_shows_exact_observation_scope_without_execution_claim(native_rig):
     text = native_rig.store.pending()[0].text
     for value in ("btq-abc12", "btq-def34", "create-member", "observed-applied"):
         assert value in text
-    for field, expected in [("Intent envelope", "1" * 64), ("Plan", "2" * 64), ("Observation", "3" * 64)]:
-        line = next(row for row in text.splitlines() if row.startswith(field + " SHA256: "))
-        assert line.split(": ", 1)[1].replace(" ", "") == expected
+    assert LINK in text
+    assert "Coordinator reports: observed-applied" in text
+    assert "queue must verify earlier effects are terminal" in text
+    assert (
+        "Admind checks enrollment, original-record binding and consent; "
+        "not these native proof claims." in text
+    )
+    assert "Earlier effects: terminal" not in text
+    assert (
+        "Exact hashes are in the linked descriptor; the authenticated permit binds that descriptor." in text
+    )
     assert recovery.redact(text) == text
     assert "unchanged precondition after cessation; absence alone is insufficient" in text
     assert "No native replay; no command return code or causation is asserted." in text
@@ -239,17 +247,22 @@ def test_native_card_exact_byte_budget_preserves_every_material_field(native_rig
     assert lines[1].startswith("Approve: settle the latest unknown native effect")
     assert "btq-abc12" in lines[2] and "btq-def34" in lines[2]
     assert "observed-applied" in lines[3]
-    assert all(text.count(" ".join([digit * 8] * 8)) == 1 for digit in "123")
+    assert LINK in text
+    for digit in "123":
+        assert digit * 64 not in text
+        assert " ".join([digit * 8] * 8) not in text
     assert "??" not in text and "(sanitized)" not in text
 
 
-def test_native_card_budget_counts_utf8_bytes(native_rig):
-    text = recovery.render(native_rig.obj, "contrôleur", LINK, 2000)
-    size = len(text.encode("utf-8"))
-    assert size > len(text)
-    assert recovery.render(native_rig.obj, "contrôleur", LINK, size) == text
-    with pytest.raises(recovery.Invalid, match="notice-material-unrepresentable"):
-        recovery.render(native_rig.obj, "contrôleur", LINK, len(text))
+def test_native_card_requires_exact_evidence_link_before_any_post(native_rig):
+    native_rig.enrolled = msgspec.structs.replace(native_rig.enrolled, descriptor_links={})
+    write(native_rig.root / "enrollment.json", native_rig.enrolled)
+    with pytest.raises(recovery.Invalid, match="native-evidence-link-required"):
+        native_rig.register()
+    assert native_rig.store.pending() == []
+    assert native_rig.store.db.execute(
+        "SELECT count(*) FROM maintenance_recovery_proposals"
+    ).fetchone()[0] == 0
 
 
 def test_native_snapshot_uses_distinct_versioned_closed_projection(native_rig):
@@ -269,7 +282,7 @@ def test_native_snapshot_uses_distinct_versioned_closed_projection(native_rig):
 
 
 @pytest.mark.parametrize("native_first", [True, False])
-@pytest.mark.parametrize("stage", ["awaiting-consent", "consented", "permit"])
+@pytest.mark.parametrize("stage", ["awaiting-consent", "consented", "permit", "permit-revoked"])
 def test_mixed_protocol_registration_preserves_current_consent_and_permit(native_rig, native_first, stage):
     native = native_rig.obj
     value = json.loads(recovery.canonical(native))
@@ -286,8 +299,10 @@ def test_mixed_protocol_registration_preserves_current_consent_and_permit(native
     native_rig.deliver()
     if stage != "awaiting-consent":
         native_rig.message()
-    if stage == "permit":
+    if stage.startswith("permit"):
         native_rig.permit()
+        if stage == "permit-revoked":
+            native_rig.message(action="revoke", mid="88" * 32)
     status = native_rig.service.get(native_rig.key)
     with native_rig.store.transaction(read_only=True):
         before = native_rig.store.db.execute(
@@ -295,7 +310,8 @@ def test_mixed_protocol_registration_preserves_current_consent_and_permit(native
         ).fetchall()
     notices = native_rig.store.db.execute("SELECT count(*) FROM notices").fetchone()[0]
     native_rig.obj = second
-    with pytest.raises(recovery.Invalid, match="recovery-scope-conflict"):
+    reason = "permit-active" if stage.startswith("permit") else "recovery-scope-conflict"
+    with pytest.raises(recovery.Invalid, match=reason):
         native_rig.register()
     assert native_rig.service.get(native_rig.key) == status
     assert native_rig.store.db.execute("SELECT * FROM maintenance_recovery_current").fetchall() == before
@@ -304,17 +320,88 @@ def test_mixed_protocol_registration_preserves_current_consent_and_permit(native
     assert proposals[0] == 1
 
 
-def test_only_closed_native_digest_fields_survive_later_outbox_redaction(native_rig):
-    from heterodyne.admind.redact import NativeRecoveryDigests, native_recovery_digest_lines, redact
+def test_native_digest_secrets_are_not_rendered_but_exact_permit_binding_remains(native_rig):
+    from heterodyne.admind.redact import redact
 
-    native_rig.register()
-    stored = native_rig.store.pending()[0].text
-    # The actual later outbound kernel remains ordinary redact(str), with no context bypass.
+    # A bug in the external writer must not disclose a secret masquerading as a digest.
+    secret = bytes(range(32)).hex()
+    effect = msgspec.structs.replace(native_rig.obj.native_effect, plan_sha256=secret)
+    native_rig.obj = msgspec.structs.replace(native_rig.obj, native_effect=effect)
+    native_rig.key = recovery.sha(native_rig.obj)
+    native_rig.enrolled = msgspec.structs.replace(
+        native_rig.enrolled, descriptor_links={native_rig.key: LINK}
+    )
+    write(native_rig.root / "enrollment.json", native_rig.enrolled)
+    native_rig.deliver()
+    stored = native_rig.store.db.execute(
+        "SELECT notice_text FROM maintenance_recovery_proposals"
+    ).fetchone()[0]
     assert redact(stored) == stored
-    assert redact("Other operator text: " + "f" * 64) == "Other operator text: <redacted hex key>"
+    assert secret not in stored and " ".join(secret[i:i + 8] for i in range(0, 64, 8)) not in stored
+    assert redact("Other operator text: " + secret) == "Other operator text: <redacted hex key>"
     with pytest.raises(recovery.Invalid, match="notice-material-unrepresentable"):
-        recovery.render(native_rig.obj, "secret-" + "f" * 64, LINK, 3200)
-    with pytest.raises(ValueError):
-        native_recovery_digest_lines({"plan_sha256": "f" * 64})  # type: ignore[arg-type]
-    with pytest.raises(ValueError):
-        native_recovery_digest_lines(NativeRecoveryDigests("token-not-a-digest", "2" * 64, "3" * 64))
+        recovery.render(native_rig.obj, "secret-" + secret, LINK, 3200)
+    native_rig.message()
+    native_rig.permit()
+    permit = native_rig.service.get(native_rig.key)["permit"]
+    raw = native_rig.store.db.execute(
+        "SELECT descriptor FROM maintenance_recovery_proposals WHERE hash=?", (permit["proposal_sha256"],)
+    ).fetchone()[0]
+    assert recovery.sha(recovery.descriptor(bytes(raw))) == permit["proposal_sha256"]
+    assert json.loads(raw)["native_effect"]["plan_sha256"] == secret
+
+
+@pytest.mark.parametrize("native_first", [True, False])
+@pytest.mark.parametrize(
+    "stage", ["revoked", "expired", "expired-consent", "permit-expired", "permit-certified", "terminal"]
+)
+def test_inactive_cross_protocol_transition_retains_original_exclusion(native_rig, native_first, stage):
+    native = native_rig.obj
+    value = json.loads(recovery.canonical(native))
+    value.pop("native_effect")
+    value.update(schema="maintenance-recovery.v1", mode="settle")
+    legacy = recovery.descriptor(recovery.canonical(value))
+    first, second = (native, legacy) if native_first else (legacy, native)
+    native_rig.obj, native_rig.key = first, recovery.sha(first)
+    native_rig.enrolled = msgspec.structs.replace(
+        native_rig.enrolled, descriptor_links={recovery.sha(first): LINK, recovery.sha(second): LINK}
+    )
+    write(native_rig.root / "enrollment.json", native_rig.enrolled)
+    native_rig.deliver()
+    if stage != "expired":
+        native_rig.message()
+    if stage.startswith("permit-"):
+        native_rig.permit()
+        native_rig.tick += 31_000_000_000
+        if stage == "permit-certified":
+            native_rig.certificate()
+    elif stage == "revoked":
+        native_rig.message(action="revoke", mid="88" * 32)
+    elif stage.startswith("expired"):
+        native_rig.at += timedelta(hours=2)
+        second = msgspec.structs.replace(second, expires_at=(native_rig.at + timedelta(hours=1)).isoformat())
+    elif stage == "terminal":
+        with native_rig.store.transaction():
+            native_rig.store.db.execute(
+                "UPDATE maintenance_recovery_proposals SET state='terminal',terminal=? WHERE hash=?",
+                (b'{"result":"complete"}', native_rig.key),
+            )
+    before = native_rig.service.get(native_rig.key)
+    old_key = native_rig.key
+    native_rig.obj = second
+    native_rig.enrolled = msgspec.structs.replace(
+        native_rig.enrolled, descriptor_links={recovery.sha(first): LINK, recovery.sha(second): LINK}
+    )
+    write(native_rig.root / "enrollment.json", native_rig.enrolled)
+    if stage in ("terminal", "permit-expired"):
+        error = recovery.Invalid if stage == "terminal" else FileNotFoundError
+        with pytest.raises(error):
+            native_rig.register()
+        assert native_rig.service.current(first.operation, old_key)
+    else:
+        assert native_rig.register().result == "registered"
+        assert native_rig.service.current(second.operation, recovery.sha(second))
+        assert not native_rig.service.current(first.operation, old_key)
+        with pytest.raises(recovery.Invalid, match="superseded"):
+            native_rig.permit()
+    assert native_rig.service.get(old_key) == before

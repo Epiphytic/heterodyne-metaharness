@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Literal, TypedDict, cast
 
 import msgspec
 
-from heterodyne.admind.redact import NativeRecoveryDigests, native_recovery_digest_lines, redact
+from heterodyne.admind.redact import redact
 
 if TYPE_CHECKING:
     from heterodyne.admind.store import Store
@@ -598,11 +598,7 @@ class Service:
         return boot, tick
 
     def supersede(self, replacement: RecoveryDescriptor, enrolled: Enrollment) -> None:
-        """Same-protocol scope replacement retains the original operation exclusion.
-
-        Cross-protocol proposals must resolve the existing original recovery via
-        its supported path; a new native descriptor cannot invalidate its consent.
-        """
+        """Preserve one active scope; inactive proposals may change protocol."""
         row = self.store.db.execute(
             "SELECT p.state,p.permit,p.terminal,p.hash,p.descriptor FROM maintenance_recovery_current c "
             "JOIN maintenance_recovery_proposals p ON p.hash=c.proposal WHERE c.operation=?",
@@ -610,10 +606,6 @@ class Service:
         ).fetchone()
         if row is None:
             return
-        # One original operation has one exclusion/owner lifecycle. Different
-        # descriptor protocols cannot replace one another or gain parallel permits.
-        if descriptor(bytes(row[4])).schema != replacement.schema:
-            raise Invalid("recovery-scope-conflict")
         if row[0] == "terminal" or row[2] is not None:
             raise Invalid("operation-terminal")
         if row[1] is not None:
@@ -637,6 +629,16 @@ class Service:
             self.certificate(
                 descriptor(bytes(row[4])), Permit(key, hashlib.sha256(cert).hexdigest()), old, enrolled
             )
+            return
+        # No issued authority exists. Inspect only stored lifecycle fields so a
+        # newer descriptor validator cannot permanently strand an old proposal.
+        previous = decode(bytes(row[4]), dict[str, object])
+        if previous.get("schema") != replacement.schema:
+            expiry = previous.get("expires_at")
+            if not isinstance(expiry, str):
+                raise Invalid("time")
+            if row[0] != "revoked" and stamp(expiry) > self.clock():
+                raise Invalid("recovery-scope-conflict")
 
     def enrollment(self) -> Enrollment:
         obj = decode(private_read(self.root / "enrollment.json"), Enrollment)
@@ -1163,45 +1165,50 @@ def boot_ns() -> int:
 
 
 def render(obj: RecoveryDescriptor, actor: str, link: str | None, budget: int) -> str:
-    """Never shorten material scope; only central closed digest rendering is exempted."""
+    """Keep exact scope in the linked proposal; never exempt text from redaction."""
+    native = isinstance(obj, NativeDescriptor)
+    if native and link is None:
+        raise Invalid("native-evidence-link-required")
     token = sha(obj)[:24]
-    records = ", ".join(f"{p.action} {p.selector.type}:{p.selector.id}" for p in obj.local_records) or "none"
-    consequences = (
-        "Diagnostic may already be delivered; never resend it. Other native effects stay held."
-        if obj.mode == "abandon-notice"
-        else "No native replay or task/approval changes."
-    )
-    lines = [
-        "Maintenance recovery consent",
-        f"Operation: {obj.operation}",
-        f"Backup owner: {actor}" if obj.mode == "finish-health" else f"Original actor: {actor}",
-        f"Result: {obj.result}",
-        f"Local records: {records}",
-        f"Proof-covered effects: {obj.effect_count}",
-        "Remaining native unknowns: never cleared by this consent.",
-        consequences,
-        f"Expires: {obj.expires_at}",
-        f"Reply: !maintenance settle {token}",
-        f"Revoke: !maintenance revoke {token}",
-        "An already issued permit may start recovery for 30 seconds after revoke.",
-    ]
     if isinstance(obj, NativeDescriptor):
         effect = obj.native_effect
         lines = [
             "Native approval observation recovery consent",
             "Approve: settle the latest unknown native effect using the recorded observation.",
             f"Native task: {effect.task_id}; approval: {effect.approval_id}",
-            f"Observation: {effect.verdict}; write family: {effect.family}; ordinal: {effect.ordinal}",
+            f"Coordinator reports: {effect.verdict}; write family: {effect.family}; "
+            f"ordinal: {effect.ordinal}",
             f"Operation: {obj.operation}",
             f"Original actor: {actor}",
-            "Earlier effects: terminal; this consent binds only the latest observed effect.",
-            "Required: original writer and descendants ended; consistent exact native projection.",
+            "Consent covers only this effect; the queue must verify earlier effects are terminal.",
+            "Queue must verify writer/descendant cessation and a consistent exact native projection.",
             "Unapplied requires unchanged precondition after cessation; absence alone is insufficient.",
+            "Admind checks enrollment, original-record binding and consent; not these native proof claims.",
             "No native replay; no command return code or causation is asserted.",
-            *native_recovery_digest_lines(NativeRecoveryDigests(
-                effect.intent_envelope_sha256, effect.plan_sha256, effect.observation_sha256,
-            )),
-            "SHA256 groups concatenate without spaces.",
+            "Exact hashes are in the linked descriptor; the authenticated permit binds that descriptor.",
+            f"Expires: {obj.expires_at}",
+            f"Reply: !maintenance settle {token}",
+            f"Revoke: !maintenance revoke {token}",
+            "An already issued permit may start recovery for 30 seconds after revoke.",
+        ]
+    else:
+        records = ", ".join(
+            f"{p.action} {p.selector.type}:{p.selector.id}" for p in obj.local_records
+        ) or "none"
+        consequences = (
+            "Diagnostic may already be delivered; never resend it. Other native effects stay held."
+            if obj.mode == "abandon-notice"
+            else "No native replay or task/approval changes."
+        )
+        lines = [
+            "Maintenance recovery consent",
+            f"Operation: {obj.operation}",
+            f"Backup owner: {actor}" if obj.mode == "finish-health" else f"Original actor: {actor}",
+            f"Result: {obj.result}",
+            f"Local records: {records}",
+            f"Proof-covered effects: {obj.effect_count}",
+            "Remaining native unknowns: never cleared by this consent.",
+            consequences,
             f"Expires: {obj.expires_at}",
             f"Reply: !maintenance settle {token}",
             f"Revoke: !maintenance revoke {token}",
@@ -1212,7 +1219,10 @@ def render(obj: RecoveryDescriptor, actor: str, link: str | None, budget: int) -
             r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/blob/[0-9a-f]{40}/[A-Za-z0-9_./-]+", link
         ):
             raise Invalid("public-link")
-        lines.insert(10 if isinstance(obj, NativeDescriptor) else 5, "Exact proposal/source/proofs: " + link)
+        if native:
+            lines.append("Exact proposal/source/proofs: " + link)
+        else:
+            lines.insert(5, "Exact proposal/source/proofs: " + link)
     else:
         lines.insert(5, "Source closure: " + obj.source_closure)
         lines.insert(6, "Exact proposal: " + sha(obj))
