@@ -1,15 +1,16 @@
 """Memory-only ingress observations; a responsive snapshot is not delivery clearance.
 
-PR122 status subset: byte accounting and explicit reconnect remain unavailable. This
-module never reads the Store, policy, message payloads or the upstream transport.
+Status is memory-only. Reconnect delegates to the source-owned subscription
+supervisor; neither route reads approval authority or grants delivery clearance.
 """
 
 import asyncio
+import contextlib
 import math
 import os
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Literal, get_args
 
@@ -17,6 +18,7 @@ import msgspec
 
 from heterodyne.admind import ctl
 from heterodyne.admind.audit import Audit
+from heterodyne.admind.ingress_reconnect import BYTE_LIMIT, Operation, Result
 
 SOCKET = "ingress.sock"
 MAX_REQUEST = 4096
@@ -36,12 +38,21 @@ Owner = Literal[
     "maintenance",
     "custody_control",
     "autobump",
+    "reconnect",
     "unknown",
     "none",
 ]
-ReaderPhase = Literal["awaiting_ack", "checking_group", "reading", "backoff", "failed", "stopped"]
+ReaderPhase = Literal[
+    "connecting", "closing", "awaiting_ack", "checking_group", "reading", "backoff", "failed", "stopped"
+]
 WorkerPhase = Literal[
-    "waiting_queue", "waiting_work_lock", "waiting_custody_lock", "handling", "failed", "stopped"
+    "waiting_observation",
+    "waiting_queue",
+    "waiting_work_lock",
+    "waiting_custody_lock",
+    "handling",
+    "failed",
+    "stopped",
 ]
 Phase = Literal["unknown", ReaderPhase, WorkerPhase]
 CounterName = Literal[
@@ -60,6 +71,7 @@ CounterName = Literal[
     "dropped_malformed",
     "dropped_replay",
     "dropped_capacity",
+    "dropped_intake",
     "handler_failed",
     "correlated",
     "ask_answered",
@@ -72,8 +84,12 @@ WORKER_PHASES = frozenset(get_args(WorkerPhase))
 OWNERS = frozenset(get_args(Owner))
 COMPONENT_PHASES = {
     "reader": READER_PHASES,
-    "normal": frozenset({"waiting_queue", "waiting_work_lock", "handling", "failed", "stopped"}),
-    "custody": frozenset({"waiting_queue", "waiting_custody_lock", "handling", "failed", "stopped"}),
+    "normal": frozenset({
+        "waiting_queue", "waiting_work_lock", "waiting_observation", "handling", "failed", "stopped"
+    }),
+    "custody": frozenset({
+        "waiting_queue", "waiting_custody_lock", "waiting_observation", "handling", "failed", "stopped"
+    }),
     "recovery": frozenset({"waiting_work_lock", "handling", "failed", "stopped"}),
 }
 UNAVAILABLE = ("queue_bytes", "durable_disposition_completion", "last_error_category")
@@ -81,7 +97,10 @@ UNAVAILABLE = ("queue_bytes", "durable_disposition_completion", "last_error_cate
 
 class Request(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     schema: Literal["admind.ingress.request.v1"]
-    op: Literal["status"]
+    op: Literal["status", "reconnect"]
+    instance: str | None = None
+    generation: int | None = None
+    request_id: str | None = None
 
 
 class Counter(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -125,26 +144,29 @@ class Snapshot(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
         "durable_disposition_completion",
         "last_error_category",
     )
-    retained_bytes: None = None
-    byte_accounting: Literal["unavailable"] = "unavailable"
-    reconnect: Literal["not-implemented"] = "not-implemented"
+    retained_bytes: int | None = None
+    byte_accounting: Literal["unavailable", "normalized-retained"] = "unavailable"
+    reconnect: Operation | Literal["not-implemented", "idle"] = "not-implemented"
+    teardown_unknown: bool = False
     upstream_delivery_verified: Literal[False] = False
     history_replay_verified: Literal[False] = False
 
 
 class Reply(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     result: Literal["ok", "refused", "unavailable"]
-    reason: Literal["snapshot", "peer", "malformed", "unavailable"]
+    reason: Literal["snapshot", "reconnect", "peer", "malformed", "unavailable"]
     snapshot: Snapshot | None = None
     schema: Literal["admind.ingress.reply.v1"] = "admind.ingress.reply.v1"
+    operation: Result | None = None
 
 
 class _WireReply(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
-    # Encoding convenience defaults must not make the protocol version optional on input.
+    # Convenience encoding defaults must never make the protocol version optional on input.
     schema: Literal["admind.ingress.reply.v1"]
     result: Literal["ok", "refused", "unavailable"]
-    reason: Literal["snapshot", "peer", "malformed", "unavailable"]
+    reason: Literal["snapshot", "reconnect", "peer", "malformed", "unavailable"]
     snapshot: Snapshot | None = None
+    operation: Result | None = None
 
 
 class Observation:
@@ -197,6 +219,10 @@ class Observation:
     def _age(current: float, previous: float) -> float:
         value = current - previous
         return max(0.0, value) if math.isfinite(value) else 0.0
+
+    def active(self, name: TaskName) -> bool:
+        task = self._tasks.get(name)
+        return task is not None and not task.done()
 
     def _task(self, name: TaskName) -> Task:
         task = self._tasks.get(name)
@@ -256,17 +282,71 @@ class Observation:
                 counters,
                 normal_depth,
                 custody_depth,
+
             ),
         )
 
 
-def server(path: Path, audit: Audit, snapshot: Callable[[], Reply]) -> ctl.JsonSocketServer[Request, Reply]:
-    """The fixed same-UID read-only endpoint; polls never append audit records."""
+def check(req: Request) -> str | None:
+    if req.op == "status":
+        return None if (req.instance, req.generation, req.request_id) == (None, None, None) else "malformed"
+    if (
+        req.instance is None
+        or len(req.instance) != 32
+        or any(c not in "0123456789abcdef" for c in req.instance)
+        or req.generation is None
+        or not 0 <= req.generation <= MAX_COUNTER
+        or req.request_id is None
+    ):
+        return "malformed"
+    try:
+        if str(uuid.UUID(req.request_id)) != req.request_id:
+            return "malformed"
+    except ValueError:
+        return "malformed"
+    return None
 
-    async def handle(_request: Request, peer: ctl.Peer) -> Reply:
-        if peer.uid != os.getuid():
-            return Reply("refused", "peer")
-        return snapshot()
+
+def server(
+    path: Path,
+    audit: Audit,
+    snapshot: Callable[[], Reply],
+    reconnect: Callable[[Request], Awaitable[Result]] | None = None,
+) -> ctl.JsonSocketServer[Request, Reply]:
+    """Fixed same-UID endpoint; status polls never append audit records."""
+
+    def mutation_audit(**fields: object) -> None:
+        # Logging failure must not manufacture a teardown outcome or skip safeguards.
+        with contextlib.suppress(Exception):
+            audit.write("ingress", **fields)
+
+    def validate(req: Request) -> str | None:
+        refusal = check(req)
+        if req.op == "reconnect" and refusal is not None:
+            mutation_audit(action="reconnect-refused", reason="malformed")
+        return refusal
+
+    async def handle(req: Request, peer: ctl.Peer) -> Reply:
+        if req.op == "status":
+            return snapshot() if peer.uid == os.getuid() else Reply("refused", "peer")
+        mutation_audit(action="reconnect-request")
+        try:
+            if peer.uid != os.getuid():
+                mutation_audit(action="reconnect-refused", reason="peer")
+                return Reply("refused", "peer")
+            if reconnect is None:
+                mutation_audit(action="reconnect-refused", reason="unavailable")
+                return Reply("unavailable", "unavailable")
+            result = await reconnect(req)
+            mutation_audit(action="reconnect-result", result=result.result, reason=result.reason)
+            return Reply("ok", "reconnect", operation=result)
+        except Exception:
+            mutation_audit(action="reconnect-handler-failed")
+            raise
+
+    def protocol_failure(req: Request | None, reason: str) -> None:
+        if req is None or req.op == "reconnect":
+            mutation_audit(action="reconnect-protocol-failed", reason=reason)
 
     return ctl.JsonSocketServer(
         path,
@@ -276,11 +356,12 @@ def server(path: Path, audit: Audit, snapshot: Callable[[], Reply]) -> ctl.JsonS
         max_request=MAX_REQUEST,
         max_reply=MAX_REPLY,
         request_type=Request,
-        check=lambda _request: None,
-        refused=lambda _reason: Reply("refused", "malformed"),
+        check=validate,
+        refused=lambda _: Reply("refused", "malformed"),
         failed=lambda: Reply("unavailable", "unavailable"),
-        describe=lambda _request: {},
+        describe=lambda _: {},
         audit_requests=False,
+        protocol_failure=protocol_failure,
     )
 
 
@@ -292,12 +373,18 @@ def _valid_snapshot(snapshot: Snapshot) -> bool:
         or tuple(t.name for t in snapshot.tasks) != TASKS
         or tuple(lock.name for lock in snapshot.locks) != LOCKS
         or tuple(counter.name for counter in snapshot.counters) != COUNTERS
-        or snapshot.unavailable != UNAVAILABLE
+        or snapshot.unavailable != (
+            UNAVAILABLE[1:] if snapshot.byte_accounting == "normalized-retained" else UNAVAILABLE
+        )
         or any(t.phase != "unknown" and t.phase not in COMPONENT_PHASES[t.name] for t in snapshot.tasks)
     ):
         return False
     numbers = (snapshot.generation, snapshot.membership_epoch, snapshot.normal_depth, snapshot.custody_depth)
     if any(not 0 <= number <= MAX_COUNTER for number in numbers):
+        return False
+    if (snapshot.byte_accounting == "normalized-retained") != (snapshot.retained_bytes is not None):
+        return False
+    if snapshot.retained_bytes is not None and not 0 <= snapshot.retained_bytes <= BYTE_LIMIT:
         return False
     ages = [snapshot.age_seconds]
     for counter in snapshot.counters:
@@ -309,13 +396,16 @@ def _valid_snapshot(snapshot: Snapshot) -> bool:
     return all(math.isfinite(age) and age >= 0 for age in ages)
 
 
-async def request(path: Path) -> Reply:
+async def request(path: Path, req: Request | None = None) -> Reply:
     """Bound the whole client operation, including send, response and connection cleanup."""
+    req = req or Request("admind.ingress.request.v1", "status")
+    if check(req) is not None:
+        raise ctl.CtlInvalidReply("ingress-request")
     try:
         async with asyncio.timeout(CLIENT_SECONDS):
             reply = await ctl.request(
                 path,
-                Request("admind.ingress.request.v1", "status"),
+                req,
                 timeout=CLIENT_SECONDS,
                 reply_type=_WireReply,
                 max_reply=MAX_REPLY,
@@ -326,13 +416,24 @@ async def request(path: Path) -> Reply:
         raise ctl.CtlInvalidReply("ingress-schema") from None
     except TimeoutError:
         raise ctl.CtlUnavailable("ingress-unavailable") from None
-    if (reply.result, reply.reason) not in {
-        ("ok", "snapshot"),
-        ("refused", "peer"),
-        ("refused", "malformed"),
-        ("unavailable", "unavailable"),
-    } or (reply.result == "ok") != (reply.snapshot is not None):
+    if (
+        (reply.result, reply.reason)
+        not in {
+            ("ok", "snapshot"),
+            ("ok", "reconnect"),
+            ("refused", "peer"),
+            ("refused", "malformed"),
+            ("unavailable", "unavailable"),
+        }
+        or (reply.reason == "snapshot") != (reply.snapshot is not None)
+        or (reply.reason == "reconnect") != (reply.operation is not None)
+        or (
+            reply.result == "ok"
+            and reply.reason != req.op
+            and not (req.op == "status" and reply.reason == "snapshot")
+        )
+    ):
         raise ctl.CtlInvalidReply("ingress-schema")
     if reply.snapshot is not None and not _valid_snapshot(reply.snapshot):
         raise ctl.CtlInvalidReply("ingress-schema")
-    return Reply(reply.result, reply.reason, reply.snapshot, reply.schema)
+    return Reply(reply.result, reply.reason, reply.snapshot, reply.schema, reply.operation)

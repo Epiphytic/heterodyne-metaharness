@@ -103,7 +103,7 @@ def test_false_group_observation_cannot_record_consent(tmp_path):
     unit.daemon.maintenance_recovery = rig.service
     rig.deliver()
 
-    async def superseded():
+    async def superseded(*, deadline: float | None = None):
         return False
 
     unit.daemon.check_group = superseded
@@ -187,7 +187,7 @@ def test_permit_authority_refresh_stays_on_daemon_loop(tmp_path):
     seen = []
     owner = threading.get_ident()
 
-    async def group():
+    async def group(*, deadline: float | None = None):
         return True
 
     def authority(sender=None):
@@ -246,7 +246,7 @@ def test_real_store_backed_authority_does_not_cross_worker_store_lock(tmp_path):
     rig.deliver()
     rig.message(sender=operator)
 
-    async def group():
+    async def group(*, deadline: float | None = None):
         return True
 
     unit.daemon.check_group = group

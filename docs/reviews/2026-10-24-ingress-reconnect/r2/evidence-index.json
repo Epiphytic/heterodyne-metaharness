@@ -1,0 +1,37 @@
+{
+  "kind": "portable-review-evidence-index",
+  "round": 2,
+  "requested_model": "opus",
+  "exposed_model": "claude-opus-5-5",
+  "effort": "high",
+  "actual_skill": "code-review",
+  "skill_invocations": 1,
+  "actual_verdict": "REVISE / NOT CLEARED",
+  "candidate": "87148cfce25a70fbdf53f73f699f3f14849fbbe0",
+  "source_unchanged": true,
+  "frozen_inputs": 67,
+  "command_summary": [
+    "claude",
+    "-p",
+    "--model",
+    "opus",
+    "--effort",
+    "high",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--dangerously-skip-permissions"
+  ],
+  "command_summary_is_exact_argv": false,
+  "retained_raw_artifacts": {
+    "admind-ingress-reconnect-code-r2-high-20261024-start.json": "b3d02df5b3ecf39bf71258bf47c9fdeab61929b48e621cc4b64a1e549220c116",
+    "admind-ingress-reconnect-code-r2-high-20261024-config.json": "9110a8fe07b53cc93f304185b027acc53f5898ce7a4d0901b8ec2acbabb031e9",
+    "admind-ingress-reconnect-code-r2-high-20261024-result.json": "791750b43b4c5e936a3571c0024e903c9bb70701cb30c86890ea135f4335e2d5",
+    "admind-ingress-reconnect-code-r2-high-20261024-actual-skill-invocation.json": "0af9eac2f4e8c62d29c6ca71c2c3faa913723b081dccb9afec75c7484c3e76a0",
+    "admind-ingress-reconnect-code-r2-high-20261024-actual-skill-report.md": "3ea2fa3c59e8aca1e760a337ff1ce7c3d4c0786fd23cddcffaf346b05912cd68",
+    "admind-ingress-reconnect-code-r2-high-20261024-stream.jsonl": "afdd76c787c2a03411930682d15475d56fcdb2a6c26f30bd84422c5484303165",
+    "admind-ingress-reconnect-code-r2-high-20261024-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "admind-ingress-reconnect-code-r2-high-20261024.log": "09dd7767daa85031fdb7e8a8463db37920cc505ac2b1c3fea54ff6f0c7690cde"
+  },
+  "raw_command_custody": "Original private controller handoff artifacts; exact command is in start.json, summary above is not a substitute. No encoded host-path payload."
+}

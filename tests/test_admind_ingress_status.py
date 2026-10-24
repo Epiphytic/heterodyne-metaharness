@@ -117,7 +117,7 @@ def test_real_socket_poll_is_private_readonly_and_does_not_grow_audit(tmp_path: 
         b"x" * 4097,
     ],
 )
-def test_actual_malformed_oversize_requests_never_call_snapshot_or_audit(
+def test_actual_malformed_oversize_requests_never_call_snapshot_or_log_payload(
     tmp_path: Path, payload: bytes
 ) -> None:
     async def body() -> None:
@@ -134,7 +134,16 @@ def test_actual_malformed_oversize_requests_never_call_snapshot_or_audit(
             assert result == ingress.Reply("refused", "malformed")
             await ctl.hang_up(writer)
             called.assert_not_called()
-            assert not audit.path.exists() or audit.path.read_bytes() == b""
+            if payload == b'{"schema":"admind.ingress.request.v1","op":"reconnect"}':
+                rows = [msgspec.json.decode(line) for line in audit.path.read_bytes().splitlines()]
+                assert len(rows) == 1
+                assert rows[0]["action"] == "reconnect-refused" and rows[0]["reason"] == "malformed"
+            else:
+                rows = [msgspec.json.decode(line) for line in audit.path.read_bytes().splitlines()]
+                assert len(rows) == 1
+                assert rows[0]["action"] == "reconnect-protocol-failed"
+                assert rows[0]["reason"] == "malformed"
+            assert b"do-not-log" not in audit.path.read_bytes()
         finally:
             await server.close()
 
@@ -392,11 +401,15 @@ def test_enum_tables_and_recovery_phase_are_closed() -> None:
         observer.phase("recovery", "waiting_custody_lock")
     observer.owner("custody", "custody_control")
     observer.owner("work", "autobump")
-    for phase in ("connecting", "closing", "waiting_observation"):
+    for phase in ("waiting_observation", "unrecognised"):
         with pytest.raises(ValueError, match="unknown ingress phase"):
             observer.phase("reader", phase)  # type: ignore[arg-type]
+    observer.phase("reader", "connecting")
+    observer.phase("reader", "closing")
+    observer.phase("normal", "waiting_observation")
+    observer.owner("work", "reconnect")
     with pytest.raises(ValueError, match="unknown ingress owner"):
-        observer.owner("work", "reconnect")  # type: ignore[arg-type]
+        observer.owner("work", "unrecognised")  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(

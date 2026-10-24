@@ -407,7 +407,7 @@ def _with_settings(args: argparse.Namespace) -> int:
             print(f"config error: {show(str(exc), False)}", file=sys.stderr)
             return EX_CONFIG
         if args.command == "ingress":
-            return ingress_command(s)
+            return ingress_command(s, args)
         if args.command == "maintenance-recovery":
             return recovery_cli.command(s, args)
         if args.command == "gateway-custody":
@@ -430,13 +430,23 @@ def _with_settings(args: argparse.Namespace) -> int:
     return run(s, store, audit)
 
 
-def ingress_command(s: AdmindSettings) -> int:
+def ingress_command(s: AdmindSettings, args: argparse.Namespace | None = None) -> int:
     try:
-        reply = asyncio.run(ingress.request(s.state_dir / ingress.SOCKET))
+        req = None
+        if args is not None and args.ingress_command == "reconnect":
+            req = ingress.Request(
+                "admind.ingress.request.v1", "reconnect", args.instance, args.generation, args.request_id
+            )
+            if ingress.check(req) is not None:
+                print("admind: invalid ingress reconnect selectors", file=sys.stderr)
+                return 2
+        reply = asyncio.run(ingress.request(s.state_dir / ingress.SOCKET, req))
     except ctl.CtlUnavailable:
         print("admind: ingress status unavailable", file=sys.stderr)
         return EX_UNAVAILABLE
     print(msgspec.json.encode(reply).decode())
+    if reply.operation is not None:
+        return 0 if reply.operation.result in ("accepted", "pending", "observing") else 1
     return 0 if reply.result == "ok" else EX_UNAVAILABLE
 
 
@@ -573,6 +583,11 @@ def build_parser() -> argparse.ArgumentParser:
     ingress_sub = status.add_subparsers(dest="ingress_command", required=True, parser_class=_QuietParser)
     ingress_sub.add_parser("status", help="read a memory-only snapshot").add_argument(
         "--json", action="store_true", required=True)
+    reconnect = ingress_sub.add_parser(
+        "reconnect", help="reconnect the current subscription; never replay answers")
+    reconnect.add_argument("--instance", required=True)
+    reconnect.add_argument("--generation", required=True, type=int)
+    reconnect.add_argument("--request-id", required=True)
     sub.add_parser("initialised", help="exit 0 if admind init has run, 1 if not, 2 if it can't tell")
     hook = sub.add_parser("hook", help="(internal) forward an agent hook event to admind")
     hook.add_argument("--socket")

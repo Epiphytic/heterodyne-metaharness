@@ -1,0 +1,39 @@
+{
+  "schema": "review-evidence-index.v1",
+  "review": "FIRST FULL Claude Opus HIGH built-in code-review; actual REVISE/NOT CLEARED; exit0 is not clearance",
+  "requested_model": "opus",
+  "exposed_model": "claude-opus-5-5",
+  "effort": "high",
+  "original_source_head": "2cc4d612688b7588e093e59c8146162fcb490e4c",
+  "approved_design_sha256": "83df7bf27aa1d81896cfa76a535f68c09809c745ea82088be86dcd0b9d3df278",
+  "actual_report": {
+    "path": "actual-skill-report.md",
+    "sha256": "4bd4d93d23788cb3e7018ce1c1d888079c08df7ed3b7ee159fa47bce3788c571",
+    "url": "https://github.com/Epiphytic/hermes-maintenance/blob/ee46413fe7203829702d349d1e15893de8a953d4/docs/reviews/2026-10-24-admind-ingress-reconnect/admind-ingress-reconnect-code-r1-high-20261024-actual-skill-report.md"
+  },
+  "raw_receipts": [
+    {
+      "name": "actual-skill-invocation.json",
+      "sha256": "516bbeffdcc0b26c2068a76c0b23c1c6e5246c51b891a020dcff4419331ecd40"
+    },
+    {
+      "name": "config.json",
+      "sha256": "a3c502b98d9d65fe29cdf9dd6ede2a9fc3e7caf0c2fdf8ea214fe57b36ce6f72"
+    },
+    {
+      "name": "start.json",
+      "sha256": "3909d4000a4fb7c0a285b2e2061667a2ff8e3eeca01360f7bcc8f521f63bfb2b"
+    },
+    {
+      "name": "result.json",
+      "sha256": "d3e89d45fee4adadf96fa5c92e825bcd1d4bf41d4b500643de0f99cc7f2a4852"
+    },
+    {
+      "name": "brief.md",
+      "sha256": "afbaf770e648f071c1ad4016c351aad48c093dbf6eec4579499b1201ef911a08"
+    }
+  ],
+  "receipt_custody": "Original unmodified command/config/start/result/brief/Skill invocation and stream retained by the controller under their original review stem; this portable index contains no executable host configuration or encoded host-path archive.",
+  "stream_sha256": "b121a8e67b65c9a83f589adfa485884d29630b63c49d6c959e2f2932afe950f7",
+  "command_summary": "Claude CLI --model opus --effort high; read-only tools and actual built-in Skill code-review; complete frozen cumulative patch plus absolute input brief. This is a portable summary, not a replacement for exact original argv."
+}

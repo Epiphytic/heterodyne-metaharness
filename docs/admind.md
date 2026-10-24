@@ -702,14 +702,16 @@ enqueue counts distinguish normal and custody traffic; decoded input, capacity,
 and handler failures are shared observations. `handler_failed` counts a
 failed event once at its reader or normal/custody handler boundary, including
 caught custody source/store failures; cancellation is not an event failure.
-`awaiting_ack` includes waiting for the transport connection because the existing
-subscription API exposes no separate connection milestone. `reconnects` counts
+`connecting` precedes the connection/write milestone; `awaiting_ack` follows the
+subscription write. `closing` is an owned transport teardown. `reconnects` counts
 ended/failed subscription cycles, not successful reconnects. Counters saturate
 with an overflow marker and reset with a new process instance. They are local
 observations, not a persistent history or receipt.
 
-Queue byte accounting, durable disposition completion, release authentication,
-and the last transport error category are unavailable. The `completed_normal`
+Queue byte accounting measures the canonical normalized event payload retained
+in queued and dequeued unfinished slots. It is not allocator/RSS usage. Durable
+disposition completion, release authentication and the last transport error
+category remain unavailable. The `completed_normal`
 and `completed_custody` counters therefore remain zero: returning from a handler
 must not be interpreted as durable completion. `claimed` counts successful Store
 claims; `ask_answered` counts the local answer transaction returning, which does
@@ -720,6 +722,47 @@ current phase rather than a complete failure history.
 
 A responsive endpoint, quiet queues, or `reading=true` cannot establish transport
 health, current native-group equality, replay completeness, or permission to
-change anything. There is no reconnect subcommand in this status subset. Preserve
-the snapshot and escalate an unexplained receive gap through the existing
-operator approval/recovery process; this command grants no recovery authority.
+change anything. Status itself grants no recovery authority.
+
+`admind ingress reconnect --instance ID --generation N --request-id UUID` asks the
+same-user daemon to cut over its existing subscription. Copy the opaque instance
+and generation from status and use a new canonical UUID. A busy/refused reply
+changes no generation or gate; an accepted reply identifies a retained lifecycle
+task, not restored delivery. Repeating that exact request returns its latest
+in-memory result even after its generation becomes old. The daemon retains at
+most 64 request records (pending records cannot be evicted); restart loses them.
+
+Reconnect closes new subscription intake, retains already decoded, queued and dequeued events,
+and waits for the exact original reader and transport to cease before opening a
+replacement. It preserves asks, attempts, membership authority, conversation and
+all execution holds. It never restarts wn-agent, replays answers or sends invites.
+The shared recovery budget is 125 seconds, original teardown at most two seconds,
+and connection/write/ACK/group verification phases at most 30 seconds each within
+the remaining budget. Uncertain teardown retains the original handles and closed
+gates, with `teardown_unknown=true` in status and one fixed audit per unknown episode; a fresh
+exact-generation request retries that custody. No operator notification is queued: normal outbox
+delivery requires observation and cannot deliver an alarm during this outage. An external observer
+must inspect status/audit; automatic notification remains a limitation, not an escalation guarantee. Observation failure
+returns control promptly when the replacement reader ends, or at the shared deadline,
+to the one automatic backoff supervisor. Unexpected loop faults fail any retained cutover as `failed-observation`, run bounded exact-reader
+cleanup, and permit that supervisor to restart; they do not set the daemon shutdown flag.
+Cleanup keeps the original handles if cessation remains unknown. A failed group check during
+explicit reconnect ends the replacement reader promptly even when the daemon is latched. Only a current-generation
+ACK plus stable group verification can reopen workers. A stop cancels the retained
+cutover and prevents a replacement.
+
+Each normal/custody queue admits at most 256 unfinished events, sharing 8 MiB of
+normalized retained bytes. Dequeue does not release capacity. Overflow is refused
+before Store claim, counted, and audited once per capacity episode; nothing is
+evicted. Already decoded messages/reactions remain bounded in these queues across intent or
+generation invalidation; workers cannot claim them until current observation. Stale non-message
+events are counted and audited without adopting membership observation. `dropped_intake` remains
+a compatibility counter, not a claim that buffered frames were discarded during cutover. This is
+not a durable inbox: restart may lose unclaimed memory, and transport history or
+replay completeness remains unqualified.
+
+Reconnect mutation requests, refusals and handler failures are audited with fixed categories;
+undecodable/oversize protocol input receives a fixed payload-free failure audit because it cannot
+be established as a status poll. Decoded status polls remain quiet, including status handler failures. Invalid local reconnect selectors return usage error 2 before socket
+access, distinct from an unavailable endpoint. Ended/failed reader cycles retain bounded lifecycle
+audit categories without peer error detail.
