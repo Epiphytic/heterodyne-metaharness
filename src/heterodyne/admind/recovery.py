@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Literal, TypedDict, cast
 
 import msgspec
 
-from heterodyne.admind.redact import redact
+from heterodyne.admind.redact import NativeRecoveryDigests, native_recovery_digest_lines, redact
 
 if TYPE_CHECKING:
     from heterodyne.admind.store import Store
@@ -160,7 +160,10 @@ def target_snapshot(obj: RecoveryDescriptor) -> str:
         },
     }
     if isinstance(obj, NativeDescriptor):
-        value.update(descriptor_schema=obj.schema, native_effect=obj.native_effect)
+        value.update(
+            schema="maintenance-recovery-native-target-snapshot.v1",
+            descriptor_schema=obj.schema, native_effect=obj.native_effect,
+        )
     return sha(value)
 
 
@@ -594,15 +597,23 @@ class Service:
             raise Invalid("clock")
         return boot, tick
 
-    def supersede(self, operation: str, enrolled: Enrollment) -> None:
-        """A new consent may replace scope, never an active initiation window or terminal history."""
+    def supersede(self, replacement: RecoveryDescriptor, enrolled: Enrollment) -> None:
+        """Same-protocol scope replacement retains the original operation exclusion.
+
+        Cross-protocol proposals must resolve the existing original recovery via
+        its supported path; a new native descriptor cannot invalidate its consent.
+        """
         row = self.store.db.execute(
             "SELECT p.state,p.permit,p.terminal,p.hash,p.descriptor FROM maintenance_recovery_current c "
             "JOIN maintenance_recovery_proposals p ON p.hash=c.proposal WHERE c.operation=?",
-            (operation,),
+            (replacement.operation,),
         ).fetchone()
         if row is None:
             return
+        # One original operation has one exclusion/owner lifecycle. Different
+        # descriptor protocols cannot replace one another or gain parallel permits.
+        if descriptor(bytes(row[4])).schema != replacement.schema:
+            raise Invalid("recovery-scope-conflict")
         if row[0] == "terminal" or row[2] is not None:
             raise Invalid("operation-terminal")
         if row[1] is not None:
@@ -805,7 +816,7 @@ class Service:
                 if bytes(previous[0]) != canonical(obj):
                     raise Invalid("immutable-proposal")
                 return Reply("existing", "proposal already registered", self.get(key))
-            self.supersede(obj.operation, enrolled)
+            self.supersede(obj, enrolled)
             if (
                 self.store.db.execute("SELECT count(*) FROM maintenance_recovery_proposals").fetchone()[0]
                 >= 128
@@ -1151,15 +1162,8 @@ def boot_ns() -> int:
     return time.clock_gettime_ns(time.CLOCK_BOOTTIME)
 
 
-def display_hash(value: str) -> str:
-    """Display all digits of a typed public digest without changing global redaction."""
-    if not HEX.fullmatch(value):
-        raise Invalid("display-hash")
-    return " ".join(value[index:index + 8] for index in range(0, 64, 8))
-
-
 def render(obj: RecoveryDescriptor, actor: str, link: str | None, budget: int) -> str:
-    """Never shorten material scope; native observation digests use validated grouped display."""
+    """Never shorten material scope; only central closed digest rendering is exempted."""
     token = sha(obj)[:24]
     records = ", ".join(f"{p.action} {p.selector.type}:{p.selector.id}" for p in obj.local_records) or "none"
     consequences = (
@@ -1194,9 +1198,9 @@ def render(obj: RecoveryDescriptor, actor: str, link: str | None, budget: int) -
             "Required: original writer and descendants ended; consistent exact native projection.",
             "Unapplied requires unchanged precondition after cessation; absence alone is insufficient.",
             "No native replay; no command return code or causation is asserted.",
-            f"Intent envelope SHA256: {display_hash(effect.intent_envelope_sha256)}",
-            f"Plan SHA256: {display_hash(effect.plan_sha256)}",
-            f"Observation SHA256: {display_hash(effect.observation_sha256)}",
+            *native_recovery_digest_lines(NativeRecoveryDigests(
+                effect.intent_envelope_sha256, effect.plan_sha256, effect.observation_sha256,
+            )),
             "SHA256 groups concatenate without spaces.",
             f"Expires: {obj.expires_at}",
             f"Reply: !maintenance settle {token}",

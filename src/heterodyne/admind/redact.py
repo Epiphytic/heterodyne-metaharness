@@ -16,6 +16,7 @@ nothing, so this ends quickly; `MAX_PASSES` is a backstop, and text that is stil
 
 import re
 from collections.abc import Callable, Container, Iterable, Iterator
+from dataclasses import dataclass
 
 from heterodyne.config.secret_scan import IDENTIFIER_VALUES, SECRET_VALUES
 
@@ -136,3 +137,39 @@ def redact_continuation(previous: str, text: str) -> str:
     if cut:
         text = FRAGMENT + text[cut:]
     return redact(text)
+
+
+@dataclass(frozen=True)
+class NativeRecoveryDigests:
+    """Closed public observation fields, supplied from a validated native effect.
+
+    Syntax/typing alone cannot prove a value is not secret. The queue owns the
+    hashes' evidence binding; this type is no authority or arbitrary exemption.
+    """
+
+    intent_envelope_sha256: str
+    plan_sha256: str
+    observation_sha256: str
+
+
+def native_recovery_digest_lines(values: NativeRecoveryDigests) -> tuple[str, ...]:
+    """Central closed-field display; ordinary/outbox redaction remains unchanged.
+
+    Group only these three known evidence digests so every digit survives the
+    later ordinary outbox pass. No caller text, label, or replacement allowlist
+    is accepted. All other material still passes the unchanged global redactor.
+    """
+    if type(values) is not NativeRecoveryDigests:
+        raise ValueError("native recovery digest fields required")
+    fields = (
+        ("Intent envelope", values.intent_envelope_sha256),
+        ("Plan", values.plan_sha256),
+        ("Observation", values.observation_sha256),
+    )
+    lines: list[str] = []
+    for label, value in fields:
+        if type(value) is not str or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            raise ValueError("invalid native recovery evidence digest")
+        grouped = " ".join(value[index:index + 8] for index in range(0, 64, 8))
+        lines.append(f"{label} SHA256: {grouped}")
+    return tuple(lines)

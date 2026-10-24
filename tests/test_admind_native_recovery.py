@@ -239,7 +239,7 @@ def test_native_card_exact_byte_budget_preserves_every_material_field(native_rig
     assert lines[1].startswith("Approve: settle the latest unknown native effect")
     assert "btq-abc12" in lines[2] and "btq-def34" in lines[2]
     assert "observed-applied" in lines[3]
-    assert all(text.count(recovery.display_hash(digit * 64)) == 1 for digit in "123")
+    assert all(text.count(" ".join([digit * 8] * 8)) == 1 for digit in "123")
     assert "??" not in text and "(sanitized)" not in text
 
 
@@ -250,3 +250,71 @@ def test_native_card_budget_counts_utf8_bytes(native_rig):
     assert recovery.render(native_rig.obj, "contrôleur", LINK, size) == text
     with pytest.raises(recovery.Invalid, match="notice-material-unrepresentable"):
         recovery.render(native_rig.obj, "contrôleur", LINK, len(text))
+
+
+def test_native_snapshot_uses_distinct_versioned_closed_projection(native_rig):
+    value = json.loads(recovery.canonical(native_rig.obj))
+    projection = {
+        name: value[name] for name in (
+            "mode", "operation", "original_record_sha256", "effects_root", "effect_count",
+            "proof_set_sha256", "local_records", "backup_before_sha256", "failure_before_sha256",
+            "enrollment_sha256", "source_closure",
+        )
+    }
+    projection.update(schema="maintenance-recovery-native-target-snapshot.v1",
+                      descriptor_schema=value["schema"], native_effect=value["native_effect"])
+    assert recovery.target_snapshot(native_rig.obj) == recovery.sha(projection)
+    projection["schema"] = "maintenance-recovery-target-snapshot.v1"
+    assert recovery.target_snapshot(native_rig.obj) != recovery.sha(projection)
+
+
+@pytest.mark.parametrize("native_first", [True, False])
+@pytest.mark.parametrize("stage", ["awaiting-consent", "consented", "permit"])
+def test_mixed_protocol_registration_preserves_current_consent_and_permit(native_rig, native_first, stage):
+    native = native_rig.obj
+    value = json.loads(recovery.canonical(native))
+    value.pop("native_effect")
+    value.update(schema="maintenance-recovery.v1", mode="settle")
+    legacy = recovery.descriptor(recovery.canonical(value))
+    first, second = (native, legacy) if native_first else (legacy, native)
+    native_rig.obj = first
+    native_rig.key = recovery.sha(first)
+    native_rig.enrolled = msgspec.structs.replace(
+        native_rig.enrolled, descriptor_links={recovery.sha(first): LINK, recovery.sha(second): LINK}
+    )
+    write(native_rig.root / "enrollment.json", native_rig.enrolled)
+    native_rig.deliver()
+    if stage != "awaiting-consent":
+        native_rig.message()
+    if stage == "permit":
+        native_rig.permit()
+    status = native_rig.service.get(native_rig.key)
+    with native_rig.store.transaction(read_only=True):
+        before = native_rig.store.db.execute(
+            "SELECT * FROM maintenance_recovery_current"
+        ).fetchall()
+    notices = native_rig.store.db.execute("SELECT count(*) FROM notices").fetchone()[0]
+    native_rig.obj = second
+    with pytest.raises(recovery.Invalid, match="recovery-scope-conflict"):
+        native_rig.register()
+    assert native_rig.service.get(native_rig.key) == status
+    assert native_rig.store.db.execute("SELECT * FROM maintenance_recovery_current").fetchall() == before
+    assert native_rig.store.db.execute("SELECT count(*) FROM notices").fetchone()[0] == notices
+    proposals = native_rig.store.db.execute("SELECT count(*) FROM maintenance_recovery_proposals").fetchone()
+    assert proposals[0] == 1
+
+
+def test_only_closed_native_digest_fields_survive_later_outbox_redaction(native_rig):
+    from heterodyne.admind.redact import NativeRecoveryDigests, native_recovery_digest_lines, redact
+
+    native_rig.register()
+    stored = native_rig.store.pending()[0].text
+    # The actual later outbound kernel remains ordinary redact(str), with no context bypass.
+    assert redact(stored) == stored
+    assert redact("Other operator text: " + "f" * 64) == "Other operator text: <redacted hex key>"
+    with pytest.raises(recovery.Invalid, match="notice-material-unrepresentable"):
+        recovery.render(native_rig.obj, "secret-" + "f" * 64, LINK, 3200)
+    with pytest.raises(ValueError):
+        native_recovery_digest_lines({"plan_sha256": "f" * 64})  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        native_recovery_digest_lines(NativeRecoveryDigests("token-not-a-digest", "2" * 64, "3" * 64))
