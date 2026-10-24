@@ -1,0 +1,17 @@
+{
+  "at": "2026-10-24T15:59:18.562062+00:00",
+  "exit": 0,
+  "head": "8ba561c72c70e0c95947a766a0fc10417c68b801",
+  "source_unchanged": true,
+  "files": {
+    "src/heterodyne/admind/recovery.py": "00f76101b8645f887d4c6dc2d365fbbda7a9feaa9bbda4b10abf049082a01842",
+    "tests/test_admind_native_recovery.py": "2afce9bed038c0f9dcc4e3122694d2d52dc9ffba66d37ddae1ceae8a865a377c"
+  },
+  "stream_sha256": "a3099f4100b4040581438e7deabdcc262153ca8aef4c437a6830c2c96fc14fb3",
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "events": 67,
+  "malformed_line_numbers": [],
+  "terminal_results": 1,
+  "terminal_success": true,
+  "log_sha256": "5f9fc7261a19b9b08ef79664688002b5587451d517f454a279d92c810c17bff7"
+}
