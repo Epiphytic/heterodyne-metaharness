@@ -45,7 +45,6 @@ from heterodyne.admind.daemon import (
     ASK_LATCHED,
     ASK_NO_APPROVALS,
     ASK_REDACTED,
-    ASK_TOO_MANY,
     RECONCILE_RESTARTED,
     RECONCILE_UNVERIFIED,
     RESTARTED_NOTICE,
@@ -1599,8 +1598,10 @@ def test_reconcile_does_not_touch_live_attempt(tmp_path: Path) -> None:
 def test_blocked_asks_do_not_exhaust_quota(tmp_path: Path) -> None:
     def before_store(h: Harness) -> None:
         store = Store(h.settings.state_dir / "admind.db")
-        for i in range(asks.MAX_OPEN):
-            store.insert_ask(row(f"b{asks.ID_ALPHABET[i]}22", kind="approval", body="", bead=f"btq-x{i}",
+        for i in range(asks.MAX_UNANSWERED_QUESTIONS + 1):
+            alphabet = asks.ID_ALPHABET
+            ask_id = f"b{alphabet[i // len(alphabet)]}{alphabet[i % len(alphabet)]}2"
+            store.insert_ask(row(ask_id, kind="approval", body="", bead=f"btq-x{i}",
                                  digest=D, status="blocked", created_at="2026-10-01T10:00:00+00:00"), None)
         store.close()
 
@@ -1745,8 +1746,10 @@ def test_concurrent_posts_respect_limit(tmp_path: Path) -> None:
 
     def before_store(h: Harness) -> None:
         store = Store(h.settings.state_dir / "admind.db")
-        for i in range(asks.MAX_OPEN - 2):
-            store.insert_ask(row(f"q{asks.ID_ALPHABET[i]}22", created_at="2026-10-01T10:00:00+00:00"), None)
+        for i in range(asks.MAX_UNANSWERED_QUESTIONS):
+            alphabet = asks.ID_ALPHABET
+            ask_id = f"q{alphabet[i // len(alphabet)]}{alphabet[i % len(alphabet)]}2"
+            store.insert_ask(row(ask_id, created_at="2026-10-01T10:00:00+00:00"), None)
         store.close()
 
     async def scenario(h: Harness) -> None:
@@ -1756,8 +1759,8 @@ def test_concurrent_posts_respect_limit(tmp_path: Path) -> None:
         replies = await asyncio.wait_for(posts, 30)
         assert [r.result for r in replies] == ["posted", "posted", "refused", "refused", "refused"]
         assert all(r == asks.refused(ASK_BUSY) for r in replies[2:])
-        full = await h.daemon.on_ask(asks.AskPost("approval", bead="btq-p4"), NONE)
-        assert full == asks.refused(ASK_TOO_MANY)
+        later = await h.daemon.on_ask(asks.AskPost("approval", bead="btq-p4"), NONE)
+        assert later.result == "posted"
     go(tmp_path, scenario, beads, before_store=before_store)
 
 

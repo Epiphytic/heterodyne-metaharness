@@ -943,6 +943,13 @@ class Store:
         return [_ask(r) for r in rows]
 
     @_locked
+    def unanswered_question_count(self) -> int:
+        """Admission quota only; other kinds and lifecycle states are unlimited."""
+        return int(self.db.execute(
+            "SELECT COUNT(*) FROM asks WHERE kind='question' AND status='open'"
+        ).fetchone()[0])
+
+    @_locked
     def capacity_count(self) -> int:
         with self.transaction(read_only=True):
             predicate = self.fulfillment.capacity_predicate()

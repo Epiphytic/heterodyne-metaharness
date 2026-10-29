@@ -15,7 +15,7 @@ import pytest
 from admind_asks_fixture import sent_mid
 from admind_waits import wait_until
 from test_admind_approvals import APPROVAL, go, queued, send, settled
-from test_admind_asks import NONE, PR, TOKEN, audited, joined, posted, question, records
+from test_admind_asks import NONE, PR, TOKEN, audited, joined, posted, question, records, row
 from test_admind_daemon import Harness, needs_tmux, run_with
 from test_admind_r13_lanes import backoff_gates
 from test_admind_reactions import outbox_count, reacted
@@ -204,16 +204,24 @@ def test_a_notice_is_never_an_ask(tmp_path: Path) -> None:
 
 
 @needs_tmux
-def test_notices_do_not_count_toward_max_open(tmp_path: Path) -> None:
+def test_notices_and_approvals_do_not_count_toward_question_limit(tmp_path: Path) -> None:
+    def before_store(h: Harness) -> None:
+        store = Store(h.settings.state_dir / "admind.db")
+        for i in range(asks.MAX_UNANSWERED_QUESTIONS):
+            alphabet = asks.ID_ALPHABET
+            ask_id = f"q{alphabet[i // len(alphabet)]}{alphabet[i % len(alphabet)]}2"
+            store.insert_ask(row(ask_id), None)
+        store.close()
+
     async def scenario(h: Harness) -> None:
-        ids = [await posted(h, question(title=f"q{i}")) for i in range(asks.MAX_OPEN)]
         await notice(h)
-        assert await h.daemon.on_ask(APPROVAL, NONE) == asks.refused(ASK_TOO_MANY)
-        assert (await h.daemon.on_ask(asks.AskCancel(ids[0]), NONE)).result == "ok"
+        assert await h.daemon.on_ask(question(), NONE) == asks.refused(ASK_TOO_MANY)
+        assert (await h.daemon.on_ask(APPROVAL, NONE)).result == "posted"
+        assert (await h.daemon.on_ask(asks.AskCancel("q222"), NONE)).result == "ok"
         for i in range(4):
             await notice(h, NoticePost(f"n{i}"))
-        assert (await h.daemon.on_ask(APPROVAL, NONE)).result == "posted"
-    go(tmp_path, scenario)
+        assert (await h.daemon.on_ask(question(), NONE)).result == "posted"
+    go(tmp_path, scenario, before_store=before_store)
 
 
 @needs_tmux
