@@ -161,7 +161,7 @@ def test_real_cli_completion_capacity_history_restart_and_idempotency(unit, tmp_
     run(body())
 
 
-def test_real_cli_releases_one_exhausted_capacity_slot_without_erasing_history(unit, tmp_path, capsys):
+def test_real_cli_completion_preserves_history_without_answered_queue_cap(unit, tmp_path, capsys):
     seed(unit.store)
     migrate_quiesced(unit)
     for index in range(19):
@@ -173,7 +173,7 @@ def test_real_cli_releases_one_exhausted_capacity_slot_without_erasing_history(u
 
     async def body():
         async with socket_server(unit) as server:
-            refused = await ctl.request(
+            admitted = await ctl.request(
                 server.path,
                 asks.AskPost(
                     "question", title="Future work", body="Future disposable operation. " * 4, form="yes-no"
@@ -181,16 +181,14 @@ def test_real_cli_releases_one_exhausted_capacity_slot_without_erasing_history(u
                 5,
                 reply_type=asks.AskReply,
             )
-            assert refused.result == "refused"
-            assert unit.store.capacity_count() == 20
+            assert admitted.result == "posted"
+            assert unit.store.capacity_count() == 21
             code, reply = await call_cli(unit, capsys, "apply", "--receipt", receipt)
             assert code == 0 and reply["result"] == "applied"
-            assert unit.store.capacity_count() == 19
-            assert len(unit.store.capacity_asks()) == 19
-            assert (
-                unit.store.db.execute("SELECT ask_id,status FROM asks ORDER BY ask_id").fetchall() == original
-            )
-            assert unit.store.ask_posted_since("2020") == posted
+            assert unit.store.capacity_count() == 20
+            assert len(unit.store.capacity_asks()) == 20
+            assert all(unit.store.ask(ask_id).status == status for ask_id, status in original)
+            assert unit.store.ask_posted_since("2020") == posted + 1
             assert unit.store.db.execute("SELECT COUNT(*) FROM ask_answers").fetchone() == (20,)
             new_post = await ctl.request(
                 server.path,
@@ -201,7 +199,7 @@ def test_real_cli_releases_one_exhausted_capacity_slot_without_erasing_history(u
                 reply_type=asks.AskReply,
             )
             assert new_post.result == "posted", new_post.message
-            assert unit.store.capacity_count() == 20
+            assert unit.store.capacity_count() == 21
 
     run(body())
 

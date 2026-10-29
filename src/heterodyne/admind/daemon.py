@@ -189,7 +189,10 @@ RECONCILE_UNVERIFIED = (
     "approve-bead is not configured on this host ([admind] approve_bead). Check it on "
     "the host with approve-bead {bead}."
 )
-ASK_TOO_MANY = f"there are already {asks.MAX_OPEN} active asks; cancel some or wait for answers."
+ASK_TOO_MANY = (
+    f"unanswered-question-limit: there are already {asks.MAX_UNANSWERED_QUESTIONS} unanswered questions; "
+    "answer or cancel a question before posting another."
+)
 ASK_TOO_OFTEN = f"{asks.MAX_PER_HOUR} asks were posted in the last hour; try again later."
 ASK_CANCELLED_NOTICE = "Ask {ask_id} was cancelled by its poster. Nothing more is needed."
 NO_ACTIVE_ASKS = "No active asks."
@@ -1367,8 +1370,6 @@ class Admind:
                     return asks.refused(str(exc))
                 # Damaged derived verification cannot suppress capacity. The
                 # Store's conservative count keeps ordinary posting available.
-        if self.store.capacity_count() >= asks.MAX_OPEN:
-            return asks.refused(ASK_TOO_MANY)
         if self.store.ask_posted_since(asks.hour_ago()) >= asks.MAX_PER_HOUR:
             return asks.refused(ASK_TOO_OFTEN)
         at = asks.stamp(asks.now())
@@ -1424,6 +1425,9 @@ class Admind:
         row = dataclasses.replace(row, truncated=truncated, card_parts=len(parts))
         try:
             with self.store.transaction():
+                if (req.kind == "question"
+                        and self.store.unanswered_question_count() >= asks.MAX_UNANSWERED_QUESTIONS):
+                    return asks.refused(ASK_TOO_MANY)
                 self.store.insert_ask(row, peer.pid)
                 if asks.management.present(row):
                     saved = self.store.ask(row.ask_id)
@@ -1538,8 +1542,6 @@ class Admind:
             return ASK_LATCHED
         if self.approve_bead is None:
             return ASK_NO_APPROVALS
-        if self.store.capacity_count() >= asks.MAX_OPEN:
-            return ASK_TOO_MANY
         if self.store.ask_posted_since(asks.hour_ago()) >= asks.MAX_PER_HOUR:
             return ASK_TOO_OFTEN
         for busy in reversed(self.store.asks_with_status("deciding", "uncertain")):  # the newest first

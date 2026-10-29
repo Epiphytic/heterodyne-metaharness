@@ -32,7 +32,6 @@ from heterodyne.admind.daemon import (
     ASK_BUSY,
     ASK_LATCHED,
     ASK_NO_APPROVALS,
-    ASK_TOO_MANY,
     ASK_TOO_OFTEN,
     NO_ACTIVE_ASKS,
 )
@@ -643,28 +642,18 @@ def test_post_refused_while_latched(tmp_path: Path) -> None:
 
 
 @needs_tmux
-def test_limits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_posting_rate_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     start = datetime(2026, 10, 5, 10, 0, tzinfo=UTC)
     clock = [start]
     monkeypatch.setattr(asks, "now", lambda: clock[0])
 
     async def scenario(h: Harness) -> None:
-        ids = [await posted(h, question(title=f"q{i}")) for i in range(asks.MAX_OPEN)]
-        assert await h.daemon.on_ask(question(), NONE) == asks.refused(ASK_TOO_MANY)
-        for ask_id in ids[:10]:
-            assert (await h.daemon.on_ask(asks.AskCancel(ask_id), NONE)).result == "ok"
+        ids = [await posted(h, question(title=f"q{i}")) for i in range(asks.MAX_PER_HOUR)]
+        assert (await h.daemon.on_ask(asks.AskCancel(ids[0]), NONE)).result == "ok"
         clock[0] = start + timedelta(minutes=30)
-        for i in range(10):
-            await posted(h, question(title=f"r{i}"))                # the 30th in the hour is allowed
-        h.store.set_ask(ids[10], "cancelled")
         assert await h.daemon.on_ask(question(), NONE) == asks.refused(ASK_TOO_OFTEN)
-        clock[0] = start + timedelta(minutes=60, seconds=1)        # the first ten are now over an hour old
+        clock[0] = start + timedelta(minutes=60, seconds=1)
         await posted(h, question(title="after the hour"))
-        h.store.set_ask(ids[11], "blocked")                        # blocked does not count as active (r2-4)
-        clock[0] = start + timedelta(hours=3)
-        await posted(h, question(title="in blocked's place"))
-        assert len(h.store.asks_with_status(*asks.ACTIVE)) == asks.MAX_OPEN
-        assert await h.daemon.on_ask(question(), NONE) == asks.refused(ASK_TOO_MANY)
     run_with(tmp_path, scenario)
 
 

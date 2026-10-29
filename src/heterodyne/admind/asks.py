@@ -35,7 +35,8 @@ ASK_SOCKET = "ask.sock"
 MAX_REQUEST, MAX_REPLY = 262_144, 1_048_576
 ID_ALPHABET = "23456789abcdefghjkmnpqrstuvwxyz"
 ID_LENGTH = 4
-MAX_OPEN, MAX_PER_HOUR, MAX_IN_FLIGHT = 20, 30, 2
+MAX_UNANSWERED_QUESTIONS = 100
+MAX_PER_HOUR, MAX_IN_FLIGHT = 30, 2
 MAX_ANSWER, MAX_ANSWERS, MAX_ANSWER_TOTAL = 16_000, 50, 64_000
 CARD_LINES, CARD_CHARS = 40, 3_500       # question and merge cards only (R15, revised)
 MAX_APPROVAL_CARD = 24_000      # an approval card's readout, in characters (R8, revised)
@@ -48,7 +49,7 @@ DETAILS_LINK_TOO_LONG = ("Ask {ask_id} has a link longer than this group's messa
                          "({n} characters, {usable} usable at chunk_chars {c}), so it can't be sent in full; "
                          "raise chunk_chars. Nothing was sent.")
 MAX_TITLE, MIN_BODY_CHARS, MAX_BODY = 200, 80, 16_000
-ACTIVE = ASK_ACTIVE      # counted by MAX_OPEN; blocked is terminal (r2-4)
+ACTIVE = ASK_ACTIVE      # lifecycle/listing states; not the question admission quota
 TERMINAL = ("approved", "denied", "stale", "superseded", "cancelled", "blocked")
 INTERNAL_ERROR = "admind hit an internal error; see the audit log."
 AskKind = Literal["question", "merge", "approval"]
