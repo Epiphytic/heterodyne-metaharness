@@ -8,10 +8,11 @@ import shutil
 import socket
 import stat
 import subprocess
+import tomllib
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import msgspec
 import pytest
@@ -2496,23 +2497,46 @@ def test_signals_never_raise(rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch) -
     assert rig.runtime.signals("alpha") == [LimitSeen(spec.session_key, 1, None)]
 
 
-def test_codex_typed_reasoning_is_seeded_before_sandbox_create(rig: RuntimeRig) -> None:
+def test_codex_typed_reasoning_is_seeded_before_sandbox_create(
+        rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch) -> None:
     """The actual runtime call supplies the profile before the backend sees the home."""
-    from typing import cast
-
     profiles = cast(dict[str, Any], rig.runtime.c.settings.profiles)
-    profiles['p-two'] = dict(profiles['p-two'], model='gpt-6.1-sol', reasoning_effort='medium')
-    spec = launch_spec(rig, 'p-two')
-    config = rig.runtime.layout(spec.session_key).home / '.codex' / 'config.toml'
+    profiles["p-two"] = dict(profiles["p-two"], model="gpt-6.1-sol", reasoning_effort="medium")
+    spec = launch_spec(rig, "p-two")
+    config = rig.runtime.layout(spec.session_key).home / ".codex" / "config.toml"
     before = rig.backend.create
     observed = []
 
     def checked_create(*args: Any, **kwargs: Any) -> Any:
-        import tomllib
-
-        observed.append(tomllib.loads(config.read_text())['model_reasoning_effort'])
+        observed.append(tomllib.loads(config.read_text())["model_reasoning_effort"])
         return before(*args, **kwargs)
 
-    rig.backend.create = checked_create  # type: ignore[method-assign]
+    monkeypatch.setattr(rig.backend, "create", checked_create)
     started = rig.runtime.launch(spec)
-    assert started.native_id and observed == ['medium']
+    assert started.native_id and observed == ["medium"]
+
+
+@pytest.mark.parametrize("requested_resume", [False, True])
+def test_typed_reasoning_native_continuation_holds_before_cleanup(
+        rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch, requested_resume: bool) -> None:
+    profiles = cast(dict[str, Any], rig.runtime.c.settings.profiles)
+    profiles["p-two"] = dict(profiles["p-two"], reasoning_effort="medium")
+    spec = launch_spec(rig, "p-two")
+    started = rig.runtime.launch(spec)
+    # Idempotent readback of a live native session remains allowed.
+    assert rig.runtime.launch(spec) == started
+    rig.runtime.stop(spec.session_key)
+    layout = rig.runtime.layout(spec.session_key)
+    retained = layout.record.read_bytes()
+    home = (layout.home / ".codex" / "config.toml").read_bytes()
+
+    def unexpected(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("native continuation must hold before cleanup or sandbox creation")
+
+    monkeypatch.setattr(rig.backend, "create", unexpected)
+    monkeypatch.setattr(rig.runtime, "_end", unexpected)
+    with pytest.raises(LaunchFailed, match="native resume is not qualified"):
+        rig.runtime.launch(replace(spec, generation=2, resume=requested_resume,
+                                   native_id=started.native_id))
+    assert layout.record.read_bytes() == retained
+    assert (layout.home / ".codex" / "config.toml").read_bytes() == home

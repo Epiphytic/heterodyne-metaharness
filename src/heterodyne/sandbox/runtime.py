@@ -28,7 +28,7 @@ import msgspec
 
 from heterodyne.agents.base import Adapter, AdapterError, Cli, UsageReport, write_private
 from heterodyne.agents.registry import ADAPTERS
-from heterodyne.config import ConfigError
+from heterodyne.config import ConfigError, profile_args
 from heterodyne.config.accounts import credential_key
 from heterodyne.config.capabilities import Capabilities
 from heterodyne.fsutil import private_dir
@@ -560,9 +560,15 @@ class SandboxRuntime:
         if prev is None and os.path.lexists(layout.git):
             # D26: a record lost after seeding; the directory may hold commits, and seeding would remove them.
             raise LaunchFailed("the session's git directory exists but its record is gone; inspect it")
+        if prev is not None and prev.phase is Phase.RUNNING and self._alive(prev, self._names()):
+            return self._started(prev)                  # idempotent: a live session is left alone
+        profile = self.c.settings.profiles.get(spec.profile, {})
+        effort = profile_args.reasoning_effort(profile, adapter.name, "profile")
+        if effort is not None and self._resume(adapter, layout, prev, spec)[0]:
+            # Server-home config does not prove a retained native thread adopts this effort.
+            # Hold before ending a prior generation or changing its record/home.
+            raise LaunchFailed("typed Codex reasoning on native resume is not qualified")
         if prev is not None and prev.phase is not Phase.ENDED:
-            if prev.phase is Phase.RUNNING and self._alive(prev, self._names()):
-                return self._started(prev)              # idempotent: a live session is left alone
             if not self._end(prev, interrupt=False, lifetime=self._overdue(prev)):
                 raise RuntimeUnavailable("an earlier launch of this session could not be cleaned up")
             prev = read_record(layout)

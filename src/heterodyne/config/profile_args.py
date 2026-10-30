@@ -46,6 +46,8 @@ def reasoning_effort(profile: Mapping[str, Any], adapter: str, where: str) -> st
     if "reasoning_effort" not in profile:
         return None
     value = profile["reasoning_effort"]
-    if adapter != "codex" or not isinstance(value, str) or value not in {"low", "medium", "high"}:
-        raise ConfigError(f"{where}.reasoning_effort must be low, medium or high for codex")
+    if adapter != "codex":
+        raise ConfigError(f"{where}.reasoning_effort is supported only by the codex adapter")
+    if not isinstance(value, str) or value not in {"low", "medium", "high"}:
+        raise ConfigError(f"{where}.reasoning_effort must be low, medium or high")
     return value

@@ -153,6 +153,10 @@ def check_profiles(merged: Mapping[str, Any]) -> None:
         profile = as_table(value)
         if profile is None:
             raise ConfigError(f"profiles.{show(name, False)} must be a table")
+        unknown = set(profile) - {"adapter", "model", "args", "reasoning_effort", "accounts", "failover"}
+        if unknown:
+            raise ConfigError(f"profiles.{show(name, False)}: unsupported profile keys "
+                              f"{show(sorted(unknown))}")
         model = profile.get("model")
         if model is not None and not isinstance(model, str):
             raise ConfigError(f"profiles.{show(name, False)}.model must be a string, "

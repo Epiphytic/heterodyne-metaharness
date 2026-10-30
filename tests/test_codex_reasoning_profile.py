@@ -50,9 +50,21 @@ def test_reasoning_refuses_untyped_or_unsupported_values(tmp_path: Path, value: 
 
 
 def test_reasoning_is_codex_only_and_generic_args_stay_refused() -> None:
-    with pytest.raises(ConfigError, match="reasoning_effort"):
+    with pytest.raises(ConfigError, match="supported only by the codex adapter"):
         check_profiles({"adapters": {"known": ["claude-code"]}, "profiles": {
             "build": dict(PROFILE, adapter="claude-code")}})
     with pytest.raises(ConfigError, match="not a flag"):
         check_profiles({"adapters": {"known": ["codex"]}, "profiles": {
             "build": dict(PROFILE, args=["-c", 'model_reasoning_effort="medium"'])}})
+
+
+@pytest.mark.parametrize("key", ["reasoning_efort", "adaptor", "models", "arg"])
+def test_profile_unknown_keys_are_refused(key: str) -> None:
+    with pytest.raises(ConfigError, match="unsupported profile keys"):
+        check_profiles({"adapters": {"known": ["codex"]}, "profiles": {
+            "build": dict(PROFILE, **{key: "medium"})}})
+
+
+def test_profile_account_routing_keys_remain_supported() -> None:
+    check_profiles({"adapters": {"known": ["codex"]}, "profiles": {
+        "build": dict(PROFILE, accounts=["one", "two"], failover="next")}})
