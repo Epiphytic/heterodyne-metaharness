@@ -1,0 +1,23 @@
+{
+  "base": "a05363054e9f204fc67e3733dfaafffcd3326c65",
+  "files": {
+    "src/heterodyne/session/control.py": "135b4508ee2839cbee528b69345a4d5b024b4623c747d940c88f61286aa687cb",
+    "src/heterodyne/session/server.py": "0a51570ddbe5c06403934111db4d31da868e518c823c50c1fe903b27e9ec22ac",
+    "src/heterodyne/session/shim.py": "d8483478e2589b8d93b453eb3aabf071ceabfba1382e9393eae8a79028c1fd7a",
+    "src/heterodyne/sandbox/runtime.py": "97dd29989b0798be88bf5483231e0671903f72289fcaa0a868695785bf8c1dab",
+    "src/heterodyne/sandbox/spec.py": "988cb1753df270aa70de653a2c3c5ae7f952f1ea4a76b7159d596d77f782221d",
+    "tests/test_manager_control.py": "8dd7bc9a70048fa1cb487a16dd93cd67707edca8c71fe9b7dbdfabf968b4d19a"
+  },
+  "command": [
+    "pytest",
+    "-q",
+    "tests"
+  ],
+  "PYTHONPATH": "src",
+  "exit_code": 1,
+  "elapsed_seconds": 2598.2892387988977,
+  "source_unchanged": true,
+  "command_note": "Portable display alias; original exact invocation remains in prior private worktree qualification, not an exact command copy.",
+  "actual_summary": "5 failed, 9384 passed, 95 skipped, 12 subtests passed in 2594.21s",
+  "actual_log_sha256": "1eb869721266396758c75042df60898c4595e78029a0de470082e0e06fe966c8"
+}

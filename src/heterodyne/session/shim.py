@@ -120,11 +120,11 @@ def _exchange(sock: Path, line: bytes, end: float, clock: Clock) -> Any:
     return json.loads(reply)
 
 
-def _ask(sock: Path, message: dict[str, Any], wait: float, clock: Clock,
+def _ask(sock: Path, message: dict[str, Any] | bytes, wait: float, clock: Clock,
          sleep: Sleep) -> dict[str, Any] | None:
     """wsd's reply, retried until `wait` seconds have passed in all; None if there is none by then."""
     end = clock() + wait
-    line = _encode(message) + b"\n"
+    line = (message if isinstance(message, bytes) else _encode(message)) + b"\n"
     while True:
         try:
             reply = _exchange(sock, line, end, clock)
@@ -403,15 +403,19 @@ def run_control(raw: bytes, env: Mapping[str, str], *, clock: Clock = time.monot
                 sleep: Sleep = time.sleep) -> tuple[int, str]:
     """Structured fixed-endpoint client: no text argv, socket override or truncation."""
     try:
-        request = parse_control(raw)
+        parse_control(raw)
+        # One exact JSON value in the existing newline-framed transport. Refuse
+        # unsupported framing instead of changing the manager's retained bytes.
+        if raw != raw.strip() or b"\n" in raw or b"\r" in raw:
+            raise ValueError("control input must be one unpadded JSON object line")
     except (ValueError, UnicodeError, RecursionError):
         return 2, json.dumps({"ok": False, "error": "operator-route-required"})
     found = _config(env)
     if found is None:
         return EX_TEMPFAIL, DENY_REASON
     sock, token, cfg = found
-    message = {"token": token, "type": "ws_request", "payload": request}
-    if len(_encode(message)) + 1 > MAX_LINE:
+    message = b'{"token":' + _encode(token) + b',"type":"ws_request","payload":' + raw + b'}'
+    if len(message) + 1 > MAX_LINE:
         return 2, json.dumps({"ok": False, "error": "operator-route-required"})
     reply = _ask(sock, message, _wait(cfg), clock, sleep)
     if reply is None:

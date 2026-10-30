@@ -345,6 +345,7 @@ class SandboxRuntime:
                 server.close()
             if any(server.active for server in self.servers.values()):
                 raise RuntimeUnavailable("manager handlers are still unwinding; owner lock retained")
+            self.servers.clear()  # all sockets above closed; allow the next owner to rebind
             self.manager_owner.close()
             self.manager_owner = None
 
@@ -539,8 +540,11 @@ class SandboxRuntime:
             if not self._alive(rec, names):
                 raise RuntimeUnavailable("the retained session's liveness is uncertain")
         elif rec.phase is Phase.ENDED:
-            if rec.sandbox in names or self.c.tmux.has_session(rec.tmux_session):
-                raise RuntimeUnavailable("an ended session still has live resources")
+            try:
+                if rec.sandbox in names or self.c.tmux.has_session(rec.tmux_session):
+                    raise RuntimeUnavailable("an ended session still has live resources")
+            except TMUX_ERRORS:
+                raise RuntimeUnavailable("the ended session's pane can't be inspected") from None
         else:
             raise RuntimeUnavailable("the retained session is transitional")
         if read_record(layout) != rec:
@@ -1079,10 +1083,12 @@ class SandboxRuntime:
             self._report(rec.ws, key, gen, caps, adapter.usage_from_event(payload))
 
         control = None
-        if self.manager_owner is not None:
-            self.manager_owner.check()
-            if rec.role == "manager":
+        if rec.role == "manager" and self.manager_owner is not None:
+            try:
+                self.manager_owner.check()
                 control = ControlJournal(layout.control(gen), self.manager_owner)
+            except (OSError, RuntimeError, ValueError):
+                raise RuntimeUnavailable("the manager control journal can't be served") from None
         return SessionServer(layout.socket(gen), token, layout.events(gen), turn_ends=adapter.turn_end_events,
                              on_event=heard, control=control)
 

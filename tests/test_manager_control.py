@@ -55,7 +55,10 @@ def test_all_eight_closed_operations(operation, arguments):
     request('Ask', {'key': 'x', 'summary': '\ud800', 'text': 'x'}),
     request().replace(b'{}', b'{"unexpected": NaN}'),
     request('Status', {'x': [[[[[[[[[[[[[[[[{}]]]]]]]]]]]]]]]]}),
-    request().replace(b'"arguments": {}', b'"arguments": {}, "operation": "Status"')])
+    request().replace(b'"arguments": {}', b'"arguments": {}, "operation": "Status"')],
+    ids=['utf8', 'empty', 'array', 'duplicate', 'unknown-operation', 'extra-argument',
+         'boolean-generation', 'oversized-text', 'surrogate', 'nonfinite', 'depth',
+         'duplicate-operation'])
 def test_codec_refuses_bad_or_open_input(raw):
     with pytest.raises((ValueError, UnicodeError)):
         shim.parse_control(raw)
@@ -263,8 +266,9 @@ def test_codec_exact_byte_depth_and_complete_outer_wire_bounds(tmp_path):
     (tmp_path/'shim.json').write_text('{}')
     env = {'HZ_SESSION_SOCKET': str(sock)}
     value = json.loads(request('ResolveSigned', {'issue_id': 'btq-x', 'event': event()}))
-    outer = {'token': 'token', 'type': 'ws_request', 'payload': value}
-    room = shim.MAX_LINE - len(shim._encode(outer)) - 1
+    wire = (b'{"token":' + shim._encode('token') + b',"type":"ws_request","payload":'
+            + json.dumps(value).encode() + b'}')
+    room = shim.MAX_LINE - len(wire) - 1
     value['arguments']['event']['content'] += 'x'*room
     with patch.object(shim, '_ask', return_value={'ok': True}) as exchange:
         assert shim.run_control(json.dumps(value).encode(), env)[0] == 0
@@ -331,3 +335,158 @@ def test_runtime_owner_release_waits_for_all_handlers(tmp_path):
     assert runtime.manager_owner is None
     with pytest.raises(RuntimeError):
         retained.check()
+
+
+def test_legacy_hook_surrogate_duplicate_and_nonfinite_payload_still_accepted(tmp_path):
+    server = SessionServer(tmp_path/'s.sock', 'token', tmp_path/'events')
+    for payload in (b'{"hook_event_name":"PreToolUse","tool_input":{"text":"\\ud800"}}',
+                    b'{"hook_event_name":"Stop","n":NaN}',
+                    b'{"hook_event_name":"Stop","n":1,"n":2}'):
+        raw = b'{"token":"token","type":"hook_event","payload":' + payload + b'}'
+        assert server._handle(raw) == {'ok': True}
+    assert (tmp_path/'events').exists()
+
+
+def test_exact_nonascii_compact_client_bytes_and_different_wire_conflict(tmp_path, journal):
+    sock = tmp_path/'s.sock'
+    (tmp_path/'token').write_text('token')
+    (tmp_path/'shim.json').write_text('{"wait_seconds":0.2}')
+    server = SessionServer(sock, 'token', tmp_path/'events', control=journal)
+    server.start()
+    try:
+        raw = json.dumps(json.loads(request('Ask', {'key':'q','summary':'Café','text':'Need help'})),
+                         ensure_ascii=False, separators=(',', ':')).encode()
+        code, output = shim.run_control(raw, {'HZ_SESSION_SOCKET':str(sock)})
+        assert code == 0
+        assert json.loads(output)['request_sha256'] == hashlib.sha256(raw).hexdigest()
+        assert journal.pending()[0]['raw'] == raw
+        # Same semantic request, different exact bytes is a real conflict.
+        assert shim.run_control(raw.replace(b':', b': ', 1),
+                                {'HZ_SESSION_SOCKET':str(sock)})[0] == 1
+        assert journal.pending()[0]['raw'] == raw
+    finally:
+        server.close()
+
+
+@pytest.mark.parametrize('transform', [lambda raw: b' '+raw, lambda raw: raw+b'\n',
+                                      lambda raw: raw.replace(b',',b',\n',1)])
+def test_client_refuses_unpreservable_newline_framing_without_exchange(transform):
+    with patch.object(shim, '_ask') as exchange:
+        assert shim.run_control(transform(request()), {})[0] == 2
+        exchange.assert_not_called()
+
+
+def test_actual_concurrent_intakes_and_observer_wait_for_short_journal_lock(journal):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    barrier = Barrier(3)
+    raws = [request(), request()]
+    def intake(raw):
+        barrier.wait(timeout=5)
+        return journal.intake(raw)
+    with ThreadPoolExecutor(3) as pool:
+        with journal.locked():
+            futures = [pool.submit(intake, raw) for raw in raws]
+            observer = pool.submit(lambda: (barrier.wait(timeout=5), journal.pending()))
+        assert all(f.result(timeout=5)['state'] == 'accepted' for f in futures)
+        observer.result(timeout=5)
+    assert len(journal.pending()) == 2
+
+
+def test_close_while_intake_waits_on_journal_lock_refuses_without_admission(tmp_path, journal):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    server = SessionServer(tmp_path/'s.sock', 'token', tmp_path/'events', control=journal)
+    entered = Event()
+    original = journal.intake
+    def waiting(raw, **kwargs):
+        entered.set()
+        return original(raw, **kwargs)
+    with ThreadPoolExecutor(1) as pool, journal.locked(), \
+            patch.object(journal, 'intake', side_effect=waiting):
+        future = pool.submit(server._handle, req('token','ws_request',json.loads(request())))
+        assert entered.wait(timeout=2)
+        server.close()
+    assert future.result(timeout=3)['ok'] is False
+    assert journal.pending() == []
+    assert list((journal.root/'requests').iterdir()) == []
+
+
+def test_terminal_replay_compares_actual_durable_json_projection(journal):
+    raw = request()
+    journal.intake(raw)
+    identity = json.loads(raw)['request_id']
+    first = journal.reply(identity, 'completed', {'values': (1,2), 'mapping': {3:'value'}})
+    assert first['data'] == {'values':[1,2], 'mapping':{'3':'value'}}
+    assert journal.reply(identity,'completed',{'mapping':{3:'value'},'values':(1,2)}) == first
+
+
+def test_closed_manager_owner_does_not_break_worker_socket_and_manager_error_is_typed(tmp_path, owner):
+    from types import SimpleNamespace
+
+    from heterodyne.sandbox.runtime import Phase, RuntimeUnavailable, SandboxRuntime, SessionRecord
+    runtime = SandboxRuntime.__new__(SandboxRuntime)
+    runtime.c = SimpleNamespace(sessions=tmp_path/'sessions')
+    runtime.manager_owner = owner
+    owner.close()
+    for role in ('worker', 'manager'):
+        rec = SessionRecord(key=role,ws='build',bead='btq-'+role,role=role,profile='codex',
+            adapter='codex',generation=1,phase=Phase.RUNNING,sandbox='fixture',tmux_session='fixture')
+        runtime.layout(role).root.mkdir(parents=True)
+        if role == 'manager':
+            with pytest.raises(RuntimeUnavailable, match='control journal'):
+                runtime._server(rec,SimpleNamespace(turn_end_events=()),'token',None)
+        else:
+            assert runtime._server(rec,SimpleNamespace(turn_end_events=()),'token',None).control is None
+
+
+def test_lock_deadline_is_retryable_and_has_no_false_terminal_receipt(tmp_path, journal):
+    from concurrent.futures import ThreadPoolExecutor
+    server = SessionServer(tmp_path/'s.sock','token',tmp_path/'events',control=journal)
+    with ThreadPoolExecutor(1) as pool, journal.locked():
+        reply = pool.submit(server._handle, req('token','ws_request',json.loads(request()))).result(3)
+    assert reply['state'] == 'pending'
+    assert reply['error'] == 'control-journal-busy-retry'
+    assert journal.pending() == []
+    assert list((journal.root/'requests').iterdir()) == []
+
+
+def test_reacquired_owner_can_rebind_previously_closed_socket(tmp_path):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from heterodyne.sandbox.runtime import SandboxRuntime
+    runtime = SandboxRuntime.__new__(SandboxRuntime)
+    runtime.c = SimpleNamespace(sessions=tmp_path/'sessions')
+    runtime.manager_owner = None
+    runtime.servers = {'closed': Mock(active=0)}
+    prior = runtime.servers['closed']
+    runtime.own_manager_control()
+    runtime.close_manager_control()
+    prior.close.assert_called_once()
+    assert runtime.servers == {}
+    runtime.own_manager_control()
+    runtime.manager_owner.check()
+    runtime.close_manager_control()
+
+
+def test_ended_observer_translates_uncertain_tmux_failure(tmp_path):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from heterodyne.sandbox.runtime import (
+        Phase,
+        RuntimeUnavailable,
+        SandboxRuntime,
+        SessionRecord,
+        write_record,
+    )
+    runtime = SandboxRuntime.__new__(SandboxRuntime)
+    runtime.c = SimpleNamespace(sessions=tmp_path/'sessions',tmux=Mock())
+    runtime.backend = SimpleNamespace(names=lambda: set())
+    rec = SessionRecord(key='ended',ws='build',bead='btq-x',role='worker',profile='codex',
+        adapter='codex',generation=1,phase=Phase.ENDED,sandbox='fixture',tmux_session='fixture')
+    write_record(runtime.layout(rec.key),rec)
+    runtime.c.tmux.has_session.side_effect = subprocess.TimeoutExpired('tmux',1)
+    with pytest.raises(RuntimeUnavailable,match="pane can't be inspected"):
+        runtime.observe_session(rec.key)

@@ -10,6 +10,8 @@ import json
 import os
 import stat
 import tempfile
+import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -116,7 +118,15 @@ class ControlJournal:
         fd = (open_lock_file(self.root / "journal.lock") if self.owner is not None
               else os.open(self.root / "journal.lock", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC))
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            deadline = time.monotonic() + 1.0
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.005)
             yield
         finally:
             os.close(fd)
@@ -161,12 +171,14 @@ class ControlJournal:
                     raise ValueError("pending control journal exceeds bound")
         return sorted(result)
 
-    def intake(self, raw: bytes) -> dict[str, Any]:
+    def intake(self, raw: bytes, *, stopped: threading.Event | None = None) -> dict[str, Any]:
         self._writable()
         request = parse_control(raw)
         request_id = request["request_id"]
         digest = hashlib.sha256(raw).hexdigest()
         with self.locked():
+            if stopped is not None and stopped.is_set():
+                raise RuntimeError("closed generation refuses intake")
             path = self._path("requests", request_id)
             if path.exists() and _read(path, 64 * 1024) != raw:
                 raise ValueError("control request identity already pins different bytes")
@@ -177,11 +189,17 @@ class ControlJournal:
             if not marker.exists():
                 if len(self._pending(reap=True)) >= PENDING_LIMIT:
                     raise ControlCapacity("100 unanswered manager requests; intake refused")
+                if stopped is not None and stopped.is_set():
+                    raise RuntimeError("closed generation refuses intake")
                 if not path.exists():
                     _write(path, raw)
                 # The immutable request is durable before its admission marker, and
                 # the marker is durable before acceptance. Orphans were never acked.
+                if stopped is not None and stopped.is_set():
+                    raise RuntimeError("closed generation refuses admission marker")
                 _write(marker, b"{}")
+            if stopped is not None and stopped.is_set():
+                raise RuntimeError("closed generation cannot acknowledge intake")
             return {"ok": True, "state": "accepted", "request_sha256": digest, "data": {}}
 
     def pending(self) -> list[dict[str, Any]]:
@@ -203,7 +221,8 @@ class ControlJournal:
             raw = _read(self._path("requests", request_id), 64 * 1024)
             digest = hashlib.sha256(raw).hexdigest()
             result = {"ok": state != "refused", "state": state, "request_sha256": digest, "data": data}
-            encoded = json.dumps(result, allow_nan=False).encode()
+            encoded = json.dumps(result, allow_nan=False, sort_keys=True).encode()
+            result = strict_json(encoded)  # compare the same durable JSON projection on replay
             if len(encoded) + 1 > CONTROL_REPLY_BYTES:
                 raise ValueError("control reply exceeds bound; operator route required")
             prior = self._outcome(request_id)

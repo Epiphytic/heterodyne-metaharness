@@ -215,7 +215,7 @@ class SessionServer:
         if json_depth(line) > MAX_DEPTH:
             return MALFORMED
         try:
-            req: Any = strict_json(line)
+            req: Any = json.loads(line)
         except UnicodeEncodeError:
             return FORBIDDEN  # preserve refusal of an escaped, unencodable launch token
         except ValueError:
@@ -240,13 +240,17 @@ class SessionServer:
             return MALFORMED
         fields = cast(dict[str, Any], payload)
         if kind == "ws_request" and fields.get("schema") == CONTROL_SCHEMA:
-            if self.control is None:
+            if self.control is None or self._closed.is_set():
                 return FORBIDDEN
-            if set(body) != {"token", "type", "payload"} or len(line) + 1 > MAX_LINE:
-                return MALFORMED
-            raw = _payload_bytes(line)
             try:
-                return self.control.intake(raw)
+                strict_json(line)  # only the new control contract tightens legacy JSON
+                if set(body) != {"token", "type", "payload"} or len(line) + 1 > MAX_LINE:
+                    return MALFORMED
+                raw = _payload_bytes(line)
+                result = self.control.intake(raw, stopped=self._closed)
+                return FORBIDDEN if self._closed.is_set() else result
+            except BlockingIOError:
+                return {"ok": False, "state": "pending", "error": "control-journal-busy-retry"}
             except ControlCapacity:
                 return {"ok": False, "state": "refused", "error": "manager-request-capacity"}
             except (OSError, ValueError, RuntimeError):

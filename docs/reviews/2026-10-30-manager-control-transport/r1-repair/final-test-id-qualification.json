@@ -1,0 +1,23 @@
+{
+  "command": [
+    "pytest",
+    "-q",
+    "tests/test_manager_control.py",
+    "tests/test_tiers.py"
+  ],
+  "PYTHONPATH": "src",
+  "exit_code": 0,
+  "actual_summary": "92 passed in 44.62s",
+  "final_source_hashes": {
+    "src/heterodyne/session/shim.py": "7b28d1b74cc4bbafe8c1946acee0d84e4718d891e0ee2c942e4b5aa4ad40864f",
+    "src/heterodyne/session/server.py": "7fac8f931f3f2d7eb489b695d86a9c243ddcbfba4e3075291e1d022ffc11b22e",
+    "src/heterodyne/session/control.py": "f5173df4aace597f9b3898f4d902cf76d5a1b3435690a8d408e759738703f51c",
+    "src/heterodyne/sandbox/spec.py": "988cb1753df270aa70de653a2c3c5ae7f952f1ea4a76b7159d596d77f782221d",
+    "src/heterodyne/sandbox/runtime.py": "4d0ccc3b1a2f7e0b75be8c8a7e2295850c2cc19793bd87862ad62ad1002fac89",
+    "tests/test_manager_control.py": "2e2a0829e3252e85792b7e779c249757a9d3210a4a467798ef40cd3cf21e2018"
+  },
+  "log_sha256": "f85217f2212614d32e177599a20c85258730f74329e92e00ff7435c71a25fb47",
+  "qualification": "After the 448-test frozen run, only tests/test_manager_control.py parametrization IDs changed. Final test/Tier regression rerun; no claim entire 448 rerun on changed testfile.",
+  "command_note": "Portable executable alias; exact argv retained privately.",
+  "exact_private_receipt_sha256": "483aff994df9313614c95fbb0762df65246beb88b4137a25b19722bae342527b"
+}
