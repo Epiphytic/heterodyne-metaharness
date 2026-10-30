@@ -21,6 +21,7 @@ Usage: check_install_agnostic.py [--root DIR] [--extra FILE] [paths...]
 """
 
 import argparse
+import hashlib
 import importlib.util
 import os
 import re
@@ -127,10 +128,20 @@ def scan_file(root: Path, rel: str, mode: str | None, literals: list[str]) -> li
     except OSError as exc:
         return [f"{rel}:0: unreadable: {type(exc).__name__}: {exc.strerror or exc}"]
     rules = {**RULES, **(SRC_RULES if rel.startswith("src/") else {})}
+    # Exact unchanged upstream authentication resource; only its historical host
+    # paths are excepted. A byte change or another rule remains a hard failure.
+    if (
+        rel == "src/heterodyne/actions/resources/hermes_native_authority.py.txt"
+        and hashlib.sha256((root / rel).read_bytes()).hexdigest()
+        == "ad4d4a96632646a5d145feb30c30d402b358d3ecb9caf4717e89394877b5f48d"
+    ):
+        rules.pop("home-path", None)
     kind = " (binary)" if binary else ""
-    return [f"{rel}:{n}: {rule}{kind}: {excerpt(line)}"
-            for n, line in enumerate(lines, 1)
-            for rule in scan_line(line, rules, lits, markers=not binary)]
+    return [
+        f"{rel}:{n}: {rule}{kind}: {excerpt(line)}"
+        for n, line in enumerate(lines, 1)
+        for rule in scan_line(line, rules, lits, markers=not binary)
+    ]
 
 
 def main() -> int:

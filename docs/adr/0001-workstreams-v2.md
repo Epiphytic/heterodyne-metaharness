@@ -488,8 +488,13 @@ Step 1 refuses an outage mode rather than silently permitting a transport gap.
   against authenticated sender keys, current allowed operator membership, the
   original system-owned delivered card, native inbound/answer rows and matching
   CLI readback. The complete release digest, immutable pushed packet link, design
-  links and deviations must match the original card. Two source/policy sweeps
-  surround native readback; a receipt alone grants no host authority. The existing
+  links and deviations must match the original card. The closed release binds
+  the expected packet commit and canonical docs path in the fixed product repo;
+  a different well-formed URL is refused. Two source/policy sweeps surround native
+  readback; policy parsing consumes the captured first-sweep bytes. The runtime
+  closure includes actual source/dependency trees and resolved interpreters, not
+  just the CLI wrapper. Isolated source execution refuses existing package
+  bytecode and site startup. A receipt alone grants no host authority. The existing
   checked H native core is reused byte-for-byte with a fixed source hash. This
   exception supersedes the generic bead-only commit point below for deployment.
 - The operator reacts 👍 (approve), 👎 (deny) or ❤️ (always), or sends `/approve` or `/deny` as a reply, on either card.

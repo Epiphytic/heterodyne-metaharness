@@ -36,22 +36,54 @@ uncertain target stays held rather than becoming reusable after a timeout.
 
 ## Evidence and limits
 
-20 focused tests passed in 0.29 seconds before final documentation-only changes.
-They cover the recipe, durable reopen, interrupted effects and reconciliation,
-target exclusion through two connections, one-use identities, cancellation,
-expiry, mapping/state drift, duplicate/unknown fields and finite schema bounds.
-Synthetic native SQL is read through the actual core reader; synthetic CLI,
-policy and clock fixtures exercise exact native authentication and two-sweep
-refusals. No test result establishes genuine operational approval or host trust.
-Focused Ruff and strict Pyright checks passed. Pyright used the canonical Product
-interpreter because this clean worktree intentionally has no `.venv`.
+The initial source commit `9dc38e3af8ce62e8b1009e6cf3aa2396ff398b0c`
+reported 20 focused passes using a canonical Python 3.12 interpreter. The actual
+round 1 HIGH built-in review found 19 passes and one failure in this worktree's
+Python 3.14 environment: its approximately 32 MiB interpreter exceeded the old
+16 MiB read bound. That original report and commit remain historical evidence;
+they did not qualify the actual worktree environment.
 
-`ripwire --quality-delta` reported exit 2: dormant `_bindings`/`_capture` were
-classified as preexisting dead functions by its canonical-name matching; new
-fixture classes/tests were also marked dead, and the fixture journal/advance
-were reported for size/parameter count. These findings are retained, not a claim
-of a clean quality gate. The dormant entry points intentionally have no host
-caller. Focused tests exercise the actual native validator and capture path.
+After the round 1 repairs, 31 focused tests passed in 0.68 seconds using this
+worktree's `.venv/bin/python` (uv Python 3.14.7, 32,159,664-byte executable). Source/interpreter hashing now
+streams through one checked descriptor with a 128 MiB per-file bound, a 512 MiB
+inventory bound and a finite file count. Focused Ruff and strict Pyright checks
+passed. The all-tracked install-agnostic checker also passed without a hook skip. A broader
+repository run was interrupted after 55.84 seconds with 115 failures, 699 passes
+and 87 skips; action/gatekeeper fixtures returned `InvalidHost('/privacy_sha256')`.
+The same first failing case,
+`test_actions_c1.py::test_permission_terminal_and_blocker_never_project_fresh_denial[completed]`,
+also failed against immutable initial commit `9dc38e3` in a separate baseline
+worktree under the identical interpreter (0.47 seconds). This establishes that
+case predates these repairs; it does not establish that every broad-suite failure
+has the same cause. A clean full-repository result is not claimed.
+
+New causal cases cover exact expected packet commit/path, malformed group types,
+public deploy alias bounds, unknown cancellation and normalized target conflicts.
+Native SQL and CLI observations remain synthetic. The fixture also executes an
+actual isolated child interpreter against disposable source files, checks source
+module mutation without a wrapper change, refuses bytecode, hashes the actual
+worktree interpreter, checks policy parsing of captured bytes, and verifies the
+checker exception is limited to the exact unchanged resource and still enforces
+the local denylist. These tests establish no genuine operational approval.
+
+The complete CLI executable closure is now explicit: fixed release source tree,
+fixed site-packages dependency tree, resolved CLI interpreter, the console wrapper,
+current harness package tree and checked adapter/core files. Every tree is pinned
+in the release and swept before and after readback; existing bytecode or symlinks
+refuse. The fixed child uses `-I -S -B`, explicit source/package roots and a fresh
+private cache prefix, avoiding `.pth`, site startup, ambient Python paths and
+pre-existing stdlib cache reads. Platform stdlib custody remains part of host
+qualification. Ordinary editable/cached installations may correctly HOLD until a
+sealed runtime profile is separately qualified; this repair changes no host files.
+The core is loaded lazily: absent or unsafe source causes a controlled authority
+HOLD when used, rather than breaking unrelated imports. Root-owned and hardlinked
+regular resources are allowed only with the same checked descriptor/hash checks.
+
+The release binds the expected immutable packet commit and canonical docs path;
+the native card must contain that exact URL, not another syntactically valid
+GitHub URL. Policies are parsed from the exact first-sweep captured bytes through
+the unchanged core parser, then their original source bytes are re-read at the
+second sweep. The local native context wrapper normalizes malformed input to HOLD.
 
 Host owner/UID separation, protected mapping/journal/artifact custody, immutable
 artifact staging and real process/manager checks remain Step 2 qualification.
@@ -64,10 +96,23 @@ this private fixture or make its receipts into host authority.
 
 ## Packaging exception
 
-The `install-agnostic` pre-commit hook rejects the fixed H home paths in the
-native adapter and original core. The controller explicitly authorized skipping
-only `install-agnostic` for this dormant source slice; Ruff and secret detection
-remain enabled. The original core is unchanged. These are fixed deployment
-profile endpoints, not portable defaults: relocation requires a reviewed new
-install profile and source pins, never an ambient path override. No host trust or
-activation is implied by this narrow packaging exception.
+The first source commit used the controller-authorized narrow skip of the
+`install-agnostic` pre-commit hook; Ruff and secret detection remained enabled.
+Round 1 correctly found that this left all-tracked CI failing. The repaired
+adapter uses documented per-line `home-path` exceptions. The checker has one
+resource exception for **only** `home-path` at the exact resource path and exact
+unchanged SHA256 above; another byte, path or rule is not exempt, and local
+secret-denylist checking remains active. No original core byte or digest was
+changed to make the checker pass. Relocation still requires a reviewed fixed
+install profile and new pins, never an ambient endpoint override.
+
+## Quality trade-offs after round 1 repairs
+
+The deterministic quality delta reported new test entry points as dead code and
+one 49-token normalized clone between the short lazy-loader refusal test and an
+unrelated graph-bounds refusal test. These are distinct behavioral tests, not
+production duplication; merging their fixtures would couple unrelated contracts.
+The small local `_require` and digest regex remain local deployment validation;
+the shared public codec identity/alias patterns are reused. The source authority
+reader remains deliberately private and dormant. These are recorded trade-offs,
+not a claim that every quality metric is clean.

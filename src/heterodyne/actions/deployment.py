@@ -11,11 +11,13 @@ from pathlib import Path
 from typing import Literal, cast
 
 from heterodyne.actions.codec import (
+    _ALIAS,  # pyright: ignore[reportPrivateUsage] - exact public deploy alias contract
+    _ID,  # pyright: ignore[reportPrivateUsage] - shared bounded identities
     InvalidAction,
     _decode,  # pyright: ignore[reportPrivateUsage] - reuse bounded closed codec
     encode_record,
 )
-from heterodyne.actions.contracts import Deploy, Record
+from heterodyne.actions.contracts import Record
 
 STEPS = (
     "preflight",
@@ -29,7 +31,6 @@ STEPS = (
 FLAGS = ("held-acceptance", "zero-new-quarantine")
 _HEX = re.compile(r"[0-9a-f]{64}")
 _OID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
-_ID = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}")
 _LINK = re.compile(r"https://github\.com/Epiphytic/[A-Za-z0-9_-]+/blob/[0-9a-f]{40}/[A-Za-z0-9_./-]+\.md")
 
 
@@ -62,6 +63,11 @@ class AuthorityPins(Record, frozen=True):
     core_sha256: str
     admind_sha256: str
     interpreter_sha256: str
+    runtime_adapter_sha256: str
+    admind_interpreter_sha256: str
+    admind_package_sha256: str
+    admind_source_sha256: str
+    harness_package_sha256: str
 
 
 class Recovery(Record, frozen=True):
@@ -89,6 +95,8 @@ class Release(Record, frozen=True):
     deadline_ns: int
     recovery: Recovery
     receipt_id: str
+    packet_commit: str
+    packet_path: str
     outage: Literal["refuse"] = "refuse"
 
 
@@ -102,7 +110,8 @@ def validate(release: Release, targets: tuple[Target, ...]) -> None:
     # Round-trip also refuses malformed direct host constructions, not only JSON input.
     _decode(encode_record(release), Release)
     _require(len(targets) <= 32 and len({t.alias for t in targets}) == len(targets), "target-map")
-    matches = [t for t in targets if t.alias == Deploy(release.target.alias).target]
+    _require(bool(_ALIAS.fullmatch(release.target.alias)), "deploy-alias")
+    matches = [t for t in targets if t.alias == release.target.alias]
     _require(matches == [release.target], "target-mapping-drift")
     for value in release.target.__struct_fields__:
         _require(bool(_ID.fullmatch(getattr(release.target, value))), "target-identifier")
@@ -139,6 +148,13 @@ def validate(release: Release, targets: tuple[Target, ...]) -> None:
         and len(set(release.deviations)) == len(release.deviations)
         and all(v.strip() and len(v) <= 1024 for v in release.deviations),
         "explicit-deviations",
+    )
+    _require(bool(re.fullmatch(r"[0-9a-f]{40}", release.packet_commit)), "packet-commit")
+    _require(
+        bool(re.fullmatch(r"docs/[A-Za-z0-9_./-]+\.json", release.packet_path))
+        and ".." not in release.packet_path.split("/")
+        and str(Path(release.packet_path)) == release.packet_path,
+        "packet-path",
     )
     _require(release.flags == FLAGS, "fixed-recipe-flags")
     _require(
@@ -226,6 +242,9 @@ class _FixtureJournal:  # pyright: ignore[reportUnusedClass] - private fixture o
                     ),
                 )
             self.db.commit()
+        except sqlite3.IntegrityError:
+            self.db.rollback()
+            raise InvalidAction("one-use-or-target-conflict") from None
         except BaseException:
             self.db.rollback()
             raise
@@ -247,8 +266,7 @@ class _FixtureJournal:  # pyright: ignore[reportUnusedClass] - private fixture o
                 "SELECT digest,phase,ordinal,observed,cancelled FROM jobs WHERE execution=?",
                 (release.execution_id,),
             ).fetchone()
-            _require(row is not None and row[0] == digest(release), "unknown-execution")
-            if row is None:
+            if row is None or row[0] != digest(release):
                 raise InvalidAction("unknown-execution")
             _, phase, ordinal, observed, cancelled = cast(tuple[str, str, int, str, int], row)
             _require(phase == "executing" and not cancelled, "forward-hold")
@@ -279,10 +297,7 @@ class _FixtureJournal:  # pyright: ignore[reportUnusedClass] - private fixture o
             row = self.db.execute(
                 "SELECT digest,phase,ordinal,anticipated FROM jobs WHERE execution=?", (release.execution_id,)
             ).fetchone()
-            _require(
-                row is not None and row[0] == digest(release) and row[1] == "uncertain", "reconcile-state"
-            )
-            if row is None:
+            if row is None or row[0] != digest(release) or row[1] != "uncertain":
                 raise InvalidAction("reconcile-state")
             _, _, ordinal, anticipated = cast(tuple[str, str, int, str], row)
             _require(observed == anticipated, "uncertain-hold")
@@ -301,7 +316,8 @@ class _FixtureJournal:  # pyright: ignore[reportUnusedClass] - private fixture o
 
     def cancel(self, execution_id: str) -> None:
         # Fixture models a pre-authorized independent stop; no native operator route is installed.
-        self.db.execute("UPDATE jobs SET cancelled=1 WHERE execution=?", (execution_id,))
+        changed = self.db.execute("UPDATE jobs SET cancelled=1 WHERE execution=?", (execution_id,))
+        _require(changed.rowcount == 1, "unknown-execution")
 
 
 def open_host_executor() -> None:
