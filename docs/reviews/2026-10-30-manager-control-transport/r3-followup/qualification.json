@@ -1,0 +1,27 @@
+{
+  "argv": [
+    "<product-test-venv>/bin/pytest",
+    "-q",
+    "tests/test_manager_control.py",
+    "tests/test_session_server.py",
+    "tests/test_session_shim.py"
+  ],
+  "exit_code": 0,
+  "elapsed_seconds": 27.495853105094284,
+  "source_hashes_before": {
+    "src/heterodyne/session/control.py": "17b73292ee43efab5db54f3dd7dc12bfc678cb1283c7bf3e0d72b936a1c9769f",
+    "src/heterodyne/session/server.py": "52e90353fc34969e4c93b82589b44045c7d18932d236ecf8503c283c33c1797b",
+    "src/heterodyne/session/shim.py": "c1cd2edf0f4c31fcc49110833a4300a45cb465bbe84dce84832ad9d0c890c515",
+    "src/heterodyne/sandbox/runtime.py": "7d5f017933de5a18bf54fef0ecc29821878f53f6b9951c8c9252716af8b85694",
+    "tests/test_manager_control.py": "32a6e4c013f46c732efe029078fb8b3e31b567f0395c111d382b8bb3a8fbfb4c"
+  },
+  "source_hashes_after": {
+    "src/heterodyne/session/control.py": "17b73292ee43efab5db54f3dd7dc12bfc678cb1283c7bf3e0d72b936a1c9769f",
+    "src/heterodyne/session/server.py": "52e90353fc34969e4c93b82589b44045c7d18932d236ecf8503c283c33c1797b",
+    "src/heterodyne/session/shim.py": "c1cd2edf0f4c31fcc49110833a4300a45cb465bbe84dce84832ad9d0c890c515",
+    "src/heterodyne/sandbox/runtime.py": "7d5f017933de5a18bf54fef0ecc29821878f53f6b9951c8c9252716af8b85694",
+    "tests/test_manager_control.py": "32a6e4c013f46c732efe029078fb8b3e31b567f0395c111d382b8bb3a8fbfb4c"
+  },
+  "source_unchanged": true,
+  "exact_private_command_receipt_sha256": "d5487be93ec033c3aa165e2e869649c3433197b8cd4d5fe0d0ed2d038e22003d"
+}

@@ -22,6 +22,10 @@ from heterodyne.session.shim import CONTROL_REPLY_BYTES, control_uuid, parse_con
 from heterodyne.wsd.gate import open_lock_file
 
 
+class ControlConflict(ValueError):
+    """A successfully read immutable request has different offered bytes."""
+
+
 class ControlCapacity(ValueError):
     """Intake refuses without accepting a 101st unanswered request."""
 
@@ -191,7 +195,7 @@ class ControlJournal:
                 raise RuntimeError("closed generation refuses intake")
             path = self._path("requests", request_id)
             if path.exists() and _read(path, 64 * 1024) != raw:
-                raise ValueError("control request identity already pins different bytes")
+                raise ControlConflict("control request identity already pins different bytes")
             outcome = self._outcome(request_id)
             if outcome is not None:
                 return outcome

@@ -29,12 +29,13 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
-from heterodyne.session.control import ControlCapacity, ControlJournal
+from heterodyne.session.control import ControlCapacity, ControlConflict, ControlJournal
 from heterodyne.session.shim import (
     CONTROL_SCHEMA,
     MAX_DEPTH,
     MAX_LINE,
     json_depth,
+    parse_control,
     strict_json,
 )
 
@@ -245,10 +246,16 @@ class SessionServer:
                 if set(body) != {"token", "type", "payload"} or len(line) + 1 > MAX_LINE:
                     return MALFORMED
                 raw = _payload_bytes(line)
+                parse_control(raw)
+            except ValueError:
+                return MALFORMED
+            try:
                 result = self.control.intake(raw, stopped=self._closed)
                 return result  # durable admission remains accepted across shutdown
             except BlockingIOError:
-                return {"ok": False, "state": "pending", "error": "control-journal-busy-retry"}
+                return {"ok": False, "state": "uncertain", "error": "control-journal-busy-retry-same-id"}
+            except ControlConflict:
+                return {"ok": False, "state": "refused", "error": "control-request-identity-conflict"}
             except ControlCapacity:
                 return {"ok": False, "state": "refused", "error": "manager-request-capacity"}
             except (OSError, ValueError, RuntimeError):

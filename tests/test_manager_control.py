@@ -445,8 +445,8 @@ def test_lock_deadline_is_retryable_and_has_no_false_terminal_receipt(tmp_path, 
     server = SessionServer(tmp_path/'s.sock','token',tmp_path/'events',control=journal)
     with ThreadPoolExecutor(1) as pool, journal.locked():
         reply = pool.submit(server._handle, req('token','ws_request',json.loads(request()))).result(3)
-    assert reply['state'] == 'pending'
-    assert reply['error'] == 'control-journal-busy-retry'
+    assert reply['ok'] is False and reply['state'] == 'uncertain'
+    assert reply['error'] == 'control-journal-busy-retry-same-id'
     assert journal.pending() == []
     assert list((journal.root/'requests').iterdir()) == []
 
@@ -567,3 +567,26 @@ def test_shutdown_busy_server_removed_from_rebind_cache_but_owner_retained(tmp_p
     runtime.close_manager_control()
     runtime.own_manager_control()
     runtime.close_manager_control()
+
+
+@pytest.mark.parametrize('payload', [json.loads(request('Execute', {'argv':['anything']})),
+                                     json.loads(request('Status', {'ready':True}))])
+def test_server_invalid_intent_is_final_malformed_without_intake(tmp_path, journal, payload):
+    server = SessionServer(tmp_path/'socket', 'token', tmp_path/'events', control=journal)
+    with patch.object(journal, 'intake', wraps=journal.intake) as intake:
+        assert server._handle(req('token','ws_request',payload)) == {'ok':False,'error':'malformed'}
+        intake.assert_not_called()
+    assert journal.pending() == []
+
+
+def test_server_identity_conflict_refused_preserves_original_and_replay(tmp_path, journal):
+    server = SessionServer(tmp_path/'socket', 'token', tmp_path/'events', control=journal)
+    raw = request()
+    accepted = server._handle(req('token','ws_request',json.loads(raw)))
+    changed = json.loads(raw)
+    changed['operation'] = 'Boundary'
+    assert server._handle(req('token','ws_request',changed)) == {
+        'ok':False,'state':'refused','error':'control-request-identity-conflict'}
+    assert server._handle(req('token','ws_request',json.loads(raw))) == accepted
+    assert len(journal.pending()) == 1
+    assert journal.pending()[0]['request'] == json.loads(raw)
