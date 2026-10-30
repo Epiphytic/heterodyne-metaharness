@@ -480,6 +480,20 @@ stopped guard, one install, then held acceptance. Host activation, outage capsul
 independent cancellation/recovery and filesystem/UID qualification remain Step 2;
 Step 1 refuses an outage mode rather than silently permitting a transport gap.
 
+The Step 2 source boundary adds an independently approved closed outer deployment
+packet with four exact ordered outage transitions, a finite outage/recovery
+window and an independent route epoch/policy/credential binding. An approval of
+the inner Release alone does not approve these fields. The dormant fixed native
+adapter binds the whole outer packet through the unchanged authentication core.
+Descriptor-anchored staging and actual kernel peer UID checks admit untrusted
+build bytes, never operator authority. The private durable outage ledger records
+intent before returning a fixed step, refuses unknown-step replay and retains
+target exclusion across a recovery request. Exact already-issued completion can
+still be acknowledged after cancellation without enabling another forward step.
+The actual protected receiver/semantic factory, qualified independent route,
+source-specific cessation/newest-state producer and host runner remain required;
+the source primitives neither manufacture those facts nor open host execution.
+
 ### 5.4 Approval resolution (Marmot)
 
 - **Deployment authority exception:** generic action/bead decisions, standing or

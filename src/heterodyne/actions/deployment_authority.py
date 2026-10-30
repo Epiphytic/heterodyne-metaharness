@@ -20,8 +20,10 @@ from typing import Any, cast
 from heterodyne.actions import deployment_runtime as runtime
 from heterodyne.actions.codec import InvalidAction
 from heterodyne.actions.deployment import Release, Target, digest, validate
+from heterodyne.admind.asks import fit
 
 CORE_SHA256 = "ad4d4a96632646a5d145feb30c30d402b358d3ecb9caf4717e89394877b5f48d"
+APPROVAL_TITLE = "Exact release"
 DB = Path(
     "/home/openclaw/.local/state/heterodyne/admind/admind.db"  # install-agnostic: allow=home-path - fixed H
 )
@@ -92,6 +94,8 @@ def _core() -> Any:
     if _loaded_core is None:
         try:
             _loaded_core = _load_core()
+        except InvalidAction as exc:
+            raise AuthorityHold(str(exc)) from exc
         except (OSError, ValueError) as exc:
             raise AuthorityHold("authority-source-unavailable") from exc
     return _loaded_core
@@ -117,7 +121,7 @@ def approval_body(release: Release, packet_url: str, group: str) -> str:
         or not re.fullmatch(r"[0-9a-f]{32,128}", group)
     ):
         raise InvalidAction("approval-context")
-    return (
+    body = (
         "Approve this exact finite heterodyne release deployment?\n"
         f"Release SHA256: {digest(release)}\nApproval: {release.approval_id}\n"
         f"Execution: {release.execution_id}\nNonce: {release.nonce}\n"
@@ -128,6 +132,12 @@ def approval_body(release: Release, packet_url: str, group: str) -> str:
         + "\n".join("- " + d for d in release.deviations)
         + "\nOne use only. No standing approval, heart reaction, generic action or host custody claim."
     )
+    # admind truncates the complete title+body context, not each deviation.
+    # Refuse here instead of producing an ask that can never pass native binding.
+    context = APPROVAL_TITLE + "\n\n" + body
+    if fit(context) != (context, False):
+        raise InvalidAction("release-card-budget")
+    return body
 
 
 def _bindings_checked(release: Release, native: dict[str, Any]) -> list[str]:
@@ -135,6 +145,7 @@ def _bindings_checked(release: Release, native: dict[str, Any]) -> list[str]:
     ask = native["ask"]
     if (
         ask["ask_id"] != release.approval_id
+        or ask["title"] != APPROVAL_TITLE
         or ask["kind"] != "question"
         or ask["status"] != "answered"
         or ask["question_form"] != "yes-no"
