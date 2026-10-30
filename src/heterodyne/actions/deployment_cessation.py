@@ -335,7 +335,7 @@ class _AdmindInvocation:  # pyright: ignore[reportUnusedClass] - private protect
     def _empty_group(self) -> None:
         try:
             fd = os.open(
-                "cgroup.events", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                "cgroup.events", _READ_FILE,
                 dir_fd=self.group_fd,
             )
         except FileNotFoundError:
