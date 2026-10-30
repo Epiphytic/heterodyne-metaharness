@@ -194,7 +194,7 @@ def test_real_cgroup_populated_empty_and_removed_retained_descriptor():
     import inspect
     source = (
         "import os, pathlib, subprocess, signal, uuid, time, json\nfrom pathlib import Path\n"
-        "InvalidAction = ValueError\nclass Probe:\n"
+        f"InvalidAction = ValueError\n_READ_FILE = {cessation._READ_FILE}\nclass Probe:\n"
         + inspect.getsource(cessation._AdmindInvocation._empty_group)
         + '''
 p = pathlib.Path('/sys/fs/cgroup') / ('heterodyne-proof-' + uuid.uuid4().hex)

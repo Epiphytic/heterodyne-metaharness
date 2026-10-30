@@ -28,7 +28,7 @@ from heterodyne.actions.deployment_host_store import (
 )
 from heterodyne.actions.deployment_outage import decode_packet, packet_digest
 
-_FILE = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+_FILE = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC
 _SUDO = Path("/usr/bin/sudo")
 _BASH = Path("/usr/bin/bash")
 _HELPER = Path("/usr/local/libexec/heterodyne/deployment-install-helper")
