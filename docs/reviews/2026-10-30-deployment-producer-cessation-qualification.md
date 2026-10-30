@@ -199,3 +199,16 @@ recorded costs rather than a passing quality gate; no baseline or metric was
 changed. The privileged-path repair deliberately retains explicit file identities
 and bounded copies instead of delegating authority to a caller-provided reader.
 No production runtime, source capsule, queue or installed profile was changed.
+
+
+## Actual third MEDIUM disposition
+
+The actual third built-in review, using the operator's exact PoC question,
+cleared source242125665706d9870e49af5ba2545d455f5a9324 as having no critical flaws
+and good enough for a PoC. The original report and exact source/command/result
+receipt are retained under `r3/`; this is no production deployment clearance.
+Remaining nonblocking findings include anchored-copy path resolution depending
+on root-owned ancestry, post-publication cleanup failure ambiguity, redundant
+process-wide renderer parity, no pre-copy capacity preflight, malformed native
+body typing, and bounded repeated observations/copies. These findings are
+preserved for follow-up rather than silently changing reviewed source.
