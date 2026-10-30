@@ -5,3 +5,5 @@ The source-bound affected suite passed 427 tests in 1029.60 seconds on Product b
 Actual subprocess locks, Unix sockets, fsync fault injection, 100-unanswered capacity, immutable exact-byte replay, and separate-process non-owning observation are tested. Backend simulations are not actual OpenShell isolation, native lane enrollment, genuine operator authorization or deployment qualification. Hermes must own the runtime for its daemon lifetime and consume the journal through the approved bridge before this lane is usable end to end.
 
 An earlier full-repository run remains isolated at an older Product base; its result is separate prior-base evidence and is not represented as current-main qualification. The request-once API is an independent reviewed prerequisite.
+
+The final candidate integrates reviewed request-once prerequisite main35650c0 without conflicts. Its exact combined source then passed 62 manager/socket/question-once tests in 2.21 seconds; all ten source/test hashes remained unchanged. The earlier 427-test result belongs to its recorded a3da7b0 prerequisite combination, not to this later merge head.

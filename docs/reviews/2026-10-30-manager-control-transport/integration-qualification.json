@@ -1,0 +1,28 @@
+{
+  "head": "e162454c02638a3667cd7af69aa927160887eb9b",
+  "main_prerequisite": "35650c0ced0f9e1e3b1e5cefe36d5485fec74837",
+  "files": {
+    "src/heterodyne/session/shim.py": "d8483478e2589b8d93b453eb3aabf071ceabfba1382e9393eae8a79028c1fd7a",
+    "src/heterodyne/session/server.py": "0a51570ddbe5c06403934111db4d31da868e518c823c50c1fe903b27e9ec22ac",
+    "src/heterodyne/session/control.py": "135b4508ee2839cbee528b69345a4d5b024b4623c747d940c88f61286aa687cb",
+    "src/heterodyne/sandbox/spec.py": "988cb1753df270aa70de653a2c3c5ae7f952f1ea4a76b7159d596d77f782221d",
+    "src/heterodyne/sandbox/runtime.py": "5130166e5ffa1b50f8125036a66275252f3f6444d9017f26af1e138284c37de3",
+    "tests/test_manager_control.py": "8dd7bc9a70048fa1cb487a16dd93cd67707edca8c71fe9b7dbdfabf968b4d19a",
+    "src/heterodyne/admind/asks.py": "fd92feeaedc8ed8f6d60f7a433f8d9a5f9e4e16cdb36be3a3630c45e0a9f85c4",
+    "src/heterodyne/admind/daemon.py": "895bce3cab87d8548719b01f80cffce98bb46781eccdde7271908bf0b6fbc8eb",
+    "src/heterodyne/admind/store.py": "fc493feba64b39df2ea226a9635f6235aa1dd3a527fa602ca22c375237f41cf9",
+    "tests/test_admind_question_once.py": "56403e012ef2b8235ac3e6db088586fe5c21dd3560f44cdfd79506fe4b715ad0"
+  },
+  "command_display": [
+    "pytest",
+    "-q",
+    "tests/test_manager_control.py",
+    "tests/test_session_server.py",
+    "tests/test_admind_question_once.py"
+  ],
+  "command_note": "Portable executable alias; exact argv retained privately.",
+  "PYTHONPATH": "src",
+  "exit_code": 0,
+  "elapsed_seconds": 2.438250466249883,
+  "source_unchanged": true
+}
