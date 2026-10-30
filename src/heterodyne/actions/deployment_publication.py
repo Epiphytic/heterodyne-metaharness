@@ -92,7 +92,10 @@ def _https(commit: str, path: str) -> bytes:
     response = HttpsResponse(connection, "https://" + _HOST + _PREFIX + commit + "/" + path, 10)
     try:
         _tls(connection, response, context)
-        connection.request("GET", _PREFIX + commit + "/" + path, headers={"Accept-Encoding": "identity"})
+        connection.request(
+            "GET", _PREFIX + commit + "/" + path,
+            headers={"Host": _HOST, "Accept-Encoding": "identity"},
+        )
         response.attach(connection.getresponse())
         if response.status != 200 or response.header("Content-Encoding") not in {None, "identity"}:
             raise InvalidAction("publication-https-status")
