@@ -1,0 +1,18 @@
+[
+  "codex",
+  "exec",
+  "resume",
+  "--ignore-user-config",
+  "--ignore-rules",
+  "--json",
+  "--model",
+  "gpt-6.1-sol",
+  "-c",
+  "model_reasoning_effort=\"medium\"",
+  "-c",
+  "approval_policy=\"never\"",
+  "-c",
+  "project_doc_max_bytes=0",
+  "01a18de7-9d4f-7423-bbc1-cef32cde7aab",
+  "Respond exactly QUALIFICATION_RESUME_9264. Do not use any tools, inspect files, or modify anything."
+]

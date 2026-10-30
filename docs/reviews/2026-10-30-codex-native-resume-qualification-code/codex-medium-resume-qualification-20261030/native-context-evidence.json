@@ -1,0 +1,25 @@
+{
+  "rollout_sha256": "e10d58a22e8ccb847936899d2268a378394db9ad50ae65d8c4f172d9f176ce4a",
+  "contexts": [
+    {
+      "turn_id": "01a18de7-9f81-7801-ac20-f62d8297bae9",
+      "cwd": "${HOST_HOME}/.hermes/handoff/2026-10-15/codex/autonomous-resume/codex-medium-resume-qualification-20261030/work",
+      "approval_policy": "never",
+      "sandbox_policy": {
+        "type": "read-only"
+      },
+      "model": "gpt-6.1-sol",
+      "effort": "medium"
+    },
+    {
+      "turn_id": "01a18de7-af54-77b3-972e-4fdd38d12060",
+      "cwd": "${HOST_HOME}/.hermes/handoff/2026-10-15/codex/autonomous-resume/codex-medium-resume-qualification-20261030/work",
+      "approval_policy": "never",
+      "sandbox_policy": {
+        "type": "read-only"
+      },
+      "model": "gpt-6.1-sol",
+      "effort": "medium"
+    }
+  ]
+}

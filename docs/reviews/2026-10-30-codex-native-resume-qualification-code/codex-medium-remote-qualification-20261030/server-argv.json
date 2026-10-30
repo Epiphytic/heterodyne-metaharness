@@ -1,0 +1,6 @@
+[
+  "${HOST_HOME}/.local/bin/codex",
+  "app-server",
+  "--listen",
+  "unix:///tmp/oizoh-codex-medium-20261030.sock"
+]

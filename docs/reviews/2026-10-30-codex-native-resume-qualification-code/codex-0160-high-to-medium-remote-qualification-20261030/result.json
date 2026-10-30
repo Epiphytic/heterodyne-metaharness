@@ -1,0 +1,46 @@
+{
+  "thread_id": "01a18df3-535d-70f0-8fe1-28644a7fe422",
+  "contexts": [
+    {
+      "turn_id": "01a18df3-5381-74b0-829d-8613b6e01952",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "approval_policy": "never",
+      "sandbox_policy": {
+        "type": "danger-full-access"
+      }
+    },
+    {
+      "turn_id": "01a18df3-935b-7aa2-899b-42ab72abf21a",
+      "model": "gpt-6.1-sol",
+      "effort": "medium",
+      "approval_policy": "never",
+      "sandbox_policy": {
+        "type": "danger-full-access"
+      }
+    }
+  ],
+  "answers": [
+    {
+      "type": "task_complete",
+      "turn_id": "01a18df3-5381-74b0-829d-8613b6e01952",
+      "last_agent_message": "REMOTE_FRESH_8371",
+      "started_at": 1793382896,
+      "completed_at": 1793382898,
+      "duration_ms": 2402,
+      "time_to_first_token_ms": 2317
+    },
+    {
+      "type": "task_complete",
+      "turn_id": "01a18df3-935b-7aa2-899b-42ab72abf21a",
+      "last_agent_message": "REMOTE_RESUMED_9428",
+      "started_at": 1793382912,
+      "completed_at": 1793382915,
+      "duration_ms": 2280,
+      "time_to_first_token_ms": 2162
+    }
+  ],
+  "rollout_sha256": "4d47f103f1f3142ac07df51bd4dce1e5f7d51d76c5c7cc1ab66b2a4d56e82b0a",
+  "version": "codex-cli 0.160.0",
+  "pass": true
+}

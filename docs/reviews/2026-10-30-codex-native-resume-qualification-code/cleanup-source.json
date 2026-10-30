@@ -1,0 +1,8 @@
+{
+  "base": "a05363054e9f204fc67e3733dfaafffcd3326c65",
+  "files": {
+    "src/heterodyne/sandbox/runtime.py": "9fcc73bcd0f91808ee97787866627c7f010ff3c5d2fd727647b97da80427c529",
+    "tests/test_sandbox_runtime.py": "5027b2e1453e73b9e5adb0a67027cc20f0eac7c547621d3da4cfdf49783ee9cc"
+  },
+  "qualification": "14 focused tests PASS; Ruff and strict Pyright PASS; final full runtime suite pending, no full PASS yet"
+}

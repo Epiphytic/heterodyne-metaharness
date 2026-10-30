@@ -1,0 +1,11 @@
+[
+  "${HOST_HOME}/.hermes/handoff/2026-10-15/codex/autonomous-resume/codex-0160-qualification-binary-20261030/codex-x86_64-unknown-linux-musl",
+  "resume",
+  "01a18df3-535d-70f0-8fe1-28644a7fe422",
+  "--remote",
+  "unix:///tmp/oizoh-codex-0160-20261030.sock",
+  "--model",
+  "gpt-6.1-sol",
+  "--no-alt-screen",
+  "Respond exactly REMOTE_RESUMED_9428. Do not use any tools, inspect files or change anything."
+]

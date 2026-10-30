@@ -1,0 +1,31 @@
+{
+  "thread_id": "01a18df0-f35b-78c0-9e31-fb12a95a1cb4",
+  "contexts": [
+    {
+      "turn_id": "01a18df0-f378-7683-be96-c5754ee42150",
+      "model": "gpt-6.1-sol",
+      "effort": "medium",
+      "approval_policy": "never",
+      "sandbox_policy": {
+        "type": "danger-full-access"
+      }
+    },
+    {
+      "turn_id": "01a18df1-32e2-7b13-8190-fd737df679f9",
+      "model": "gpt-6.1-sol",
+      "effort": "medium",
+      "approval_policy": "never",
+      "sandbox_policy": {
+        "type": "danger-full-access"
+      }
+    }
+  ],
+  "answers": [
+    "REMOTE_FRESH_8371",
+    "REMOTE_RESUMED_9428"
+  ],
+  "rollout_sha256": "a8b11498444ae222bd18acd4b8fa0a4746ad0e83d750ebb0d2b482f30ef47ba0",
+  "version": "codex-cli 0.166.0",
+  "pass": true,
+  "evidence_correction": "Initial collector searched event_msg.agent_message; actual 0.166 writes task_complete.last_agent_message. Original result retained; re-extracted from unchanged native rollout."
+}

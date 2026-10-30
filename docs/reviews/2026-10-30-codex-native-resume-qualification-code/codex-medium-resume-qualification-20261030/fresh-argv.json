@@ -1,0 +1,18 @@
+[
+  "codex",
+  "exec",
+  "--sandbox",
+  "read-only",
+  "--ignore-user-config",
+  "--ignore-rules",
+  "--json",
+  "--model",
+  "gpt-6.1-sol",
+  "-c",
+  "model_reasoning_effort=\"medium\"",
+  "-c",
+  "approval_policy=\"never\"",
+  "-c",
+  "project_doc_max_bytes=0",
+  "Respond exactly QUALIFICATION_START_4831. Do not use any tools, inspect files, or modify anything."
+]
