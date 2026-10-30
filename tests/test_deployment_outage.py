@@ -29,6 +29,8 @@ from heterodyne.actions.deployment_outage import (
     packet_digest,
 )
 
+OUTER_URL = URL.replace("a" * 40, "b" * 40)
+
 
 def packet():
     r = release()
@@ -122,7 +124,7 @@ def test_whole_packet_synthetic_native_binding(tmp_path):
     _, native, response = native_fixture(tmp_path)
     native["ask"]["title"] = outage_authority.APPROVAL_TITLE
     response["ask"]["summary"]["title"] = outage_authority.APPROVAL_TITLE
-    native["ask"]["body"] = outage_authority.approval_body(p, URL, H)
+    native["ask"]["body"] = outage_authority.approval_body(p, OUTER_URL, H)
     core = authority._core()
     core._validate(p, native, response, {"bel": "d" * 64}, outage_authority._bindings)
     changed = msgspec.structs.replace(p, outage=msgspec.structs.replace(p.outage, deadline_ns=89))
@@ -140,7 +142,7 @@ def test_outage_keeps_actual_native_authentication(tmp_path, change):
     _, native, response = native_fixture(tmp_path)
     native["ask"]["title"] = outage_authority.APPROVAL_TITLE
     response["ask"]["summary"]["title"] = outage_authority.APPROVAL_TITLE
-    native["ask"]["body"] = outage_authority.approval_body(p, URL, H)
+    native["ask"]["body"] = outage_authority.approval_body(p, OUTER_URL, H)
     if change == "sender":
         native["inbound"][0]["sender_key"] = "e" * 64
     elif change == "owner":
@@ -160,7 +162,7 @@ def rendered_outage(p):
     from heterodyne.admind.redact import redact
     from heterodyne.admind.store import AskRow
 
-    body = outage_authority.approval_body(p, URL, H)
+    body = outage_authority.approval_body(p, OUTER_URL, H)
     request = asks.AskPost(
         "question", title=outage_authority.APPROVAL_TITLE, body=body,
         poster="protected-deploy", form="yes-no", recommended="yes",
@@ -210,7 +212,7 @@ def test_real_endpoint_chunk_bound_and_protected_target_mapping(monkeypatch):
     p = packet()
     monkeypatch.setattr(authority, "_rendering", lambda: ((), 1000))
     with pytest.raises(InvalidAction, match="single-part|transport-bound"):
-        outage_authority.approval_body(p, URL, H)
+        outage_authority.approval_body(p, OUTER_URL, H)
     with pytest.raises(InvalidAction):
         _installer_argv(p, ())
 
@@ -264,3 +266,8 @@ def test_root_helper_contract_pins_are_required_and_closed(field):
     del raw[field]
     with pytest.raises(InvalidAction):
         decode_packet(json.dumps(raw).encode(), (TARGET,))
+
+
+def test_outer_publication_commit_must_differ_from_inner_release():
+    with pytest.raises(InvalidAction, match="outer-packet-publication-url"):
+        outage_authority.approval_body(packet(), URL, H)

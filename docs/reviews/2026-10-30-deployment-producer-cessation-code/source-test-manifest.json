@@ -1,0 +1,45 @@
+{
+  "base": "76c07c09a0e1b807c21acf76e753e8aa41f97284",
+  "source_sha256": {
+    "src/heterodyne/actions/deployment_card.py": "c45c00c2b4d793905f9f5886f33c233181818995d33b97f7f0bf0990e55a0dd2",
+    "src/heterodyne/actions/deployment_publication.py": "6099d1df4e44d68c9030d2d7b5a10009c990149336bd82f664a37aac0aad22e2",
+    "src/heterodyne/actions/deployment_cessation.py": "eb0c295526a5a79a3b4a5d7eadbb0689afc2cde2c9e7fee8132207c6207c05d5",
+    "src/heterodyne/actions/deployment_outage_authority.py": "b77e522fc28244aac0171c575760bced85a192aec0e2b8689dd04cff766c737f",
+    "src/heterodyne/actions/deployment_outage_journal.py": "d5b91b1eaa6860c0232dbcf25a3e3643fc045dff8c59cb68b5309f3f39a5c405",
+    "tests/test_deployment_card.py": "c02b67b9ae04aa971511089acb2d689bdf9daee0c10b460b835e329d0a703aaf",
+    "tests/test_deployment_publication.py": "ad916dc61239f495df25cfa20c06d98171fb4f293f4be402026f0e92f9e024c9",
+    "tests/test_deployment_cessation.py": "a0469fdffba166fce0e6f0c6da67befbf7824bc1c290eef480b7aa267f1b4d8c",
+    "tests/test_deployment_outage.py": "6eb223b6cde3026d517d89ebe210f089ace21286609ce151b9c19f574092a1d0",
+    "tests/test_deployment_outage_journal.py": "0c15c85bbf7c2d1d3b0f6c9cc4c729dcd3e89427ec7737ca0c118da066a2dd59",
+    "tests/fixtures/deployment-card/whole-packet-v2.json": "59067dad89566be1c988799b3c33f1103d57eb36b807281084f59d03bc3c20b6",
+    "docs/reviews/2026-10-30-deployment-producer-cessation-qualification.md": "84b4c759f10c8b9e94026b01b2435faef69fbeb97ff726b377e19e9a75a2570a"
+  },
+  "source_unchanged": true,
+  "focused_test_argv_template": [
+    "${HOST_HOME}/repos/heterodyne-deployment-step1-20261029/.venv/bin/python",
+    "-m",
+    "pytest",
+    "-q",
+    "tests/test_deployment_card.py",
+    "tests/test_deployment_publication.py",
+    "tests/test_deployment_cessation.py",
+    "tests/test_deployment_step1.py",
+    "tests/test_deployment_outage.py",
+    "tests/test_deployment_host_store.py",
+    "tests/test_deployment_outage_journal.py"
+  ],
+  "environment": {
+    "PYTHONDONTWRITEBYTECODE": "unset",
+    "PYTHONPATH": "src:tests"
+  },
+  "focused_test_exit": 0,
+  "focused_test_log_sha256": "d2e8a100fb758244cc318a4e8751d5390a79c054644a22ad8ce73646908bca98",
+  "quality_argv": [
+    "ripwire",
+    ".",
+    "--quality-delta"
+  ],
+  "quality_exit": 2,
+  "quality_log_sha256": "c960747d71156d48847ac0cb39b749957ec9ceebd0b22908e3f1fb897eb27650",
+  "qualification": "Synthetic SQL/transport/profile and source-only components; no genuine approval, protected host deployment, native factory custody or all-writer exclusion claim."
+}

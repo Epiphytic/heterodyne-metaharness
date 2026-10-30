@@ -29,6 +29,7 @@ APPROVAL_TITLE = "OUTAGE DEPLOYMENT: exact finite release"
 def approval_body(packet: DeploymentPacket, packet_url: str, group: str) -> str:
     validate_packet(packet, (packet.release.target,))
     if (not release_auth._PACKET.fullmatch(packet_url)
+        or packet_url.split("/", 7)[6] == packet.release.packet_commit
         or packet_url.split("/", 7)[-1] != packet.release.packet_path
         or ".." in packet_url.split("/")):
         raise InvalidAction("outer-packet-publication-url")
