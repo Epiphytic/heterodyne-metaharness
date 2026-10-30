@@ -71,16 +71,11 @@ def _bindings(packet: DeploymentPacket, native: dict[str, Any]) -> list[str]:
         group = kv["group_id_hex"]
         if ask["title"] != APPROVAL_TITLE or ask["body"] != approval_body(packet, url, group):
             core._hold("exact outage deployment context changed")
-        # The unchanged release binder validates ask shape and native membership.
-        # Projection is local only; the core authenticates the original retained
-        # native rows/card/reply/CLI, and the full original body was checked above.
-        projected = {**native, "ask": {
-            **ask, "title": release_auth.APPROVAL_TITLE,
-            "body": release_auth.approval_body(
-                packet.release, release_auth._packet_url(packet.release), group,
-            ),
-        }}
-        return release_auth._bindings(packet.release, projected)
+        # Only native ask shape/membership are projected. The exact original
+        # whole OUTAGE card was checked above; independently checking an inner
+        # release card would impose a different, unposted renderer contract.
+        projected = {**native, "ask": {**ask, "title": release_auth.APPROVAL_TITLE}}
+        return release_auth._membership_checked(packet.release, projected)[1]
     except (core.AuthorityHold, InvalidAction):
         raise
     except (KeyError, TypeError, ValueError) as exc:

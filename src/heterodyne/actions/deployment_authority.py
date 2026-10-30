@@ -197,7 +197,7 @@ def approval_body(release: Release, packet_url: str, group: str) -> str:
     return body
 
 
-def _bindings_checked(release: Release, native: dict[str, Any]) -> list[str]:
+def _membership_checked(release: Release, native: dict[str, Any]) -> tuple[str, list[str]]:
     core = _core()
     ask = native["ask"]
     if (
@@ -224,11 +224,17 @@ def _bindings_checked(release: Release, native: dict[str, Any]) -> list[str]:
         core._hold("invalid native membership")
     if type(kv["group_id_hex"]) is not str or type(ask["body"]) is not str:
         core._hold("invalid native group context")
-    body = ask["body"]
+    return kv["group_id_hex"], cast(list[str], members)
+
+
+def _bindings_checked(release: Release, native: dict[str, Any]) -> list[str]:
+    core = _core()
+    group, members = _membership_checked(release, native)
+    body = native["ask"]["body"]
     urls = [line[8:] for line in body.splitlines() if line.startswith("Packet: ")]
-    if len(urls) != 1 or body != approval_body(release, urls[0], kv["group_id_hex"]):
+    if len(urls) != 1 or body != approval_body(release, urls[0], group):
         core._hold("exact release context changed")
-    return cast(list[str], members)
+    return members
 
 
 def _bindings(release: Release, native: dict[str, Any]) -> list[str]:
