@@ -456,8 +456,42 @@ Every flow has the same shape: **observe** (hook, Marmot or forge), then **decid
    - Commit the WIP, react ⏸️, post the cards (§6.2), and run pickup.
 4. Every decision adds a bead comment with the tier, the decider and the reason.
 
+**Finite deployment exception (approved build/deployment split, gsc5).** The public
+request remains `deploy{target}` and the eventual executor command remains
+`wsd-act run <approval-id>`. A deployment approval resolves through protected
+admission to one immutable `heterodyne_release.v1` envelope, rather than a general
+command or an agent outside the sandbox. Target aliases resolve through a finite
+protected mapping; request JSON cannot supply paths, argv, executable, environment,
+unit names or an execution URL. The envelope binds the exact target definition,
+source commit/tree, release/bootstrap/installer/guard/unit/dependency-lock digests,
+fixed recipe flags, initial state/manager identities, approved immutable design
+links, explicit deviations, execution identity/nonce, finite forward and recovery
+windows, independent recovery route and receipt identity. Authority source roles
+are fixed and their bytes are bound to the approved envelope.
+
+Step 1 provides closed values and a **private fake-effect fixture journal**, plus a
+dormant native admind corroboration reader. This is not a provisioned protected
+configuration or a host executor. The fixture commits each issued step before its
+fake effect, retains completed transitions and target exclusion across restart,
+and never retries an uncertain step. Reconciliation requires the exact expected
+post-state. Cancellation and expiry prevent further forward steps. The sole recipe
+is read-only preflight, online guard, finite owner exclusion, disable/clean stop,
+stopped guard, one install, then held acceptance. Host activation, outage capsule,
+independent cancellation/recovery and filesystem/UID qualification remain Step 2;
+Step 1 refuses an outage mode rather than silently permitting a transport gap.
+
 ### 5.4 Approval resolution (Marmot)
 
+- **Deployment authority exception:** generic action/bead decisions, standing or
+  promoted approvals, and heart/always responses cannot authorize a release.
+  The protected admission path must corroborate an exact yes/no native admind ask
+  against authenticated sender keys, current allowed operator membership, the
+  original system-owned delivered card, native inbound/answer rows and matching
+  CLI readback. The complete release digest, immutable pushed packet link, design
+  links and deviations must match the original card. Two source/policy sweeps
+  surround native readback; a receipt alone grants no host authority. The existing
+  checked H native core is reused byte-for-byte with a fixed source hash. This
+  exception supersedes the generic bead-only commit point below for deployment.
 - The operator reacts 👍 (approve), 👎 (deny) or ❤️ (always), or sends `/approve` or `/deny` as a reply, on either card.
 - `wsd` looks up the message→bead map, which is persisted and survives restart, and resolves by the targeted message, not in arrival order.
 - **The commit point is the approval bead.** All decision events from Marmot, GitHub and Radicle go through a single serialised decision queue inside `wsd`.
