@@ -27,7 +27,7 @@ from heterodyne.actions.codec import (
 )
 from heterodyne.actions.contracts import Record
 from heterodyne.actions.deployment import Target
-from heterodyne.actions.deployment_authority import _PACKET
+from heterodyne.actions.deployment_authority import _GROUP, _PACKET
 from heterodyne.actions.deployment_card import _derive, _prepare, _PreparedCard
 from heterodyne.actions.deployment_outage import decode_packet, packet_digest
 
@@ -86,9 +86,11 @@ def _profile(fd: int) -> _Profile:
     if len(raw) > MAX_BYTES or len(raw) != before[6] or _identity(fd) != before:
         raise InvalidAction("producer-profile-changed-or-bound")
     value = _decode(raw, _Profile)
-    for digest in (value.operation_original_sha256, value.packet_sha256, value.group_hex):
+    for digest in (value.operation_original_sha256, value.packet_sha256):
         if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
             raise InvalidAction("producer-profile-digest")
+    if not _GROUP.fullmatch(value.group_hex):
+        raise InvalidAction("producer-profile-group")
     if not _PACKET.fullmatch(value.publication_url):
         raise InvalidAction("producer-profile-url")
     return value

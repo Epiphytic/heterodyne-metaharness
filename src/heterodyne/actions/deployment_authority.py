@@ -44,6 +44,7 @@ ADMIND = (
     "/home/openclaw/.local/share/heterodyne/releases/"  # install-agnostic: allow=home-path - fixed H
     "5db4c0c27c51b4e3db5a5dee8ab94ef25d3af156/.venv/bin/admind"
 )
+_GROUP = re.compile(r"[0-9a-f]{32,128}")
 _PACKET = re.compile(
     r"https://github\.com/Epiphytic/heterodyne-metaharness/blob/[0-9a-f]{40}/docs/[A-Za-z0-9_./-]+\.json"
 )
@@ -172,7 +173,7 @@ def _approval_body(release: Release, packet_url: str, group: str) -> str:
         packet_url != _packet_url(release)
         or not _PACKET.fullmatch(packet_url)
         or ".." in packet_url.split("/")
-        or not re.fullmatch(r"[0-9a-f]{32,128}", group)
+        or not _GROUP.fullmatch(group)
     ):
         raise InvalidAction("approval-context")
     group_digest = display(ComputedDigest(hashlib.sha256(group.encode("ascii")).hexdigest()))

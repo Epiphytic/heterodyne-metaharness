@@ -104,7 +104,7 @@ def _manager_endpoint(endpoint: Path, uid: int) -> tuple[int, int, int]:
 _DB_LIMIT = 1024 * 1024 * 1024
 _WAL_LIMIT = 256 * 1024 * 1024
 _DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-_READ_FILE = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+_READ_FILE = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK | os.O_NOCTTY
 
 
 def _inode(fd: int) -> tuple[int, int]:

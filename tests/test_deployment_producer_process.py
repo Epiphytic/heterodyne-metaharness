@@ -366,3 +366,27 @@ def test_output_uses_strict_bounded_codec(inputs, raw):
     original, _, profile, *_ = inputs
     with pytest.raises(InvalidAction, match="producer-output-shape"):
         producer._check_output(raw, original, profile)
+
+
+@pytest.mark.parametrize("group", ["c" * 32, "a" * 64, "f" * 128])
+def test_actual_child_group_policy_matches_authority_binder(inputs, group):
+    original, _, profile, _, _, _, path = inputs
+    profile = msgspec.structs.replace(profile, group_hex=group)
+    path.chmod(0o600)
+    path.write_bytes(encode_record(profile))
+    path.chmod(0o400)
+    result = child(inputs)
+    assert (result.returncode, result.stderr) == (0, b"")
+    assert producer._check_output(result.stdout, original, profile).group_hex == group
+
+
+@pytest.mark.parametrize("group", ["a" * 31, "a" * 129, "A" * 32, "g" * 64])
+def test_invalid_group_refuses_before_publication(inputs, monkeypatch, group):
+    original, _, profile, profile_fd, archive, commit, path = inputs
+    monkeypatch.setattr(publication, "_https", lambda *args: pytest.fail("unexpected publication read"))
+    profile = msgspec.structs.replace(profile, group_hex=group)
+    path.chmod(0o600)
+    path.write_bytes(encode_record(profile))
+    path.chmod(0o400)
+    with pytest.raises(InvalidAction, match="producer-profile-group"):
+        producer._produce(original, profile_fd, archive, commit)
