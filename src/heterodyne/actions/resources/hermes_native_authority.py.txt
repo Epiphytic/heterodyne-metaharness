@@ -1,0 +1,311 @@
+"""Shared native admind evidence readers and authentication rules.
+
+Typed packet adapters supply exact body bindings and fixed source/endpoint pins.
+This core cannot authorize a packet without its adapter's binding validator.
+"""
+import hashlib
+import json
+import os
+import sqlite3
+import stat
+import subprocess
+import tomllib
+import re
+
+LIMIT = 4 * 1024 * 1024
+MAX_ANSWERS = 64
+HEX = re.compile(r"[0-9a-f]{64}")
+ANSWER_FIELDS = "ask_id,seq,kind,operator,message_id,text,at,choice"
+PUBLIC_ANSWER = ("kind", "operator", "text", "at", "choice")
+_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+
+
+class AuthorityHold(ValueError):
+    """Payload-free refusal; no failure grants permission."""
+
+
+def _hold(reason):
+    raise AuthorityHold("HOLD: " + reason)
+
+
+def canonical(value):
+    try:
+        raw = json.dumps(
+            value, sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode()
+    except (ValueError, TypeError, RecursionError, UnicodeError):
+        _hold("invalid canonical JSON")
+    if len(raw) > LIMIT:
+        _hold("evidence size limit")
+    return raw
+
+
+def _sha(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _json(raw):
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                _hold("duplicate JSON field")
+            result[key] = value
+        return result
+
+    try:
+        return json.loads(
+            raw,
+            object_pairs_hook=pairs,
+            parse_constant=lambda _: _hold("nonfinite JSON"),
+        )
+    except (ValueError, TypeError, RecursionError, UnicodeError):
+        _hold("invalid JSON evidence")
+
+
+def _read(path, limit=LIMIT):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        before = os.fstat(fd)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_mode & 0o022
+            or before.st_size > limit
+        ):
+            _hold("unsafe or oversized source file")
+        raw = b""
+        while len(raw) <= limit:
+            chunk = os.read(fd, min(65536, limit + 1 - len(raw)))
+            if not chunk:
+                break
+            raw += chunk
+        after = os.fstat(fd)
+        fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if len(raw) > limit or any(
+            getattr(after, key) != getattr(before, key) for key in fields
+        ):
+            _hold("source changed during read")
+        return raw
+    finally:
+        os.close(fd)
+
+
+def _polymod(values):
+    # NIP-19/BIP-173, equivalent to heterodyne.marmot.nip19 public-key decoder.
+    check = 1
+    generators = (0x3B6A57B2, 0x26508E6D, 0x1EA119FA, 0x3D4233DD, 0x2A1462B3)
+    for value in values:
+        top = check >> 25
+        check = ((check & 0x1FFFFFF) << 5) ^ value
+        for index, generator in enumerate(generators):
+            if top >> index & 1:
+                check ^= generator
+    return check
+
+
+def _npub(npub):
+    if (
+        not isinstance(npub, str)
+        or len(npub) != 63
+        or npub not in (npub.lower(), npub.upper())
+    ):
+        _hold("invalid operator public identity")
+    text = npub.lower()
+    if not text.startswith("npub1"):
+        _hold("invalid operator public identity")
+    try:
+        data = [_CHARSET.index(c) for c in text[5:]]
+    except ValueError:
+        _hold("invalid operator public identity")
+    if _polymod([3, 3, 3, 3, 0, 14, 16, 21, 2] + data) != 1:
+        _hold("operator identity checksum")
+    acc = bits = 0
+    raw = bytearray()
+    for value in data[:-6]:
+        acc = (acc << 5) | value
+        bits += 5
+        if bits >= 8:
+            bits -= 8
+            raw.append((acc >> bits) & 255)
+    if len(raw) != 32 or bits >= 5 or (acc << (8 - bits)) & 255:
+        _hold("operator identity padding")
+    return raw.hex()
+
+
+def _operators(host_policy, queue_policy):
+    host_raw, queue_raw = _read(host_policy), _read(queue_policy)
+    try:
+        host = tomllib.loads(host_raw.decode())
+        queue = _json(queue_raw)
+        names = host["operators"]
+        approvers = queue["approvers"]
+        host_approvers = host["approvers"]
+        if (
+            type(names) is not list
+            or type(approvers) is not list
+            or type(host_approvers) is not list
+            or not names
+            or len(names) > 64
+            or len(approvers) > 64
+            or len(host_approvers) > 64
+            or len(set(names)) != len(names)
+            or not all(type(n) is str for n in names + approvers + host_approvers)
+        ):
+            _hold("invalid allowed operator policy")
+        result = {
+            name: _npub(host["identities"][name]["marmot_npub"])
+            for name in names
+            if name in approvers and name in host_approvers
+        }
+        if not result or len(set(result.values())) != len(result):
+            _hold("ambiguous allowed operator identity")
+        return result
+    except (KeyError, TypeError, ValueError, UnicodeError):
+        _hold("operator policy unavailable")
+
+
+def _fetch(ask_id, admind):
+    env = {
+        "HOME": "/home/openclaw",
+        "PATH": "/usr/bin:/bin",
+        "LC_ALL": "C.UTF-8",
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    result = subprocess.run(
+        [admind, "ask", "get", ask_id, "--json"],
+        env=env,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    if result.returncode or len(result.stdout) > LIMIT or len(result.stderr) > LIMIT:
+        _hold("fixed admind readback unavailable")
+    return _json(result.stdout)
+
+
+def _rows(db, query, params=()):
+    rows = [dict(row) for row in db.execute(query, params).fetchmany(MAX_ANSWERS + 1)]
+    if len(rows) > MAX_ANSWERS:
+        _hold("native record bound")
+    return rows
+
+
+def _native(ask_id, database):
+    # Transaction snapshot; no Store constructor, migrations, immutable=1 or writes.
+    db = sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=5)
+    try:
+        db.row_factory = sqlite3.Row
+        remaining = [10000]
+
+        def progress():
+            remaining[0] -= 1
+            return int(remaining[0] <= 0)
+
+        db.set_progress_handler(progress, 1000)
+        db.execute("PRAGMA query_only=ON")
+        db.execute("BEGIN")
+        asks = _rows(db, "SELECT * FROM asks WHERE ask_id=?", (ask_id,))
+        if len(asks) != 1:
+            _hold("exact native ask missing")
+        answers = _rows(
+            db,
+            f"SELECT {ANSWER_FIELDS} FROM ask_answers WHERE ask_id=? ORDER BY seq",
+            (ask_id,),
+        )
+        cards = _rows(
+            db,
+            "SELECT * FROM outbox WHERE key GLOB ? OR delivery_group=?",
+            ("ask:" + ask_id + ":*", "ask:" + ask_id),
+        )
+        incoming = []
+        for answer in answers:
+            incoming.extend(
+                _rows(
+                    db,
+                    "SELECT message_id,status,received_at,reply_to,sender_key "
+                    "FROM inbound WHERE message_id=?",
+                    (answer["message_id"],),
+                )
+            )
+        kv = _rows(
+            db,
+            "SELECT key,value FROM kv WHERE key IN ('group_id_hex','group_operators')",
+        )
+        result = dict(
+            ask=asks[0], answers=answers, cards=cards, inbound=incoming, kv=kv
+        )
+        canonical(result)
+        return result
+    finally:
+        db.close()
+
+
+def _validate(packet, native, response, operators, bindings):
+    members = bindings(packet, native)
+    ask, answers, cards = native["ask"], native["answers"], native["cards"]
+    # admind's delivery_group is an outbox batch key, not an MLS group ID.
+    # The native daemon sends to its configured group and filters inbound group
+    # and sender before storing answers. The exact body group binding is not
+    # independent proof of the card destination: this trusts that native daemon
+    # boundary. Require its system-owned original card and authenticated reply.
+    # Native re-redaction preserves ask-card keys: its _CHUNKED pattern only
+    # matches reply/session or 64-hex-message namespaces, not four-character asks.
+    if any("ownership_kind" not in card for card in cards):
+        _hold("native card ownership schema missing")
+    if (
+        len(cards) != 1
+        or cards[0]["status"] != "sent"
+        or cards[0]["key"] != "ask:" + ask["ask_id"] + ":0"
+        or cards[0]["delivery_group"] != "ask:" + ask["ask_id"]
+        or cards[0]["ownership_kind"] != "system"
+    ):
+        _hold("original system approval card not delivered in exact ask batch")
+    card = cards[0]
+    if not isinstance(card["message_id"], str) or not HEX.fullmatch(card["message_id"]):
+        _hold("original card identity missing")
+    if not answers or len(native["inbound"]) != len(answers):
+        _hold("authenticated answer missing")
+    seen = set()
+    for answer, incoming in zip(answers, native["inbound"], strict=True):
+        operator = answer["operator"]
+        if (
+            type(answer["seq"]) is not int
+            or answer["seq"] <= 0
+            or answer["seq"] in seen
+            or answer["ask_id"] != ask["ask_id"]
+            or answer["kind"] != "answer"
+            or answer["choice"] != "yes"
+            or not answer["text"]
+            or not answer["at"]
+            or operator not in operators
+            or operators[operator] not in members
+            or incoming["sender_key"] != operators[operator]
+            or incoming["message_id"] != answer["message_id"]
+            or incoming["status"] != "done"
+            or incoming["reply_to"] != card["message_id"]
+            or not incoming["received_at"]
+        ):
+            _hold("conflicting or unauthenticated operator decision")
+        seen.add(answer["seq"])
+    if (
+        type(response) is not dict
+        or response.get("result") != "ok"
+        or response.get("message") != "answered"
+    ):
+        _hold("CLI decision unavailable")
+    public = response.get("ask", {})
+    summary = public.get("summary", {})
+    if (
+        summary.get("ask_id") != ask["ask_id"]
+        or summary.get("kind") != ask["kind"]
+        or summary.get("status") != ask["status"]
+        or summary.get("title") != ask["title"]
+        or summary.get("delivered") is not True
+        or type(summary.get("answer_count")) is not int
+        or summary["answer_count"] != len(answers)
+        or public.get("answers")
+        != [{key: row[key] for key in PUBLIC_ANSWER} for row in answers]
+    ):
+        _hold("CLI/native authenticated decision mismatch")
+
+

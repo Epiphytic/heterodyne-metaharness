@@ -21,6 +21,7 @@ Usage: check_install_agnostic.py [--root DIR] [--extra FILE] [paths...]
 """
 
 import argparse
+import hashlib
 import importlib.util
 import os
 import re
@@ -54,6 +55,18 @@ ALLOW = re.compile(r"install-agnostic: allow=([\w,-]+)")
 BINARY_SNIFF = 8000  # bytes; git's buffer_is_binary() heuristic
 EXEMPT_DIRS = ("examples/", "tests/fixtures/")
 EXEMPT_FILES = ("LICENSE", "scripts/check_install_agnostic.py")
+
+# Unchanged source/evidence, never runtime configuration; all other rules remain enforced.
+_HOME_EVIDENCE_PINS = {
+    'src/heterodyne/actions/resources/hermes_native_authority.py.txt':
+        'ad4d4a96632646a5d145feb30c30d402b358d3ecb9caf4717e89394877b5f48d',
+    'docs/reviews/2026-10-29-deployment-step1-code/r1/actual-review.md':
+        'ad36077c835877e393001417ca8ea1576d15f6eb107b4c6cbd054c0dd3f0e138',
+    'docs/reviews/2026-10-29-deployment-step1-code/r1/review-receipt.json':
+        'e70aacea52af0b678c6ecbb02444bf448ef36fc6e44dc238e950ad35b65b1791',
+    'docs/reviews/2026-10-29-deployment-step1-code/r2/review-receipt.json':
+        '84d42b032df83a5f626a7c9522b58f9e9288a5d75a5b1d77be3f33e6889a1d73',
+}
 
 
 class GitError(Exception):
@@ -127,10 +140,18 @@ def scan_file(root: Path, rel: str, mode: str | None, literals: list[str]) -> li
     except OSError as exc:
         return [f"{rel}:0: unreadable: {type(exc).__name__}: {exc.strerror or exc}"]
     rules = {**RULES, **(SRC_RULES if rel.startswith("src/") else {})}
+    # Exact unchanged authentication source and actual review evidence. Only
+    # historical host paths are excepted, never another rule or local denylist.
+    if rel in _HOME_EVIDENCE_PINS and (
+        hashlib.sha256((root / rel).read_bytes()).hexdigest() == _HOME_EVIDENCE_PINS[rel]
+    ):
+        rules.pop("home-path", None)
     kind = " (binary)" if binary else ""
-    return [f"{rel}:{n}: {rule}{kind}: {excerpt(line)}"
-            for n, line in enumerate(lines, 1)
-            for rule in scan_line(line, rules, lits, markers=not binary)]
+    return [
+        f"{rel}:{n}: {rule}{kind}: {excerpt(line)}"
+        for n, line in enumerate(lines, 1)
+        for rule in scan_line(line, rules, lits, markers=not binary)
+    ]
 
 
 def main() -> int:
