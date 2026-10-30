@@ -1,0 +1,35 @@
+{
+  "command": [
+    "pytest",
+    "-q",
+    "tests/test_manager_control.py",
+    "tests/test_session_server.py",
+    "tests/test_session_shim.py",
+    "tests/test_sandbox_runtime.py",
+    "tests/test_sandbox_live_teardown.py",
+    "tests/test_admind_question_once.py"
+  ],
+  "source_hashes": {
+    "src/heterodyne/session/shim.py": "7b28d1b74cc4bbafe8c1946acee0d84e4718d891e0ee2c942e4b5aa4ad40864f",
+    "src/heterodyne/session/server.py": "7fac8f931f3f2d7eb489b695d86a9c243ddcbfba4e3075291e1d022ffc11b22e",
+    "src/heterodyne/session/control.py": "f5173df4aace597f9b3898f4d902cf76d5a1b3435690a8d408e759738703f51c",
+    "src/heterodyne/sandbox/spec.py": "988cb1753df270aa70de653a2c3c5ae7f952f1ea4a76b7159d596d77f782221d",
+    "src/heterodyne/sandbox/runtime.py": "4d0ccc3b1a2f7e0b75be8c8a7e2295850c2cc19793bd87862ad62ad1002fac89",
+    "tests/test_manager_control.py": "75400b618e627f273dfe95199524d62cf4e5e74a660a6ca3beaa0ead41920f09"
+  },
+  "source_hashes_after": {
+    "src/heterodyne/session/shim.py": "7b28d1b74cc4bbafe8c1946acee0d84e4718d891e0ee2c942e4b5aa4ad40864f",
+    "src/heterodyne/session/server.py": "7fac8f931f3f2d7eb489b695d86a9c243ddcbfba4e3075291e1d022ffc11b22e",
+    "src/heterodyne/session/control.py": "f5173df4aace597f9b3898f4d902cf76d5a1b3435690a8d408e759738703f51c",
+    "src/heterodyne/sandbox/spec.py": "988cb1753df270aa70de653a2c3c5ae7f952f1ea4a76b7159d596d77f782221d",
+    "src/heterodyne/sandbox/runtime.py": "4d0ccc3b1a2f7e0b75be8c8a7e2295850c2cc19793bd87862ad62ad1002fac89",
+    "tests/test_manager_control.py": "75400b618e627f273dfe95199524d62cf4e5e74a660a6ca3beaa0ead41920f09"
+  },
+  "source_unchanged": true,
+  "exit_code": 0,
+  "elapsed_seconds": 857.8044282430783,
+  "base": "ac6fad9fda5ab8fde4733bcde4ca9877b57620ba",
+  "qualification": "actual local source semantics; no OpenShell or native/operator enrollment",
+  "command_note": "Runner displayed by portable alias; exact invoked argv retained privately, this is not an exact invocation.",
+  "exact_private_receipt_sha256": "174976cf4a037b08b284f20ed5329620028d36599ec0a22ec05c0928ea022e7d"
+}

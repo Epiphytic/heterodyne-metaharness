@@ -1,0 +1,51 @@
+{
+  "kind": "actual-claude-builtin-code-review-r1-high",
+  "actual_reviewed_head": "ac6fad9fda5ab8fde4733bcde4ca9877b57620ba",
+  "base": "35650c0ced0f9e1e3b1e5cefe36d5485fec74837",
+  "actual_reasoning": "high",
+  "actual_model_selector": "opus",
+  "builtin_skill_args": "153",
+  "source_hashes": {
+    "docs/reviews/2026-10-30-manager-control-transport/diff-check.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "docs/reviews/2026-10-30-manager-control-transport/integration-qualification.json": "14f77e0e674e7370dac44b219275b183bf89aa071fe7d6094712c989dc055135",
+    "docs/reviews/2026-10-30-manager-control-transport/integration-tests.log": "faef289354216fa923ea6d0c9100b4cf77e67454c0f6a0e11806408ab0891d95",
+    "docs/reviews/2026-10-30-manager-control-transport/qualification.json": "5976d24235305ed08a29ba2cf2ce47e3359b9931c3359c666ce4cc5dde476b8b",
+    "docs/reviews/2026-10-30-manager-control-transport/quality.log": "e460c8b5ec9f3e40b8b313fe2d742f6eeeccac523ad0f91720c1fa033bb84ef3",
+    "docs/reviews/2026-10-30-manager-control-transport/ruff.log": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18",
+    "docs/reviews/2026-10-30-manager-control-transport/source-scope.md": "4a054d86a954d344752c7b7775020cd5d8c82820ab08b51517aed3a160b6c0a8",
+    "docs/reviews/2026-10-30-manager-control-transport/tests.log": "ece0cccb175a5949c61b89f3bdb5f76cbdc8237c89501dd716676d8da3fcfd88",
+    "src/heterodyne/sandbox/runtime.py": "5130166e5ffa1b50f8125036a66275252f3f6444d9017f26af1e138284c37de3",
+    "src/heterodyne/sandbox/spec.py": "988cb1753df270aa70de653a2c3c5ae7f952f1ea4a76b7159d596d77f782221d",
+    "src/heterodyne/session/control.py": "135b4508ee2839cbee528b69345a4d5b024b4623c747d940c88f61286aa687cb",
+    "src/heterodyne/session/server.py": "0a51570ddbe5c06403934111db4d31da868e518c823c50c1fe903b27e9ec22ac",
+    "src/heterodyne/session/shim.py": "d8483478e2589b8d93b453eb3aabf071ceabfba1382e9393eae8a79028c1fd7a",
+    "tests/test_manager_control.py": "8dd7bc9a70048fa1cb487a16dd93cd67707edca8c71fe9b7dbdfabf968b4d19a"
+  },
+  "result": {
+    "exit_code": 0,
+    "elapsed_seconds": 181.42088797688484,
+    "source_unchanged": true,
+    "head_unchanged": true,
+    "source_hashes_after": {
+      "docs/reviews/2026-10-30-manager-control-transport/diff-check.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "docs/reviews/2026-10-30-manager-control-transport/integration-qualification.json": "14f77e0e674e7370dac44b219275b183bf89aa071fe7d6094712c989dc055135",
+      "docs/reviews/2026-10-30-manager-control-transport/integration-tests.log": "faef289354216fa923ea6d0c9100b4cf77e67454c0f6a0e11806408ab0891d95",
+      "docs/reviews/2026-10-30-manager-control-transport/qualification.json": "5976d24235305ed08a29ba2cf2ce47e3359b9931c3359c666ce4cc5dde476b8b",
+      "docs/reviews/2026-10-30-manager-control-transport/quality.log": "e460c8b5ec9f3e40b8b313fe2d742f6eeeccac523ad0f91720c1fa033bb84ef3",
+      "docs/reviews/2026-10-30-manager-control-transport/ruff.log": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18",
+      "docs/reviews/2026-10-30-manager-control-transport/source-scope.md": "4a054d86a954d344752c7b7775020cd5d8c82820ab08b51517aed3a160b6c0a8",
+      "docs/reviews/2026-10-30-manager-control-transport/tests.log": "ece0cccb175a5949c61b89f3bdb5f76cbdc8237c89501dd716676d8da3fcfd88",
+      "src/heterodyne/sandbox/runtime.py": "5130166e5ffa1b50f8125036a66275252f3f6444d9017f26af1e138284c37de3",
+      "src/heterodyne/sandbox/spec.py": "988cb1753df270aa70de653a2c3c5ae7f952f1ea4a76b7159d596d77f782221d",
+      "src/heterodyne/session/control.py": "135b4508ee2839cbee528b69345a4d5b024b4623c747d940c88f61286aa687cb",
+      "src/heterodyne/session/server.py": "0a51570ddbe5c06403934111db4d31da868e518c823c50c1fe903b27e9ec22ac",
+      "src/heterodyne/session/shim.py": "d8483478e2589b8d93b453eb3aabf071ceabfba1382e9393eae8a79028c1fd7a",
+      "tests/test_manager_control.py": "8dd7bc9a70048fa1cb487a16dd93cd67707edca8c71fe9b7dbdfabf968b4d19a"
+    }
+  },
+  "report_sha256": "4842ff52ac01780c53568e2dc5fc32f4ad1b1488ed232067145789c2bc9f366d",
+  "private_start_sha256": "a90b78cbb7e5d76a28019438c41eb121f9cf6f117176112c0861e10d8d0e4a7b",
+  "private_result_sha256": "291616a3a0eb55085471d9f2f70a657d5b46a67996174f2da56c6e512080131a",
+  "actual_review_verdict": "CHANGES NEEDED",
+  "history": "Initial actual builtin HIGH round1; repair does not reset history."
+}

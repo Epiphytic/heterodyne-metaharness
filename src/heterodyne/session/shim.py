@@ -120,11 +120,11 @@ def _exchange(sock: Path, line: bytes, end: float, clock: Clock) -> Any:
     return json.loads(reply)
 
 
-def _ask(sock: Path, message: dict[str, Any], wait: float, clock: Clock,
+def _ask(sock: Path, message: dict[str, Any] | bytes, wait: float, clock: Clock,
          sleep: Sleep) -> dict[str, Any] | None:
     """wsd's reply, retried until `wait` seconds have passed in all; None if there is none by then."""
     end = clock() + wait
-    line = _encode(message) + b"\n"
+    line = (message if isinstance(message, bytes) else _encode(message)) + b"\n"
     while True:
         try:
             reply = _exchange(sock, line, end, clock)
@@ -293,6 +293,144 @@ def run_request(words: Sequence[str], env: Mapping[str, str], *, clock: Clock = 
     if reply is None:
         return EX_TEMPFAIL, DENY_REASON
     return (0 if reply.get("ok") is True else 1), json.dumps(reply)
+
+
+# The installed shim is a standalone stdlib file; the host uses this same codec.
+CONTROL_SCHEMA = "hermes.manager-control.v1"
+CONTROL_BYTES = 16 * 1024
+CONTROL_REPLY_BYTES = 32 * 1024
+CONTROL_DEPTH = 16
+CONTROL_FIELDS = {
+    "Status": frozenset(), "Boundary": frozenset(),
+    "ListManagerRequests": frozenset({"cursor"}),
+    "Evidence": frozenset({"issue_id"}),
+    "Ask": frozenset({"key", "summary", "text"}),
+    "Escalate": frozenset({"issue_id", "reason"}),
+    "ResolveSigned": frozenset({"issue_id", "event"}),
+    "ReadOutcome": frozenset({"origin_generation", "request_id"}),
+}
+
+
+def strict_json(raw: bytes) -> Any:
+    """No replacement UTF-8, duplicate object keys, nonfinite values or surrogate text."""
+    def pairs(values: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in values:
+            if key in result:
+                raise ValueError("duplicate JSON key")
+            result[key] = value
+        return result
+
+    def constant(value: str) -> Any:
+        raise ValueError("nonfinite JSON")
+
+    text = raw.decode("utf-8", "strict")
+    value = json.loads(text, object_pairs_hook=pairs, parse_constant=constant)
+    # ensure_ascii=False exposes escaped lone surrogates without rewriting valid input.
+    json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8", "strict")
+    return value
+
+
+def control_uuid(value: Any) -> bool:
+    import uuid
+    try:
+        return isinstance(value, str) and str(uuid.UUID(value)) == value
+    except ValueError:
+        return False
+
+
+def _control_text(value: Any, limit: int) -> bool:
+    return isinstance(value, str) and 0 < len(value.encode("utf-8")) <= limit
+
+
+def _control_identifier(value: Any) -> bool:
+    import re
+    return isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value) is not None
+
+
+def _control_event(event: Any) -> bool:
+    import re
+    fields = {"id", "pubkey", "created_at", "kind", "tags", "content", "sig"}
+    if not isinstance(event, dict) or set(event) != fields:
+        return False
+    for key, size in (("id", 64), ("pubkey", 64), ("sig", 128)):
+        if not isinstance(event[key], str) or re.fullmatch("[0-9a-f]{" + str(size) + "}", event[key]) is None:
+            return False
+    return (type(event["created_at"]) is int and event["created_at"] >= 0
+            and type(event["kind"]) is int and 0 <= event["kind"] <= 65535
+            and isinstance(event["content"], str) and isinstance(event["tags"], list)
+            and all(isinstance(tag, list) and all(isinstance(x, str) for x in tag) for tag in event["tags"]))
+
+
+def _control_arguments(operation: str, args: dict[str, Any]) -> bool:
+    import re
+    if "issue_id" in args and not _control_identifier(args["issue_id"]):
+        return False
+    if operation == "Ask":
+        key = args["key"]
+        return (isinstance(key, str) and re.fullmatch(r"[A-Za-z0-9._-]{1,128}", key) is not None
+                and _control_text(args["summary"], 256) and _control_text(args["text"], 4096))
+    if operation == "Escalate":
+        return _control_text(args["reason"], 4096)
+    if operation == "ResolveSigned":
+        return _control_event(args["event"])
+    if operation == "ReadOutcome":
+        return (type(args["origin_generation"]) is int and 0 < args["origin_generation"] < 2**63
+                and control_uuid(args["request_id"]))
+    if operation == "ListManagerRequests":
+        return args["cursor"] is None or _control_text(args["cursor"], 256)
+    return True
+
+
+def parse_control(raw: bytes) -> dict[str, Any]:
+    """Validate untrusted intent; this conveys no operator or native authority."""
+    if len(raw) > MAX_LINE or json_depth(raw) > CONTROL_DEPTH:
+        raise ValueError("control request exceeds bounds")
+    request = strict_json(raw)
+    if (not isinstance(request, dict) or set(request) != {"schema", "request_id", "operation", "arguments"}
+            or request["schema"] != CONTROL_SCHEMA or not control_uuid(request["request_id"])):
+        raise ValueError("invalid control request")
+    op, args = request["operation"], request["arguments"]
+    if (not isinstance(op, str) or op not in CONTROL_FIELDS or not isinstance(args, dict)
+            or set(args) != CONTROL_FIELDS[op] or not _control_arguments(op, args)):
+        raise ValueError("invalid control operation or arguments")
+    if op != "ResolveSigned" and len(raw) > CONTROL_BYTES:
+        raise ValueError("control request exceeds ordinary bound")
+    return request
+
+
+def run_control(raw: bytes, env: Mapping[str, str], *, clock: Clock = time.monotonic,
+                sleep: Sleep = time.sleep) -> tuple[int, str]:
+    """Structured fixed-endpoint client: no text argv, socket override or truncation."""
+    try:
+        parse_control(raw)
+        # One exact JSON value in the existing newline-framed transport. Refuse
+        # unsupported framing instead of changing the manager's retained bytes.
+        if raw != raw.strip() or b"\n" in raw or b"\r" in raw:
+            return 2, json.dumps({"ok": False, "error": "control-input-requires-unpadded-single-line"})
+    except (ValueError, UnicodeError, RecursionError):
+        return 2, json.dumps({"ok": False, "error": "operator-route-required"})
+    found = _config(env)
+    if found is None:
+        return EX_TEMPFAIL, DENY_REASON
+    sock, token, cfg = found
+    message = b'{"token":' + _encode(token) + b',"type":"ws_request","payload":' + raw + b'}'
+    if len(message) + 1 > MAX_LINE:
+        return 2, json.dumps({"ok": False, "error": "operator-route-required"})
+    reply = _ask(sock, message, _wait(cfg), clock, sleep)
+    if reply is None:
+        return EX_TEMPFAIL, DENY_REASON
+    encoded = json.dumps(reply)
+    if len(encoded.encode()) + 1 > CONTROL_REPLY_BYTES:
+        return 2, json.dumps({"ok": False, "error": "operator-route-required"})
+    return (0 if reply.get("ok") is True else 1), encoded
+
+
+def control_main() -> int:
+    raw = read_bounded(sys.stdin.fileno(), MAX_LINE, DEFAULT_WAIT)
+    code, output = run_control(raw, os.environ)
+    print(output)
+    return code
 
 
 STATUS_FILE = "status.json"     # in $HOME/.hz: what wsd last accepted, from which launch, and when
@@ -482,7 +620,9 @@ def main(argv: Sequence[str]) -> int:
         return request_main(argv[1:])
     if argv[:1] == ["status"]:
         return status_main()
-    print("usage: shim.py hook <Event>|request|status [text...]", file=sys.stderr)
+    if list(argv) == ["control"]:
+        return control_main()
+    print("usage: shim.py hook <Event>|request|status [text...]|control", file=sys.stderr)
     return 2
 
 

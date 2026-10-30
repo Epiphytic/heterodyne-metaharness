@@ -29,7 +29,15 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
-from heterodyne.session.shim import MAX_DEPTH, MAX_LINE, json_depth  # stdlib-only, shared with the shim
+from heterodyne.session.control import ControlCapacity, ControlConflict, ControlJournal
+from heterodyne.session.shim import (
+    CONTROL_SCHEMA,
+    MAX_DEPTH,
+    MAX_LINE,
+    json_depth,
+    parse_control,
+    strict_json,
+)
 
 CLIENT_SECONDS = 5.0            # one request's whole deadline, from its accept
 MAX_HANDLERS = 32
@@ -60,7 +68,9 @@ class SessionServer:
     def __init__(self, path: Path, token: str, events: Path, *, max_spool: int = 4 << 20,
                  max_handlers: int = MAX_HANDLERS, client_seconds: float = CLIENT_SECONDS,
                  clock: Callable[[], float] = time.monotonic, turn_ends: tuple[str, ...] = ("Stop",),
-                 on_event: Callable[[dict[str, Any]], None] | None = None) -> None:
+                 on_event: Callable[[dict[str, Any]], None] | None = None,
+                 control: ControlJournal | None = None) -> None:
+        self.control = control
         self.path = path
         self.token = token.encode()
         self.events = events
@@ -228,6 +238,29 @@ class SessionServer:
         if not isinstance(payload, dict):
             return MALFORMED
         fields = cast(dict[str, Any], payload)
+        if kind == "ws_request" and fields.get("schema") == CONTROL_SCHEMA:
+            if self.control is None or self._closed.is_set():
+                return FORBIDDEN
+            try:
+                strict_json(line)  # only the new control contract tightens legacy JSON
+                if set(body) != {"token", "type", "payload"} or len(line) + 1 > MAX_LINE:
+                    return MALFORMED
+                raw = _payload_bytes(line)
+                parse_control(raw)
+            except ValueError:
+                return MALFORMED
+            try:
+                result = self.control.intake(raw, stopped=self._closed)
+                return result  # durable admission remains accepted across shutdown
+            except BlockingIOError:
+                return {"ok": False, "state": "uncertain", "error": "control-journal-busy-retry-same-id"}
+            except ControlConflict:
+                return {"ok": False, "state": "refused", "error": "control-request-identity-conflict"}
+            except ControlCapacity:
+                return {"ok": False, "state": "refused", "error": "manager-request-capacity"}
+            except (OSError, ValueError, RuntimeError):
+                return {"ok": False, "state": "uncertain",
+                        "error": "control-intake-unavailable-retry-same-id"}
         self._spool(kind, fields)
         if kind == "ws_request":
             return UNSUPPORTED
@@ -273,3 +306,26 @@ class SessionServer:
             with os.fdopen(fd, "ab") as fh:
                 fh.write(line)
 
+
+
+def _payload_bytes(line: bytes) -> bytes:
+    """Preserve the exact inner request bytes after strict outer-object validation."""
+    text = line.decode("utf-8", "strict")
+    decoder = json.JSONDecoder()
+    cursor = text.index("{") + 1
+    while True:
+        while text[cursor].isspace():
+            cursor += 1
+        key, cursor = decoder.raw_decode(text, cursor)
+        while text[cursor].isspace():
+            cursor += 1
+        cursor += 1  # colon, already checked by the strict full parse
+        while text[cursor].isspace():
+            cursor += 1
+        start = cursor
+        _, cursor = decoder.raw_decode(text, cursor)
+        if key == "payload":
+            return text[start:cursor].encode("utf-8")
+        while text[cursor].isspace():
+            cursor += 1
+        cursor += 1  # comma; a validated control envelope always has payload

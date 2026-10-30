@@ -1,0 +1,21 @@
+# Transport R1 repair candidate
+
+This is the next source candidate for PR153, after the actual initial HIGH built-in `code-review` returned **CHANGES NEEDED**. The complete original report and receipt are retained in `../r1-high`; that result is not rewritten or superseded by an invented approval. The original source candidate was `ac6fad9fda5ab8fde4733bcde4ca9877b57620ba`, based on reviewed Product main `35650c0ced0f9e1e3b1e5cefe36d5485fec74837`.
+
+The repair restores the legacy hook parser (including escaped surrogate, duplicate-key and non-finite tool payload compatibility) while retaining strict parsing for the eight-operation control channel. The installed structured control client embeds the exact validated input bytes in the authenticated outer frame. It refuses padded or multiline input rather than changing its bytes; a single unpadded JSON object line, with escaped newlines permitted, is the supported framing. Exact-byte conflict and SHA tests include compact, non-ASCII input.
+
+Journal contention waits for up to one second; exhausted contention returns a retryable pending response, never a false final refusal. Intake checks the server's real close event after lock acquisition and before durable writes/admission acknowledgement. Runtime shutdown retains its lifetime owner if handlers are still unwinding; this does not claim cancellation of an already running or hung filesystem syscall. Rebinding clears closed server references only after all handlers have ceased.
+
+Manager owner/journal failures become typed runtime errors without applying manager-owner checks to worker sockets. Read-only ended-session observation translates backend tmux failures. Terminal replay compares the same normalized durable JSON projection. The approved 100-unanswered generation-journal bound still includes outstanding read-only requests; terminal history remains unbounded.
+
+Causal tests exercise legacy compatibility, exact input bytes, framing refusal, concurrent intake/inspection, close while waiting for the journal lock, exhausted contention, durable terminal replay, owner reacquisition, worker independence and ended-session errors. These qualify local transport semantics, not genuine OpenShell isolation, live manager enrollment, queue ownership, Marmot delivery, native authority, or deployment.
+
+The initial affected repair run had 61 passes and one failing test that still calculated the old outer serialization size; it is preserved as an intermediate result, not the final qualification. A subsequent targeted repair run passed 71 tests before the final additional regression cases. See the source-bound `qualification.json` and log for the broader affected run and any separately identified test-only follow-up. The historical pre-integration 427-test run, final original 62-test run, and these repair results are distinct source combinations.
+
+The historical prior-base full-suite run completed with 9,384 passes, 95 skips, 12 subtests and five failures in 2,594.21 seconds. Four spike wrapper failures were missing worktree-local Python executable errors. The fifth revealed randomized parameter IDs changing across independent safety-tier collections; the repair gives those cases deterministic explicit IDs. That prior-base run is not a full-suite pass on this candidate.
+
+Full Ruff and whitespace checks are recorded separately. The repair quality delta exits 2 with seven major findings, including intake/handler complexity, journal class length, runtime churn and a dynamically invoked test callback classified as dead code. These measurements are disclosed, not waived or described as quality clearance. The original six-major quality result remains retained separately.
+
+No live services, queues, native claims, sandbox instances or production configuration were changed. Actual cumulative R2 HIGH review remains required on the frozen repaired source.
+
+Final affected repair qualification: **448 passed in 857.55s** with source hashes unchanged. The only later change was deterministic test IDs; the final manager-control and safety-tier check passed **92 tests in 44.62s**. No production source changed between those runs. Full Ruff and whitespace checks passed. The final quality run is retained in `final-quality.log`; its actual exit remains 2, with seven major findings.

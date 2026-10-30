@@ -1,0 +1,9 @@
+# Authorized MEDIUM repair follow-up disposition
+
+Actual builtin PR153 review returned no critical flaws and good enough source-only transport PoC at32c54f6; exit0,221.794s, source and head unchanged. Preserve the actual report, including its distinction between confirmed findings and unverified candidates. R1/R2 HIGH, R3 MEDIUM and this follow-up retain their actual histories; no further validation review is requested.
+
+The deterministic malformed/conflict and busy-state consumer fixes passed. Existing153-test journal/socket/shim qualification and prior499-test source boundaries remain accurate. Quality remains exit2/seven major; no full-suite or live qualification is claimed.
+
+The reviewer asks that corrupt journal progress holds be visible before wiring a consumer. The independently reviewed Hermes consumer candidate PR197 (frozen784839d6cda483dc22f60388fbb3e88131c60b35) catches journal read ValueError/OSError/RuntimeError in Supervisor.tick_run and emits manager_control_hold, retaining the exact pending request and allowing other runs to progress. This is source behavior under separate review, not claimed current production delivery. It does not delete a corrupted record or manufacture a final refusal; supported operator inspection/recovery is still required. Transport source is dormant until its consumer and deployment gates pass.
+
+Strict no-newline framing is documented in r3-followup/source-scope.md and the qualified manager prompt. The remaining listed worker-server closure, raw lock error, backlog cost, rejected-ingress audit, import coupling, request/outcome tempfile retention and duplicated lifetime guard candidates remain disclosed; no findings were promoted to verified or silently erased. Per-generation records retain historical uncertain intake rather than being garbage-collected without a terminal receipt. Ordinary producer design ph58, actual isolation, genuine Marmot/native enrollment and deployment are not qualified here.

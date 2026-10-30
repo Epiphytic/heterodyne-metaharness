@@ -58,6 +58,7 @@ from heterodyne.sandbox.spec import (
     short_id,
 )
 from heterodyne.session import shim
+from heterodyne.session.control import ControlJournal, ControlOwner
 from heterodyne.session.server import SessionServer
 from heterodyne.tmux import Tmux, TmuxError
 from heterodyne.wsd import gitwip, ids
@@ -317,6 +318,8 @@ class SandboxRuntime:
         self.c = config
         self.backend = backend
         self.selftest = selftest
+        self._closing_manager_servers: list[SessionServer] = []
+        self.manager_owner: ControlOwner | None = None
         self.servers: dict[str, SessionServer] = {}      # key -> its running generation's socket
         self.cp: Checkpoint = nothing                       # a test's crash points in a resolve
         self._inspect_lock = threading.Lock()
@@ -330,6 +333,27 @@ class SandboxRuntime:
         self.polled: dict[tuple[str, int], int] = {}      # (key, generation) -> when its read last ran
         self.walked: dict[tuple[str, str], int] = {}      # (adapter, install) -> when its last walk passed
         self.walk_lock = threading.Lock()                  # one taint walk at a time: expire's and the ends'
+
+    def own_manager_control(self) -> None:
+        """Acquire actual install-wide daemon ownership before qualified lifecycle work."""
+        if any(server.active for server in getattr(self, "_closing_manager_servers", [])):
+            raise RuntimeUnavailable("manager handlers are still unwinding; owner lock retained")
+        if self.manager_owner is None:
+            self.manager_owner = ControlOwner(self.c.sessions.parent / "hermes-manager-owner")
+        self.manager_owner.check()
+
+    def close_manager_control(self) -> None:
+        if self.manager_owner is not None:
+            closing = list(self.servers.values())
+            closing.extend(getattr(self, "_closing_manager_servers", []))
+            self.servers.clear()  # closed sockets must never suppress a later rebind
+            for server in closing:
+                server.close()
+            self._closing_manager_servers = [server for server in closing if server.active]
+            if self._closing_manager_servers:
+                raise RuntimeUnavailable("manager handlers are still unwinding; owner lock retained")
+            self.manager_owner.close()
+            self.manager_owner = None
 
     # --- names ---
 
@@ -510,6 +534,28 @@ class SandboxRuntime:
 
     def available(self) -> bool:
         return self.backend.available()
+
+    def observe_session(self, key: str) -> SessionRecord | None:
+        """Non-owning observation: no restore, socket rebind, cleanup or journal write."""
+        layout = self.layout(key)
+        rec = read_record(layout)
+        if rec is None:
+            return None
+        names = self._names()
+        if rec.phase is Phase.RUNNING:
+            if not self._alive(rec, names):
+                raise RuntimeUnavailable("the retained session's liveness is uncertain")
+        elif rec.phase is Phase.ENDED:
+            try:
+                if rec.sandbox in names or self.c.tmux.has_session(rec.tmux_session):
+                    raise RuntimeUnavailable("an ended session still has live resources")
+            except TMUX_ERRORS:
+                raise RuntimeUnavailable("the ended session's pane can't be inspected") from None
+        else:
+            raise RuntimeUnavailable("the retained session is transitional")
+        if read_record(layout) != rec:
+            raise RuntimeUnavailable("the session changed during observation")
+        return rec
 
     def sessions(self, ws: str) -> list[Session]:
         self._restore_creates(ws=ws)
@@ -1042,8 +1088,17 @@ class SandboxRuntime:
         def heard(payload: dict[str, Any]) -> None:
             self._report(rec.ws, key, gen, caps, adapter.usage_from_event(payload))
 
+        control = None
+        if rec.role == "manager" and self.manager_owner is not None:
+            try:
+                if any(server.active for server in getattr(self, "_closing_manager_servers", [])):
+                    raise RuntimeUnavailable("previous manager handlers are still unwinding")
+                self.manager_owner.check()
+                control = ControlJournal(layout.control(gen), self.manager_owner)
+            except (OSError, RuntimeError, ValueError):
+                raise RuntimeUnavailable("the manager control journal can't be served") from None
         return SessionServer(layout.socket(gen), token, layout.events(gen), turn_ends=adapter.turn_end_events,
-                             on_event=heard)
+                             on_event=heard, control=control)
 
     def _report(self, ws: str, key: str, gen: int, caps: Capabilities, report: UsageReport | None) -> None:
         if report is None:
