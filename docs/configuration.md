@@ -61,7 +61,7 @@ See `examples/config.toml` for a commented sample.
   - missing or `none`: no runtime, so wsd holds every workstream;
   - `bubblewrap` or `seatbelt`: no runtime either, with a one-line notice when wsd starts. Setup records `bubblewrap` on Linux until persistent crash-loop accounting lands (plan 3's P1, btq-g08sd), so a Linux host runs no agents until the operator changes `sandbox` to `openshell` (see [wsd.md](wsd.md) §5);
   - anything else: a configuration error, and `wsd run` exits with 78.
-- **`[profiles.<name>]`:** a profile is an `adapter` plus an optional `model`. The `adapter` must be one of `adapters.known`. `model`, if present, must be a string.
+- **`[profiles.<name>]`:** a profile is an `adapter` plus an optional `model`. The `adapter` must be one of `adapters.known`. `model`, if present, must be a string. Codex profiles may also set `reasoning_effort = "low"`, `"medium"` or `"high"`. This typed setting seeds the private Codex server home before sandbox creation and applies to new and resumed sessions. Omitting it retains the installed default. Other adapters reject it. Generic configuration overrides through `args` remain refused.
 - **`[roles]`:** role name to profile name.
 - **`[sandbox]`** must be a table. It holds two host allowlists:
   - `egress_approved`: a list of hosts a workstream may add as extra egress.

@@ -887,7 +887,10 @@ class SandboxRuntime:
         layout.empty(gen).chmod(0o555)          # E25: empty and read-only, remade before every create
         layout.home.mkdir(mode=0o700, exist_ok=True)
         facts = adapter.facts(layout, cli, c.uid)
-        for cleared in adapter.prepare_install_home(layout, spec.worktree, installed.root):
+        profile: dict[str, Any] = dict(c.settings.profiles.get(spec.profile, {}))
+        if spec.model:
+            profile["model"] = spec.model
+        for cleared in adapter.prepare_install_home(layout, spec.worktree, installed.root, profile=profile):
             log.warning("exec_dir_cleared %s gen=%d adapter=%s path=%s files=%d links=%d dirs=%d bytes=%d",
                         spec.session_key, gen, adapter.name, cleared.path, cleared.files, cleared.links,
                         cleared.dirs, cleared.bytes)
@@ -960,9 +963,6 @@ class SandboxRuntime:
         self._trust(adapter, cli, sp, layout)
         self._app_server(adapter, cli, sp, layout)
         rec = self._phase(layout, rec, phase=Phase.STARTING)
-        profile: dict[str, Any] = dict(c.settings.profiles.get(spec.profile, {}))
-        if spec.model:
-            profile["model"] = spec.model
         tui = adapter.tui_argv(cli, profile, native_id=native, resume=resume, label=spec.label)
         c.tmux.kill(rec.tmux_session)
         c.tmux.new_session(rec.tmux_session, spec.worktree, self.backend.tty_argv(sp.name, sp.workdir, tui))

@@ -39,3 +39,13 @@ def check(adapter: str, args: object, where: str, *,
             if not (token.startswith("--") and "=" in token and allowed.get(flag) is True):
                 raise ConfigError(REFUSED.format(where=where, index=i, adapter=adapter))
         i += 1
+
+
+def reasoning_effort(profile: Mapping[str, Any], adapter: str, where: str) -> str | None:
+    """One typed Codex scalar; never an escape hatch for generic config overrides."""
+    if "reasoning_effort" not in profile:
+        return None
+    value = profile["reasoning_effort"]
+    if adapter != "codex" or not isinstance(value, str) or value not in {"low", "medium", "high"}:
+        raise ConfigError(f"{where}.reasoning_effort must be low, medium or high for codex")
+    return value

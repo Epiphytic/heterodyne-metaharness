@@ -2494,3 +2494,25 @@ def test_signals_never_raise(rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setattr(rig.runtime, "_records", unlistable)
     assert rig.runtime.signals("alpha") == [LimitSeen(spec.session_key, 1, None)]
+
+
+def test_codex_typed_reasoning_is_seeded_before_sandbox_create(rig: RuntimeRig) -> None:
+    """The actual runtime call supplies the profile before the backend sees the home."""
+    from typing import cast
+
+    profiles = cast(dict[str, Any], rig.runtime.c.settings.profiles)
+    profiles['p-two'] = dict(profiles['p-two'], model='gpt-6.1-sol', reasoning_effort='medium')
+    spec = launch_spec(rig, 'p-two')
+    config = rig.runtime.layout(spec.session_key).home / '.codex' / 'config.toml'
+    before = rig.backend.create
+    observed = []
+
+    def checked_create(*args: Any, **kwargs: Any) -> Any:
+        import tomllib
+
+        observed.append(tomllib.loads(config.read_text())['model_reasoning_effort'])
+        return before(*args, **kwargs)
+
+    rig.backend.create = checked_create  # type: ignore[method-assign]
+    started = rig.runtime.launch(spec)
+    assert started.native_id and observed == ['medium']

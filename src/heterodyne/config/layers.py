@@ -162,6 +162,7 @@ def check_profiles(merged: Mapping[str, Any]) -> None:
             raise ConfigError(f"profiles.{show(name, False)}: adapter {show(adapter)} "
                               f"is not one of {sorted(known)}")
         profile_args.check(adapter, profile.get("args", []), f"profiles.{show(name, False)}.args")
+        profile_args.reasoning_effort(profile, adapter, f"profiles.{show(name, False)}")
 
 
 def as_table(value: Any) -> Mapping[str, Any] | None:
