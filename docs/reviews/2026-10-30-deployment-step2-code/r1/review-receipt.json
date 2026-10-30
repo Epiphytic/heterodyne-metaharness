@@ -1,0 +1,62 @@
+{
+  "reviewed_head": "a05fff89283cab649e5835c1387b099ba4240c01",
+  "base": "eef8c8fee6bffdfebe92d71137a7f1ffe9bd4c2e",
+  "review_round": 1,
+  "requested_effort": "high",
+  "started_at": "2026-10-30T05:38:49.729119+00:00",
+  "argv_template_note": "Public template only: each literal host home prefix is replaced with ${HOST_HOME}; exact original argv/start/result retained privately by controller. Not executable evidence of a different invocation.",
+  "argv_template": [
+    "${HOST_HOME}/.nvm/versions/node/v22.22.0/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+    "-p",
+    "--settings",
+    "{\"disableAllHooks\":true}",
+    "--model",
+    "opus",
+    "--effort",
+    "high",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--dangerously-skip-permissions",
+    "--tools",
+    "Read,Bash,Skill,Agent,ReportFindings",
+    "--strict-mcp-config",
+    "--mcp-config",
+    "{\"mcpServers\":{}}",
+    "--add-dir",
+    "${HOST_HOME}/repos/heterodyne-deployment-step2-20261029",
+    "--add-dir",
+    "${HOST_HOME}/repos/beads-oizoh-session-20261029",
+    "--",
+    "Invoke actual built-in Skill code-review for FULL HIGH reasoning ROUND1 of new Step2 source PR143, parent and any forks HIGH. Codex author, independent Claude Opus reviewer. a05fff89283cab649e5835c1387b099ba4240c01 ${HOST_HOME}/repos/heterodyne-deployment-step2-20261029 versus eef8c8fee6bffdfebe92d71137a7f1ffe9bd4c2e (previous reviewed Step1 PR142 now merged; preserve priorhistory not reset). Approved genuine gsc5 architecture 3d4822e5a2d163d291b46735765f154d879d1e74 H docs/architecture/2026-10-26-build-and-deployment-queues.md; disposition PR157. Read docs/reviews/2026-10-30-deployment-step2-source-qualification.md and complete source diff/tests. This private foundation adds protected anchored artifact staging, real kernel SO_PEERCRED checks before recv, target flock, pinned installer composition in one root-owned lifetime (NEVER invoked), closed finite outage/recovery packets, exact whole outer packet native binding via original unchanged admind core, durable SQLite intent/recovery journal oneuse/nonces/cancel/unknown. Real namespace twoUID executorUID1/buildUID2 admission/write denial test; actualSQLite restart/busy/cancelheldtarget. 76focusedPASS1.97s Ruff strictPyright installchecker hooksPASS withbytecodeenvunset. Actualqualityexit2 sevenmajor disclosed. Public executor/opener HOLD: actual protected MDK semantic factory/custody, independent-route qualification, typed cessation/newest-state reconciliation and host runner are NOT implemented and not falselyclaimed. Source-only merge review; no demands entire runtime before dormant foundation merge. Assess source correctness security strictpacketbindings finite recovery deadlockrisk truthfultests, preserve genuine native identity and exact card/ask/operation ownership. Readonly no edits commits liveDB/services/queue/GitHub comments/asks. Explicit verdict ranked actionable findings file/line. {\"docs/adr/0001-workstreams-v2.md\": \"d1013102fd05fd13a8c0183c38bc637a9f05996bf88c88b0dac00266a5b99fba\", \"docs/reviews/2026-10-30-deployment-step2-source-qualification.md\": \"9de1ce5df0ffac9befa1e8fe437e128b1a07ad971b9cc6c68e80cda28be27bef\", \"src/heterodyne/actions/deployment_authority.py\": \"df556f2730ece68be1e6e8519e5fd30172f984d8937a92f7c1cbf5c0b3079b52\", \"src/heterodyne/actions/deployment_host_store.py\": \"9b20f99ba2ca75f6c1c5cdcee95b8707c468702ba0f1f69fed9ded1446c3396a\", \"src/heterodyne/actions/deployment_outage.py\": \"c1202c701bf067cb20fc30e45d9cafd86d23c68827f5b1f878705470a11ed158\", \"src/heterodyne/actions/deployment_outage_authority.py\": \"a5c9335e49e73eb9833c733c880b3867c06dd678085809009bb1d2f0c83b2e82\", \"src/heterodyne/actions/deployment_outage_journal.py\": \"0e7afb4cb9b4e6fe566eb8ab7bc4e013eef2ab11d90d6a571352ad9e1a1361d9\", \"tests/test_deployment_host_store.py\": \"2d4142a7b34b1ad2ecffa7ecfa3e0374e60e95710d4daa22ddbaba684404ab28\", \"tests/test_deployment_outage.py\": \"947555ff51adf126c5ef65603038c4f4bb718c607d97027f3d54866df8f9a10e\", \"tests/test_deployment_outage_journal.py\": \"cc3275ed5024dd2c01dd8cbb146699118623d0e73cb699de087f0b3b2a95c2a0\"}"
+  ],
+  "raw_argv_sha256": "0394139ded21c2186418a7b5ae70db23ca81ad5eea4cb66d56f66e623e5186aa",
+  "raw_argv_hash_encoding": "UTF-8 json.dumps(original argv, ensure_ascii=False, separators=(comma,colon))",
+  "raw_start_sha256": "0e3dca2bcd31a460e08d74dcb612b08aa065e8a14d00e01e02b29898a7af238a",
+  "raw_result_sha256": "4aae93c2f0ad23292bf24e443e5fa71815c9ba2699584c85eb50db4b7db50d57",
+  "actual_report_sha256": "8e728495c4413a195aaec8516d07b559883c30440fb63cd8c1bb25ff3afe283d",
+  "exit": 0,
+  "source_unchanged": true,
+  "native_source_unchanged": true,
+  "events": 79,
+  "model_usage": [
+    {
+      "claude-opus-5-5": {
+        "inputTokens": 54,
+        "outputTokens": 28477,
+        "cacheReadInputTokens": 1565162,
+        "cacheCreationInputTokens": 114394,
+        "webSearchRequests": 0,
+        "costUSD": 1.5281834,
+        "contextWindow": 1000000,
+        "maxOutputTokens": 128000,
+        "thinkingTokens": 19678,
+        "canonicalModel": "claude-opus-5-5",
+        "provider": "firstParty",
+        "costBasis": "list"
+      }
+    }
+  ],
+  "actual_verdict": "CHANGES REQUESTED",
+  "verdict_source": "Retained actual terminal result opening and unchanged actual-review.md, not inferred from exit status."
+}

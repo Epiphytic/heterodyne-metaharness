@@ -480,6 +480,34 @@ stopped guard, one install, then held acceptance. Host activation, outage capsul
 independent cancellation/recovery and filesystem/UID qualification remain Step 2;
 Step 1 refuses an outage mode rather than silently permitting a transport gap.
 
+The Step 2 source boundary adds an independently approved closed outer deployment
+packet with four exact ordered outage transitions, a finite outage/recovery
+window and an independent route epoch/policy/credential binding. An approval of
+the inner Release alone does not approve these fields. The dormant fixed native
+adapter binds the whole outer packet through the unchanged authentication core.
+Descriptor-anchored staging and actual kernel peer UID checks admit untrusted
+build bytes, never operator authority. The private durable outage ledger records
+intent before returning a fixed step, refuses unknown-step replay and retains
+target exclusion across a recovery request. Exact already-issued completion can
+still be acknowledged after cancellation without enabling another forward step.
+The card has a distinct OUTAGE title, a computed full outer digest preserved by
+the actual redactor, and explicit acceptance that a queued but undelivered reply
+is not a received revocation. Unchanged context must fit the real renderer. A
+failed-no-effect terminal receipt releases a target only when the journal proves
+it never issued a step; issued and recovery-held targets remain excluded. Build
+ingress has a total monotonic deadline, and installer composition names only a
+fixed root helper and exact packet digest, never a root shell delegation.
+Root-helper/profile/sudo roles are pinned and root must independently check its
+protected exact permit, source/target/UID and one-use state. The outer publication
+URL is separate immutable native-card context; the producer must verify the actual
+committed packet bytes. Current rendering uses resolved pinned login forms and
+actual endpoint chunks. Old Step 1 cards/pins hold rather than being reinterpreted.
+A cancelled ordinal-zero capsule may release only with durable proof no intent
+was ever issued.
+The actual protected receiver/semantic factory, qualified independent route,
+source-specific cessation/newest-state producer and host runner remain required;
+the source primitives neither manufacture those facts nor open host execution.
+
 ### 5.4 Approval resolution (Marmot)
 
 - **Deployment authority exception:** generic action/bead decisions, standing or

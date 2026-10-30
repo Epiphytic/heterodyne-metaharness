@@ -20,8 +20,16 @@ from typing import Any, cast
 from heterodyne.actions import deployment_runtime as runtime
 from heterodyne.actions.codec import InvalidAction
 from heterodyne.actions.deployment import Release, Target, digest, validate
+from heterodyne.admind import asks
+from heterodyne.admind import settings as admind_settings
+from heterodyne.admind.redact import redact_with_dirs
+from heterodyne.admind.store import AskRow
+from heterodyne.config import load as load_config
+from heterodyne.config.errors import ConfigError
+from heterodyne.harness.digests import ComputedDigest, display
 
 CORE_SHA256 = "ad4d4a96632646a5d145feb30c30d402b358d3ecb9caf4717e89394877b5f48d"
+APPROVAL_TITLE = "Exact release"
 DB = Path(
     "/home/openclaw/.local/state/heterodyne/admind/admind.db"  # install-agnostic: allow=home-path - fixed H
 )
@@ -92,6 +100,8 @@ def _core() -> Any:
     if _loaded_core is None:
         try:
             _loaded_core = _load_core()
+        except InvalidAction as exc:
+            raise AuthorityHold(str(exc)) from exc
         except (OSError, ValueError) as exc:
             raise AuthorityHold("authority-source-unavailable") from exc
     return _loaded_core
@@ -106,6 +116,49 @@ def _packet_url(release: Release) -> str:
     )
 
 
+def _rendering() -> tuple[tuple[str, ...], int]:
+    """Resolve the actual fixed H admind profile, never ambient/global redaction."""
+    env = {"HOME": str(HOST_POLICY.parent.parent.parent),
+           "HETERODYNE_CONFIG_DIR": str(HOST_POLICY.parent)}
+    config = HOST_POLICY.parent / "config.toml"
+    core = _core()
+    before = core._read(config), core._read(HOST_POLICY)
+    try:
+        settings = admind_settings.resolve(load_config(None, env), env)
+    except (OSError, ValueError, ConfigError) as exc:
+        raise InvalidAction("approval-rendering-profile-unavailable") from exc
+    if before != (core._read(config), core._read(HOST_POLICY)):
+        raise InvalidAction("approval-rendering-profile-changed")
+    return settings.login_dirs, settings.chunk_chars
+
+
+def _check_card(title: str, body: str, ask_id: str) -> None:
+    directories, chunk_chars = _rendering()
+    context = title + "\n\n" + body
+    shown = redact_with_dirs(context, directories)
+    if shown != context:
+        raise InvalidAction("release-card-redaction")
+    if asks.fit(shown) != (shown, False):
+        raise InvalidAction("release-card-budget")
+    request = asks.AskPost(
+        "question", title=title, body=body, poster="protected-deploy", form="yes-no", recommended="yes",
+    )
+    form, choices = asks.stored_form(request)
+    at = asks.stamp(asks.now())
+    row = AskRow(
+        ask_id, "question", "protected-deploy", title, body, None, None, None, None,
+        False, 1, "open", None, None, at, at, question_form=form, choices=choices,
+    )
+    try:
+        parts, truncated = asks.checked_card_chunks(row, chunk_chars)
+    except asks.chunk.TooWide as exc:
+        raise InvalidAction("release-card-transport-bound") from exc
+    if type(parts) is not list or len(parts) != 1 or truncated:
+        raise InvalidAction("release-card-single-part-required")
+    if any(redact_with_dirs(part, directories) != part for part in parts):
+        raise InvalidAction("release-card-packed-redaction")
+
+
 def approval_body(release: Release, packet_url: str, group: str) -> str:
     # Rendering is also a boundary: reject unsafe direct typed constructions,
     # even when this helper is called before the native capture validates them.
@@ -117,17 +170,21 @@ def approval_body(release: Release, packet_url: str, group: str) -> str:
         or not re.fullmatch(r"[0-9a-f]{32,128}", group)
     ):
         raise InvalidAction("approval-context")
-    return (
+    group_digest = display(ComputedDigest(hashlib.sha256(group.encode("ascii")).hexdigest()))
+    body = (
         "Approve this exact finite heterodyne release deployment?\n"
-        f"Release SHA256: {digest(release)}\nApproval: {release.approval_id}\n"
+        f"Release SHA256: {display(ComputedDigest(digest(release)))}\nApproval: {release.approval_id}\n"
         f"Execution: {release.execution_id}\nNonce: {release.nonce}\n"
-        f"Target: {release.target.target_id}\nPacket: {packet_url}\nApproval group: {group}\n"
+        f"Target: {release.target.target_id}\nPacket: {packet_url}\n"
+        f"Approval group SHA256: {group_digest}\n"
         "Designs:\n"
         + "\n".join(release.design_links)
         + "\nDeployment deviations:\n"
         + "\n".join("- " + d for d in release.deviations)
         + "\nOne use only. No standing approval, heart reaction, generic action or host custody claim."
     )
+    _check_card(APPROVAL_TITLE, body, release.approval_id)
+    return body
 
 
 def _bindings_checked(release: Release, native: dict[str, Any]) -> list[str]:
@@ -135,6 +192,7 @@ def _bindings_checked(release: Release, native: dict[str, Any]) -> list[str]:
     ask = native["ask"]
     if (
         ask["ask_id"] != release.approval_id
+        or ask["title"] != APPROVAL_TITLE
         or ask["kind"] != "question"
         or ask["status"] != "answered"
         or ask["question_form"] != "yes-no"
