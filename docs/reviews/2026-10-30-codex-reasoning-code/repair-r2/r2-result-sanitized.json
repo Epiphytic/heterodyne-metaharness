@@ -1,0 +1,96 @@
+{
+  "exit": 0,
+  "source_unchanged": true,
+  "native_source_unchanged": true,
+  "terminal": [
+    {
+      "duration_api_ms": 202130,
+      "stop_reason": "end_turn",
+      "session_id": "ffcbfb28-a813-401a-bdde-2792be248597",
+      "total_cost_usd": 1.2911515999999996,
+      "usage": {
+        "input_tokens": 12,
+        "cache_creation_input_tokens": 38921,
+        "cache_read_input_tokens": 161421,
+        "output_tokens": 5787,
+        "output_tokens_details": {
+          "thinking_tokens": 1412
+        },
+        "server_tool_use": {
+          "web_search_requests": 0,
+          "web_fetch_requests": 0
+        },
+        "service_tier": "standard",
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 38921,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "inference_geo": "global",
+        "iterations": [],
+        "speed": "standard",
+        "fallback_credit": null
+      },
+      "modelUsage": {
+        "claude-opus-5-5": {
+          "inputTokens": 54,
+          "outputTokens": 18840,
+          "cacheReadInputTokens": 1174138,
+          "cacheCreationInputTokens": 112509,
+          "webSearchRequests": 0,
+          "costUSD": 1.2911515999999996,
+          "contextWindow": 1000000,
+          "maxOutputTokens": 128000,
+          "thinkingTokens": 8064,
+          "canonicalModel": "claude-opus-5-5",
+          "provider": "firstParty",
+          "costBasis": "list"
+        }
+      },
+      "permission_denials": [],
+      "terminal_reason": "completed",
+      "fast_mode_state": "off",
+      "fast_mode_disabled_reason": "sdk_opt_in_required",
+      "subagent_stats": {
+        "spawned": 0,
+        "requested": {
+          "background": 0,
+          "foreground": 0,
+          "unset": 0
+        },
+        "started_in_background": 0,
+        "max_depth": 0,
+        "spawned_by_subagents": 0,
+        "completed": 0,
+        "failed": 0,
+        "killed": {
+          "parent": 0,
+          "user": 0,
+          "system": 0
+        },
+        "refused": {
+          "depth_limit": 0,
+          "concurrency_limit": 0,
+          "budget": 0
+        },
+        "by_type": {}
+      },
+      "safety_stops": 0,
+      "is_error": false,
+      "num_turns": 6,
+      "subtype": "success",
+      "api_error_status": null,
+      "result": "**Verdict: request changes.** This is round 2 of the HIGH cumulative review of PR146 (`67ce2df..8b4d788`). The repair does what it set out to do for fresh launches and live idempotent readback, but the new hold now runs at the wrong point in `launch` and causes problems. I didn't edit, commit or post anything.\n\n**What needs fixing:**\n1. **`src/heterodyne/sandbox/runtime.py:567`** \u2014 the hold runs before `_end(prev)`. If the previous generation crashed or its tmux is dead, relaunch now refuses without cleaning it up. The dead sandbox stays allocated, its commits and WIP aren't settled, and the record stays RUNNING until something else reconciles it. Refusing before touching anything is what the design asks for, but here it also skips cleanup of a generation that's already dead. Either clean up a dead prior generation before holding, or accept that behaviour explicitly in the docs and cover it with a test.\n2. **`docs/adr/0001-workstreams-v2.md:182`** \u2014 the ADR's example profile still uses `effort = \"medium\"`. With the new unknown-key check, a config copied from it now fails to load, and wsd/admind exit 78. Update the ADR, and ideally have the error suggest `reasoning_effort`.\n3. **`runtime.py:569`** \u2014 the hold is checked before the unlanded-commits and owed-WIP checks, so \"reasoning not qualified\" hides the more important integrity error.\n\n**Likely problems, not yet confirmed:**\n- `runtime.py:566` \u2014 the `ConfigError` raised there isn't converted into a launch refusal. `wsd/park.py:1407` would report it as an unexpected runtime state.\n- `runtime.py:565` \u2014 adding `reasoning_effort` to a profile blocks every session already parked on it, even ones started under the default. That matches the hold policy, but the docs don't say so.\n- `tests/test_sandbox_runtime.py:2519` \u2014 the hold tests only cover a cleanly ended prior generation. Nothing tests a crashed one, a handoff, missing state, or the unlanded/WIP order, so the suite passes despite points 1 and 3.\n\n**Code quality (not bugs):** Codex-specific logic sits in the generic `launch` path, the effort value is validated in three places, the adapter interface was widened to pass the whole profile, and the session-state lookup runs twice per launch. These match the line-count, complexity and parameter-count increases the PR already discloses.\n\n**What I checked:**\n- HEAD is `8b4d788` and the worktree is clean.\n- My hashes of `runtime.py`, `layers.py` and `codex.py` match yours.\n- Findings 1\u20133 are confirmed by reading the code at those lines and the ADR.\n- I didn't re-run any tests or independently re-hash the evidence logs and receipts. Your test results (274 runtime PASS, 312 focused PASS, 103 accounts PASS) are as you recorded them. As you said, there's no live host deployment and no proof yet that a resumed session actually uses the configured effort.",
+      "ttft_ms": 1533,
+      "type": "result",
+      "duration_ms": 202974,
+      "uuid": "758c6f62-5e88-4b54-8317-c8c27b6ac8ef",
+      "ttft_stream_ms": 926,
+      "time_to_request_ms": 174,
+      "first_content_frame_ms": 927,
+      "queued_turn_count": 0,
+      "result_index": 0
+    }
+  ],
+  "events": 87,
+  "head": "8b4d7885ed274cab95de950530ec441e388fc675"
+}

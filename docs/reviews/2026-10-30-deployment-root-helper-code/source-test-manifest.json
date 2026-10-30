@@ -1,0 +1,71 @@
+{
+  "schema": "source-only-qualification.v1",
+  "base": "c77dd91a84656f01d265d09344a2a21902e8f682",
+  "source_sha256": {
+    "src/heterodyne/actions/deployment_root_helper.py": "6dee1206cd377f582a77a27db0b223e702fe5758426cb0e0af69a4ff27ff17f5",
+    "tests/test_deployment_root_helper.py": "dd07635b2582ed7c9e18d7be1187e18a08f3c5f1ff50a9144ba2f88fae3cf57a"
+  },
+  "source_unchanged": true,
+  "environment": {
+    "PYTHONPATH": "src:tests",
+    "PYTHONDONTWRITEBYTECODE": "unset"
+  },
+  "checks": [
+    {
+      "name": "focused-tests",
+      "argv_template": [
+        "${HOST_HOME}/repos/heterodyne-deployment-step1-20261029/.venv/bin/python",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/test_deployment_step1.py",
+        "tests/test_deployment_outage.py",
+        "tests/test_deployment_host_store.py",
+        "tests/test_deployment_outage_journal.py",
+        "tests/test_deployment_publication.py",
+        "tests/test_deployment_card.py",
+        "tests/test_deployment_cessation.py",
+        "tests/test_deployment_root_helper.py"
+      ],
+      "raw_argv_sha256": "39336c7793450dc1ee848d08a36c24afa30fcf18fb9c85b53dcacc54c84ec143",
+      "exit": 0,
+      "log_sha256": "80e9e77d9e00957045a464a30b4d67c543369fb8ccc78a1ad18e28e1f93e1728"
+    },
+    {
+      "name": "ruff",
+      "argv_template": [
+        "${HOST_HOME}/repos/heterodyne-deployment-step1-20261029/.venv/bin/ruff",
+        "check",
+        "src/heterodyne/actions/deployment_root_helper.py",
+        "tests/test_deployment_root_helper.py"
+      ],
+      "raw_argv_sha256": "c0597d8debb794fbfecac10a7aee7de7548e1430f7dc793ca46fc593757c9ee3",
+      "exit": 0,
+      "log_sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
+    },
+    {
+      "name": "pyright",
+      "argv_template": [
+        "${HOST_HOME}/repos/heterodyne-deployment-step1-20261029/.venv/bin/pyright",
+        "--pythonpath",
+        "${HOST_HOME}/repos/heterodyne-deployment-step1-20261029/.venv/bin/python",
+        "src/heterodyne/actions/deployment_root_helper.py"
+      ],
+      "raw_argv_sha256": "4b9c118e642b45a6b1c80d589204a72ef84493b380b9e7dc1f203040bc07a589",
+      "exit": 0,
+      "log_sha256": "98a60d18e073eb18d8c68c37afbdb7812fd0a7c9fd6f14d4ccadd686b58a14aa"
+    },
+    {
+      "name": "quality-delta",
+      "argv_template": [
+        "ripwire",
+        ".",
+        "--quality-delta"
+      ],
+      "raw_argv_sha256": "03b7bc717eaeb5825c04b77395ff7dfda53f20e20586d183426f5d8b00d690e8",
+      "exit": 2,
+      "log_sha256": "34bf8f8224ff9e4d8a05bce41da5438ea0f6053b933787cdc7b6e22f877e88ef"
+    }
+  ],
+  "limitations": "namespace fixture effects and read-only actual sudo topology only; no installed custody/approval/deployment claim"
+}

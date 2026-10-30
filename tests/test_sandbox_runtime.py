@@ -8,10 +8,11 @@ import shutil
 import socket
 import stat
 import subprocess
+import tomllib
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import msgspec
 import pytest
@@ -2494,3 +2495,109 @@ def test_signals_never_raise(rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setattr(rig.runtime, "_records", unlistable)
     assert rig.runtime.signals("alpha") == [LimitSeen(spec.session_key, 1, None)]
+
+
+def test_codex_typed_reasoning_is_seeded_before_sandbox_create(
+        rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The actual runtime call supplies the profile before the backend sees the home."""
+    profiles = cast(dict[str, Any], rig.runtime.c.settings.profiles)
+    profiles["p-two"] = dict(profiles["p-two"], model="gpt-6.1-sol", reasoning_effort="medium")
+    spec = launch_spec(rig, "p-two")
+    config = rig.runtime.layout(spec.session_key).home / ".codex" / "config.toml"
+    before = rig.backend.create
+    observed = []
+
+    def checked_create(*args: Any, **kwargs: Any) -> Any:
+        observed.append(tomllib.loads(config.read_text())["model_reasoning_effort"])
+        return before(*args, **kwargs)
+
+    monkeypatch.setattr(rig.backend, "create", checked_create)
+    started = rig.runtime.launch(spec)
+    assert started.native_id and observed == ["medium"]
+
+
+@pytest.mark.parametrize("requested_resume", [False, True])
+def test_typed_reasoning_native_continuation_holds_before_cleanup(
+        rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch, requested_resume: bool) -> None:
+    profiles = cast(dict[str, Any], rig.runtime.c.settings.profiles)
+    profiles["p-two"] = dict(profiles["p-two"], reasoning_effort="medium")
+    spec = launch_spec(rig, "p-two")
+    started = rig.runtime.launch(spec)
+    # Idempotent readback of a live native session remains allowed.
+    assert rig.runtime.launch(spec) == started
+    rig.runtime.stop(spec.session_key)
+    layout = rig.runtime.layout(spec.session_key)
+    retained = layout.record.read_bytes()
+    home = (layout.home / ".codex" / "config.toml").read_bytes()
+
+    def unexpected(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("native continuation must hold before cleanup or sandbox creation")
+
+    monkeypatch.setattr(rig.backend, "create", unexpected)
+    monkeypatch.setattr(rig.runtime, "_end", unexpected)
+    with pytest.raises(LaunchFailed, match="native resume is not qualified"):
+        rig.runtime.launch(replace(spec, generation=2, resume=requested_resume,
+                                   native_id=started.native_id))
+    assert layout.record.read_bytes() == retained
+    assert (layout.home / ".codex" / "config.toml").read_bytes() == home
+
+
+@pytest.mark.parametrize("integrity", ["none", "unlanded", "wip"])
+def test_typed_reasoning_dead_generation_is_retained_until_explicit_stop(
+        rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch, integrity: str) -> None:
+    # The previous generation started under the default; changing its profile also holds resume.
+    spec = launch_spec(rig, "p-two")
+    started = rig.runtime.launch(spec)
+    layout = rig.runtime.layout(spec.session_key)
+    prior = record(rig, spec.session_key)
+    rig.tmux.kill(prior.tmux_session)
+    prior = msgspec.structs.replace(prior, unlanded=integrity == "unlanded",
+                    wip_mark="retained-wip" if integrity == "wip" else "")
+    write_record(layout, prior)
+    profiles = cast(dict[str, Any], rig.runtime.c.settings.profiles)
+    profiles["p-two"] = dict(profiles["p-two"], reasoning_effort="medium")
+    retained = layout.record.read_bytes()
+    deleted = list(rig.backend.deleted)
+    created = list(rig.backend.created)
+
+    def unexpected(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("an unqualified launch must not clean up or settle the retained generation")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(rig.runtime, "_end", unexpected)
+        patch.setattr(rig.runtime, "_settle_wip", unexpected)
+        error = RuntimeUnavailable if integrity == "unlanded" else LaunchFailed
+        match = {"none": "native resume is not qualified", "unlanded": "commits were not landed",
+                 "wip": "lifetime WIP commit is still owed"}[integrity]
+        with pytest.raises(error, match=match):
+            rig.runtime.launch(replace(spec, generation=2, native_id=started.native_id))
+    assert layout.record.read_bytes() == retained
+    assert rig.backend.created == created and rig.backend.deleted == deleted
+    assert prior.sandbox in rig.backend.boxes
+    if integrity == "none":
+        rig.runtime.stop(spec.session_key)
+        assert record(rig, spec.session_key).phase is Phase.ENDED
+        assert prior.sandbox not in rig.backend.boxes
+
+
+def test_invalid_typed_reasoning_is_a_confirmed_launch_refusal(rig: RuntimeRig) -> None:
+    profiles = cast(dict[str, Any], rig.runtime.c.settings.profiles)
+    profiles["p-two"] = dict(profiles["p-two"], reasoning_effort="unsupported")
+    with pytest.raises(LaunchFailed, match="must be low, medium or high"):
+        rig.runtime.launch(launch_spec(rig, "p-two"))
+    assert not rig.backend.created
+
+
+def test_typed_reasoning_handoff_is_fresh_but_missing_state_is_not(
+        rig: RuntimeRig) -> None:
+    spec = launch_spec(rig, "p-two")
+    rig.runtime.launch(spec)
+    rig.runtime.stop(spec.session_key)
+    layout = rig.runtime.layout(spec.session_key)
+    profiles = cast(dict[str, Any], rig.runtime.c.settings.profiles)
+    profiles["p-two"] = dict(profiles["p-two"], reasoning_effort="medium")
+    shutil.rmtree(layout.home / ".codex")
+    with pytest.raises(RuntimeUnavailable, match="resumable state can't be found"):
+        rig.runtime.launch(replace(spec, generation=2))
+    rig.runtime.launch(replace(spec, generation=2, handoff=True))
+    assert record(rig, spec.session_key).generation == 2

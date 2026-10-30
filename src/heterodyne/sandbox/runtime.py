@@ -28,7 +28,7 @@ import msgspec
 
 from heterodyne.agents.base import Adapter, AdapterError, Cli, UsageReport, write_private
 from heterodyne.agents.registry import ADAPTERS
-from heterodyne.config import ConfigError
+from heterodyne.config import ConfigError, profile_args
 from heterodyne.config.accounts import credential_key
 from heterodyne.config.capabilities import Capabilities
 from heterodyne.fsutil import private_dir
@@ -560,9 +560,10 @@ class SandboxRuntime:
         if prev is None and os.path.lexists(layout.git):
             # D26: a record lost after seeding; the directory may hold commits, and seeding would remove them.
             raise LaunchFailed("the session's git directory exists but its record is gone; inspect it")
+        if prev is not None and prev.phase is Phase.RUNNING and self._alive(prev, self._names()):
+            return self._started(prev)                  # idempotent: a live session is left alone
+        self._check_reasoning_resume(adapter, layout, prev, spec)
         if prev is not None and prev.phase is not Phase.ENDED:
-            if prev.phase is Phase.RUNNING and self._alive(prev, self._names()):
-                return self._started(prev)              # idempotent: a live session is left alone
             if not self._end(prev, interrupt=False, lifetime=self._overdue(prev)):
                 raise RuntimeUnavailable("an earlier launch of this session could not be cleaned up")
             prev = read_record(layout)
@@ -602,6 +603,25 @@ class SandboxRuntime:
                                checked, pinned)
         except Exception as exc:  # noqa: BLE001 - every failure ends the sandbox, then is reported
             raise self._fail(layout, rec, exc) from None
+
+    def _check_reasoning_resume(self, adapter: Adapter, layout: SessionLayout,
+                                prev: SessionRecord | None, spec: LaunchSpec) -> None:
+        """Read-only qualification gate; explicit stop/reconciliation owns retained cleanup."""
+        profile = self.c.settings.profiles.get(spec.profile, {})
+        try:
+            effort = profile_args.reasoning_effort(profile, adapter.name, "profile")
+        except ConfigError as exc:
+            raise LaunchFailed(str(exc)) from None
+        if effort is not None:
+            if prev is not None and prev.unlanded:
+                raise self._unlanded(prev)
+            if prev is not None and prev.wip_mark:
+                raise LaunchFailed("the last generation's lifetime WIP commit is still owed")
+        if effort is not None and self._resume(adapter, layout, prev, spec)[0]:
+            # Server-home config does not prove a retained native thread adopts this effort.
+            # Intentionally retain even a dead generation: explicit stop/reconciliation performs
+            # cleanup; an unqualified launch does not mutate it. Report integrity holds first.
+            raise LaunchFailed("typed Codex reasoning on native resume is not qualified")
 
     def stop(self, session_key: str) -> None:
         layout = self.layout(session_key)
@@ -887,7 +907,10 @@ class SandboxRuntime:
         layout.empty(gen).chmod(0o555)          # E25: empty and read-only, remade before every create
         layout.home.mkdir(mode=0o700, exist_ok=True)
         facts = adapter.facts(layout, cli, c.uid)
-        for cleared in adapter.prepare_install_home(layout, spec.worktree, installed.root):
+        profile: dict[str, Any] = dict(c.settings.profiles.get(spec.profile, {}))
+        if spec.model:
+            profile["model"] = spec.model
+        for cleared in adapter.prepare_install_home(layout, spec.worktree, installed.root, profile=profile):
             log.warning("exec_dir_cleared %s gen=%d adapter=%s path=%s files=%d links=%d dirs=%d bytes=%d",
                         spec.session_key, gen, adapter.name, cleared.path, cleared.files, cleared.links,
                         cleared.dirs, cleared.bytes)
@@ -960,9 +983,6 @@ class SandboxRuntime:
         self._trust(adapter, cli, sp, layout)
         self._app_server(adapter, cli, sp, layout)
         rec = self._phase(layout, rec, phase=Phase.STARTING)
-        profile: dict[str, Any] = dict(c.settings.profiles.get(spec.profile, {}))
-        if spec.model:
-            profile["model"] = spec.model
         tui = adapter.tui_argv(cli, profile, native_id=native, resume=resume, label=spec.label)
         c.tmux.kill(rec.tmux_session)
         c.tmux.new_session(rec.tmux_session, spec.worktree, self.backend.tty_argv(sp.name, sp.workdir, tui))
