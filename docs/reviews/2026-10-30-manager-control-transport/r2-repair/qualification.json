@@ -1,0 +1,32 @@
+{
+  "argv": [
+    "<repository-pytest>",
+    "-q",
+    "tests/test_manager_control.py",
+    "tests/test_session_server.py",
+    "tests/test_session_shim.py",
+    "tests/test_sandbox_runtime.py",
+    "tests/test_sandbox_live_teardown.py",
+    "tests/test_admind_question_once.py",
+    "tests/test_tiers.py"
+  ],
+  "exit_code": 0,
+  "elapsed_seconds": 590.5648424928077,
+  "source_hashes_before": {
+    "src/heterodyne/session/control.py": "5c523f5edebfca2b86398bfea831bc699c55aeeda3c4dc7f64b5dbbfea0012a5",
+    "src/heterodyne/session/server.py": "b2da2dc1e93f5f3bb52c1d673b6b042dedfef191a2f8a8c6a8652aa4fbf5a4c0",
+    "src/heterodyne/session/shim.py": "c1cd2edf0f4c31fcc49110833a4300a45cb465bbe84dce84832ad9d0c890c515",
+    "src/heterodyne/sandbox/runtime.py": "7d5f017933de5a18bf54fef0ecc29821878f53f6b9951c8c9252716af8b85694",
+    "tests/test_manager_control.py": "e3cb733a72c8d2e0213e0d879f3100afebc7df1c9f8fec9221c9783847f9ff5d"
+  },
+  "source_hashes_after": {
+    "src/heterodyne/session/control.py": "5c523f5edebfca2b86398bfea831bc699c55aeeda3c4dc7f64b5dbbfea0012a5",
+    "src/heterodyne/session/server.py": "b2da2dc1e93f5f3bb52c1d673b6b042dedfef191a2f8a8c6a8652aa4fbf5a4c0",
+    "src/heterodyne/session/shim.py": "c1cd2edf0f4c31fcc49110833a4300a45cb465bbe84dce84832ad9d0c890c515",
+    "src/heterodyne/sandbox/runtime.py": "7d5f017933de5a18bf54fef0ecc29821878f53f6b9951c8c9252716af8b85694",
+    "tests/test_manager_control.py": "e3cb733a72c8d2e0213e0d879f3100afebc7df1c9f8fec9221c9783847f9ff5d"
+  },
+  "source_unchanged": true,
+  "exact_private_receipt_sha256": "3362cccf3cf93b897057ec6fcb0ee42da7160e1c870688ab6dba43561d5d149a",
+  "command_note": "Public executable alias; exact private receipt digest pins actual invocation."
+}

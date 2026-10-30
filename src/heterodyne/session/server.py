@@ -216,8 +216,6 @@ class SessionServer:
             return MALFORMED
         try:
             req: Any = json.loads(line)
-        except UnicodeEncodeError:
-            return FORBIDDEN  # preserve refusal of an escaped, unencodable launch token
         except ValueError:
             return MALFORMED
         if not isinstance(req, dict):
@@ -248,13 +246,14 @@ class SessionServer:
                     return MALFORMED
                 raw = _payload_bytes(line)
                 result = self.control.intake(raw, stopped=self._closed)
-                return FORBIDDEN if self._closed.is_set() else result
+                return result  # durable admission remains accepted across shutdown
             except BlockingIOError:
                 return {"ok": False, "state": "pending", "error": "control-journal-busy-retry"}
             except ControlCapacity:
                 return {"ok": False, "state": "refused", "error": "manager-request-capacity"}
             except (OSError, ValueError, RuntimeError):
-                return {"ok": False, "state": "refused", "error": "control-intake-refused"}
+                return {"ok": False, "state": "uncertain",
+                        "error": "control-intake-unavailable-retry-same-id"}
         self._spool(kind, fields)
         if kind == "ws_request":
             return UNSUPPORTED

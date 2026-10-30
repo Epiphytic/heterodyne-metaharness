@@ -8,6 +8,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import stat
 import tempfile
 import threading
@@ -154,6 +155,15 @@ class ControlJournal:
         result = []
         with os.scandir(self.root / "pending") as entries:
             for entry in entries:
+                # A killed atomic writer can leave its private temporary file.
+                # It was never an admission marker. Never follow arbitrary entries.
+                if (re.fullmatch(r"\.intake-[a-z0-9_]{8}", entry.name)
+                        and entry.is_file(follow_symlinks=False)):
+                    if reap:
+                        self._writable()
+                        Path(entry.path).unlink()
+                        _sync_dir(self.root / "pending")
+                    continue
                 if not entry.name.endswith(".json"):
                     raise ValueError("unexpected pending control entry")
                 request_id = entry.name[:-5]
@@ -198,8 +208,6 @@ class ControlJournal:
                 if stopped is not None and stopped.is_set():
                     raise RuntimeError("closed generation refuses admission marker")
                 _write(marker, b"{}")
-            if stopped is not None and stopped.is_set():
-                raise RuntimeError("closed generation cannot acknowledge intake")
             return {"ok": True, "state": "accepted", "request_sha256": digest, "data": {}}
 
     def pending(self) -> list[dict[str, Any]]:

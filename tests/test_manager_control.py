@@ -490,3 +490,80 @@ def test_ended_observer_translates_uncertain_tmux_failure(tmp_path):
     runtime.c.tmux.has_session.side_effect = subprocess.TimeoutExpired('tmux',1)
     with pytest.raises(RuntimeUnavailable,match="pane can't be inspected"):
         runtime.observe_session(rec.key)
+
+
+def test_shutdown_after_durable_marker_preserves_positive_ack_and_replay(tmp_path, journal, owner):
+    server = SessionServer(tmp_path/'socket', 'token', tmp_path/'events', control=journal)
+    original = control._write
+    raw = request('Escalate', {'issue_id':'btq-x', 'reason':'operator needed'})
+    def close_after_marker(path, data):
+        original(path, data)
+        if path.parent.name == 'pending':
+            server.close()
+    with patch.object(control, '_write', side_effect=close_after_marker):
+        result = server._handle(req('token','ws_request',json.loads(raw)))
+    assert result['state'] == 'accepted'
+    restarted = ControlJournal(journal.root, owner)
+    assert len(restarted.pending()) == 1
+    assert restarted.intake(restarted.pending()[0]['raw']) == result
+
+
+def test_killed_atomic_pending_writer_does_not_wedge_restart(journal, owner):
+    # Kill the actual subprocess after tempfile/fsync, before marker rename.
+    script = '''import os,sys
+from pathlib import Path
+from heterodyne.session import control
+root=Path(sys.argv[1]); raw=bytes.fromhex(sys.argv[2])
+owner=control.ControlOwner(root.parent/'child-owner')
+journal=control.ControlJournal(root,owner)
+original=Path.replace
+def killed(path,target):
+ if target.parent.name=='pending': os._exit(73)
+ return original(path,target)
+Path.replace=killed
+journal.intake(raw)
+'''
+    raw = request()
+    child = subprocess.run([sys.executable,'-c',script,str(journal.root),raw.hex()], timeout=5)
+    assert child.returncode == 73
+    leftovers = list((journal.root/'pending').iterdir())
+    assert len(leftovers) == 1 and leftovers[0].name.startswith('.intake-')
+    restarted = ControlJournal(journal.root, owner)
+    assert restarted.pending() == []
+    assert restarted.intake(raw)['state'] == 'accepted'
+    assert len(restarted.pending()) == 1
+    assert not leftovers[0].exists()
+
+
+@pytest.mark.parametrize('fault', [OSError('disk full'), ValueError('corrupt retained outcome'),
+                                  RuntimeError('owner unavailable')])
+def test_journal_fault_never_reports_final_policy_refusal(tmp_path, journal, fault):
+    server = SessionServer(tmp_path/'socket', 'token', tmp_path/'events', control=journal)
+    with patch.object(journal, 'intake', side_effect=fault):
+        result = server._handle(req('token','ws_request',json.loads(request())))
+    assert result == {'ok':False, 'state':'uncertain',
+                      'error':'control-intake-unavailable-retry-same-id'}
+
+
+def test_shutdown_busy_server_removed_from_rebind_cache_but_owner_retained(tmp_path):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from heterodyne.sandbox.runtime import RuntimeUnavailable, SandboxRuntime
+    runtime = SandboxRuntime.__new__(SandboxRuntime)
+    runtime.c = SimpleNamespace(sessions=tmp_path/'sessions')
+    runtime.manager_owner = None
+    runtime.servers = {}
+    runtime.own_manager_control()
+    busy = Mock(active=1)
+    runtime.servers = {'manager':busy, 'worker':Mock(active=0)}
+    with pytest.raises(RuntimeUnavailable, match='unwinding'):
+        runtime.close_manager_control()
+    assert runtime.servers == {}
+    runtime.manager_owner.check()
+    with pytest.raises(RuntimeUnavailable, match='unwinding'):
+        runtime.own_manager_control()
+    busy.active = 0
+    runtime.close_manager_control()
+    runtime.own_manager_control()
+    runtime.close_manager_control()

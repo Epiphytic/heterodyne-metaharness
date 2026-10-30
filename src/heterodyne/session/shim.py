@@ -407,7 +407,7 @@ def run_control(raw: bytes, env: Mapping[str, str], *, clock: Clock = time.monot
         # One exact JSON value in the existing newline-framed transport. Refuse
         # unsupported framing instead of changing the manager's retained bytes.
         if raw != raw.strip() or b"\n" in raw or b"\r" in raw:
-            raise ValueError("control input must be one unpadded JSON object line")
+            return 2, json.dumps({"ok": False, "error": "control-input-requires-unpadded-single-line"})
     except (ValueError, UnicodeError, RecursionError):
         return 2, json.dumps({"ok": False, "error": "operator-route-required"})
     found = _config(env)

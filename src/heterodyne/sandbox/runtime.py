@@ -318,6 +318,7 @@ class SandboxRuntime:
         self.c = config
         self.backend = backend
         self.selftest = selftest
+        self._closing_manager_servers: list[SessionServer] = []
         self.manager_owner: ControlOwner | None = None
         self.servers: dict[str, SessionServer] = {}      # key -> its running generation's socket
         self.cp: Checkpoint = nothing                       # a test's crash points in a resolve
@@ -335,17 +336,22 @@ class SandboxRuntime:
 
     def own_manager_control(self) -> None:
         """Acquire actual install-wide daemon ownership before qualified lifecycle work."""
+        if any(server.active for server in getattr(self, "_closing_manager_servers", [])):
+            raise RuntimeUnavailable("manager handlers are still unwinding; owner lock retained")
         if self.manager_owner is None:
             self.manager_owner = ControlOwner(self.c.sessions.parent / "hermes-manager-owner")
         self.manager_owner.check()
 
     def close_manager_control(self) -> None:
         if self.manager_owner is not None:
-            for server in self.servers.values():
+            closing = list(self.servers.values())
+            closing.extend(getattr(self, "_closing_manager_servers", []))
+            self.servers.clear()  # closed sockets must never suppress a later rebind
+            for server in closing:
                 server.close()
-            if any(server.active for server in self.servers.values()):
+            self._closing_manager_servers = [server for server in closing if server.active]
+            if self._closing_manager_servers:
                 raise RuntimeUnavailable("manager handlers are still unwinding; owner lock retained")
-            self.servers.clear()  # all sockets above closed; allow the next owner to rebind
             self.manager_owner.close()
             self.manager_owner = None
 
@@ -1085,6 +1091,8 @@ class SandboxRuntime:
         control = None
         if rec.role == "manager" and self.manager_owner is not None:
             try:
+                if any(server.active for server in getattr(self, "_closing_manager_servers", [])):
+                    raise RuntimeUnavailable("previous manager handlers are still unwinding")
                 self.manager_owner.check()
                 control = ControlJournal(layout.control(gen), self.manager_owner)
             except (OSError, RuntimeError, ValueError):
