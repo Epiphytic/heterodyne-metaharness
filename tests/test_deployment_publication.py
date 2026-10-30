@@ -5,6 +5,7 @@ No fixture performs network I/O or claims genuine approval or protected custody.
 
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -48,8 +49,11 @@ def published(tmp_path, monkeypatch):
         reads.append((actual_commit, actual_path))
         return canonical
     monkeypatch.setattr(publication, "_https", https)
-    with archive.open("rb") as tree, obj.open("rb") as body:
-        yield canonical, url, tree.fileno(), body.fileno(), reads, repository, archive
+    # Equivalent protected scratch; production /run is never created.
+    with tempfile.TemporaryDirectory(prefix=".publication-", dir=Path.cwd()) as directory:
+        monkeypatch.setattr(publication, "_SCRATCH", Path(directory))
+        with archive.open("rb") as tree, obj.open("rb") as body:
+            yield canonical, url, tree.fileno(), body.fileno(), reads, repository, archive
 
 
 def test_real_git_complete_tree_and_regular_packet_plus_modeled_https(published):
@@ -158,3 +162,20 @@ def test_fixed_tls_reader_rejects_redirects_and_encoding(monkeypatch, status, en
         "GET", "/Epiphytic/heterodyne-metaharness/" + "a" * 40 + "/docs/packet.json",
         {"Accept-Encoding": "identity"},
     )
+
+
+@pytest.mark.parametrize("error", [EOFError(), publication.store_core._TAR_ERRORS[0]("truncated")])
+def test_tar_read_failures_are_typed_before_https(published, monkeypatch, error):
+    original, url, archive, commit, reads, _, _ = published
+    def fail(*args):
+        raise error
+    monkeypatch.setattr(publication.store_core, "check_git", fail)
+    with pytest.raises(InvalidAction, match="readback-unavailable"):
+        publication._verify(original, (TARGET,), url, archive, commit)
+    assert reads == []
+
+
+def test_scratch_does_not_use_ambient_tmpdir(published, monkeypatch):
+    original, url, archive, commit, _, _, _ = published
+    monkeypatch.setenv("TMPDIR", "/nonexistent/untrusted-temporary-directory")
+    assert publication._verify(original, (TARGET,), url, archive, commit).published_original == original

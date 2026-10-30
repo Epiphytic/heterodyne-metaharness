@@ -12,17 +12,12 @@ from dataclasses import dataclass
 
 import msgspec
 
-from heterodyne.actions import deployment_authority as authority
 from heterodyne.actions.codec import InvalidAction, encode_record
 from heterodyne.actions.deployment import Target
 from heterodyne.actions.deployment_outage import decode_packet, packet_digest
-from heterodyne.actions.deployment_outage_authority import APPROVAL_TITLE, approval_body
+from heterodyne.actions.deployment_outage_authority import _approval_card
 from heterodyne.actions.deployment_publication import _verify
 from heterodyne.admind import asks
-from heterodyne.admind.redact import redact_with_dirs
-from heterodyne.admind.store import AskRow
-
-_POSTER = "protected-deploy"
 
 
 @dataclass(frozen=True)
@@ -47,39 +42,14 @@ def _prepare(  # pyright: ignore[reportUnusedFunction] - future owning protected
     original: bytes, targets: tuple[Target, ...], group_hex: str, publication_url: str,
     archive_fd: int, commit_fd: int,
 ) -> _PreparedCard:
-    publication = _verify(original, targets, publication_url, archive_fd, commit_fd)
     packet = decode_packet(original, targets)
-    directories, chunk_chars = authority._rendering()
     release = packet.release
     if asks.normalise_id(release.approval_id) != release.approval_id:
         raise InvalidAction("deployment-card-ask-id")
-    body = approval_body(packet, publication.url, group_hex)
-    request = asks.AskPost(
-        "question", title=APPROVAL_TITLE, body=body, poster=_POSTER,
-        form="yes-no", recommended="yes",
-    )
-    if asks.check(request) is not None:
-        raise InvalidAction("deployment-card-request-refused")
-    form, choices = asks.stored_form(request)
-    at = asks.stamp(asks.now())
-    row = AskRow(
-        release.approval_id, "question", _POSTER, APPROVAL_TITLE, body,
-        None, None, None, None, False, 1, "open", None, None, at, at,
-        question_form=form, choices=choices,
-    )
-    # checked_card_chunks alone begins with the ordinary redacting context
-    # renderer. Refuse whole-context changes first, then packed-part changes.
-    if redact_with_dirs(asks.context(row), directories) != asks.context(row):
-        raise InvalidAction("deployment-card-redaction")
-    try:
-        parts, truncated = asks.checked_card_chunks(row, chunk_chars)
-    except asks.chunk.TooWide as exc:
-        raise InvalidAction("deployment-card-transport-bound") from exc
-    if type(parts) is not list or truncated or len(parts) != 1:
-        raise InvalidAction("deployment-card-exact-single-part-required")
-    if (any(redact_with_dirs(part, directories) != part for part in parts)
-        or asks.card_chunks(row, chunk_chars) != (parts, False)):
-        raise InvalidAction("deployment-card-renderer-mismatch")
+    # Validate the exact final card once, before any network corroboration. Its
+    # provisional value is never returned until the complete proof succeeds.
+    _, request, _, parts = _approval_card(packet, publication_url, group_hex)
+    publication = _verify(original, targets, publication_url, archive_fd, commit_fd)
     return _PreparedCard(
         original, hashlib.sha256(original).hexdigest(), encode_record(packet), packet_digest(packet),
         release.approval_id, group_hex, msgspec.json.encode(request),

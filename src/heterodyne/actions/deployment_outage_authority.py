@@ -26,14 +26,14 @@ from heterodyne.harness.digests import ComputedDigest, display
 APPROVAL_TITLE = "OUTAGE DEPLOYMENT: exact finite release"
 
 
-def approval_body(packet: DeploymentPacket, packet_url: str, group: str) -> str:
+def _approval_card(packet: DeploymentPacket, packet_url: str, group: str):
     validate_packet(packet, (packet.release.target,))
     if (not release_auth._PACKET.fullmatch(packet_url)
         or packet_url.split("/", 7)[6] == packet.release.packet_commit
         or packet_url.split("/", 7)[-1] != packet.release.packet_path
         or ".." in packet_url.split("/")):
         raise InvalidAction("outer-packet-publication-url")
-    original = release_auth.approval_body(
+    original = release_auth._approval_body(
         packet.release, release_auth._packet_url(packet.release), group,
     )
     body = (
@@ -49,8 +49,12 @@ def approval_body(packet: DeploymentPacket, packet_url: str, group: str) -> str:
         + "\nA yes explicitly accepts that gap for this exact finite outage capsule only."
         + "\nOnly the exact packet transitions and independently authenticated recovery are authorized."
     )
-    release_auth._check_card(APPROVAL_TITLE, body, packet.release.approval_id)
-    return body
+    request, row, parts = release_auth._check_card(APPROVAL_TITLE, body, packet.release.approval_id)
+    return body, request, row, parts
+
+
+def approval_body(packet: DeploymentPacket, packet_url: str, group: str) -> str:
+    return _approval_card(packet, packet_url, group)[0]
 
 
 def _bindings(packet: DeploymentPacket, native: dict[str, Any]) -> list[str]:

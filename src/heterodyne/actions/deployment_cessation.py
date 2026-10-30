@@ -9,8 +9,10 @@ import os
 import pwd
 import select
 import socket
+import sqlite3
 import stat
 import subprocess
+import tempfile
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -76,6 +78,23 @@ def _number(fields: dict[str, str], key: str) -> int:
     return int(value)
 
 
+def _manager_endpoint(endpoint: Path, uid: int) -> tuple[int, int, int]:
+    """Kernel-authenticate one fixed internal endpoint, not a caller address.
+
+    systemctl prefers systemd/private; authenticate that endpoint and its fallback
+    bus both before and after the exact pinned command.
+    """
+    info = endpoint.stat(follow_symlinks=False)
+    if not stat.S_ISSOCK(info.st_mode) or info.st_uid != uid:
+        raise InvalidAction("cessation-manager-socket")
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        connection.settimeout(2)
+        connection.connect(str(endpoint))
+        if peer_credentials_checked(connection)[1] != uid:
+            raise InvalidAction("cessation-manager-peer")
+    return info.st_dev, info.st_ino, info.st_uid
+
+
 class _AdmindInvocation:  # pyright: ignore[reportUnusedClass] - private protected recipe observer
     """Retain a kernel pidfd before stop, then observe the exact old invocation.
 
@@ -86,6 +105,18 @@ class _AdmindInvocation:  # pyright: ignore[reportUnusedClass] - private protect
 
     def __init__(self, scope: _ManagerScope):
         self.scope = scope
+        self.pidfd = self.group_fd = -1
+        try:
+            self._capture_live()
+        except BaseException as exc:
+            self.close()
+            if isinstance(exc, InvalidAction):
+                raise
+            if isinstance(exc, (OSError, UnicodeError, KeyError, ValueError, subprocess.SubprocessError)):
+                raise InvalidAction("cessation-capture-unavailable") from exc
+            raise
+
+    def _capture_live(self) -> None:
         self.boot = _boot()
         before = self._show()
         self._identity(before)
@@ -95,24 +126,17 @@ class _AdmindInvocation:  # pyright: ignore[reportUnusedClass] - private protect
         self.pid = _number(before, "MainPID")
         if self.pid <= 0 or self.pid != _number(before, "ExecMainPID"):
             raise InvalidAction("cessation-live-pid-required")
-        try:
-            self.pidfd = os.pidfd_open(self.pid, 0)
-        except OSError as exc:
-            raise InvalidAction("cessation-pidfd-unavailable") from exc
-        self.group_fd = -1
-        try:
-            self.group_fd = self._capture_group()
-            if self._show() != before or _boot() != self.boot:
-                raise InvalidAction("cessation-invocation-changed")
-        except BaseException:
-            if self.group_fd >= 0:
-                os.close(self.group_fd)
-            os.close(self.pidfd)
-            raise
+        self.pidfd = os.pidfd_open(self.pid, 0)
+        self.group_fd = self._capture_group()
+        if self._show() != before or _boot() != self.boot:
+            raise InvalidAction("cessation-invocation-changed")
 
     def close(self) -> None:
-        os.close(self.group_fd)
-        os.close(self.pidfd)
+        for attribute in ("group_fd", "pidfd"):
+            fd = getattr(self, attribute)
+            if fd >= 0:
+                os.close(fd)
+                setattr(self, attribute, -1)
 
     def stopped_snapshot(self, destination: Path) -> StoppedSnapshot:
         """Newest live-path WAL snapshot surrounded by exact old-unit cessation.
@@ -122,28 +146,45 @@ class _AdmindInvocation:  # pyright: ignore[reportUnusedClass] - private protect
         positive exclusion of every other writer are separate requirements.
         Destination is a fresh protected recipe output, never a backup to restore.
         """
-        before = self.observe()
-        source = self.scope.database
-        for path in (source, *source.parents):
-            info = path.stat(follow_symlinks=False)
-            if (path.is_symlink() or info.st_uid not in {0, self.scope.service_uid}
-                or info.st_mode & 0o022):
-                raise InvalidAction("cessation-live-database-custody")
-        original = source.stat(follow_symlinks=False)
-        if not stat.S_ISREG(original.st_mode):
-            raise InvalidAction("cessation-live-database-regular")
         try:
-            record = wal_snapshot(source, destination, threading.Event())
-            after = self.observe()
-            latest = source.stat(follow_symlinks=False)
-            if (before != after or (latest.st_dev, latest.st_ino) != (original.st_dev, original.st_ino)
-                or source.is_symlink()):
-                raise InvalidAction("cessation-live-database-changed")
-            return StoppedSnapshot(
-                after, original.st_dev, original.st_ino, str(record["sha256"]),
-                int(record["bytes"]), int(record["schema"]),
-            )
-        except (OSError, ValueError, TimeoutError) as exc:
+            before = self.observe()
+            source = self.scope.database
+            for path in (source, *source.parents):
+                info = path.stat(follow_symlinks=False)
+                if (path.is_symlink() or info.st_uid not in {0, self.scope.service_uid}
+                    or info.st_mode & 0o022):
+                    raise InvalidAction("cessation-live-database-custody")
+            original = source.stat(follow_symlinks=False)
+            if not stat.S_ISREG(original.st_mode):
+                raise InvalidAction("cessation-live-database-regular")
+            # Failed/partial snapshots stay in an attempt directory which is
+            # removed on every path. Never delete/adopt a preexisting destination.
+            with tempfile.TemporaryDirectory(prefix=".stopped-", dir=destination.parent) as attempt:
+                temporary = Path(attempt) / "snapshot.db"
+                record = wal_snapshot(source, temporary, threading.Event())
+                after = self.observe()
+                latest = source.stat(follow_symlinks=False)
+                if (before != after or (latest.st_dev, latest.st_ino) != (original.st_dev, original.st_ino)
+                    or source.is_symlink()):
+                    raise InvalidAction("cessation-live-database-changed")
+                published = False
+                try:
+                    os.link(temporary, destination, follow_symlinks=False)
+                    published = True
+                    directory = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                    try:
+                        os.fsync(directory)
+                    finally:
+                        os.close(directory)
+                except BaseException:
+                    if published:
+                        destination.unlink()
+                    raise
+                return StoppedSnapshot(
+                    after, original.st_dev, original.st_ino, str(record["sha256"]),
+                    int(record["bytes"]), int(record["schema"]),
+                )
+        except (OSError, ValueError, TimeoutError, sqlite3.Error) as exc:
             if isinstance(exc, InvalidAction):
                 raise
             raise InvalidAction("cessation-stopped-snapshot-unavailable") from exc
@@ -166,14 +207,19 @@ class _AdmindInvocation:  # pyright: ignore[reportUnusedClass] - private protect
             raise
 
     def _empty_group(self) -> None:
-        # A removed retained kernel cgroup has no tasks. A missing current path
-        # alone is never evidence: only the original descriptor may prove removal.
-        if os.fstat(self.group_fd).st_nlink == 0:
-            return
-        fd = os.open(
-            "cgroup.events", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
-            dir_fd=self.group_fd,
-        )
+        try:
+            fd = os.open(
+                "cgroup.events", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                dir_fd=self.group_fd,
+            )
+        except FileNotFoundError:
+            # Real cgroupfs retains st_nlink==2 after rmdir. The kernel's deleted
+            # marker names the ORIGINAL anchored cgroup, never its current path.
+            retained = str(Path(f"/proc/self/fd/{self.group_fd}").readlink())
+            expected = "/sys/fs/cgroup" + self.before["ControlGroup"] + " (deleted)"
+            if retained == expected:
+                return
+            raise
         try:
             raw = os.read(fd, 4097)
             if len(raw) > 4096 or raw.decode("ascii").splitlines().count("populated 0") != 1:
@@ -202,9 +248,8 @@ class _AdmindInvocation:  # pyright: ignore[reportUnusedClass] - private protect
             raise InvalidAction("cessation-protected-root-profile-required")
         runtime = Path("/run/user") / str(s.service_uid)
         bus = runtime / "bus"
-        info = bus.stat(follow_symlinks=False)
-        if not stat.S_ISSOCK(info.st_mode) or info.st_uid != s.service_uid:
-            raise InvalidAction("cessation-manager-bus")
+        private = runtime / "systemd/private"
+        endpoints = {endpoint: _manager_endpoint(endpoint, s.service_uid) for endpoint in (private, bus)}
         pins = (
             (Path("/usr/sbin/runuser"), s.runuser_sha256),
             (Path("/usr/bin/env"), s.env_sha256),
@@ -214,11 +259,6 @@ class _AdmindInvocation:  # pyright: ignore[reportUnusedClass] - private protect
         for path, expected in pins:
             if stream_hash(path) != expected:
                 raise InvalidAction("cessation-helper-source-drift")
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-            connection.settimeout(2)
-            connection.connect(str(bus))
-            if peer_credentials_checked(connection)[1] != s.service_uid:
-                raise InvalidAction("cessation-manager-peer")
         argv = (
             "/usr/sbin/runuser", "-u", s.service_user, "--", "/usr/bin/env", "-i",
             f"XDG_RUNTIME_DIR={runtime}", f"DBUS_SESSION_BUS_ADDRESS=unix:path={bus}",
@@ -242,9 +282,9 @@ class _AdmindInvocation:  # pyright: ignore[reportUnusedClass] - private protect
         for path, expected in pins:
             if stream_hash(path) != expected:
                 raise InvalidAction("cessation-helper-source-drift")
-        after = bus.stat(follow_symlinks=False)
-        if (after.st_dev, after.st_ino, after.st_uid) != (info.st_dev, info.st_ino, info.st_uid):
-            raise InvalidAction("cessation-manager-bus-changed")
+        for endpoint, identity in endpoints.items():
+            if _manager_endpoint(endpoint, s.service_uid) != identity:
+                raise InvalidAction("cessation-manager-socket-changed")
         return fields
 
     def observe(self) -> UnitCessation:
@@ -284,7 +324,9 @@ class _AdmindInvocation:  # pyright: ignore[reportUnusedClass] - private protect
         if self._show() != after or _boot() != self.boot:
             raise InvalidAction("cessation-invocation-changed")
         code, status = _number(after, "ExecMainCode"), _number(after, "ExecMainStatus")
-        clean = after["Result"] == "success" and code == 1 and status == 0
+        # The authenticated manager applies SuccessExitStatus and normal stop
+        # signals; code/status remain explicit evidence rather than reinterpreted.
+        clean = after["Result"] == "success" and code in {1, 2, 3}
         return UnitCessation(
             _UNIT, self.boot, before["InvocationID"], self.pid,
             _number(before, "ExecMainStartTimestampMonotonic"),

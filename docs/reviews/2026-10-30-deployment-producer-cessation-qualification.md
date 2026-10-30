@@ -29,14 +29,15 @@ semantic consumption in the separate native implementation. This source does
 not replace that custody with a deserialized prepared value.
 
 `_AdmindInvocation` observes the fixed user systemd unit through pinned system
-binaries and a kernel-UID-checked manager bus. Before a stop it retains the actual
+binaries and kernel-UID-checked systemd/private and fallback user-bus sockets. Before a stop it retains the actual
 PID descriptor and original cgroup directory. Afterward it requires the original
 PID to have exited and the retained cgroup to be empty or actually removed,
 with stable unit invocation/start identity and boot. A forced timeout may prove
 cessation when those positive facts hold; it never settles historical UNKNOWN.
 Its stopped snapshot reuses the existing bounded WAL snapshot implementation,
 reads the configured live DB path, includes committed WAL contents, retains an
-exclusive new output and surrounds the copy with exact old-unit observations.
+exclusive attempt output, publishes it without overwrite only after validation,
+and surrounds the copy with exact old-unit observations.
 No older backup is restored. This covers one invocation only: source-specific
 qualification and positive exclusion of all other writers remain mandatory
 before recovery can release any issued target. A snapshot or dataclass is not
@@ -47,7 +48,7 @@ only if all retained recovery commands were cancel. Safe-stop, held-restore,
 mixed commands, any issued intent or uncertain effect retain target exclusion.
 This closes PR143's reported small medium gap in a separate source change.
 
-Validation: 116 focused tests pass with inherited bytecode suppression unset.
+Original source validation: 116 focused tests passed with inherited bytecode suppression unset.
 The publication cases use actual deterministic disposable Git commits, complete
 archives and file modes, with synthetic HTTPS and profile. The refreshed v2
 cross-language fixture is produced by that real local Git proof and actual
@@ -69,8 +70,75 @@ a caller-selected observation callback.
 Proposed additional runtime writes are anonymous private copies of retained Git
 objects and a fresh protected stopped-snapshot destination. Exact owning object
 view, snapshot path, permissions and runtime source closure belong in the future
-protected deployment profile and exact deployment packet. No host path, unit,
-account, installed binary, queue, native approval or production database changed.
+protected deployment profile and exact deployment packet. No production path, unit, account, installed binary, queue, native approval or
+production database changed. The later R1 causal test creates/removes only one
+uniquely named disposable kernel cgroup and its own harmless fixture child.
 The next concrete source boundary is the fixed root helper with genuine sudo
 ancestry/UID proof, independently protected permit/profile and durable one-use
 intent, followed by the owning receiver integration and full finite recipe.
+
+
+## First HIGH review repair
+
+The actual first HIGH built-in code-review verdict is CHANGES REQUESTED and is
+retained under `deployment-producer-cessation-code/r1/`, with command/report/source
+receipts. The reviewer could not run the configured test environment; that limit
+is preserved in the actual report, independently of the source-bound test logs.
+No second/validation review has been run by the author.
+
+The actual Linux cgroup probe confirmed the finding: an empty cgroup directory's
+link count remains 2 after removal. Cessation now accepts removal only when the
+kernel `/proc/self/fd` link of the originally retained descriptor names the exact
+fixed `/sys/fs/cgroup` plus captured ControlGroup and its deleted marker. A
+missing current path or missing fixture events alone remains insufficient. The
+real causal regression creates one unique disposable cgroup, moves only its own
+harmless child into it, observes populated refusal, kills/reaps that child,
+observes empty acceptance, removes that cgroup and observes retained-descriptor
+acceptance with link count still 2. It never stops, reads or alters a host service.
+The original manager/cgroup fixtures remain explicitly synthetic.
+
+Constructor/source/database/SQLite failures now produce typed HOLD diagnostics.
+Snapshot attempts live in an exclusive directory under the explicit destination
+parent; failure removes the whole attempt. Publication is a non-overwriting link
+only after stopped-state and live-source validation; an existing destination is
+never deleted. Primary `systemd/private` and fallback bus sockets receive actual
+peer-UID checks plus inode checks before and after the pinned systemctl command.
+The manager's Result=success classifies configured successful exits and ordinary
+SIGTERM stops as clean; actual exit code/status remain retained facts. No result
+settles an earlier UNKNOWN effect.
+
+Publication reuses the unchanged core's tar-error tuple. Its strict role-bounded
+copy loop is retained deliberately: `store_core._copy` uses a different global
+1GiB bound, while a commit object requires 1MiB and must refuse growth at that
+limit. The scratch location is now fixed `/run/heterodyne-deploy-publication`,
+opened through the existing protected descriptor walk and required to be owned
+by the producer UID with mode0700 and protected ancestors. Missing provisioning
+refuses. Anonymous mode0600 temporary files use that descriptor anchor, never
+ambient TMPDIR, and no needless durability fsync is claimed for ephemeral copies.
+Fixtures use an equivalent private directory in their isolated worktree, without
+creating the production directory. This exact runtime directory must join the
+future protected provisioning write set.
+
+The exact final card is checked once against one profile snapshot before HTTPS
+corroboration. The original whole-packet fixture remains byte-identical. Returned
+request/row/parts reuse the checked renderer, and oversized cards cause no network
+read. Duplicate complete-tree parsing remains because the unchanged core returns
+no validated member inventory; that bounded cost is preferred to changing its
+authentication contract or reimplementing Git validation.
+
+Final repair verification: 130 focused tests passed in 4.33s, with Ruff and
+strict source Pyright passing. Source hashes were unchanged throughout the run;
+the exact commands, source hashes and complete logs are retained in
+`deployment-producer-cessation-code/r1-repair/`. The real cgroup test requires
+the qualified Linux host's disposable cgroup/sudo prerequisites; this is not a
+universal portable-suite claim.
+
+The actual quality-delta exits 2: 24 rows, 1 minor, 12 preexisting-worse,
+12 new-symbol and 11 gating. Production constructor complexity was reduced by
+extracting the same capture logic and fixed socket check. Remaining rows report
+class verbosity (215 to 238 lines), renderer churn, test callback reachability
+and short regression-fixture clones. These are retained findings, not a passing
+quality gate or a changed baseline. The causal regression fixtures and explicit
+security checks are preserved for review rather than hidden behind an abstraction
+that changes their evidence. Runtime admission and production authority remain
+unqualified; no protected directory, service or deployment was installed.

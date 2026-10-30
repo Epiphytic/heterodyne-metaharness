@@ -134,3 +134,158 @@ def test_stopped_snapshot_includes_latest_committed_wal_without_restore(invocati
             held.stopped_snapshot(target)
     finally:
         live.close()
+
+
+@pytest.mark.parametrize(
+    "error", [FileNotFoundError(), KeyError("service"), subprocess.TimeoutExpired("show", 5)],
+)
+def test_capture_unavailable_is_typed_hold(monkeypatch, tmp_path, error):
+    def fail(self):
+        raise error
+    monkeypatch.setattr(cessation._AdmindInvocation, "_show", fail)
+    scope = cessation._ManagerScope("missing", 1001, "a" * 64, "b" * 64, "c" * 64, tmp_path / "absent")
+    with pytest.raises(InvalidAction, match="capture-unavailable"):
+        cessation._AdmindInvocation(scope)
+
+
+@pytest.mark.parametrize("code,status", [(1, 0), (1, 42), (2, 15)])
+def test_manager_success_classifies_configured_exit_or_sigterm_clean(invocation, code, status):
+    held, child, fields, _ = invocation
+    child.kill()
+    child.wait(timeout=2)
+    stopped(fields)
+    fields.update(Result="success", ExecMainCode=str(code), ExecMainStatus=str(status))
+    assert held.observe().outcome == "clean"
+
+
+def test_snapshot_missing_source_and_partial_failure_leave_no_destination(invocation, monkeypatch):
+    held, _, _, path = invocation
+    proof = cessation.UnitCessation("unit", "boot", "a" * 32, 1, 1, 2, "/group", "success", 1, 0, "clean")
+    monkeypatch.setattr(held, "observe", lambda: proof)
+    with pytest.raises(InvalidAction, match="snapshot-unavailable"):
+        held.stopped_snapshot(path / "saved.db")
+    assert not (path / "saved.db").exists()
+    source = path / "live.db"
+    source.write_bytes(b"fixture source")
+    held.scope = cessation._ManagerScope("service", os.getuid(), "a" * 64, "b" * 64, "c" * 64, source)
+    original = cessation.Path.stat
+    def protected(self, *args, **kwargs):
+        info = original(self, *args, **kwargs)
+        values = list(info)
+        values[0] &= ~0o022  # synthetic source ancestor custody only
+        return os.stat_result(values)
+    monkeypatch.setattr(cessation.Path, "stat", protected)
+    def fail(source, destination, cancel):
+        destination.write_bytes(b"partial snapshot")
+        raise sqlite3.DatabaseError("synthetic corruption")
+    monkeypatch.setattr(cessation, "wal_snapshot", fail)
+    with pytest.raises(InvalidAction, match="snapshot-unavailable"):
+        held.stopped_snapshot(path / "saved.db")
+    assert not (path / "saved.db").exists() and not list(path.glob(".stopped-*"))
+    def copied(source, destination, cancel):
+        destination.write_bytes(b"complete but invalidated")
+        return {"sha256": "a" * 64, "bytes": 24, "schema": 1}
+    monkeypatch.setattr(cessation, "wal_snapshot", copied)
+    observations = iter([proof, InvalidAction("cessation-live-database-changed")])
+    def invalidated():
+        result = next(observations)
+        if isinstance(result, Exception):
+            raise result
+        return result
+    monkeypatch.setattr(held, "observe", invalidated)
+    with pytest.raises(InvalidAction, match="database-changed"):
+        held.stopped_snapshot(path / "saved.db")
+    assert not (path / "saved.db").exists() and not list(path.glob(".stopped-*"))
+
+
+def test_real_cgroup_populated_empty_and_removed_retained_descriptor():
+    # Only the inspected descriptor observer runs as root, never Product imports
+    # or host service operations. One unique disposable cgroup owns one harmless
+    # fixture child, then both are removed. No existing task is reassigned.
+    import inspect
+    source = (
+        "import os, pathlib, subprocess, signal, uuid, time, json\nfrom pathlib import Path\n"
+        "InvalidAction = ValueError\nclass Probe:\n"
+        + inspect.getsource(cessation._AdmindInvocation._empty_group)
+        + '''
+p = pathlib.Path('/sys/fs/cgroup') / ('heterodyne-proof-' + uuid.uuid4().hex)
+p.mkdir()
+child = None
+fd = -1
+try:
+    fd = os.open(p, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    observer = Probe(); observer.group_fd = fd; observer.before = {'ControlGroup': '/' + p.name}
+    child = subprocess.Popen(['/usr/bin/python3', '-I', '-S', '-c', 'import time; time.sleep(30)'])
+    (p / 'cgroup.procs').write_text(str(child.pid))
+    try: observer._empty_group()
+    except ValueError as error: assert 'populated' in str(error)
+    else: raise AssertionError('live cgroup accepted')
+    child.kill(); child.wait(timeout=3)
+    deadline = time.monotonic() + 3
+    while 'populated 0' not in (p / 'cgroup.events').read_text():
+        assert time.monotonic() < deadline
+        time.sleep(.01)
+    observer._empty_group()
+    p.rmdir()
+    assert os.fstat(fd).st_nlink == 2
+    observer._empty_group()
+    print(json.dumps({'populated_refused': True, 'empty_passed': True,
+                      'removed_retained_passed': True, 'removed_nlink': os.fstat(fd).st_nlink}))
+finally:
+    if child is not None and child.poll() is None: child.kill(); child.wait(timeout=3)
+    if fd >= 0: os.close(fd)
+    if p.exists(): p.rmdir()
+'''
+    )
+    result = subprocess.run(
+        ["/usr/bin/sudo", "-n", "/usr/bin/python3", "-I", "-S", "-c", source],
+        capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert '"removed_retained_passed": true' in result.stdout
+    assert '"removed_nlink": 2' in result.stdout
+
+
+@pytest.mark.parametrize("private_peer_allowed", [True, False])
+def test_primary_private_socket_authenticated_before_systemctl(monkeypatch, tmp_path, private_peer_allowed):
+    # Synthetic transport properties only: asserts the actual reader checks the
+    # primary systemd/private endpoint, plus its possible fallback bus.
+    import stat
+    from types import SimpleNamespace
+    monkeypatch.setattr(cessation.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(cessation.pwd, "getpwnam", lambda user: SimpleNamespace(pw_uid=1001))
+    monkeypatch.setattr(cessation, "stream_hash", lambda path: "a" * 64)
+    info = os.stat_result((stat.S_IFSOCK | 0o600, 11, 12, 1, 1001, 1001, 0, 0, 0, 0))
+    monkeypatch.setattr(cessation.Path, "stat", lambda self, **kwargs: info)
+    connected = []
+    class Socket:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def settimeout(self, value):
+            pass
+        def connect(self, path):
+            self.path = path
+            connected.append(path)
+    monkeypatch.setattr(cessation.socket, "socket", lambda *args: Socket())
+    monkeypatch.setattr(cessation, "peer_credentials_checked", lambda conn: (
+        1, 1001 if private_peer_allowed or not conn.path.endswith("systemd/private") else 7, 1,
+    ))
+    executions = []
+    def show(*args, **kwargs):
+        executions.append(args)
+        return SimpleNamespace(returncode=0, stdout="".join(
+            name + "=fixture\n" for name in cessation._PROPERTIES
+        ).encode())
+    monkeypatch.setattr(cessation.subprocess, "run", show)
+    observer = object.__new__(cessation._AdmindInvocation)
+    observer.scope = cessation._ManagerScope("service", 1001, "a" * 64, "a" * 64, "a" * 64, tmp_path)
+    if private_peer_allowed:
+        observer._show()
+        assert connected == ["/run/user/1001/systemd/private", "/run/user/1001/bus"] * 2
+        assert len(executions) == 1
+    else:
+        with pytest.raises(InvalidAction, match="manager-peer"):
+            observer._show()
+        assert connected == ["/run/user/1001/systemd/private"] and not executions

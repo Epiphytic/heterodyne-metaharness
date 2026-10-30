@@ -42,10 +42,11 @@ def test_exact_noncanonical_operation_and_immutable_outer_card(published):
 
 
 def test_actual_owned_endpoint_bound_refuses_before_post(published, monkeypatch):
-    raw, url, archive, commit, _, _, _ = published
+    raw, url, archive, commit, reads, _, _ = published
     monkeypatch.setattr(authority, "_rendering", lambda: ((), 1000))
     with pytest.raises(InvalidAction, match="single-part|transport-bound"):
         _prepare(raw, (TARGET,), H, url, archive, commit)
+    assert reads == []
 
 
 def test_no_caller_written_card_or_unpublished_packet(published):
@@ -65,3 +66,15 @@ def test_fixed_native_interop_fixture_matches_actual_renderer_and_git(published)
     prepared = _prepare(original, (TARGET,), H, url, archive, commit)
     observed = {k: v.hex() if isinstance(v, bytes) else v for k, v in vars(prepared).items()}
     assert observed == fixture["prepared"]
+
+
+def test_one_owned_rendering_profile_snapshot(published, monkeypatch):
+    raw, url, archive, commit, _, _, _ = published
+    original = authority._rendering
+    calls = []
+    def profile():
+        calls.append(True)
+        return original()
+    monkeypatch.setattr(authority, "_rendering", profile)
+    _prepare(raw, (TARGET,), H, url, archive, commit)
+    assert len(calls) == 1
