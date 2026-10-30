@@ -622,8 +622,11 @@ class SandboxRuntime:
             # server restart and adopts medium from the new home even after a high turn.
             # Keep the CLI capability scoped to the tested version/effort. Verify the
             # journal-pinned install before any retained-generation cleanup.
-            if effort == "medium" and self._cli(adapter, spec).manifest.version == "0.160.0":
-                return
+            if effort == "medium" and prev is not None:
+                installed = self._cli(adapter, spec)
+                if (installed.manifest.version == "0.160.0"
+                        and (prev.install_name, prev.install_digest) == (installed.name, installed.digest)):
+                    return
             raise LaunchFailed("typed Codex reasoning on native resume is not qualified")
 
     def stop(self, session_key: str) -> None:
