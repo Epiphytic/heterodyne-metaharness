@@ -1,0 +1,53 @@
+{
+  "source_commit": "c25ac16c613c02177436cf0e63b2569be82883ae",
+  "source_tree": "daae1b6a1bd424bccb0352012fbfc5b3b9bac7c2",
+  "frozen_round2_head": "8b4d7885ed274cab95de950530ec441e388fc675",
+  "original_base": "67ce2df8acdb00e6a698f90bccc450bc32137a63",
+  "review_round1": "CHANGES REQUESTED, actual built-in HIGH; preserved",
+  "review_round2": "REQUEST CHANGES, actual built-in HIGH; preserved",
+  "next_gate": "cumulative round3 MEDIUM exact operator PoC question, controller only",
+  "files": {
+    "docs/adr/0001-workstreams-v2.md": "544dcab2a6c30e6af32b87426eb6406b0347897b4a7bf90b4a708bb79db9515d",
+    "docs/configuration.md": "1c42c0fdc449c65afeed7f2878be4c633c4d7cc548729e4b6e7a2d53c0cd2edb",
+    "src/heterodyne/config/layers.py": "e047a040dab19f902c2a29fe9df02215a17938c342a543a07ca845f257e3f045",
+    "src/heterodyne/sandbox/runtime.py": "199835ede03c1471041839cfd1704ae4ea9b80c965b8908ba154bb5e33a7d26f",
+    "tests/test_codex_reasoning_profile.py": "a99506f1a6b4fdc1976d9e89d9115bf8d866c56fb6cd20d6d591ee94f581a9fe",
+    "tests/test_sandbox_runtime.py": "4197f7c774cc45224fb1d0c46569030db954963cd27133ef2df76e8f4e9d4221"
+  },
+  "logs": {
+    "pyright.log": "8eee6ada9f0e06449d4d87e2896b97b5b67086549368e2f48b5adb219d1044e6",
+    "config-accounts.log": "ffbf5ec2cfae202dbc4a272c407f3f7252c8f2ef2b2706d92a53f89708094e6d",
+    "quality-parent-delta.txt": "010d1486f4440de2ac6c5597abd1e06e0b12b7a0fd75559adf2ed2a23c8cb132",
+    "runtime-suite.log": "964277e3f49f293c2761d9f38f1c6f48e20bf18bcd15ce0d144b268f47b4307f",
+    "focused.log": "a2172d02cde2bace484e93e72d423e45bf96134cd8c56dc7b8f90cba878eba03",
+    "ruff.log": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
+  },
+  "results": {
+    "focused": "23 passed,271 deselected in14.62s",
+    "config_adapter_content_accounts": "416 passed in8.40s",
+    "runtime": "279 passed in492.64s",
+    "ruff": "4changedPythonfiles PASS",
+    "pyright": "0errors0warnings0informations; missing local.venv discovery notice disclosed",
+    "quality_delta": "exit2;3reviewfixchurn+runtimeclass1367to1381LOC; no clearance",
+    "hooks": "PASS",
+    "diff_check": "PASS"
+  },
+  "commands": {
+    "test_env": "${OPERATOR_HOME}/repos/heterodyne-metaharness-v2/.venv",
+    "runtime": "PYTHONPATH=src $TEST_ENV/bin/python -m pytest tests/test_sandbox_runtime.py -q",
+    "focused": "PYTHONPATH=src $TEST_ENV/bin/python -m pytest tests/test_codex_reasoning_profile.py tests/test_sandbox_runtime.py -k reasoning -q",
+    "config": "PYTHONPATH=src $TEST_ENV/bin/python -m pytest tests/test_codex_reasoning_profile.py tests/test_agents_adapters.py tests/test_agents_content.py tests/test_config.py tests/test_config_accounts.py tests/test_wsd_accounts.py -q",
+    "ruff": "$TEST_ENV/bin/ruff check src/heterodyne/config/layers.py src/heterodyne/sandbox/runtime.py tests/test_codex_reasoning_profile.py tests/test_sandbox_runtime.py",
+    "pyright": "$TEST_ENV/bin/pyright --pythonpath $TEST_ENV/bin/python src/heterodyne/config/layers.py src/heterodyne/sandbox/runtime.py tests/test_codex_reasoning_profile.py tests/test_sandbox_runtime.py",
+    "quality": "ripwire src/heterodyne --quality-delta (uncommitted source vs frozen8b4)"
+  },
+  "actual_native_resume_reasoning_qualified": false,
+  "actual_openshell_isolation_qualified": false,
+  "raw_capture_sha256": {
+    "r2-actual-start.json": "999ad9883659a612ba162112bb67d585e374438d4fe4b4eda6d03d00c9eed229",
+    "r2-actual-result.json": "c7c30e24410027032c70e2b873e7cdcbc2f7064b7b6378592d2cb7f1b25b7fd9",
+    "pyright.log": "0544e734db490342a1cfe9571f034a3c08e32fe0576e8216ec903326567a03e9",
+    "qualification-receipt.json": "d231c34457fade0b6603313797ee4d80741980d28264601faf9d7ca9d5d8888c"
+  },
+  "published_invocation_copies": "Home prefix replaced by ${OPERATOR_HOME}; exact raw originals retained privately by controller and pinned in r2-actual-artifact-hashes.json"
+}

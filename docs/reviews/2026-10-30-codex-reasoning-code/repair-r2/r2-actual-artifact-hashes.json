@@ -1,0 +1,22 @@
+{
+  "oizoh-codex-reasoning-r2-high-20261030.log": {
+    "sha256": "d49510151b45440386e3ad8d812b4e40049c8de44a7d228c59f258ecc1a1f9fb",
+    "bytes": 2857
+  },
+  "oizoh-codex-reasoning-r2-high-20261030-start.json": {
+    "sha256": "999ad9883659a612ba162112bb67d585e374438d4fe4b4eda6d03d00c9eed229",
+    "bytes": 12008
+  },
+  "oizoh-codex-reasoning-r2-high-20261030-result.json": {
+    "sha256": "c7c30e24410027032c70e2b873e7cdcbc2f7064b7b6378592d2cb7f1b25b7fd9",
+    "bytes": 5551
+  },
+  "oizoh-codex-reasoning-r2-high-20261030-stderr.log": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  "oizoh-codex-reasoning-r2-high-20261030-stream.jsonl": {
+    "sha256": "4aaf42349c152556b1c187d3277653d949cfcc1cad24fda62e3207e274311a17",
+    "bytes": 269227
+  }
+}
