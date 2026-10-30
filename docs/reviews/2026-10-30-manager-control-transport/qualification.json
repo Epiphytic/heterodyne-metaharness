@@ -1,0 +1,60 @@
+{
+  "base": "a3da7b0edcb59c485f13e00760d5210169ab470f",
+  "files": {
+    "src/heterodyne/session/shim.py": "d8483478e2589b8d93b453eb3aabf071ceabfba1382e9393eae8a79028c1fd7a",
+    "src/heterodyne/session/server.py": "0a51570ddbe5c06403934111db4d31da868e518c823c50c1fe903b27e9ec22ac",
+    "src/heterodyne/session/control.py": "135b4508ee2839cbee528b69345a4d5b024b4623c747d940c88f61286aa687cb",
+    "src/heterodyne/sandbox/spec.py": "988cb1753df270aa70de653a2c3c5ae7f952f1ea4a76b7159d596d77f782221d",
+    "src/heterodyne/sandbox/runtime.py": "5130166e5ffa1b50f8125036a66275252f3f6444d9017f26af1e138284c37de3",
+    "tests/test_manager_control.py": "8dd7bc9a70048fa1cb487a16dd93cd67707edca8c71fe9b7dbdfabf968b4d19a"
+  },
+  "PYTHONPATH": "src",
+  "exit_code": 0,
+  "elapsed_seconds": 1029.815251282882,
+  "source_unchanged": true,
+  "checks": [
+    {
+      "command": [
+        "ruff",
+        "check",
+        "src/heterodyne/session/shim.py",
+        "src/heterodyne/session/server.py",
+        "src/heterodyne/session/control.py",
+        "src/heterodyne/sandbox/spec.py",
+        "src/heterodyne/sandbox/runtime.py",
+        "tests/test_manager_control.py"
+      ],
+      "exit_code": 0,
+      "log": "ruff.log"
+    },
+    {
+      "command": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "exit_code": 0,
+      "log": "diff-check.log"
+    },
+    {
+      "command": [
+        "ripwire",
+        "src",
+        "--quality-delta"
+      ],
+      "exit_code": 2,
+      "log": "quality.log"
+    }
+  ],
+  "command_display": [
+    "pytest",
+    "-q",
+    "tests/test_manager_control.py",
+    "tests/test_session_server.py",
+    "tests/test_session_shim.py",
+    "tests/test_sandbox_runtime.py",
+    "tests/test_sandbox_live_teardown.py"
+  ],
+  "command_note": "Runner path shown by portable alias; exact invoked argv retained privately. This is not an exact shell command.",
+  "exact_private_receipt_sha256": "6e0d558a7a48c4e5c15fc77506d6c7b3bc3df13a2fae7d52de005162f526ca11"
+}

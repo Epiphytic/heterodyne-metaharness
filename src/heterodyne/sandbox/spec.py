@@ -114,6 +114,12 @@ class SessionLayout:
     def probe_socket(self, generation: int) -> Path:
         return self.run(generation) / "p.sock"
 
+    def control(self, generation: int) -> Path:
+        """Protected host journal: never inside a home, bridge, git or run bind."""
+        if type(generation) is not int or generation < 1:
+            raise ValueError("invalid manager generation")
+        return self.root / f"r{generation}-manager-control"
+
     def events(self, generation: int) -> Path:
         return self.root / f"r{generation}-events.jsonl"
 
