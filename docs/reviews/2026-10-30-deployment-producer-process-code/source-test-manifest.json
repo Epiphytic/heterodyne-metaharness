@@ -1,0 +1,74 @@
+{
+  "schema": "source-only-qualification.v1",
+  "base": "6ac40e353c85346e3c23c943057a964d7057b458",
+  "source_sha256": {
+    "src/heterodyne/actions/deployment_producer_process.py": "c4b2ceb3b5903c40c89cf34b07cc1dffc0ca6b09d4fc09469edd9fd37be5904c",
+    "tests/test_deployment_producer_process.py": "e974ace515fd5923e4e048401b3623574bd9afdc0d26800fd2d31c1d3eb4c103",
+    "tests/fixtures/deployment-card/owned-process-v1.json": "8ff2adb909be00ebe600b4cd1f4f651de5859f8d424a17f0ae6f6f6b886f9baa"
+  },
+  "source_unchanged": true,
+  "environment": {
+    "PYTHONPATH": "src:tests",
+    "PYTHONDONTWRITEBYTECODE": "unset"
+  },
+  "checks": [
+    {
+      "name": "focused-tests",
+      "argv_template": [
+        "${HOST_HOME}/repos/heterodyne-deployment-step1-20261029/.venv/bin/python",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/test_deployment_step1.py",
+        "tests/test_deployment_outage.py",
+        "tests/test_deployment_host_store.py",
+        "tests/test_deployment_outage_journal.py",
+        "tests/test_deployment_publication.py",
+        "tests/test_deployment_card.py",
+        "tests/test_deployment_cessation.py",
+        "tests/test_deployment_producer_process.py"
+      ],
+      "raw_argv_sha256": "6ef6767364bc979896832dc54db7970ddbe2960f2025bc56cc73f15c6e3071ad",
+      "exit": 0,
+      "log_sha256": "bec824904f731a5ca6f7ebd36971cb48a9222e329198705489a1e84937d96eca"
+    },
+    {
+      "name": "ruff",
+      "argv_template": [
+        "${HOST_HOME}/repos/heterodyne-deployment-step1-20261029/.venv/bin/ruff",
+        "check",
+        "src/heterodyne/actions/deployment_producer_process.py",
+        "tests/test_deployment_producer_process.py"
+      ],
+      "raw_argv_sha256": "7e70918e863272d5a64437ba03a09f484f4c4e6a9a1c0f64db137be6b4054657",
+      "exit": 0,
+      "log_sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
+    },
+    {
+      "name": "pyright",
+      "argv_template": [
+        "${HOST_HOME}/repos/heterodyne-deployment-step1-20261029/.venv/bin/pyright",
+        "--pythonpath",
+        "${HOST_HOME}/repos/heterodyne-deployment-step1-20261029/.venv/bin/python",
+        "src/heterodyne/actions/deployment_producer_process.py"
+      ],
+      "raw_argv_sha256": "7275856a2ad8c8efdaab951089b7344d8b99759542c11cd2f998951864c9626f",
+      "exit": 0,
+      "log_sha256": "72d2aa0dcc0387b0ca03df6f0b171fea90d6e39de875579bd2b39d9b4e6d92ff",
+      "raw_log_sha256": "544ee3e344ea6586705f30f1cfa639beec0c7202a57b770b7f676efa6bc0a63f",
+      "log_path_substitution": "Public log replaces exact host-home prefix with ${HOST_HOME}; raw log preserved privately with above SHA256."
+    },
+    {
+      "name": "quality-delta",
+      "argv_template": [
+        "ripwire",
+        ".",
+        "--quality-delta"
+      ],
+      "raw_argv_sha256": "617b1d965fbf79079b0f4a3e4f2ad51864f82601b06f6a439a973ef53e30125a",
+      "exit": 2,
+      "log_sha256": "ee60f6ca0c85d1694c8d82614cb92dff626cb1a4394525778e30688384ec0482"
+    }
+  ],
+  "limits": "Actual isolated child/ownedFD/Git mechanics. Synthetic HTTPS/rendering profile; no enrolled launcher/runtime closure/native consent/permit authority."
+}
