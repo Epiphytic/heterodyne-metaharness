@@ -1,0 +1,11 @@
+[
+  "${HOST_HOME}/.local/bin/codex",
+  "resume",
+  "01a18df1-ff11-7d22-a630-24a023958ca8",
+  "--remote",
+  "unix:///tmp/oizoh-codex-change-20261030.sock",
+  "--model",
+  "gpt-6.1-sol",
+  "--no-alt-screen",
+  "Respond exactly REMOTE_RESUMED_9428. Do not use any tools, inspect files or change anything."
+]

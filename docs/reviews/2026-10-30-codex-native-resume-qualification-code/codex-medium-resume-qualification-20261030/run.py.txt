@@ -1,0 +1,18 @@
+from pathlib import Path
+import os,subprocess,json,hashlib
+r=Path(__file__).parent
+env=dict(os.environ);env['CODEX_HOME']=str(r/'home')
+common=['--ignore-user-config','--ignore-rules','--json','--model','gpt-6.1-sol','-c','model_reasoning_effort="medium"','-c','approval_policy="never"','-c','project_doc_max_bytes=0']
+argv=['codex','exec','--sandbox','read-only',*common,'Respond exactly QUALIFICATION_START_4831. Do not use any tools, inspect files, or modify anything.']
+(r/'fresh-argv.json').write_text(json.dumps(argv,indent=2)+'\n')
+with (r/'fresh.jsonl').open('xb') as o,(r/'fresh.stderr').open('xb') as e: p=subprocess.run(argv,cwd=r/'work',env=env,stdout=o,stderr=e,timeout=180)
+events=[json.loads(line) for line in (r/'fresh.jsonl').read_text().splitlines()]
+ids=[e['thread_id'] for e in events if e.get('type')=='thread.started']
+print(json.dumps({'stage':'fresh','exit':p.returncode,'threads':ids,'events':len(events)}),flush=True)
+if p.returncode or len(ids)!=1:raise SystemExit(1)
+argv=['codex','exec','resume',*common,ids[0],'Respond exactly QUALIFICATION_RESUME_9264. Do not use any tools, inspect files, or modify anything.']
+(r/'resume-argv.json').write_text(json.dumps(argv,indent=2)+'\n')
+with (r/'resume.jsonl').open('xb') as o,(r/'resume.stderr').open('xb') as e:p=subprocess.run(argv,cwd=r/'work',env=env,stdout=o,stderr=e,timeout=180)
+events=[json.loads(line) for line in (r/'resume.jsonl').read_text().splitlines()]
+print(json.dumps({'stage':'resume','exit':p.returncode,'events':len(events)}),flush=True)
+(r/'result.json').write_text(json.dumps({'resume_exit':p.returncode,'thread_id':ids[0]},indent=2)+'\n')

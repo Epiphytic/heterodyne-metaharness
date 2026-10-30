@@ -2520,7 +2520,7 @@ def test_codex_typed_reasoning_is_seeded_before_sandbox_create(
 def test_typed_reasoning_native_continuation_holds_before_cleanup(
         rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch, requested_resume: bool) -> None:
     profiles = cast(dict[str, Any], rig.runtime.c.settings.profiles)
-    profiles["p-two"] = dict(profiles["p-two"], reasoning_effort="medium")
+    profiles["p-two"] = dict(profiles["p-two"], reasoning_effort="high")
     spec = launch_spec(rig, "p-two")
     started = rig.runtime.launch(spec)
     # Idempotent readback of a live native session remains allowed.
@@ -2555,7 +2555,7 @@ def test_typed_reasoning_dead_generation_is_retained_until_explicit_stop(
                     wip_mark="retained-wip" if integrity == "wip" else "")
     write_record(layout, prior)
     profiles = cast(dict[str, Any], rig.runtime.c.settings.profiles)
-    profiles["p-two"] = dict(profiles["p-two"], reasoning_effort="medium")
+    profiles["p-two"] = dict(profiles["p-two"], reasoning_effort="high")
     retained = layout.record.read_bytes()
     deleted = list(rig.backend.deleted)
     created = list(rig.backend.created)
@@ -2600,4 +2600,131 @@ def test_typed_reasoning_handoff_is_fresh_but_missing_state_is_not(
     with pytest.raises(RuntimeUnavailable, match="resumable state can't be found"):
         rig.runtime.launch(replace(spec, generation=2))
     rig.runtime.launch(replace(spec, generation=2, handoff=True))
+    assert record(rig, spec.session_key).generation == 2
+
+
+@pytest.mark.parametrize("requested_resume", [False, True])
+@pytest.mark.parametrize("model", ["gpt-6.1-sol", "fixture-model"])
+def test_qualified_codex_resume_adopts_medium_after_high(
+        rig: RuntimeRig, requested_resume: bool, model: str) -> None:
+    profiles = cast(dict[str, Any], rig.runtime.c.settings.profiles)
+    profiles["p-two"] = dict(profiles["p-two"], model=model, reasoning_effort="high")
+    spec = launch_spec(rig, "p-two")
+    first = rig.runtime.launch(spec)
+    layout = rig.runtime.layout(spec.session_key)
+    first_config = tomllib.loads((layout.home / ".codex" / "config.toml").read_text())
+    assert first_config["model_reasoning_effort"] == "high"
+    rig.runtime.stop(spec.session_key)
+    profiles["p-two"] = dict(profiles["p-two"], reasoning_effort="medium")
+    second = rig.runtime.launch(replace(spec, generation=2, resume=requested_resume,
+                                       native_id=first.native_id))
+    assert second.native_id == first.native_id
+    layout = rig.runtime.layout(spec.session_key)
+    assert record(rig, spec.session_key).generation == 2
+    config = tomllib.loads((layout.home / ".codex" / "config.toml").read_text())
+    assert config["model_reasoning_effort"] == "medium"
+
+
+@pytest.mark.parametrize("integrity", ["unlanded", "wip"])
+def test_qualified_reasoning_resume_preserves_integrity_holds(
+        rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch, integrity: str) -> None:
+    profiles = cast(dict[str, Any], rig.runtime.c.settings.profiles)
+    profiles["p-two"] = dict(profiles["p-two"], model="gpt-6.1-sol", reasoning_effort="medium")
+    spec = launch_spec(rig, "p-two")
+    first = rig.runtime.launch(spec)
+    rig.runtime.stop(spec.session_key)
+    layout = rig.runtime.layout(spec.session_key)
+    prior = record(rig, spec.session_key)
+    write_record(layout, msgspec.structs.replace(prior, unlanded=integrity == "unlanded",
+                                               wip_mark="retained-wip" if integrity == "wip" else ""))
+    retained = layout.record.read_bytes()
+
+    def unexpected(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("an integrity hold must precede cleanup and install qualification")
+
+    monkeypatch.setattr(rig.runtime, "_end", unexpected)
+    monkeypatch.setattr(rig.runtime, "_cli", unexpected)
+    error = RuntimeUnavailable if integrity == "unlanded" else LaunchFailed
+    with pytest.raises(error, match="commits were not landed|lifetime WIP commit is still owed"):
+        rig.runtime.launch(replace(spec, generation=2, native_id=first.native_id))
+    assert layout.record.read_bytes() == retained
+
+
+@pytest.mark.parametrize("field,value", [("install_name", "another-install"),
+                                         ("install_digest", "0" * 64)])
+def test_medium_resume_requires_previous_install_identity(
+        rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch, field: str, value: str) -> None:
+    profiles = cast(dict[str, Any], rig.runtime.c.settings.profiles)
+    profiles["p-two"] = dict(profiles["p-two"], reasoning_effort="medium")
+    spec = launch_spec(rig, "p-two")
+    first = rig.runtime.launch(spec)
+    rig.runtime.stop(spec.session_key)
+    layout = rig.runtime.layout(spec.session_key)
+    prior = record(rig, spec.session_key)
+    write_record(layout, msgspec.structs.replace(prior, **{field: value}))
+    retained = layout.record.read_bytes()
+
+    def unexpected(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("changed install must refuse before retained cleanup")
+
+    monkeypatch.setattr(rig.runtime, "_end", unexpected)
+    with pytest.raises(LaunchFailed, match="native resume is not qualified"):
+        rig.runtime.launch(replace(spec, generation=2, native_id=first.native_id))
+    assert layout.record.read_bytes() == retained
+
+
+@pytest.mark.parametrize("effort,version", [("low", "0.160.0"), ("medium", "0.166.0")])
+def test_unqualified_resume_capability_refuses_before_cleanup(
+        rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch, effort: str, version: str) -> None:
+    profiles = cast(dict[str, Any], rig.runtime.c.settings.profiles)
+    profiles["p-two"] = dict(profiles["p-two"], reasoning_effort=effort)
+    spec = launch_spec(rig, "p-two")
+    first = rig.runtime.launch(spec)
+    rig.runtime.stop(spec.session_key)
+    layout = rig.runtime.layout(spec.session_key)
+    retained = layout.record.read_bytes()
+    original_cli = rig.runtime._cli
+
+    def different_version(*args: Any, **kwargs: Any) -> Any:
+        installed = original_cli(*args, **kwargs)
+        return replace(installed, manifest=replace(installed.manifest, version=version))
+
+    def unexpected(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("unqualified capability must refuse before cleanup")
+
+    monkeypatch.setattr(rig.runtime, "_cli", different_version)
+    monkeypatch.setattr(rig.runtime, "_end", unexpected)
+    with pytest.raises(LaunchFailed, match="native resume is not qualified"):
+        rig.runtime.launch(replace(spec, generation=2, native_id=first.native_id))
+    assert layout.record.read_bytes() == retained
+
+
+def test_qualified_medium_crashed_generation_verifies_install_before_cleanup(
+        rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch) -> None:
+    profiles = cast(dict[str, Any], rig.runtime.c.settings.profiles)
+    profiles["p-two"] = dict(profiles["p-two"], reasoning_effort="high")
+    spec = launch_spec(rig, "p-two")
+    first = rig.runtime.launch(spec)
+    prior = record(rig, spec.session_key)
+    rig.tmux.kill(prior.tmux_session)
+    profiles["p-two"] = dict(profiles["p-two"], reasoning_effort="medium")
+    observed: list[str] = []
+    original_cli, original_end = rig.runtime._cli, rig.runtime._end
+
+    def checked_cli(*args: Any, **kwargs: Any) -> Any:
+        installed = original_cli(*args, **kwargs)
+        observed.append("verified")
+        return installed
+
+    def checked_end(*args: Any, **kwargs: Any) -> Any:
+        assert observed and observed[0] == "verified"
+        observed.append("cleanup")
+        return original_end(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(rig.runtime, "_cli", checked_cli)
+        patch.setattr(rig.runtime, "_end", checked_end)
+        second = rig.runtime.launch(replace(spec, generation=2, native_id=first.native_id))
+    assert second.native_id == first.native_id
+    assert observed.index("verified") < observed.index("cleanup")
     assert record(rig, spec.session_key).generation == 2

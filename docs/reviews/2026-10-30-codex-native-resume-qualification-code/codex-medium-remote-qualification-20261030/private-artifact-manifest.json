@@ -1,0 +1,38 @@
+{
+  "fresh-argv.json": {
+    "sha256": "d3544f4e7324ab09ecba430d06a83f460ff017c224cafe31e60288824e0cae95",
+    "bytes": 299
+  },
+  "fresh.screen": {
+    "sha256": "2a8e9d76430d56bebdb76dc0d64763799fc16a8a7018581548f4bd5d1c31d2cf",
+    "bytes": 6854
+  },
+  "qualified-result.json": {
+    "sha256": "458be456e4c4af7dcc775089f2afb7be2728bba59db94309d272f36d04a7990e",
+    "bytes": 953
+  },
+  "result.json": {
+    "sha256": "c836ccaed57f1906120a1490a7539aec88edfe86848c693ac92adc0394616608",
+    "bytes": 696
+  },
+  "resume-argv.json": {
+    "sha256": "e4b93fac78c8d0b10c7820987f21406844f0008c865a80e2e879eac4367467ec",
+    "bytes": 307
+  },
+  "resume.screen": {
+    "sha256": "524b5ec844255f881d43d4c58f07df019cc96f559ceb34e897725bfa5373f8db",
+    "bytes": 7242
+  },
+  "run.py": {
+    "sha256": "40a5b13f18e42a6649365920a4064c12dfbb3558a34dc41521c3b4647864dd77",
+    "bytes": 3735
+  },
+  "server-argv.json": {
+    "sha256": "207e9754b27cd22f7a8b3979a797f68f33cb9fc4f984bc4b62b8682f66066f14",
+    "bytes": 120
+  },
+  "server.log": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  }
+}

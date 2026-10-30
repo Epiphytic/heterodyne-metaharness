@@ -1,0 +1,48 @@
+{
+  "thread_id": "01a18df1-ff11-7d22-a630-24a023958ca8",
+  "contexts": [
+    {
+      "turn_id": "01a18df1-ff25-7641-891e-fa498b77f143",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "approval_policy": "never",
+      "sandbox_policy": {
+        "type": "danger-full-access"
+      }
+    },
+    {
+      "turn_id": "01a18df2-3f0a-7841-938b-7ea04891f8b0",
+      "model": "gpt-6.1-sol",
+      "effort": "medium",
+      "approval_policy": "never",
+      "sandbox_policy": {
+        "type": "danger-full-access"
+      }
+    }
+  ],
+  "answers": [
+    {
+      "type": "task_complete",
+      "root_turn_id": "01a18df1-ff25-7641-891e-fa498b77f143",
+      "turn_id": "01a18df1-ff25-7641-891e-fa498b77f143",
+      "last_agent_message": "REMOTE_FRESH_8371",
+      "started_at": 1793382809,
+      "completed_at": 1793382812,
+      "duration_ms": 2810,
+      "time_to_first_token_ms": 2707
+    },
+    {
+      "type": "task_complete",
+      "root_turn_id": "01a18df2-3f0a-7841-938b-7ea04891f8b0",
+      "turn_id": "01a18df2-3f0a-7841-938b-7ea04891f8b0",
+      "last_agent_message": "REMOTE_RESUMED_9428",
+      "started_at": 1793382825,
+      "completed_at": 1793382828,
+      "duration_ms": 2269,
+      "time_to_first_token_ms": 2173
+    }
+  ],
+  "rollout_sha256": "db33c55508e121acf319b4224c9b4c1eb8fa970dc41b42a260acf7df21fad9a4",
+  "version": "codex-cli 0.166.0",
+  "pass": true
+}

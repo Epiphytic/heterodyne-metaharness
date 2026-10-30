@@ -1,0 +1,8 @@
+[
+  "codex",
+  "exec",
+  "--sandbox",
+  "read-only",
+  "--json",
+  "Respond exactly QUALIFICATION_START_4831. Do not use any tools, inspect files, or modify anything."
+]

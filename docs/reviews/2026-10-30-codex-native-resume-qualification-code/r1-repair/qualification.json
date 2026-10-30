@@ -1,0 +1,23 @@
+{
+  "base": "201d4ff53a005a2d23379a12708cea11a669fdfa",
+  "files": {
+    "src/heterodyne/sandbox/runtime.py": "462c80a3c3a1c6843278c74ead3e4291a92e31891a9a73b51512131c403df18c",
+    "tests/test_sandbox_runtime.py": "f09fc3ce2be960eb63731fee654e082342963d605cdbe032b517f1d1cced65b9"
+  },
+  "focused": "19 PASS71.33s",
+  "ruff": "PASS",
+  "strict_pyright": "PASS",
+  "full_runtime": {
+    "source_head": "61065df8e888e10cc935b4847d3ca833fb51dacb",
+    "command": "PYTHONPATH=src:tests .venv/bin/pytest -q tests/test_sandbox_runtime.py",
+    "result": "PASS",
+    "tests": 290,
+    "elapsed_seconds": 933.59,
+    "source_hashes_unchanged": true
+  },
+  "quality": "exit2, <quality-delta baseline=\"git-HEAD\" regressions=\"19\" minor=\"3\" acked=\"0\" preexisting-worse=\"12\" new-symbol=\"7\" gating=\"9\" at=\"201d4ff53+dirty\">",
+  "limits": [
+    "Actual network proof is recorded model only; runtime qualification is CLI adoption, not every model.",
+    "No OpenShell custody, new host effect, deployment or live workstream transition."
+  ]
+}

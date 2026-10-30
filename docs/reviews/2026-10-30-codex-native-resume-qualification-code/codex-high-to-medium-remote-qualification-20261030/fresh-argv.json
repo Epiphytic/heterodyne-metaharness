@@ -1,0 +1,10 @@
+[
+  "${HOST_HOME}/.local/bin/codex",
+  "--remote",
+  "unix:///tmp/oizoh-codex-change-20261030.sock",
+  "--dangerously-bypass-approvals-and-sandbox",
+  "--model",
+  "gpt-6.1-sol",
+  "--no-alt-screen",
+  "Respond exactly REMOTE_FRESH_8371. Do not use any tools, inspect files or change anything."
+]

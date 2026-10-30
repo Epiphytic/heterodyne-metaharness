@@ -1,0 +1,23 @@
+{
+  "rollout_sha256": "a904a24f9995547c5c2d4361cb0503b6266bb51b35df09d4707a96b961445b2f",
+  "contexts": [
+    {
+      "turn_id": "01a18df0-0480-73e1-823d-aa5886b8715d",
+      "model": "gpt-6.1-sol",
+      "effort": "medium",
+      "approval_policy": "never",
+      "sandbox_policy": {
+        "type": "read-only"
+      }
+    },
+    {
+      "turn_id": "01a18df0-191e-7202-b777-1b2fc717cab4",
+      "model": "gpt-6.1-sol",
+      "effort": "medium",
+      "approval_policy": "never",
+      "sandbox_policy": {
+        "type": "read-only"
+      }
+    }
+  ]
+}

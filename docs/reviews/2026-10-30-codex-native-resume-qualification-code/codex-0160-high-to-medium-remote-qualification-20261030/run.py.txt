@@ -1,0 +1,65 @@
+from pathlib import Path
+import os,subprocess,json,time,signal,hashlib,pexpect
+r=Path(__file__).parent
+env=dict(os.environ);env['CODEX_HOME']=str(r/'home');env['TERM']='xterm-256color'
+socket='/tmp/oizoh-codex-0160-20261030.sock'
+if Path(socket).exists():raise SystemExit('owned socket unexpectedly exists; inspect first')
+exe=str(r.parent/'codex-0160-qualification-binary-20261030/codex-x86_64-unknown-linux-musl')
+serverargv=[exe,'app-server','--listen','unix://'+socket]
+(r/'server-argv.json').write_text(json.dumps(serverargv,indent=2)+'\n')
+serverlog=(r/'server.log').open('xb');server=subprocess.Popen(serverargv,cwd=r/'work',env=env,stdin=subprocess.DEVNULL,stdout=serverlog,stderr=subprocess.STDOUT,start_new_session=True)
+children=[]
+try:
+ for _ in range(100):
+  if Path(socket).exists():break
+  if server.poll() is not None:raise RuntimeError('server exited')
+  time.sleep(.1)
+ else:raise RuntimeError('server socket timeout')
+ def run(stage,thread=None):
+  prompt='Respond exactly '+('REMOTE_FRESH_8371' if thread is None else 'REMOTE_RESUMED_9428')+'. Do not use any tools, inspect files or change anything.'
+  argv=[exe]+(['resume',thread] if thread else [])+['--remote','unix://'+socket]+([] if thread else ['--dangerously-bypass-approvals-and-sandbox'])+['--model','gpt-6.1-sol','--no-alt-screen',prompt]
+  (r/(stage+'-argv.json')).write_text(json.dumps(argv,indent=2)+'\n')
+  with (r/(stage+'.screen')).open('x') as log:
+   child=pexpect.spawn(argv[0],argv[1:],cwd=str(r/'work'),env=env,encoding='utf-8',timeout=120,dimensions=(45,150));children.append(child);child.logfile=log
+   while True:
+    found=child.expect(['REMOTE_FRESH_8371' if thread is None else 'REMOTE_RESUMED_9428','Do you trust','Press enter to continue',pexpect.EOF,pexpect.TIMEOUT])
+    if found==0:
+     # Prompt echo is not answer proof; authoritative native rollout is checked below.
+     time.sleep(15);break
+    if found==1:child.sendline('y')
+    elif found==2:child.sendline('')
+    else:raise RuntimeError(stage+' no response/prompt')
+   child.sendcontrol('c');time.sleep(.5);child.sendcontrol('c')
+   try:child.expect(pexpect.EOF,timeout=8)
+   except pexpect.TIMEOUT:child.terminate(force=True)
+   child.close()
+ def records():
+  paths=list((r/'home/sessions').rglob('*.jsonl'))
+  return [(p,[json.loads(line) for line in p.read_text().splitlines()]) for p in paths]
+ run('fresh')
+ allrecords=records()
+ if len(allrecords)!=1:raise RuntimeError('expected one native session')
+ path,events=allrecords[0];thread=next(e['payload']['id'] for e in events if e.get('type')=='session_meta')
+ os.killpg(server.pid,signal.SIGTERM);server.wait(timeout=8);serverlog.close()
+ (r/'home/config.toml').write_text((r/'home/config.toml').read_text().replace('effort = "high"','effort = "medium"'))
+ (r/'server-resume-argv.json').write_text(json.dumps(serverargv,indent=2)+'\n')
+ serverlog=(r/'server-resume.log').open('xb');server=subprocess.Popen(serverargv,cwd=r/'work',env=env,stdin=subprocess.DEVNULL,stdout=serverlog,stderr=subprocess.STDOUT,start_new_session=True)
+ for _ in range(100):
+  if Path(socket).exists():break
+  if server.poll() is not None:raise RuntimeError('resumed server exited')
+  time.sleep(.1)
+ run('resume',thread)
+ events=[json.loads(line) for line in path.read_text().splitlines()]
+ contexts=[{k:e['payload'].get(k) for k in ['turn_id','model','effort','approval_policy','sandbox_policy']} for e in events if e.get('type')=='turn_context']
+ answers=[e['payload'] for e in events if e.get('type')=='event_msg' and e.get('payload',{}).get('type')=='task_complete']
+ result={'thread_id':thread,'contexts':contexts,'answers':answers,'rollout_sha256':hashlib.sha256(path.read_bytes()).hexdigest(),'version':subprocess.check_output([exe,'--version'],text=True).strip()}
+ result['pass']=len(contexts)>=2 and all(c['model']=='gpt-6.1-sol' for c in contexts) and [c['effort'] for c in contexts]==['high','medium'] and any('REMOTE_FRESH_8371' in str(a) for a in answers) and any('REMOTE_RESUMED_9428' in str(a) for a in answers)
+ (r/'result.json').write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result),flush=True)
+finally:
+ for child in children:
+  if child.isalive():child.terminate(force=True)
+ if server.poll() is None:
+  os.killpg(server.pid,signal.SIGTERM)
+  try:server.wait(timeout=8)
+  except subprocess.TimeoutExpired:os.killpg(server.pid,signal.SIGKILL);server.wait()
+ serverlog.close()
