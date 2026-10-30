@@ -8,6 +8,8 @@ import os
 import sqlite3
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -17,6 +19,8 @@ from heterodyne.actions.codec import InvalidAction
 
 @pytest.fixture
 def invocation(tmp_path, monkeypatch):
+    scratch = tempfile.TemporaryDirectory(prefix=".cessation-", dir=Path.cwd())
+    tmp_path = Path(scratch.name)
     child = subprocess.Popen([sys.executable, "-I", "-S", "-c", "import time; time.sleep(10)"])
     fields = {
         "Id": "heterodyne-admind.service", "LoadState": "loaded", "ActiveState": "active",
@@ -43,6 +47,7 @@ def invocation(tmp_path, monkeypatch):
         if child.poll() is None:
             child.kill()
         child.wait(timeout=2)
+        scratch.cleanup()
 
 
 def stopped(fields):
@@ -103,15 +108,6 @@ def test_stopped_snapshot_includes_latest_committed_wal_without_restore(invocati
     held.scope = cessation._ManagerScope(
         "service", os.getuid(), "a" * 64, "b" * 64, "c" * 64, path / "live.db",
     )
-    original_stat = cessation.Path.stat
-    def protected_stat(self, *args, **kwargs):
-        info = original_stat(self, *args, **kwargs)
-        if self in {cessation.Path("/tmp"), cessation.Path("/dev/shm")}:  # noqa: S108 - synthetic custody only
-            values = list(info)
-            values[0] &= ~0o022
-            return os.stat_result(values)
-        return info
-    monkeypatch.setattr(cessation.Path, "stat", protected_stat)
     monkeypatch.setattr("heterodyne.wsd.backup_copy.MIN_FREE", 0)
     live = sqlite3.connect(path / "live.db")
     try:
@@ -168,13 +164,6 @@ def test_snapshot_missing_source_and_partial_failure_leave_no_destination(invoca
     source = path / "live.db"
     source.write_bytes(b"fixture source")
     held.scope = cessation._ManagerScope("service", os.getuid(), "a" * 64, "b" * 64, "c" * 64, source)
-    original = cessation.Path.stat
-    def protected(self, *args, **kwargs):
-        info = original(self, *args, **kwargs)
-        values = list(info)
-        values[0] &= ~0o022  # synthetic source ancestor custody only
-        return os.stat_result(values)
-    monkeypatch.setattr(cessation.Path, "stat", protected)
     def fail(source, destination, cancel):
         destination.write_bytes(b"partial snapshot")
         raise sqlite3.DatabaseError("synthetic corruption")
@@ -289,3 +278,94 @@ def test_primary_private_socket_authenticated_before_systemctl(monkeypatch, tmp_
         with pytest.raises(InvalidAction, match="manager-peer"):
             observer._show()
         assert connected == ["/run/user/1001/systemd/private"] and not executions
+
+
+def test_success_result_with_core_dump_is_forced(invocation):
+    held, child, fields, _ = invocation
+    child.kill()
+    child.wait(timeout=2)
+    stopped(fields)
+    fields.update(Result="success", ExecMainCode="3", ExecMainStatus="11")
+    assert held.observe().outcome == "forced"
+
+
+def test_namespace_root_snapshot_refuses_hostile_sidecars_and_destinations():
+    # Actual namespace-root/subordinate-service UID and SQLite filesystem effects.
+    # The cessation observation is synthetic; no host service or DB is touched.
+    probe = r'''
+import hashlib, json, os, sqlite3, subprocess
+from pathlib import Path
+from heterodyne.actions import deployment_cessation as c
+from heterodyne.actions.codec import InvalidAction
+from heterodyne.wsd import backup_copy
+for mount in ('/tmp', '/run'):
+    subprocess.run(['mount', '-t', 'tmpfs', '-o', 'mode=755', 'tmpfs', mount], check=True)
+source = Path('/run/source'); source.mkdir(mode=0o700); os.chown(source, 1, 1)
+protected = Path('/run/protected'); protected.mkdir(mode=0o700)
+ready_r, ready_w = os.pipe(); done_r, done_w = os.pipe()
+pid = os.fork()
+if pid == 0:
+    os.close(ready_r); os.close(done_w); os.setgid(1); os.setuid(1)
+    connection = sqlite3.connect(source / 'live.db')
+    connection.execute('PRAGMA journal_mode=WAL')
+    connection.execute('PRAGMA user_version=17')
+    connection.execute('CREATE TABLE newest(value TEXT)')
+    connection.execute("INSERT INTO newest VALUES ('newest WAL state')")
+    connection.commit(); os.write(ready_w, b'R'); os.read(done_r, 1)
+    connection.close(); os._exit(0)
+os.close(ready_w); os.close(done_r)
+try:
+    assert os.read(ready_r, 1) == b'R'
+    held = c._AdmindInvocation.__new__(c._AdmindInvocation)
+    held.scope = c._ManagerScope('fixture', 1, 'a'*64, 'b'*64, 'c'*64, source/'live.db')
+    proof = c.UnitCessation('fixture', 'boot', 'a'*32, pid, 1, 2, '/fixture', 'timeout', 2, 9, 'forced')
+    held.observe = lambda: proof
+    backup_copy.MIN_FREE = 0
+    sentinel = protected/'sentinel'; sentinel.write_bytes(b'root private sentinel'); sentinel.chmod(0o400)
+    def facts():
+        s = sentinel.stat()
+        return s.st_uid, s.st_gid, s.st_mode, s.st_size, hashlib.sha256(sentinel.read_bytes()).hexdigest()
+    original = facts(); refused = 0
+    for suffix in ('-wal', '-shm'):
+        sidecar = source/('live.db'+suffix); saved = source/('saved'+suffix)
+        sidecar.rename(saved)
+        try:
+            for kind in ('symlink', 'hardlink'):
+                if kind == 'symlink': sidecar.symlink_to(sentinel)
+                else: os.link(sentinel, sidecar)
+                try:
+                    target = protected/('bad'+suffix+kind)
+                    try: held.stopped_snapshot(target)
+                    except InvalidAction: refused += 1
+                    else: raise AssertionError('hostile sidecar accepted')
+                    assert not target.exists() and facts() == original
+                finally: sidecar.unlink()
+        finally: saved.rename(sidecar)
+    unsafe = Path('/run/service-destination'); unsafe.mkdir(mode=0o700); os.chown(unsafe,1,1)
+    writable = Path('/run/writable'); writable.mkdir(mode=0o700); writable.chmod(0o720)
+    linked = Path('/run/linked'); linked.symlink_to(protected)
+    destinations = 0
+    for parent in (unsafe, writable, linked):
+        target = parent/'refused.db'
+        try: held.stopped_snapshot(target)
+        except InvalidAction: destinations += 1
+        else: raise AssertionError('unprotected destination accepted')
+        assert not target.exists()
+    target = protected/'good.db'; observed = held.stopped_snapshot(target)
+    with sqlite3.connect(target) as saved:
+        assert saved.execute('SELECT value FROM newest').fetchall() == [('newest WAL state',)]
+    assert observed.schema == 17 and (source/'live.db-shm').stat().st_uid == 1
+    assert facts() == original and sentinel.stat().st_nlink == 1
+    assert not list(protected.glob('.stopped-*'))
+    print(json.dumps({'sidecar_refusals':refused,'destination_refusals':destinations,'newest_wal':True}))
+finally:
+    os.write(done_w,b'D'); os.close(done_w); os.waitpid(pid,0)
+'''
+    result = subprocess.run(
+        ["unshare", "--user", "--map-auto", "--map-root-user", "--mount", sys.executable, "-c", probe],
+        env={**os.environ, "PYTHONPATH": str(Path.cwd() / "src"), "PYTHONDONTWRITEBYTECODE": "1"},
+        capture_output=True, text=True, timeout=20,
+    )
+    assert result.returncode == 0, result.stderr
+    assert '"sidecar_refusals": 4' in result.stdout
+    assert '"destination_refusals": 3' in result.stdout and '"newest_wal": true' in result.stdout

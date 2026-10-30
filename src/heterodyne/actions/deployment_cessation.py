@@ -5,6 +5,11 @@ can cease even when its earlier effect is UNKNOWN; that history stays UNKNOWN.
 This read-only component neither stops a process nor releases a deployment target.
 """
 
+
+# pyright: reportPrivateUsage=false
+# Closed protected snapshot composition reuses the existing descriptor walk.
+
+import contextlib
 import os
 import pwd
 import select
@@ -18,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from heterodyne.actions.codec import InvalidAction
+from heterodyne.actions.deployment_host_store import _private_root
 from heterodyne.actions.deployment_runtime import stream_hash
 from heterodyne.platform import peer_credentials_checked
 from heterodyne.wsd.backup_copy import snapshot as wal_snapshot
@@ -95,6 +101,125 @@ def _manager_endpoint(endpoint: Path, uid: int) -> tuple[int, int, int]:
     return info.st_dev, info.st_ino, info.st_uid
 
 
+_DB_LIMIT = 1024 * 1024 * 1024
+_WAL_LIMIT = 256 * 1024 * 1024
+_DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+_READ_FILE = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+
+
+def _inode(fd: int) -> tuple[int, int]:
+    info = os.fstat(fd)
+    return info.st_dev, info.st_ino
+
+
+def _source_directory(path: Path, service_uid: int) -> int:
+    if not path.is_absolute() or str(path) != os.path.normpath(path):
+        raise InvalidAction("cessation-live-database-path")
+    fd = os.open("/", _DIRECTORY)
+    try:
+        for name in path.parts[1:]:
+            child = os.open(name, _DIRECTORY, dir_fd=fd)
+            os.close(fd)
+            fd = child
+            info = os.fstat(fd)
+            if info.st_uid not in {0, service_uid} or info.st_mode & 0o022:
+                raise InvalidAction("cessation-live-database-custody")
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _live_identity(info: os.stat_result) -> tuple[int, ...]:
+    return tuple(getattr(info, field) for field in (
+        "st_dev", "st_ino", "st_uid", "st_gid", "st_mode", "st_nlink",
+        "st_size", "st_mtime_ns", "st_ctime_ns",
+    ))
+
+
+class _LiveDatabase:
+    """Retained live DB/WAL/SHM names; SQLite never opens these original paths."""
+
+    def __init__(self, scope: _ManagerScope) -> None:
+        self.scope = scope
+        self.directory = _source_directory(scope.database.parent, scope.service_uid)
+        self.files: dict[str, tuple[int, os.stat_result] | None] = {}
+        try:
+            for suffix in ("", "-wal", "-shm"):
+                name = scope.database.name + suffix
+                try:
+                    fd = os.open(name, _READ_FILE, dir_fd=self.directory)
+                except FileNotFoundError:
+                    if not suffix:
+                        raise
+                    self.files[suffix] = None
+                    continue
+                info = os.fstat(fd)
+                self.files[suffix] = fd, info
+                main = self.files[""]
+                if main is None:
+                    raise InvalidAction("cessation-live-main-required")
+                owner = main[1].st_uid
+                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_mode & 0o022
+                    or info.st_uid not in {0, scope.service_uid} or info.st_uid != owner):
+                    raise InvalidAction("cessation-live-sidecar-custody")
+            main = self.files[""]
+            if main is None:
+                raise InvalidAction("cessation-live-main-required")
+            self.original = main[1]
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self) -> None:
+        for item in self.files.values():
+            if item is not None:
+                os.close(item[0])
+        self.files.clear()
+        os.close(self.directory)
+
+    def copy(self, staged: Path) -> None:
+        for suffix, limit in (("", _DB_LIMIT), ("-wal", _WAL_LIMIT)):
+            retained = self.files[suffix]
+            if retained is None:
+                continue
+            fd, info = retained
+            if info.st_size > limit:
+                raise InvalidAction("cessation-live-copy-bound")
+            target = Path(str(staged) + suffix)
+            output = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(output, "wb") as writer:
+                offset = 0
+                while data := os.pread(fd, min(65536, limit + 1 - offset), offset):
+                    offset += len(data)
+                    if offset > limit:
+                        raise InvalidAction("cessation-live-copy-bound")
+                    writer.write(data)
+                if offset != info.st_size:
+                    raise InvalidAction("cessation-live-database-changed")
+        self.check()
+
+    def check(self) -> None:
+        fresh = _source_directory(self.scope.database.parent, self.scope.service_uid)
+        try:
+            if _inode(fresh) != _inode(self.directory):
+                raise InvalidAction("cessation-live-database-changed")
+            for suffix, retained in self.files.items():
+                try:
+                    current = os.stat(self.scope.database.name + suffix, dir_fd=fresh, follow_symlinks=False)
+                except FileNotFoundError:
+                    if retained is not None:
+                        raise InvalidAction("cessation-live-database-changed") from None
+                    continue
+                if retained is None or any(
+                    _live_identity(item) != _live_identity(retained[1])
+                    for item in (current, os.fstat(retained[0]))
+                ):
+                    raise InvalidAction("cessation-live-database-changed")
+        finally:
+            os.close(fresh)
+
+
 class _AdmindInvocation:  # pyright: ignore[reportUnusedClass] - private protected recipe observer
     """Retain a kernel pidfd before stop, then observe the exact old invocation.
 
@@ -148,42 +273,43 @@ class _AdmindInvocation:  # pyright: ignore[reportUnusedClass] - private protect
         """
         try:
             before = self.observe()
-            source = self.scope.database
-            for path in (source, *source.parents):
-                info = path.stat(follow_symlinks=False)
-                if (path.is_symlink() or info.st_uid not in {0, self.scope.service_uid}
-                    or info.st_mode & 0o022):
-                    raise InvalidAction("cessation-live-database-custody")
-            original = source.stat(follow_symlinks=False)
-            if not stat.S_ISREG(original.st_mode):
-                raise InvalidAction("cessation-live-database-regular")
-            # Failed/partial snapshots stay in an attempt directory which is
-            # removed on every path. Never delete/adopt a preexisting destination.
-            with tempfile.TemporaryDirectory(prefix=".stopped-", dir=destination.parent) as attempt:
-                temporary = Path(attempt) / "snapshot.db"
-                record = wal_snapshot(source, temporary, threading.Event())
-                after = self.observe()
-                latest = source.stat(follow_symlinks=False)
-                if (before != after or (latest.st_dev, latest.st_ino) != (original.st_dev, original.st_ino)
-                    or source.is_symlink()):
-                    raise InvalidAction("cessation-live-database-changed")
-                published = False
-                try:
-                    os.link(temporary, destination, follow_symlinks=False)
-                    published = True
-                    directory = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            with contextlib.ExitStack() as cleanup:
+                live = _LiveDatabase(self.scope)
+                cleanup.callback(live.close)
+                directory = _private_root(destination.parent)
+                cleanup.callback(os.close, directory)
+                # SQLite never opens a live service-owned path as root. It reads
+                # only stable descriptor copies inside this protected attempt.
+                with tempfile.TemporaryDirectory(
+                    prefix=".stopped-", dir=f"/proc/self/fd/{directory}",
+                ) as attempt:
+                    staged = Path(attempt) / "live.db"
+                    live.copy(staged)
+                    temporary = Path(attempt) / "snapshot.db"
+                    record = wal_snapshot(staged, temporary, threading.Event())
+                    after = self.observe()
+                    live.check()
+                    if before != after:
+                        raise InvalidAction("cessation-live-database-changed")
+                    latest_directory = _private_root(destination.parent)
                     try:
-                        os.fsync(directory)
+                        if _inode(latest_directory) != _inode(directory):
+                            raise InvalidAction("cessation-destination-changed")
                     finally:
-                        os.close(directory)
-                except BaseException:
-                    if published:
-                        destination.unlink()
-                    raise
-                return StoppedSnapshot(
-                    after, original.st_dev, original.st_ino, str(record["sha256"]),
-                    int(record["bytes"]), int(record["schema"]),
-                )
+                        os.close(latest_directory)
+                    published = False
+                    try:
+                        os.link(temporary, destination.name, dst_dir_fd=directory, follow_symlinks=False)
+                        published = True
+                        os.fsync(directory)
+                    except BaseException:
+                        if published:
+                            os.unlink(destination.name, dir_fd=directory)
+                        raise
+                    return StoppedSnapshot(
+                        after, live.original.st_dev, live.original.st_ino, str(record["sha256"]),
+                        int(record["bytes"]), int(record["schema"]),
+                    )
         except (OSError, ValueError, TimeoutError, sqlite3.Error) as exc:
             if isinstance(exc, InvalidAction):
                 raise
@@ -326,7 +452,7 @@ class _AdmindInvocation:  # pyright: ignore[reportUnusedClass] - private protect
         code, status = _number(after, "ExecMainCode"), _number(after, "ExecMainStatus")
         # The authenticated manager applies SuccessExitStatus and normal stop
         # signals; code/status remain explicit evidence rather than reinterpreted.
-        clean = after["Result"] == "success" and code in {1, 2, 3}
+        clean = after["Result"] == "success" and code in {1, 2}
         return UnitCessation(
             _UNIT, self.boot, before["InvocationID"], self.pid,
             _number(before, "ExecMainStartTimestampMonotonic"),

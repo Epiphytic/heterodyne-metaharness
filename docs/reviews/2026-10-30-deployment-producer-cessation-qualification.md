@@ -142,3 +142,60 @@ quality gate or a changed baseline. The causal regression fixtures and explicit
 security checks are preserved for review rather than hidden behind an abstraction
 that changes their evidence. Runtime admission and production authority remain
 unqualified; no protected directory, service or deployment was installed.
+
+## Second HIGH review repair
+
+The actual cumulative second HIGH report and its honest command/result receipt
+are retained in `deployment-producer-cessation-code/r2/`. Its verdict remains
+CHANGES REQUESTED; the author has not run a validation review.
+
+SQLite no longer opens any service-owned original database or sidecar path with
+root privileges. A descriptor-anchored no-follow walk retains the live database,
+WAL and SHM (or exact sidecar absence), requires regular single-link files with
+matching expected ownership and no group/world write, and checks complete inode,
+size and change metadata. Strict bounded pread copies only DB (1GiB maximum) and
+WAL (256MiB maximum) into a new protected private attempt. SQLite reconstructs
+SHM only there. Source names, descriptors and absent sidecars must remain stable
+across the copy and stopped observations. The existing WAL snapshot operates on
+that private copy. Its output is linked without overwrite through the retained
+protected destination-parent descriptor after matching destination custody is
+checked again. Failure removes the private attempt and never deletes a prior
+output. These checks still do not establish exclusion of every external writer.
+
+The causal namespace regression runs actual namespace-root and subordinate
+service UID1 against real SQLite WAL files, with synthetic cessation facts.
+Four planted WAL/SHM symlink/hardlink aliases are refused while a root-owned
+read-only sentinel remains byte/owner/mode unchanged. Service-owned, writable
+and symlinked destination parents are refused. The positive protected snapshot
+contains the newest committed WAL row, while source SHM remains service-owned.
+This requires Linux user/subordinate-ID and mount-namespace support; it neither
+provisions a host account nor touches a real service/database. The historical
+real cgroup fixture retains its separately documented host prerequisites.
+
+Whole OUTAGE preparation and later native binding now use the exact same posted
+whole-card validation. Native ask shape and membership checks are reused without
+requiring a separate unposted inner Release card to render. The regression makes
+inner-card validation refuse while whole-card preparation and actual core
+synthetic-native validation still agree; malformed native shape remains refused.
+CLD_DUMPED is retained as forced even if the manager reports success.
+
+The fixed HTTPS reader binds the raw TCP socket, wraps without an implicit
+handshake, binds the TLS socket and only then performs the handshake. The total
+watchdog can therefore interrupt a trickling handshake, including deadline
+expiry during socket ownership transfer. A real loopback TLS trickle regression
+exercises that deadline; it is not production CA/route qualification. Platform
+DNS/TCP-connect behavior remains explicitly unqualified. Hosted Git/HTTPS bytes
+are exactly canonical JSON; the original request may be noncanonical JSON with
+the same decoded packet. Original bytes/hash and canonical bytes/hash remain
+separate retained values, with no byte-equality claim between them.
+
+Final second-review repair verification: 134 focused tests pass in 4.79s with
+inherited bytecode suppression unset; Ruff and strict source Pyright pass.
+Exact commands, hashes and complete logs are in `r2-repair/`. The quality delta
+exits 2 with 29 rows and 18 preexisting-worse gating findings, principally repair
+churn, synthetic test reachability and short test scaffold clones, plus the new
+81-line retained-database helper and 80-line causal namespace probe. These are
+recorded costs rather than a passing quality gate; no baseline or metric was
+changed. The privileged-path repair deliberately retains explicit file identities
+and bounded copies instead of delegating authority to a caller-provided reader.
+No production runtime, source capsule, queue or installed profile was changed.

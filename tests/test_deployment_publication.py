@@ -3,9 +3,14 @@
 No fixture performs network I/O or claims genuine approval or protected custody.
 """
 
+import http.client
 import os
+import socket
+import ssl
 import subprocess
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -139,8 +144,8 @@ def test_fixed_tls_reader_rejects_redirects_and_encoding(monkeypatch, status, en
         def close(self):
             pass
     class Connection:
-        def __init__(self, host, *, timeout, context):
-            observed.append((host, timeout, context.verify_mode, context.check_hostname))
+        def __init__(self, host, port, *, timeout):
+            observed.append((host, port, timeout))
             self.sock = Socket()
         def connect(self):
             pass
@@ -150,15 +155,19 @@ def test_fixed_tls_reader_rejects_redirects_and_encoding(monkeypatch, status, en
             return Response()
         def close(self):
             pass
-    monkeypatch.setattr(publication.http.client, "HTTPSConnection", Connection)
+    def tls(connection, response, context):
+        observed.append((context.verify_mode, context.check_hostname))
+        response.bind(connection.sock)
+    monkeypatch.setattr(publication.http.client, "HTTPConnection", Connection)
+    monkeypatch.setattr(publication, "_tls", tls)
     monkeypatch.setenv("HTTPS_PROXY", "http://untrusted.invalid")
     if refused:
         with pytest.raises(InvalidAction, match="https-status"):
             publication._https("a" * 40, "docs/packet.json")
     else:
         assert publication._https("a" * 40, "docs/packet.json") == b"canonical"
-    assert observed[0] == ("raw.githubusercontent.com", 10, publication.ssl.CERT_REQUIRED, True)
-    assert observed[1] == (
+    assert observed[:2] == [("raw.githubusercontent.com", 443, 10), (publication.ssl.CERT_REQUIRED, True)]
+    assert observed[2] == (
         "GET", "/Epiphytic/heterodyne-metaharness/" + "a" * 40 + "/docs/packet.json",
         {"Accept-Encoding": "identity"},
     )
@@ -179,3 +188,39 @@ def test_scratch_does_not_use_ambient_tmpdir(published, monkeypatch):
     original, url, archive, commit, _, _, _ = published
     monkeypatch.setenv("TMPDIR", "/nonexistent/untrusted-temporary-directory")
     assert publication._verify(original, (TARGET,), url, archive, commit).published_original == original
+
+
+def test_actual_tls_trickle_handshake_is_interrupted_by_total_watchdog():
+    # Real loopback TCP and TLS handshake, synthetic peer: no external network
+    # or production CA/host qualification is claimed.
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    stop = threading.Event()
+    def peer():
+        with listener.accept()[0] as client:
+            try:
+                client.recv(4096)
+                client.sendall(b"\x16\x03\x03\x00\xff")
+                while not stop.wait(.01):
+                    client.sendall(b"\x00")
+            except OSError:
+                pass
+    thread = threading.Thread(target=peer, daemon=True)
+    thread.start()
+    connection = http.client.HTTPConnection("127.0.0.1", listener.getsockname()[1], timeout=3)
+    response = publication.HttpsResponse(connection, "https://fixture.invalid", .15)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    started = time.monotonic()
+    try:
+        with pytest.raises(OSError):
+            publication._tls(connection, response, context)
+        assert response.expired and time.monotonic() - started < 1
+    finally:
+        response.close()
+        stop.set()
+        thread.join(timeout=2)
+        listener.close()
+    assert not thread.is_alive()

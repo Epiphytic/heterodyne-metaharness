@@ -66,6 +66,20 @@ def _retain(fd: int, limit: int) -> BinaryIO:
         raise
 
 
+def _tls(connection: http.client.HTTPConnection, response: HttpsResponse, context: ssl.SSLContext) -> None:
+    """Bind before handshake so the total watchdog can interrupt TLS trickles."""
+    connection.connect()
+    if connection.sock is None:
+        raise InvalidAction("publication-tcp-unavailable")
+    response.bind(connection.sock)
+    wrapped = context.wrap_socket(connection.sock, server_hostname=_HOST, do_handshake_on_connect=False)
+    connection.sock = wrapped
+    # wrap_socket transfers the fd. If the deadline expired in that transfer,
+    # bind immediately shuts down the new owner before handshake can block.
+    response.bind(wrapped)
+    wrapped.do_handshake()
+
+
 def _https(commit: str, path: str) -> bytes:
     """Fixed no-redirect TLS read with the existing connected-I/O watchdog.
 
@@ -74,11 +88,10 @@ def _https(commit: str, path: str) -> bytes:
     """
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     context.load_verify_locations(cafile=_CA)
-    connection = http.client.HTTPSConnection(_HOST, timeout=10, context=context)
+    connection = http.client.HTTPConnection(_HOST, 443, timeout=10)
     response = HttpsResponse(connection, "https://" + _HOST + _PREFIX + commit + "/" + path, 10)
     try:
-        connection.connect()
-        response.bind(connection.sock)
+        _tls(connection, response, context)
         connection.request("GET", _PREFIX + commit + "/" + path, headers={"Accept-Encoding": "identity"})
         response.attach(connection.getresponse())
         if response.status != 200 or response.header("Content-Encoding") not in {None, "identity"}:
@@ -94,8 +107,11 @@ def _https(commit: str, path: str) -> bytes:
 def _verify(  # pyright: ignore[reportUnusedFunction] - owning protected receiver integration only
     original: bytes, targets: tuple[Target, ...], url: str, archive_fd: int, commit_fd: int,
 ) -> _PublishedPacket:
-    """Original request and exact served, regular Git member must be the same packet.
+    """Original request and served regular Git member must decode to the same packet.
 
+    Hosted/Git bytes must use the exact canonical encoding. The original request
+    may use a different JSON encoding; its bytes/hash remain separately retained
+    by the producer and are never claimed byte-identical to the hosted artifact.
     Local complete Git proof establishes commit/tree/mode. The separate fixed
     HTTPS read establishes hosted bytes at the exact immutable URL. This is not
     deployment consent, a receiver credential, or a public runtime opener.
