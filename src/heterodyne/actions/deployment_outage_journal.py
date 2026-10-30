@@ -249,6 +249,13 @@ class _OutageJournal:  # pyright: ignore[reportUnusedClass] - dormant protected 
             ).fetchone()
             if ordinal != 0 or phase not in {"ready", "recovery-hold"} or issued:
                 raise InvalidAction("outage-never-issued-proof-unavailable")
+            recovery = self.db.execute(
+                "SELECT payload FROM recovery WHERE execution=?", (packet.release.execution_id,),
+            ).fetchall()
+            if (phase == "recovery-hold" and not recovery) or any(
+                decode_recovery(raw, packet, targets).operation != "cancel" for (raw,) in recovery
+            ):
+                raise InvalidAction("outage-never-issued-cancel-only")
             receipt = NeverIssuedFailure(
                 "heterodyne-never-issued-failure.v1", packet_digest(packet),
                 packet.release.execution_id, "failed-no-effect",

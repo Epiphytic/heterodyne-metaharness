@@ -26,13 +26,14 @@ from heterodyne.harness.digests import ComputedDigest, display
 APPROVAL_TITLE = "OUTAGE DEPLOYMENT: exact finite release"
 
 
-def approval_body(packet: DeploymentPacket, packet_url: str, group: str) -> str:
+def _approval_card(packet: DeploymentPacket, packet_url: str, group: str):
     validate_packet(packet, (packet.release.target,))
     if (not release_auth._PACKET.fullmatch(packet_url)
+        or packet_url.split("/", 7)[6] == packet.release.packet_commit
         or packet_url.split("/", 7)[-1] != packet.release.packet_path
         or ".." in packet_url.split("/")):
         raise InvalidAction("outer-packet-publication-url")
-    original = release_auth.approval_body(
+    original = release_auth._approval_body(
         packet.release, release_auth._packet_url(packet.release), group,
     )
     body = (
@@ -48,8 +49,12 @@ def approval_body(packet: DeploymentPacket, packet_url: str, group: str) -> str:
         + "\nA yes explicitly accepts that gap for this exact finite outage capsule only."
         + "\nOnly the exact packet transitions and independently authenticated recovery are authorized."
     )
-    release_auth._check_card(APPROVAL_TITLE, body, packet.release.approval_id)
-    return body
+    request, row, parts = release_auth._check_card(APPROVAL_TITLE, body, packet.release.approval_id)
+    return body, request, row, parts
+
+
+def approval_body(packet: DeploymentPacket, packet_url: str, group: str) -> str:
+    return _approval_card(packet, packet_url, group)[0]
 
 
 def _bindings(packet: DeploymentPacket, native: dict[str, Any]) -> list[str]:
@@ -66,16 +71,11 @@ def _bindings(packet: DeploymentPacket, native: dict[str, Any]) -> list[str]:
         group = kv["group_id_hex"]
         if ask["title"] != APPROVAL_TITLE or ask["body"] != approval_body(packet, url, group):
             core._hold("exact outage deployment context changed")
-        # The unchanged release binder validates ask shape and native membership.
-        # Projection is local only; the core authenticates the original retained
-        # native rows/card/reply/CLI, and the full original body was checked above.
-        projected = {**native, "ask": {
-            **ask, "title": release_auth.APPROVAL_TITLE,
-            "body": release_auth.approval_body(
-                packet.release, release_auth._packet_url(packet.release), group,
-            ),
-        }}
-        return release_auth._bindings(packet.release, projected)
+        # Only native ask shape/membership are projected. The exact original
+        # whole OUTAGE card was checked above; independently checking an inner
+        # release card would impose a different, unposted renderer contract.
+        projected = {**native, "ask": {**ask, "title": release_auth.APPROVAL_TITLE}}
+        return release_auth._membership_checked(packet.release, projected)[1]
     except (core.AuthorityHold, InvalidAction):
         raise
     except (KeyError, TypeError, ValueError) as exc:

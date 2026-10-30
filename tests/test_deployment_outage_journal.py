@@ -188,3 +188,19 @@ def test_current_schema_open_does_not_take_writer_lock(journal):
         second.close()
     finally:
         first.db.rollback()
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+def test_never_issued_safe_stop_retains_target_even_with_later_cancel(journal, mixed):
+    _, first = journal
+    p = packet()
+    first.record_capsule(p, (TARGET,), 3)
+    c = command(p, operation="safe-stop")
+    first.request_recovery(p, (TARGET,), c, 101, c.expected_observation_sha256)
+    if mixed:
+        cancel = command(p, command_nonce="latercancel")
+        first.request_recovery(p, (TARGET,), cancel, 102, cancel.expected_observation_sha256)
+    with pytest.raises(InvalidAction, match="cancel-only"):
+        first.fail_never_issued(p, (TARGET,))
+    with pytest.raises(InvalidAction, match="target-conflict"):
+        first.record_capsule(another(p), (TARGET,), 3)

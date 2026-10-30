@@ -132,7 +132,7 @@ def _rendering() -> tuple[tuple[str, ...], int]:
     return settings.login_dirs, settings.chunk_chars
 
 
-def _check_card(title: str, body: str, ask_id: str) -> None:
+def _check_card(title: str, body: str, ask_id: str) -> tuple[asks.AskPost, AskRow, list[str]]:
     directories, chunk_chars = _rendering()
     context = title + "\n\n" + body
     shown = redact_with_dirs(context, directories)
@@ -143,6 +143,8 @@ def _check_card(title: str, body: str, ask_id: str) -> None:
     request = asks.AskPost(
         "question", title=title, body=body, poster="protected-deploy", form="yes-no", recommended="yes",
     )
+    if asks.check(request) is not None:
+        raise InvalidAction("deployment-card-request-refused")
     form, choices = asks.stored_form(request)
     at = asks.stamp(asks.now())
     row = AskRow(
@@ -157,9 +159,12 @@ def _check_card(title: str, body: str, ask_id: str) -> None:
         raise InvalidAction("release-card-single-part-required")
     if any(redact_with_dirs(part, directories) != part for part in parts):
         raise InvalidAction("release-card-packed-redaction")
+    if asks.card_chunks(row, chunk_chars) != (parts, False):
+        raise InvalidAction("deployment-card-renderer-mismatch")
+    return request, row, parts
 
 
-def approval_body(release: Release, packet_url: str, group: str) -> str:
+def _approval_body(release: Release, packet_url: str, group: str) -> str:
     # Rendering is also a boundary: reject unsafe direct typed constructions,
     # even when this helper is called before the native capture validates them.
     validate(release, (release.target,))
@@ -183,11 +188,16 @@ def approval_body(release: Release, packet_url: str, group: str) -> str:
         + "\n".join("- " + d for d in release.deviations)
         + "\nOne use only. No standing approval, heart reaction, generic action or host custody claim."
     )
+    return body
+
+
+def approval_body(release: Release, packet_url: str, group: str) -> str:
+    body = _approval_body(release, packet_url, group)
     _check_card(APPROVAL_TITLE, body, release.approval_id)
     return body
 
 
-def _bindings_checked(release: Release, native: dict[str, Any]) -> list[str]:
+def _membership_checked(release: Release, native: dict[str, Any]) -> tuple[str, list[str]]:
     core = _core()
     ask = native["ask"]
     if (
@@ -214,11 +224,17 @@ def _bindings_checked(release: Release, native: dict[str, Any]) -> list[str]:
         core._hold("invalid native membership")
     if type(kv["group_id_hex"]) is not str or type(ask["body"]) is not str:
         core._hold("invalid native group context")
-    body = ask["body"]
+    return kv["group_id_hex"], cast(list[str], members)
+
+
+def _bindings_checked(release: Release, native: dict[str, Any]) -> list[str]:
+    core = _core()
+    group, members = _membership_checked(release, native)
+    body = native["ask"]["body"]
     urls = [line[8:] for line in body.splitlines() if line.startswith("Packet: ")]
-    if len(urls) != 1 or body != approval_body(release, urls[0], kv["group_id_hex"]):
+    if len(urls) != 1 or body != approval_body(release, urls[0], group):
         core._hold("exact release context changed")
-    return cast(list[str], members)
+    return members
 
 
 def _bindings(release: Release, native: dict[str, Any]) -> list[str]:
