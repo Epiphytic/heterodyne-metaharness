@@ -1,0 +1,39 @@
+{
+  "source_commit": "7d5387b34eef9d3c370e5b833db7fea6837d456b",
+  "source_tree": "e93ce84e4a4d0ec3e50201fd0c5ea1a0aa4f6f3e",
+  "base_commit": "67ce2df8acdb00e6a698f90bccc450bc32137a63",
+  "files": {
+    "docs/configuration.md": "1fb8ef6c0822e4c880675634e22b5085bc28e151d6f7ae7e1fcfbb4ba1b3e8de",
+    "src/heterodyne/agents/base.py": "ef87afdb73a7dd73d99b8666da63fc435854d1ea317fee90d49d193ab66fe323",
+    "src/heterodyne/agents/claude_code.py": "e972023c46e7eb5beb8e9450d0ee9784fefcff61a5b0ae44da0bfb01cd595895",
+    "src/heterodyne/agents/codex.py": "b2034fcbc374ca83e7dd141a594bd08abddd811a76d22c579660238aa61766ba",
+    "src/heterodyne/config/layers.py": "8b4b6f259a7efe0d8b9165b4828f98715e77cb291b350445596cdad79d106509",
+    "src/heterodyne/config/profile_args.py": "cfb08810aa668ea5c48936896527c48366537ef74127134b88bffd35a716cfa1",
+    "src/heterodyne/sandbox/runtime.py": "c832a73da2f43a0a4caa66179a90a19ab7c94db9dd1de2dc85c6fa00fc5e281a",
+    "tests/test_codex_reasoning_profile.py": "b0c16513a5d181236cf463faedafaebf5b781c7a3cef8a0c7457b0d168c4308a",
+    "tests/test_sandbox_runtime.py": "9f9dd3519e94f8968e46c9a5ffe0393e041baff0c4f04c8baf422f998b3dc420"
+  },
+  "logs": {
+    "focused.log": "f48cff66ec58f8fb630cc995f593ae6218ddfec515e94481eb8f545f76384957",
+    "runtime-focused.log": "459c57ce4fbdd3bc2e0e9c705df96054062417e6847e5780db7c75c0b284c6c0",
+    "runtime-suite.log": "6352f4ac5b926f907a7fd938224a927546234eeee8092a03f1747337ff7bc566",
+    "pyright.log": "63e86002981999ce2b8a7f15e5d7f7bfee7f5a111c8eba70fabd628dcba2f827",
+    "quality-parent-delta.txt": "eee97c6955f1e2d6ca4d9be180366471e2d7e719f08a5505dd196a9416d94ec8"
+  },
+  "runtime_isolation_qualified": false,
+  "commands": {
+    "focused": "PYTHONPATH=src $TEST_ENV/bin/python -m pytest tests/test_codex_reasoning_profile.py tests/test_agents_adapters.py tests/test_agents_content.py tests/test_config.py -q",
+    "runtime_focused": "PYTHONPATH=src $TEST_ENV/bin/python -m pytest tests/test_sandbox_runtime.py -k typed_reasoning -q",
+    "runtime_suite": "PYTHONPATH=src $TEST_ENV/bin/python -m pytest tests/test_sandbox_runtime.py -q",
+    "quality": "ripwire src/heterodyne --quality-delta",
+    "pyright": "$TEST_ENV/bin/pyright --pythonpath $TEST_ENV/bin/python src/heterodyne/config/profile_args.py src/heterodyne/config/layers.py src/heterodyne/agents/base.py src/heterodyne/agents/codex.py src/heterodyne/agents/claude_code.py src/heterodyne/sandbox/runtime.py tests/test_codex_reasoning_profile.py tests/test_sandbox_runtime.py"
+  },
+  "raw_log_sha256": {
+    "focused.log": "f48cff66ec58f8fb630cc995f593ae6218ddfec515e94481eb8f545f76384957",
+    "runtime-focused.log": "459c57ce4fbdd3bc2e0e9c705df96054062417e6847e5780db7c75c0b284c6c0",
+    "runtime-suite.log": "6352f4ac5b926f907a7fd938224a927546234eeee8092a03f1747337ff7bc566",
+    "pyright.log": "0b7e9dfb5d2d78b6dff18e84ebf93c373399800298d37d0a4b9c8c594e796dfb",
+    "quality-parent-delta.txt": "eee97c6955f1e2d6ca4d9be180366471e2d7e719f08a5505dd196a9416d94ec8"
+  },
+  "path_normalization": "$WORKTREE is this isolated candidate checkout; $TEST_ENV is the pre-existing shared Product qualification virtualenv. Installed paths are normalized for repository portability; raw capture hashes are retained separately."
+}
