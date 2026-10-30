@@ -562,12 +562,7 @@ class SandboxRuntime:
             raise LaunchFailed("the session's git directory exists but its record is gone; inspect it")
         if prev is not None and prev.phase is Phase.RUNNING and self._alive(prev, self._names()):
             return self._started(prev)                  # idempotent: a live session is left alone
-        profile = self.c.settings.profiles.get(spec.profile, {})
-        effort = profile_args.reasoning_effort(profile, adapter.name, "profile")
-        if effort is not None and self._resume(adapter, layout, prev, spec)[0]:
-            # Server-home config does not prove a retained native thread adopts this effort.
-            # Hold before ending a prior generation or changing its record/home.
-            raise LaunchFailed("typed Codex reasoning on native resume is not qualified")
+        self._check_reasoning_resume(adapter, layout, prev, spec)
         if prev is not None and prev.phase is not Phase.ENDED:
             if not self._end(prev, interrupt=False, lifetime=self._overdue(prev)):
                 raise RuntimeUnavailable("an earlier launch of this session could not be cleaned up")
@@ -608,6 +603,25 @@ class SandboxRuntime:
                                checked, pinned)
         except Exception as exc:  # noqa: BLE001 - every failure ends the sandbox, then is reported
             raise self._fail(layout, rec, exc) from None
+
+    def _check_reasoning_resume(self, adapter: Adapter, layout: SessionLayout,
+                                prev: SessionRecord | None, spec: LaunchSpec) -> None:
+        """Read-only qualification gate; explicit stop/reconciliation owns retained cleanup."""
+        profile = self.c.settings.profiles.get(spec.profile, {})
+        try:
+            effort = profile_args.reasoning_effort(profile, adapter.name, "profile")
+        except ConfigError as exc:
+            raise LaunchFailed(str(exc)) from None
+        if effort is not None:
+            if prev is not None and prev.unlanded:
+                raise self._unlanded(prev)
+            if prev is not None and prev.wip_mark:
+                raise LaunchFailed("the last generation's lifetime WIP commit is still owed")
+        if effort is not None and self._resume(adapter, layout, prev, spec)[0]:
+            # Server-home config does not prove a retained native thread adopts this effort.
+            # Intentionally retain even a dead generation: explicit stop/reconciliation performs
+            # cleanup; an unqualified launch does not mutate it. Report integrity holds first.
+            raise LaunchFailed("typed Codex reasoning on native resume is not qualified")
 
     def stop(self, session_key: str) -> None:
         layout = self.layout(session_key)

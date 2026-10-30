@@ -68,3 +68,9 @@ def test_profile_unknown_keys_are_refused(key: str) -> None:
 def test_profile_account_routing_keys_remain_supported() -> None:
     check_profiles({"adapters": {"known": ["codex"]}, "profiles": {
         "build": dict(PROFILE, accounts=["one", "two"], failover="next")}})
+
+
+def test_legacy_effort_key_suggests_typed_setting() -> None:
+    with pytest.raises(ConfigError, match="use reasoning_effort instead of effort"):
+        check_profiles({"adapters": {"known": ["codex"]}, "profiles": {
+            "build": {"adapter": "codex", "effort": "medium"}}})
