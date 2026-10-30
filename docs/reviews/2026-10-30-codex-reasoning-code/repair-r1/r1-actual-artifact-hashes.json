@@ -1,0 +1,28 @@
+{
+  "review": "actual Claude builtin code-review round1 HIGH",
+  "source_head": "df968b3798b8bfb42747ac9307ef2e5d279c148e",
+  "verdict": "CHANGES REQUESTED",
+  "original_controller_artifacts": {
+    "oizoh-codex-reasoning-r1-high-20261030.log": {
+      "sha256": "4604c88bf89c5b4069e9a445f1ae587ec1f9631aa20dadad42acb56dee85a04b",
+      "bytes": 3558
+    },
+    "oizoh-codex-reasoning-r1-high-20261030-start.json": {
+      "sha256": "2e274adcc7763006599d62875031c08c333ec72bc3eaacc1ca2334b0f13b59dd",
+      "bytes": 8117
+    },
+    "oizoh-codex-reasoning-r1-high-20261030-result.json": {
+      "sha256": "51cfb0d96b83a6500c602f14e34ff5bbca07a7fcfb422d7399dba729bc109e19",
+      "bytes": 6228
+    },
+    "oizoh-codex-reasoning-r1-high-20261030-stderr.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "oizoh-codex-reasoning-r1-high-20261030-stream.jsonl": {
+      "sha256": "3990d3c774aeaa26c7028fa2be55480e4076d202c5427dc66b960745406029f6",
+      "bytes": 188983
+    }
+  },
+  "note": "Original command/start/result/stream retained unchanged by controller; hashes identify exact artifacts. This repair does not reset review count."
+}
