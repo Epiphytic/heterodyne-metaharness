@@ -294,7 +294,8 @@ class Adapter(Protocol):
         ...
 
     def prepare_install_home(self, layout: SessionLayout, worktree: Path,
-                             install: Path) -> "tuple[Cleared, ...]":
+                             install: Path, *,
+                             profile: Mapping[str, Any] | None = None) -> "tuple[Cleared, ...]":
         """The synthetic home for a launch from the managed install at `install`: `defaults/` merged under
         the launcher's keys, and each `empty_read_only` path made an empty directory. Returns what it
         cleared."""

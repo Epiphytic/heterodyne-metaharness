@@ -39,7 +39,8 @@ from heterodyne.agents.base import (
     write_at,
 )
 from heterodyne.agents.config_files import merge, open_dir_at, open_under, read_bounded_at, toml_text, without
-from heterodyne.config.profile_args import FLAGS
+from heterodyne.config.errors import ConfigError
+from heterodyne.config.profile_args import FLAGS, reasoning_effort
 from heterodyne.harness.resources import store_core
 from heterodyne.sandbox.spec import BRIDGE_INSIDE, RUN_INSIDE, AgentFacts, Bind, SessionLayout
 from heterodyne.session.shim import MAX_DEPTH, MAX_LINE, json_depth
@@ -166,8 +167,15 @@ class Codex:
                              "in_app_updates": False}}
 
     def prepare_install_home(self, layout: SessionLayout, worktree: Path,
-                             install: Path) -> tuple[exec_dirs.Cleared, ...]:
+                             install: Path, *,
+                             profile: Mapping[str, Any] | None = None) -> tuple[exec_dirs.Cleared, ...]:
+        try:
+            effort = reasoning_effort(profile or {}, self.name, "profile")
+        except ConfigError:
+            raise AdapterError("the Codex profile has an invalid reasoning effort") from None
         tree = self._defaults(install)
+        if effort is not None:
+            tree["model_reasoning_effort"] = effort
         servers = self._content_servers(install)
         if servers:
             merge(tree, {"mcp_servers": servers})
