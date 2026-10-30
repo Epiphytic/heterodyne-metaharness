@@ -66,10 +66,16 @@ owned descriptors and real disposable Git objects. The positive child uses
 explicit synthetic HTTPS bytes and rendering profile; its test bootstrap also
 remaps arbitrary fixture descriptors into the fixed slots. A production native
 launcher must own those slots and may not reuse test bootstrap source selectors.
-Negative child cases use no successful transport mock: an audit hook fails on
-any socket operation, proving malformed/original/oversize/argv/custody/closed-fd
-refusals occur before network access. Other tests reject writable descriptors
-whose file mode appears read-only, hardlinks, pipes and tampered output. No host
+The original negative audit-hook tests were not causal: a missing host scratch
+could mask a removed guard. That original qualification claim is withdrawn and
+preserved as a finding in the actual first HIGH review. Repaired negative child
+cases now share the positive child's working protected scratch, rendering profile
+and synthetic HTTPS. Each asserts that a publication marker is absent. A child
+with descriptor custody deliberately disabled succeeds and reaches that marker,
+so removing the writable-file guard no longer leaves a falsely passing refusal.
+In-process tests additionally assert exact guard reasons before publication.
+Other tests reject writable descriptors whose mode appears read-only, hardlinks,
+pipes and validly base64-reencoded tampered operation/request bytes. No host
 service, production directory, queue, native approval or deployment changed.
 
 The runtime write set for future exact deployment approval adds this producer
@@ -100,3 +106,47 @@ The install-agnostic hook initially refused the literal host path in the Pyright
 log. Its public copy now explicitly substitutes `${HOST_HOME}`; the original raw
 log is preserved privately with its exact SHA in the manifest. No hook is skipped
 and no executable/source bytes changed for this documentation correction.
+
+
+## First HIGH repair
+
+The actual first HIGH verdict remains CHANGES REQUESTED and is retained with
+honest command, model and source-unchanged receipts under `r1/`. The reviewer
+reran all151 tests and confirmed their hashes, while identifying the causal
+qualification gaps above. The repair is based on the frozen source plus the
+separate PR145 second-review snapshot/card/TLS fixes, retaining their full actual
+review history. No second review has been run by the author.
+
+Preparation and output correlation now call the same private pure candidate
+card derivation, including actual ask-ID normalisation. Construction uses named
+fields; a candidate is never publication evidence. `_prepare` only returns it
+after the existing complete Git/HTTPS proof and matching publication coordinates.
+A causal test makes ask normalisation refuse and verifies both entry paths
+refuse. Valid base64 byte tampering reaches the specific correlation refusal;
+shape/encoding/bound tests retain separate exact diagnostics.
+
+Nested JSON recursion/allocation failures in output checking produce a typed
+refusal. The fixed child entry catches ordinary exceptions at its outer boundary
+and writes only its fixed stderr refusal using descriptor2, including a missing
+stdin stream, recursion/allocation failure or unexpected key. Four actual child
+cases verify that no source/path traceback escapes. Exit failure is never consent.
+
+New causal cases mutate the actual profile during pread and an archive identity
+after the actual publication read, exercise the profile byte bound and output
+bound, reject hosted mismatches after publication, and reject wrong publication
+paths/inner commits before publication. The output-production bound test lowers
+the test threshold after a real successful preparation; it does not claim a
+legitimate current32KiB packet can naturally produce256KiB of output. Filesystem
+change detection still relies on the qualified kernel's metadata granularity;
+coarse timestamps are an explicit portability limit. There is still no enrolled
+native launcher or root permit publisher, and all runtime admission stays held.
+
+Final first-review repair verification: 173 focused tests pass in14.26s with
+inherited bytecode suppression unset; Ruff, strict source Pyright and diff checks
+pass. Exact source/command/log hashes and unchanged receipts are in `r1-repair/`.
+The actual quality delta exits2 with20 rows and5 gating findings:13 dynamic/pytest
+reachability rows,5 test scaffold clones, one minor shared-helper churn row and
+one outer-entry error-masking row. Catching ordinary exceptions is intentional
+only at that fixed private subprocess boundary to preserve the closed refusal
+channel; parsing/derivation still raises typed errors internally. No baseline
+was changed and these findings are not reported as a passing quality gate.

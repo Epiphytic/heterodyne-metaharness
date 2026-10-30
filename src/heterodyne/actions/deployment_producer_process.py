@@ -21,9 +21,8 @@ from heterodyne.actions.codec import MAX_BYTES, InvalidAction, _decode, _pairs, 
 from heterodyne.actions.contracts import Record
 from heterodyne.actions.deployment import Target
 from heterodyne.actions.deployment_authority import _PACKET
-from heterodyne.actions.deployment_card import _prepare, _PreparedCard
+from heterodyne.actions.deployment_card import _derive, _prepare, _PreparedCard
 from heterodyne.actions.deployment_outage import decode_packet, packet_digest
-from heterodyne.actions.deployment_outage_authority import _approval_card
 
 _PROFILE_FD, _ARCHIVE_FD, _COMMIT_FD = 3, 4, 5
 _OUTPUT_LIMIT = 256 * 1024
@@ -141,19 +140,12 @@ def _check_output(  # pyright: ignore[reportUnusedFunction] - private native own
         raise InvalidAction("producer-output-bound")
     try:
         value = msgspec.convert(json.loads(raw, object_pairs_hook=_pairs), type=_Output, strict=True)
-    except (ValueError, TypeError, msgspec.ValidationError) as exc:
+    except (ValueError, TypeError, RecursionError, MemoryError, msgspec.ValidationError) as exc:
         raise InvalidAction("producer-output-shape") from exc
     if raw != msgspec.json.encode(value):
         raise InvalidAction("producer-output-encoding")
-    canonical = _bound_operation(original, profile)
-    packet = decode_packet(original, profile.targets)
-    _, request, _, parts = _approval_card(packet, profile.publication_url, profile.group_hex)
-    commit, path = profile.publication_url.split("/", 7)[6:]
-    expected = _output(_PreparedCard(
-        original, _sha(original), canonical, _sha(canonical), packet.release.approval_id,
-        profile.group_hex, msgspec.json.encode(request), profile.publication_url,
-        commit, path, _sha(canonical), parts[0],
-    ))
+    _bound_operation(original, profile)
+    expected = _output(_derive(original, profile.targets, profile.group_hex, profile.publication_url))
     if value != expected:
         raise InvalidAction("producer-output-correlation")
     return value
@@ -173,6 +165,12 @@ def _entry() -> int:  # pyright: ignore[reportUnusedFunction] - private fixed su
         sys.stdout.buffer.write(raw)
         sys.stdout.buffer.flush()
         return 0
-    except (InvalidAction, OSError, ValueError, TypeError):
-        sys.stderr.write("owned-card-producer-refused\n")
+    except Exception:
+        # A closed or malformed stdio stream, recursion or allocation failure
+        # must not turn this private child boundary into a source/path traceback.
+        # The owning launcher treats every nonzero exit as refusal regardless.
+        try:
+            os.write(2, b"owned-card-producer-refused\n")
+        except OSError:
+            pass
         return 2
