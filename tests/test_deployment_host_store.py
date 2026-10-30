@@ -7,14 +7,20 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 import msgspec
 import pytest
+from test_deployment_outage import packet
 from test_deployment_step1 import TARGET, release
 
+from heterodyne.actions import deployment_host_store as host
 from heterodyne.actions.codec import InvalidAction
+from heterodyne.actions.deployment import digest
 from heterodyne.actions.deployment_host_store import _installer_argv, _ProtectedStore, read_submission
+from heterodyne.actions.deployment_outage import packet_digest
 
 
 @pytest.fixture
@@ -97,24 +103,49 @@ def test_peer_refused_before_waiting_for_input():
         client.close()
 
 
-def test_fixed_installer_composition_does_not_execute(store_root):
-    r = release()
-    argv = _installer_argv(r, store_root / "bootstrap", store_root / "checkout")
-    assert argv[:5] == ("/usr/bin/sudo", "-n", "/usr/bin/env", "-i", "PATH=/usr/sbin:/usr/bin:/sbin:/bin")
-    script = argv[9]
-    assert 'cat -- "$1" >"$b"' in script
-    assert "--check --strict --quiet" in script
-    assert script.index("--check") < script.index('bash "$b"')
-    assert "--no-wsd --no-verity" in script
-    assert "--fetch" not in script and "--adopt" not in script
-    assert argv[-4:] == (
-        str(store_root / "checkout"), r.artifacts.source_commit, r.artifacts.release_sha256, "service"
+def test_fixed_installer_composition_does_not_execute():
+    p = packet()
+    assert _installer_argv(p) == (
+        "/usr/bin/sudo", "-n", "/usr/local/libexec/heterodyne/deployment-install-helper",
+        "--packet-sha256", packet_digest(p),
     )
-    wrong = msgspec.structs.replace(
-        r, artifacts=msgspec.structs.replace(r.artifacts, bootstrap_sha256="b" * 64)
-    )
+    wrong = msgspec.structs.replace(p, release=msgspec.structs.replace(
+        p.release, artifacts=msgspec.structs.replace(p.release.artifacts, bootstrap_sha256="b" * 64)
+    ))
+    wrong = msgspec.structs.replace(wrong, outage=msgspec.structs.replace(
+        wrong.outage, release_sha256=digest(wrong.release)
+    ))
     with pytest.raises(InvalidAction, match="bootstrap-installer-mismatch"):
-        _installer_argv(wrong, store_root / "bootstrap", store_root / "checkout")
+        _installer_argv(wrong)
+
+
+def test_progress_cannot_extend_total_ingress_deadline(monkeypatch):
+    # Real stream timing; UID authorization is synthetic here, independently
+    # covered with actual kernel credentials by the namespace test below.
+    monkeypatch.setattr(host, "peer_credentials_checked", lambda conn: (1, os.geteuid() + 1, 1))
+    monkeypatch.setattr(host, "_INGRESS_SECONDS", 0.06)
+    server, client = socket.socketpair()
+    stop = threading.Event()
+
+    def dribble():
+        while not stop.wait(0.015):
+            try:
+                client.sendall(b" ")
+            except OSError:
+                return
+
+    sender = threading.Thread(target=dribble)
+    sender.start()
+    started = time.monotonic()
+    try:
+        with pytest.raises(InvalidAction, match="deadline|unavailable"):
+            read_submission(server, os.geteuid() + 1, (TARGET,))
+        assert time.monotonic() - started < 0.3
+    finally:
+        stop.set()
+        server.close()
+        client.close()
+        sender.join(timeout=1)
 
 
 _NAMESPACE_PROBE = r'''
@@ -122,6 +153,11 @@ import hashlib, json, os, shutil, socket, subprocess, tempfile
 from pathlib import Path
 import msgspec
 from test_deployment_step1 import TARGET, release
+from test_deployment_outage import packet
+
+from heterodyne.actions import deployment_host_store as host
+from heterodyne.actions.deployment_outage import packet_digest
+from heterodyne.actions.deployment import digest
 from heterodyne.actions.codec import encode_record
 from heterodyne.actions.deployment_host_store import _ProtectedStore, read_submission
 subprocess.run(["mount", "-t", "tmpfs", "-o", "mode=755", "tmpfs", "/tmp"], check=True)

@@ -113,6 +113,8 @@ def test_core_tamper_reason_survives(monkeypatch):
 def test_whole_packet_synthetic_native_binding(tmp_path):
     p = packet()
     _, native, response = native_fixture(tmp_path)
+    native["ask"]["title"] = outage_authority.APPROVAL_TITLE
+    response["ask"]["summary"]["title"] = outage_authority.APPROVAL_TITLE
     native["ask"]["body"] = outage_authority.approval_body(p, URL, H)
     core = authority._core()
     core._validate(p, native, response, {"bel": "d" * 64}, outage_authority._bindings)
@@ -129,6 +131,8 @@ def test_whole_packet_synthetic_native_binding(tmp_path):
 def test_outage_keeps_actual_native_authentication(tmp_path, change):
     p = packet()
     _, native, response = native_fixture(tmp_path)
+    native["ask"]["title"] = outage_authority.APPROVAL_TITLE
+    response["ask"]["summary"]["title"] = outage_authority.APPROVAL_TITLE
     native["ask"]["body"] = outage_authority.approval_body(p, URL, H)
     if change == "sender":
         native["inbound"][0]["sender_key"] = "e" * 64
@@ -142,3 +146,54 @@ def test_outage_keeps_actual_native_authentication(tmp_path, change):
         native["answers"][0]["choice"] = "no"
     with pytest.raises(authority._core().AuthorityHold):
         authority._core()._validate(p, native, response, {"bel": "d" * 64}, outage_authority._bindings)
+
+
+def rendered_outage(p):
+    from heterodyne.admind import asks
+    from heterodyne.admind.redact import redact
+    from heterodyne.admind.store import AskRow
+
+    body = outage_authority.approval_body(p, URL, H)
+    request = asks.AskPost(
+        "question", title=outage_authority.APPROVAL_TITLE, body=body,
+        poster="protected-deploy", form="yes-no", recommended="yes",
+    )
+    assert asks.check(request) is None
+    form, choices = asks.stored_form(request)
+    at = asks.stamp(asks.now())
+    row = AskRow(
+        p.release.approval_id, "question", "protected-deploy", request.title, body,
+        None, None, None, None, False, 1, "open", None, None, at, at,
+        question_form=form, choices=choices,
+    )
+    assert redact(asks.context(row)) == asks.context(row)
+    parts, truncated = asks.checked_card_chunks(row, 8000)
+    assert not truncated and len(parts) == 1
+    assert asks.card_chunks(row, 8000) == (parts, False)
+    return parts[0]
+
+
+def test_actual_rendered_outage_card_retains_exact_outer_digest_and_gap():
+    from heterodyne.harness.digests import parse_display
+
+    p = packet()
+    shown = rendered_outage(p)
+    line = next(line for line in shown.splitlines() if line.startswith("Protected deployment SHA256: "))
+    assert parse_display(line.removeprefix("Protected deployment SHA256: ")).hex == packet_digest(p)
+    assert outage_authority.APPROVAL_TITLE in shown
+    assert "queued but undelivered Marmot reply is not a received revocation" in shown
+    assert "A yes explicitly accepts that gap" in shown
+    assert "<redacted" not in shown
+    changed = msgspec.structs.replace(p, outage=msgspec.structs.replace(
+        p.outage, route=msgspec.structs.replace(p.outage.route, credential_sha256="b" * 64),
+    ))
+    assert rendered_outage(changed) != shown
+
+
+def test_actual_login_redaction_cannot_expand_or_change_approval_context(monkeypatch):
+    from heterodyne.admind import redact as redactor
+
+    monkeypatch.setattr(redactor, "_login_dirs", redactor._compile_dirs(("/tiny",)))
+    r = release(deviations=("Read /tiny before deployment",))
+    with pytest.raises(InvalidAction, match="card-redaction"):
+        authority.approval_body(r, URL, H)

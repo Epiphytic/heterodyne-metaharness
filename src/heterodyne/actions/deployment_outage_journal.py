@@ -13,9 +13,10 @@ import os
 import sqlite3
 import stat
 from collections.abc import Generator
-from typing import cast
+from typing import Literal, cast
 
 from heterodyne.actions.codec import InvalidAction, encode_record
+from heterodyne.actions.contracts import Record
 from heterodyne.actions.deployment import Target
 from heterodyne.actions.deployment_host_store import _ProtectedStore
 from heterodyne.actions.deployment_outage import (
@@ -26,6 +27,21 @@ from heterodyne.actions.deployment_outage import (
     packet_digest,
     validate_packet,
 )
+
+_ACTIVE = (
+    "CREATE UNIQUE INDEX active_target ON jobs(target) "
+    "WHERE phase NOT IN ('succeeded','failed-no-effect')"
+)
+_LEGACY_ACTIVE = "CREATE UNIQUE INDEX active_target ON jobs(target) WHERE phase != 'succeeded'"
+
+
+class NeverIssuedFailure(Record, frozen=True):
+    """Journal-owned causal receipt, not proof for any already-issued operation."""
+
+    schema: Literal["heterodyne-never-issued-failure.v1"]
+    packet_sha256: str
+    execution_id: str
+    outcome: Literal["failed-no-effect"]
 
 
 class _OutageJournal:  # pyright: ignore[reportUnusedClass] - dormant protected factory ledger
@@ -66,14 +82,22 @@ class _OutageJournal:  # pyright: ignore[reportUnusedClass] - dormant protected 
                   execution TEXT PRIMARY KEY, approval TEXT UNIQUE, nonce TEXT UNIQUE,
                   target TEXT NOT NULL, packet TEXT NOT NULL, payload BLOB NOT NULL,
                   ordinal INTEGER NOT NULL, phase TEXT NOT NULL);
-                CREATE UNIQUE INDEX IF NOT EXISTS active_target ON jobs(target)
-                  WHERE phase != 'succeeded';
                 CREATE TABLE IF NOT EXISTS events(
                   execution TEXT NOT NULL, ordinal INTEGER NOT NULL, phase TEXT NOT NULL,
                   observed TEXT NOT NULL, PRIMARY KEY(execution,ordinal,phase));
                 CREATE TABLE IF NOT EXISTS recovery(
                   nonce TEXT PRIMARY KEY, execution TEXT NOT NULL, payload BLOB NOT NULL);
             """)
+            old_index = self.db.execute(
+                "SELECT sql FROM sqlite_master WHERE type='index' AND name='active_target'",
+            ).fetchone()
+            if old_index and " ".join(old_index[0].split()) not in {
+                " ".join(_ACTIVE.split()), " ".join(_LEGACY_ACTIVE.split()),
+            }:
+                raise InvalidAction("outage-journal-index-schema")
+            with self._transaction():
+                self.db.execute("DROP INDEX IF EXISTS active_target")
+                self.db.execute(_ACTIVE)
             os.fsync(fd)
             os.fsync(self.root_fd)
         except BaseException:
@@ -188,7 +212,7 @@ class _OutageJournal:  # pyright: ignore[reportUnusedClass] - dormant protected 
             raise InvalidAction("outage-recovery-observation")
         with self._transaction():
             _, phase = self._row(packet)
-            if phase == "succeeded":
+            if phase in {"succeeded", "failed-no-effect"}:
                 raise InvalidAction("outage-recovery-terminal")
             self.db.execute(
                 "INSERT INTO recovery VALUES(?,?,?)",
@@ -199,3 +223,32 @@ class _OutageJournal:  # pyright: ignore[reportUnusedClass] - dormant protected 
             self.db.execute(
                 "UPDATE jobs SET phase='recovery-hold' WHERE execution=?", (packet.release.execution_id,),
             )
+
+    def fail_never_issued(self, packet: DeploymentPacket, targets: tuple[Target, ...]) -> NeverIssuedFailure:
+        """Record real absence of issued effects; no caller proof/exit code input.
+
+        This only settles a capsule from which this journal has never returned a
+        step. Once any intent was issued, even an installer exit before an
+        apparent change requires a separately qualified no-effect producer.
+        """
+        validate_packet(packet, targets)
+        with self._transaction():
+            ordinal, phase = self._row(packet)
+            issued = self.db.execute(
+                "SELECT 1 FROM events WHERE execution=? AND phase='issued' LIMIT 1",
+                (packet.release.execution_id,),
+            ).fetchone()
+            if ordinal != 0 or phase != "ready" or issued:
+                raise InvalidAction("outage-never-issued-proof-unavailable")
+            receipt = NeverIssuedFailure(
+                "heterodyne-never-issued-failure.v1", packet_digest(packet),
+                packet.release.execution_id, "failed-no-effect",
+            )
+            self.db.execute(
+                "INSERT INTO events VALUES(?,0,'failed-no-effect',?)",
+                (packet.release.execution_id, encode_record(receipt).decode("ascii")),
+            )
+            self.db.execute(
+                "UPDATE jobs SET phase='failed-no-effect' WHERE execution=?", (packet.release.execution_id,),
+            )
+        return receipt

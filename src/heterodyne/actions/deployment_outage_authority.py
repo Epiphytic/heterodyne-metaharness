@@ -18,25 +18,36 @@ from typing import Any
 
 from heterodyne.actions import deployment_authority as release_auth
 from heterodyne.actions import deployment_runtime as runtime
-from heterodyne.actions.codec import InvalidAction
+from heterodyne.actions.codec import InvalidAction, encode_record
 from heterodyne.actions.deployment import Target
 from heterodyne.actions.deployment_outage import DeploymentPacket, packet_digest, validate_packet
 from heterodyne.admind.asks import fit
+from heterodyne.admind.redact import redact
+from heterodyne.harness.digests import display, of_bytes
+
+APPROVAL_TITLE = "OUTAGE DEPLOYMENT: exact finite release"
 
 
 def approval_body(packet: DeploymentPacket, packet_url: str, group: str) -> str:
     validate_packet(packet, (packet.release.target,))
+    original = release_auth.approval_body(packet.release, packet_url, group)
     body = (
-        release_auth.approval_body(packet.release, packet_url, group)
-        + "\nProtected deployment SHA256: " + packet_digest(packet)
+        "Approve this exact finite outage deployment and explicitly accept its transport gap?\n"
+        + original.split("\n", 1)[1]
+        + "\nProtected deployment SHA256: " + display(of_bytes(encode_record(packet)))
         + "\nOutage steps: disable_stop, stopped_guard, install, held_acceptance"
         + "\nIndependent route: " + packet.outage.route.route_id
         + "\nOutage deadline ns: " + str(packet.outage.deadline_ns)
         + "\nRecovery deadline ns: " + str(packet.outage.recovery_deadline_ns)
+        + "\nDuring this outage, a queued but undelivered Marmot reply is not a received revocation."
+        + "\nA yes explicitly accepts that gap for this exact finite outage capsule only."
         + "\nOnly the exact packet transitions and independently authenticated recovery are authorized."
     )
-    context = release_auth.APPROVAL_TITLE + "\n\n" + body
-    if fit(context) != (context, False):
+    context = APPROVAL_TITLE + "\n\n" + body
+    shown = redact(context)
+    if shown != context:
+        raise InvalidAction("outage-card-redaction")
+    if fit(shown) != (shown, False):
         raise InvalidAction("outage-card-budget")
     return body
 
@@ -49,12 +60,15 @@ def _bindings(packet: DeploymentPacket, native: dict[str, Any]) -> list[str]:
         kv = {row["key"]: row["value"] for row in native["kv"]}
         url = release_auth._packet_url(packet.release)
         group = kv["group_id_hex"]
-        if ask["body"] != approval_body(packet, url, group):
+        if ask["title"] != APPROVAL_TITLE or ask["body"] != approval_body(packet, url, group):
             core._hold("exact outage deployment context changed")
         # The unchanged release binder validates ask shape and native membership.
         # Projection is local only; the core authenticates the original retained
         # native rows/card/reply/CLI, and the full original body was checked above.
-        projected = {**native, "ask": {**ask, "body": release_auth.approval_body(packet.release, url, group)}}
+        projected = {**native, "ask": {
+            **ask, "title": release_auth.APPROVAL_TITLE,
+            "body": release_auth.approval_body(packet.release, url, group),
+        }}
         return release_auth._bindings(packet.release, projected)
     except (core.AuthorityHold, InvalidAction):
         raise

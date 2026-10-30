@@ -490,6 +490,13 @@ build bytes, never operator authority. The private durable outage ledger records
 intent before returning a fixed step, refuses unknown-step replay and retains
 target exclusion across a recovery request. Exact already-issued completion can
 still be acknowledged after cancellation without enabling another forward step.
+The card has a distinct OUTAGE title, a computed full outer digest preserved by
+the actual redactor, and explicit acceptance that a queued but undelivered reply
+is not a received revocation. Unchanged context must fit the real renderer. A
+failed-no-effect terminal receipt releases a target only when the journal proves
+it never issued a step; issued and recovery-held targets remain excluded. Build
+ingress has a total monotonic deadline, and installer composition names only a
+fixed root helper and exact packet digest, never a root shell delegation.
 The actual protected receiver/semantic factory, qualified independent route,
 source-specific cessation/newest-state producer and host runner remain required;
 the source primitives neither manufacture those facts nor open host execution.

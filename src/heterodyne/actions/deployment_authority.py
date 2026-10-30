@@ -18,9 +18,11 @@ from pathlib import Path
 from typing import Any, cast
 
 from heterodyne.actions import deployment_runtime as runtime
-from heterodyne.actions.codec import InvalidAction
+from heterodyne.actions.codec import InvalidAction, encode_record
 from heterodyne.actions.deployment import Release, Target, digest, validate
 from heterodyne.admind.asks import fit
+from heterodyne.admind.redact import redact
+from heterodyne.harness.digests import display, of_bytes
 
 CORE_SHA256 = "ad4d4a96632646a5d145feb30c30d402b358d3ecb9caf4717e89394877b5f48d"
 APPROVAL_TITLE = "Exact release"
@@ -123,19 +125,23 @@ def approval_body(release: Release, packet_url: str, group: str) -> str:
         raise InvalidAction("approval-context")
     body = (
         "Approve this exact finite heterodyne release deployment?\n"
-        f"Release SHA256: {digest(release)}\nApproval: {release.approval_id}\n"
+        f"Release SHA256: {display(of_bytes(encode_record(release)))}\nApproval: {release.approval_id}\n"
         f"Execution: {release.execution_id}\nNonce: {release.nonce}\n"
-        f"Target: {release.target.target_id}\nPacket: {packet_url}\nApproval group: {group}\n"
+        f"Target: {release.target.target_id}\nPacket: {packet_url}\n"
+        f"Approval group SHA256: {display(of_bytes(group.encode('ascii')))}\n"
         "Designs:\n"
         + "\n".join(release.design_links)
         + "\nDeployment deviations:\n"
         + "\n".join("- " + d for d in release.deviations)
         + "\nOne use only. No standing approval, heart reaction, generic action or host custody claim."
     )
-    # admind truncates the complete title+body context, not each deviation.
-    # Refuse here instead of producing an ask that can never pass native binding.
+    # Match actual admind fitting after whole-context redaction. An exact
+    # approval cannot silently hide or expand any of the bound context.
     context = APPROVAL_TITLE + "\n\n" + body
-    if fit(context) != (context, False):
+    shown = redact(context)
+    if shown != context:
+        raise InvalidAction("release-card-redaction")
+    if fit(shown) != (shown, False):
         raise InvalidAction("release-card-budget")
     return body
 

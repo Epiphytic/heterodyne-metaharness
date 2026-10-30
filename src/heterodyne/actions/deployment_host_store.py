@@ -10,18 +10,22 @@ import hashlib
 import os
 import socket
 import stat
+import time
 from collections.abc import Generator
 from pathlib import Path
 from typing import Literal
 
 from heterodyne.actions.codec import MAX_BYTES, InvalidAction
 from heterodyne.actions.deployment import Release, Target, decode_release, validate
+from heterodyne.actions.deployment_outage import DeploymentPacket, packet_digest, validate_packet
 from heterodyne.platform import peer_credentials_checked
 
 Role = Literal["bootstrap", "release", "installer", "guard", "units", "dependency-lock"]
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
 _ROLES: tuple[Role, ...] = ("bootstrap", "release", "installer", "guard", "units", "dependency-lock")
+_INGRESS_SECONDS = 2
+_ROOT_INSTALL_HELPER = "/usr/local/libexec/heterodyne/deployment-install-helper"
 
 
 def _private_root(path: Path) -> int:
@@ -59,10 +63,17 @@ def read_submission(conn: socket.socket, submit_uid: int, targets: tuple[Target,
         if peer_credentials_checked(conn)[1] != submit_uid:
             raise InvalidAction("deployment-peer-refused")
         prior_timeout = conn.gettimeout()
-        conn.settimeout(2)
+        deadline = time.monotonic() + _INGRESS_SECONDS
         try:
             raw = bytearray()
-            while chunk := conn.recv(min(4096, MAX_BYTES + 1 - len(raw))):
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise InvalidAction("deployment-submission-deadline")
+                conn.settimeout(remaining)
+                chunk = conn.recv(min(4096, MAX_BYTES + 1 - len(raw)))
+                if not chunk:
+                    break
                 raw.extend(chunk)
                 if len(raw) > MAX_BYTES:
                     raise InvalidAction("deployment-submission-bound")
@@ -196,33 +207,21 @@ class _ProtectedStore:  # pyright: ignore[reportUnusedClass] - dormant protected
             os.close(out)
 
 
-# One source-owned root lifetime: copy, pin check, execute. No split check/run,
-# eval, incoming command string, fetch/adopt flag or selected shell/environment.
-_PINNED_INSTALL = '''b=$(mktemp /run/hz-install-boot.XXXXXX)
-trap 'rm -f -- "$b"' EXIT
-cat -- "$1" >"$b"
-printf '%s  %s\\n' "$2" "$b" | sha256sum --check --strict --quiet
-bash "$b" --checkout "$3" --commit "$4" --expect-sha256 "$5" --service-user "$6" --no-wsd --no-verity
-'''
-
-
 def _installer_argv(  # pyright: ignore[reportUnusedFunction] - source-only fixed recipe composition
-    release: Release, bootstrap: Path, checkout: Path,
+    packet: DeploymentPacket,
 ) -> tuple[str, ...]:
-    """Describe the existing pinned protocol; does not execute or authenticate it.
+    """Name one fixed helper and packet; never delegate root bash to the executor.
 
-    Paths must come from the future protected target mapping/stager. This private
-    composition is never passed directly to sudo by a public request handler.
+    The root-owned helper/profile must independently allow the exact packet,
+    UID, source closure and one-use operation, then perform the existing single
+    private-copy/hash/execute lifetime. No such helper is installed or opened by
+    this source foundation. Caller paths, commands and flags are not arguments.
     """
+    release = packet.release
+    validate_packet(packet, (release.target,))
     validate(release, (release.target,))
-    if not bootstrap.is_absolute() or not checkout.is_absolute():
-        raise InvalidAction("protected-install-path")
     if release.artifacts.bootstrap_sha256 != release.artifacts.installer_sha256:
         raise InvalidAction("pinned-bootstrap-installer-mismatch")
     return (
-        "/usr/bin/sudo", "-n", "/usr/bin/env", "-i", "PATH=/usr/sbin:/usr/bin:/sbin:/bin",
-        "/bin/bash", "-euo", "pipefail", "-c", _PINNED_INSTALL,
-        "heterodyne-pinned-install", str(bootstrap), release.artifacts.installer_sha256,
-        str(checkout), release.artifacts.source_commit, release.artifacts.release_sha256,
-        release.target.service_user,
+        "/usr/bin/sudo", "-n", _ROOT_INSTALL_HELPER, "--packet-sha256", packet_digest(packet),
     )
