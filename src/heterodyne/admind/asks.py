@@ -12,9 +12,11 @@ and a `Choices:` footer close the card, and a reaction or a short reply maps to 
 are packed by `chunk.pack`, so a link, a choice line or the footer is never cut (K23).
 """
 
+import hashlib
 import json
 import re
 import secrets
+import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -89,6 +91,36 @@ class AskPost(msgspec.Struct, frozen=True, tag="post", forbid_unknown_fields=Tru
     management: ManagementMetadata | None = None
 
 
+class AskQuestionOnce(msgspec.Struct, frozen=True, tag="question.once.v1", forbid_unknown_fields=True):
+    """Question relay idempotency only; never a native approval or management request."""
+    key: str
+    post: AskPost
+
+
+def question_once_check(req: AskQuestionOnce) -> str | None:
+    prefix, sep, key = req.key.rpartition(":")
+    namespace, sep2, run_id = prefix.partition(":")
+    try:
+        valid_run = str(uuid.UUID(run_id)) == run_id
+    except ValueError:
+        valid_run = False
+    if (not sep or not sep2 or namespace != "sandbox-manager" or not valid_run
+            or re.fullmatch(r"[A-Za-z0-9._-]{1,128}", key) is None):
+        return "invalid sandbox manager question key"
+    post = req.post
+    if (post.kind != "question" or post.bead is not None or post.pr_url is not None
+            or post.head_sha is not None or post.presentation is not None
+            or post.render_version is not None or post.management is not None):
+        return "question.once.v1 takes ordinary questions only"
+    return check(post)
+
+
+def question_content(req: AskQuestionOnce) -> tuple[str, str]:
+    """Host-derived canonical typed content, distinct from sandbox wire-byte evidence."""
+    raw = msgspec.json.encode(req.post)
+    return hashlib.sha256(raw).hexdigest(), raw.decode("utf-8")
+
+
 class AskGet(msgspec.Struct, frozen=True, tag="get", forbid_unknown_fields=True):
     ask_id: str
 
@@ -106,7 +138,7 @@ class AskBinding(msgspec.Struct, frozen=True, tag="ask.binding.v1", forbid_unkno
     ask_id: str
 
 
-AskRequest = AskPost | AskGet | AskList | AskCancel | AskBinding | NoticePost
+AskRequest = AskQuestionOnce | AskPost | AskGet | AskList | AskCancel | AskBinding | NoticePost
 
 
 class AnswerView(msgspec.Struct, frozen=True):
@@ -195,6 +227,8 @@ def new_id(taken: Callable[[str], bool]) -> str:
 
 def check(req: AskRequest) -> str | None:
     """Why a request is refused before it is logged or handled (R4, R16, R19); None if it may go on."""
+    if isinstance(req, AskQuestionOnce):
+        return question_once_check(req)
     if isinstance(req, AskGet | AskCancel | AskBinding):
         return None if normalise_id(req.ask_id) is not None else (
             f"an ask ID is {ID_LENGTH} characters from {ID_ALPHABET}")
@@ -276,6 +310,9 @@ def failed() -> AskReply:
 
 def describe(req: AskRequest) -> dict[str, object]:
     """The audit fields of a request: IDs, labels and lengths, never text (R18)."""
+    if isinstance(req, AskQuestionOnce):
+        return {**describe(req.post), "op": "question.once.v1",
+                "request_sha256": question_content(req)[0]}
     if isinstance(req, AskPost):
         return {"op": "post", "ask_kind": req.kind, "poster": req.poster, "bead": req.bead,
                 "title_chars": len(req.title), "body_chars": len(req.body), "pr": req.pr_url is not None,

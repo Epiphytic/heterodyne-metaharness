@@ -1316,7 +1316,7 @@ class Admind:
             return await asyncio.to_thread(
                 binding.read, self.store, ask_id, self.s.chunk_chars, self.load_operators
             )
-        if isinstance(req, asks.AskPost):
+        if isinstance(req, asks.AskQuestionOnce | asks.AskPost):
             return await self.serialised_post(req, peer)
         if isinstance(req, NoticePost):
             async with self.ask_post_lock:
@@ -1332,18 +1332,43 @@ class Admind:
             return asks.AskReply("ok", row.status, ask=self.ask_view(row))
         return self.cancel_ask(row)
 
-    async def serialised_post(self, req: asks.AskPost, peer: ctl.Peer) -> asks.AskReply:
+    async def serialised_post(
+        self, req: asks.AskPost | asks.AskQuestionOnce, peer: ctl.Peer,
+    ) -> asks.AskReply:
         """At most MAX_IN_FLIGHT posts at once (the next is refused), run one at a time (R15, R22)."""
         if self.posts_in_flight >= asks.MAX_IN_FLIGHT:
             return asks.refused(ASK_BUSY)
         self.posts_in_flight += 1
         try:
             async with self.ask_post_lock:
+                if isinstance(req, asks.AskQuestionOnce):
+                    return self.post_question_once(req, peer)
                 if req.kind == "approval":
                     return await self.post_approval(req, peer)
                 return self.post_ask(req, peer)
         finally:
             self.posts_in_flight -= 1
+
+    def post_question_once(self, req: asks.AskQuestionOnce, peer: ctl.Peer) -> asks.AskReply:
+        """Commit the actual question, card and immutable idempotency binding together."""
+        why = asks.question_once_check(req)
+        if why is not None:
+            return asks.refused(why)
+        digest, content = asks.question_content(req)
+        with self.store.transaction():
+            prior = self.store.question_key(req.key)
+            if prior is not None:
+                if prior[:2] != (digest, content):
+                    return asks.refused("question key already binds different content")
+                row = self.store.ask(prior[2])
+                if row is None or row.kind != "question":
+                    return asks.refused("question key retained ask unavailable")
+                # Exact retained ID wins before latch, hourly and unanswered limits.
+                return asks.AskReply("posted", f"ask {row.ask_id} retained", ask=self.ask_view(row))
+            result = self.post_ask(req.post, peer)
+            if result.result == "posted" and result.ask is not None:
+                self.store.bind_question(req.key, digest, content, result.ask.summary.ask_id)
+            return result
 
     def post_ask(self, req: asks.AskPost, peer: ctl.Peer) -> asks.AskReply:
         """Under `ask_post_lock`: check the latch and the limits, then store a question or merge ask and
