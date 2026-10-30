@@ -41,7 +41,9 @@ class _PreparedCard:
 def _derive(
     original: bytes, targets: tuple[Target, ...], group_hex: str, publication_url: str,
 ) -> _PreparedCard:
-    """One pure candidate derivation; this value is not publication evidence."""
+    """Shared candidate derivation under the current host rendering policy.
+
+    The owning factory must enroll that policy; this is not publication evidence."""
     packet = decode_packet(original, targets)
     release = packet.release
     if asks.normalise_id(release.approval_id) != release.approval_id:
@@ -72,10 +74,5 @@ def _prepare(  # pyright: ignore[reportUnusedFunction] - future owning protected
     # Validate the exact final card once, before any network corroboration. Its
     # provisional value is never returned until the complete proof succeeds.
     candidate = _derive(original, targets, group_hex, publication_url)
-    publication = _verify(original, targets, publication_url, archive_fd, commit_fd)
-    if (publication.url, publication.commit, publication.path, publication.published_original_sha256) != (
-        candidate.publication_url, candidate.publication_commit,
-        candidate.publication_path, candidate.published_original_sha256,
-    ):
-        raise InvalidAction("deployment-card-publication-mismatch")
+    _verify(original, targets, publication_url, archive_fd, commit_fd)
     return candidate

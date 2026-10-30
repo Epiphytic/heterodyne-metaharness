@@ -333,3 +333,36 @@ def test_actual_profile_byte_bound_is_causal(inputs):
     path.chmod(0o400)
     with pytest.raises(InvalidAction, match="profile-changed-or-bound"):
         producer._profile(inputs[3])
+
+
+def test_distinct_descriptors_for_one_object_refuse_before_publication(inputs, monkeypatch):
+    original, _, _, profile_fd, archive, _, _ = inputs
+    monkeypatch.setattr(publication, "_https", lambda *args: pytest.fail("unexpected publication read"))
+    duplicate = os.dup(archive)
+    try:
+        with pytest.raises(InvalidAction, match="producer-object-alias"):
+            producer._produce(original, profile_fd, archive, duplicate)
+    finally:
+        os.close(duplicate)
+
+
+def test_canonical_profile_binding_refuses_before_publication(inputs, monkeypatch):
+    original, _, profile, profile_fd, archive, commit, path = inputs
+    monkeypatch.setattr(publication, "_https", lambda *args: pytest.fail("unexpected publication read"))
+    path.chmod(0o600)
+    path.write_bytes(encode_record(msgspec.structs.replace(profile, packet_sha256="0" * 64)))
+    path.chmod(0o400)
+    with pytest.raises(InvalidAction, match="producer-canonical-binding"):
+        producer._produce(original, profile_fd, archive, commit)
+
+
+def test_actual_child_closed_stdout_has_exact_refusal_without_shutdown_flush(inputs):
+    result = child(inputs, extra="r,w=os.pipe();os.close(r);os.dup2(w,1);os.close(w)")
+    assert (result.returncode, result.stdout, result.stderr) == (2, b"", b"owned-card-producer-refused\n")
+
+
+@pytest.mark.parametrize("raw", [b"NaN", b"\xff", b'{"schema":null,"schema":null}'])
+def test_output_uses_strict_bounded_codec(inputs, raw):
+    original, _, profile, *_ = inputs
+    with pytest.raises(InvalidAction, match="producer-output-shape"):
+        producer._check_output(raw, original, profile)

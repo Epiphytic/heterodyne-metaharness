@@ -169,7 +169,7 @@ def test_fixed_tls_reader_rejects_redirects_and_encoding(monkeypatch, status, en
     assert observed[:2] == [("raw.githubusercontent.com", 443, 10), (publication.ssl.CERT_REQUIRED, True)]
     assert observed[2] == (
         "GET", "/Epiphytic/heterodyne-metaharness/" + "a" * 40 + "/docs/packet.json",
-        {"Accept-Encoding": "identity"},
+        {"Host": "raw.githubusercontent.com", "Accept-Encoding": "identity"},
     )
 
 

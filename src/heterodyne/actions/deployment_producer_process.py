@@ -17,7 +17,14 @@ from typing import Literal
 
 import msgspec
 
-from heterodyne.actions.codec import MAX_BYTES, InvalidAction, _decode, _pairs, encode_record
+from heterodyne.actions.codec import (
+    MAX_BYTES,
+    InvalidAction,
+    _decode,
+    _pairs,
+    _reject_constant,
+    encode_record,
+)
 from heterodyne.actions.contracts import Record
 from heterodyne.actions.deployment import Target
 from heterodyne.actions.deployment_authority import _PACKET
@@ -139,7 +146,12 @@ def _check_output(  # pyright: ignore[reportUnusedFunction] - private native own
     if not raw or len(raw) > _OUTPUT_LIMIT:
         raise InvalidAction("producer-output-bound")
     try:
-        value = msgspec.convert(json.loads(raw, object_pairs_hook=_pairs), type=_Output, strict=True)
+        # This output includes the rendered multiline card; the action codec's
+        # safe-text walk deliberately forbids those strings. Reuse its strict
+        # JSON hooks, then enforce the flat typed output and canonical bytes.
+        value = msgspec.convert(json.loads(
+            raw.decode("utf-8"), object_pairs_hook=_pairs, parse_constant=_reject_constant,
+        ), type=_Output, strict=True)
     except (ValueError, TypeError, RecursionError, MemoryError, msgspec.ValidationError) as exc:
         raise InvalidAction("producer-output-shape") from exc
     if raw != msgspec.json.encode(value):
@@ -173,4 +185,6 @@ def _entry() -> int:  # pyright: ignore[reportUnusedFunction] - private fixed su
             os.write(2, b"owned-card-producer-refused\n")
         except OSError:
             pass
-        return 2
+        # Do not let interpreter shutdown retry a failed buffered stdout flush.
+        # This entry is only executed in the factory-owned subprocess.
+        os._exit(2)
