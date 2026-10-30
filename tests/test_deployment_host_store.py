@@ -105,7 +105,7 @@ def test_peer_refused_before_waiting_for_input():
 
 def test_fixed_installer_composition_does_not_execute():
     p = packet()
-    assert _installer_argv(p) == (
+    assert _installer_argv(p, (TARGET,)) == (
         "/usr/bin/sudo", "-n", "/usr/local/libexec/heterodyne/deployment-install-helper",
         "--packet-sha256", packet_digest(p),
     )
@@ -116,7 +116,7 @@ def test_fixed_installer_composition_does_not_execute():
         wrong.outage, release_sha256=digest(wrong.release)
     ))
     with pytest.raises(InvalidAction, match="bootstrap-installer-mismatch"):
-        _installer_argv(wrong)
+        _installer_argv(wrong, (TARGET,))
 
 
 def test_progress_cannot_extend_total_ingress_deadline(monkeypatch):

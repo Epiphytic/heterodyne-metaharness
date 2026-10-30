@@ -4,7 +4,14 @@ import json
 
 import msgspec
 import pytest
-from test_deployment_step1 import TARGET, URL, H, native_fixture, release
+from test_deployment_step1 import (  # noqa: F401
+    TARGET,
+    URL,
+    H,
+    native_fixture,
+    release,
+    synthetic_rendering_profile,
+)
 
 from heterodyne.actions import deployment_authority as authority
 from heterodyne.actions import deployment_outage_authority as outage_authority
@@ -34,7 +41,7 @@ def packet():
         OutageCapsule(
             "heterodyne-outage-capsule.v1", digest(r), r.execution_id, r.nonce,
             2, 90, 200, transitions, IndependentRoute("terminal1", H, H, H),
-        ), H, H, H,
+        ), H, H, H, H, H, H,
     )
 
 
@@ -191,9 +198,69 @@ def test_actual_rendered_outage_card_retains_exact_outer_digest_and_gap():
 
 
 def test_actual_login_redaction_cannot_expand_or_change_approval_context(monkeypatch):
-    from heterodyne.admind import redact as redactor
-
-    monkeypatch.setattr(redactor, "_login_dirs", redactor._compile_dirs(("/tiny",)))
+    monkeypatch.setattr(authority, "_rendering", lambda: (("/tiny",), 2000))
     r = release(deviations=("Read /tiny before deployment",))
     with pytest.raises(InvalidAction, match="card-redaction"):
         authority.approval_body(r, URL, H)
+
+
+def test_real_endpoint_chunk_bound_and_protected_target_mapping(monkeypatch):
+    from heterodyne.actions.deployment_host_store import _installer_argv
+
+    p = packet()
+    monkeypatch.setattr(authority, "_rendering", lambda: ((), 1000))
+    with pytest.raises(InvalidAction, match="single-part|transport-bound"):
+        outage_authority.approval_body(p, URL, H)
+    with pytest.raises(InvalidAction):
+        _installer_argv(p, ())
+
+
+def test_outer_url_is_independent_and_retained_in_exact_native_body(tmp_path):
+    p = packet()
+    outer = URL.replace("a" * 40, "b" * 40)
+    body = outage_authority.approval_body(p, outer, H)
+    assert "Outer Packet: " + outer in body
+    assert "Inner Release: " + URL in body
+    _, native, response = native_fixture(tmp_path)
+    native["ask"].update(title=outage_authority.APPROVAL_TITLE, body=body)
+    response["ask"]["summary"]["title"] = outage_authority.APPROVAL_TITLE
+    authority._core()._validate(p, native, response, {"bel": "d" * 64}, outage_authority._bindings)
+    with pytest.raises(InvalidAction, match="publication-url"):
+        outage_authority.approval_body(p, outer.replace("docs/release.json", "docs/other.json"), H)
+
+
+def test_rendering_profile_resolved_without_global_login_state(monkeypatch, request):
+    from types import SimpleNamespace
+
+    from heterodyne.admind import redact as redactor
+
+    monkeypatch.setattr(authority, "_core", lambda: SimpleNamespace(_read=lambda path: b"pinned config"))
+    seen = []
+
+    def config(ws, env):
+        seen.append((ws, env))
+        return object()
+
+    monkeypatch.setattr(authority, "load_config", config)
+    monkeypatch.setattr(authority.admind_settings, "resolve", lambda cfg, env: SimpleNamespace(
+        login_dirs=("~/.claude-b",), chunk_chars=2000,
+    ))
+    monkeypatch.setattr(redactor, "_login_dirs", None)
+    monkeypatch.setattr(authority, "_rendering", request.getfixturevalue("synthetic_rendering_profile"))
+    with pytest.raises(InvalidAction, match="card-redaction"):
+        authority.approval_body(release(deviations=("Read ~/.claude-b",)), URL, H)
+    assert seen == [(None, {
+        "HOME": str(authority.HOST_POLICY.parent.parent.parent),
+        "HETERODYNE_CONFIG_DIR": str(authority.HOST_POLICY.parent),
+    })]
+
+
+@pytest.mark.parametrize("field", ["root_helper_sha256", "root_profile_sha256", "sudo_sha256"])
+def test_root_helper_contract_pins_are_required_and_closed(field):
+    p = packet()
+    with pytest.raises(InvalidAction, match="outage-digest"):
+        decode_packet(encode_record(msgspec.structs.replace(p, **{field: "bad"})), (TARGET,))
+    raw = json.loads(encode_record(p))
+    del raw[field]
+    with pytest.raises(InvalidAction):
+        decode_packet(json.dumps(raw).encode(), (TARGET,))

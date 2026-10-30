@@ -28,6 +28,14 @@ TARGET = Target("hermes", "hermes-prod", "revision1", "service", "release", "uni
 URL = "https://github.com/Epiphytic/heterodyne-metaharness/blob/" + "a" * 40 + "/docs/release.json"
 
 
+@pytest.fixture(autouse=True)
+def synthetic_rendering_profile(monkeypatch):
+    # Explicit synthetic endpoint profile, never a genuine installed config.
+    original = authority._rendering
+    monkeypatch.setattr(authority, "_rendering", lambda: ((), 2000))
+    return original
+
+
 def release(**changes):
     original = Release(
         "heterodyne-release.v1",

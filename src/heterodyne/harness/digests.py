@@ -1,7 +1,6 @@
 """A digest shown on an approval card (plan 4c E14). Only a `ComputedDigest` is ever grouped for display: a
 SHA-256 that `wsd` computed itself, over a manifest's canonical bytes (`of_manifest`) or a file it holds open
-(`of_fd`) or original bytes it owns (`of_bytes`). A digest read from anywhere else is never given this form,
-so a card cannot show a value it was
+(`of_fd`). A digest read from anywhere else is never given this form, so a card cannot show a value it was
 handed. The display is `sha256:` and 16 space-separated groups of 4 lowercase hex: no secret scanner pattern
 matches it, and `parse_display` takes back that exact form and no other."""
 
@@ -18,18 +17,13 @@ _CHUNK = 1 << 16
 
 @dataclass(frozen=True)
 class ComputedDigest:
-    """A SHA-256 `wsd` computed; build with an `of_*` source-computing helper."""
+    """A SHA-256 `wsd` computed; build one with `of_manifest` or `of_fd` only."""
 
     hex: str
 
 
 def of_manifest(m: sc.Manifest) -> ComputedDigest:
     return ComputedDigest(hashlib.sha256(sc.canonical(m)).hexdigest())
-
-
-def of_bytes(original: bytes) -> ComputedDigest:
-    """Compute over owned original/canonical bytes; never re-label a supplied digest."""
-    return ComputedDigest(hashlib.sha256(original).hexdigest())
 
 
 def of_fd(fd: int) -> ComputedDigest:

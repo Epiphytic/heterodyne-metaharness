@@ -208,7 +208,7 @@ class _ProtectedStore:  # pyright: ignore[reportUnusedClass] - dormant protected
 
 
 def _installer_argv(  # pyright: ignore[reportUnusedFunction] - source-only fixed recipe composition
-    packet: DeploymentPacket,
+    packet: DeploymentPacket, targets: tuple[Target, ...],
 ) -> tuple[str, ...]:
     """Name one fixed helper and packet; never delegate root bash to the executor.
 
@@ -218,8 +218,7 @@ def _installer_argv(  # pyright: ignore[reportUnusedFunction] - source-only fixe
     this source foundation. Caller paths, commands and flags are not arguments.
     """
     release = packet.release
-    validate_packet(packet, (release.target,))
-    validate(release, (release.target,))
+    validate_packet(packet, targets)
     if release.artifacts.bootstrap_sha256 != release.artifacts.installer_sha256:
         raise InvalidAction("pinned-bootstrap-installer-mismatch")
     return (

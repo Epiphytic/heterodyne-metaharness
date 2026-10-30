@@ -141,8 +141,7 @@ def test_no_effect_proof_cannot_release_any_issued_or_recovery_target(journal, p
     _, first = journal
     p = packet()
     first.record_capsule(p, (TARGET,), 3)
-    if phase != "recovery":
-        first.issue(p, (TARGET,), 4, p.outage.transitions[0].before_sha256)
+    first.issue(p, (TARGET,), 4, p.outage.transitions[0].before_sha256)
     if phase == "completed":
         first.complete(p, (TARGET,), p.outage.transitions[0].after_sha256)
     if phase == "recovery":
@@ -164,3 +163,28 @@ def test_legacy_target_index_migrates_but_unknown_schema_refuses(journal):
     first.db.execute("CREATE UNIQUE INDEX active_target ON jobs(target) WHERE phase != 'anything'")
     with pytest.raises(InvalidAction, match="index-schema"):
         _OutageJournal(store)
+
+
+def test_cancel_before_first_intent_can_prove_no_effect_and_release(journal):
+    store, first = journal
+    p = packet()
+    first.record_capsule(p, (TARGET,), 3)
+    c = command(p)
+    first.request_recovery(p, (TARGET,), c, 101, c.expected_observation_sha256)
+    second = _OutageJournal(store)
+    try:
+        assert second.fail_never_issued(p, (TARGET,)).outcome == "failed-no-effect"
+        assert second.db.execute("SELECT COUNT(*) FROM recovery").fetchone() == (1,)
+        second.record_capsule(another(p), (TARGET,), 3)
+    finally:
+        second.close()
+
+
+def test_current_schema_open_does_not_take_writer_lock(journal):
+    store, first = journal
+    first.db.execute("BEGIN IMMEDIATE")
+    try:
+        second = _OutageJournal(store)
+        second.close()
+    finally:
+        first.db.rollback()

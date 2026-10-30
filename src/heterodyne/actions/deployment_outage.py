@@ -50,6 +50,9 @@ class DeploymentPacket(Record, frozen=True):
     store_source_sha256: str
     outage_source_sha256: str
     semantic_factory_source_sha256: str
+    root_helper_sha256: str
+    root_profile_sha256: str
+    sudo_sha256: str
 
 
 class RecoveryCommand(Record, frozen=True):
@@ -88,7 +91,8 @@ def validate_packet(packet: DeploymentPacket, targets: tuple[Target, ...]) -> No
         capsule.release_sha256, capsule.route.epoch_sha256,
         capsule.route.policy_sha256, capsule.route.credential_sha256,
         packet.store_source_sha256, packet.outage_source_sha256,
-        packet.semantic_factory_source_sha256,
+        packet.semantic_factory_source_sha256, packet.root_helper_sha256,
+        packet.root_profile_sha256, packet.sudo_sha256,
     )
     for ordinal, transition in enumerate(capsule.transitions):
         _hashes(transition.before_sha256, transition.after_sha256)

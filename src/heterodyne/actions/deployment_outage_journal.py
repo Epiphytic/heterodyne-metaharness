@@ -88,16 +88,19 @@ class _OutageJournal:  # pyright: ignore[reportUnusedClass] - dormant protected 
                 CREATE TABLE IF NOT EXISTS recovery(
                   nonce TEXT PRIMARY KEY, execution TEXT NOT NULL, payload BLOB NOT NULL);
             """)
-            old_index = self.db.execute(
-                "SELECT sql FROM sqlite_master WHERE type='index' AND name='active_target'",
-            ).fetchone()
-            if old_index and " ".join(old_index[0].split()) not in {
-                " ".join(_ACTIVE.split()), " ".join(_LEGACY_ACTIVE.split()),
-            }:
-                raise InvalidAction("outage-journal-index-schema")
-            with self._transaction():
-                self.db.execute("DROP INDEX IF EXISTS active_target")
-                self.db.execute(_ACTIVE)
+            current = self._index_sql()
+            if current != " ".join(_ACTIVE.split()):
+                # Ordinary/status opens retain read concurrency. A migration
+                # rechecks under the same transaction before changing schema.
+                with self._transaction():
+                    current = self._index_sql()
+                    if current == " ".join(_LEGACY_ACTIVE.split()):
+                        self.db.execute("DROP INDEX active_target")
+                        self.db.execute(_ACTIVE)
+                    elif current is None:
+                        self.db.execute(_ACTIVE)
+                    elif current != " ".join(_ACTIVE.split()):
+                        raise InvalidAction("outage-journal-index-schema")
             os.fsync(fd)
             os.fsync(self.root_fd)
         except BaseException:
@@ -108,6 +111,12 @@ class _OutageJournal:  # pyright: ignore[reportUnusedClass] - dormant protected 
         finally:
             if fd >= 0:
                 os.close(fd)
+
+    def _index_sql(self) -> str | None:
+        row = self.db.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name='active_target'",
+        ).fetchone()
+        return " ".join(row[0].split()) if row else None
 
     def close(self) -> None:
         self.db.close()
@@ -238,7 +247,7 @@ class _OutageJournal:  # pyright: ignore[reportUnusedClass] - dormant protected 
                 "SELECT 1 FROM events WHERE execution=? AND phase='issued' LIMIT 1",
                 (packet.release.execution_id,),
             ).fetchone()
-            if ordinal != 0 or phase != "ready" or issued:
+            if ordinal != 0 or phase not in {"ready", "recovery-hold"} or issued:
                 raise InvalidAction("outage-never-issued-proof-unavailable")
             receipt = NeverIssuedFailure(
                 "heterodyne-never-issued-failure.v1", packet_digest(packet),

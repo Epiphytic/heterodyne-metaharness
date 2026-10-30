@@ -37,8 +37,14 @@ database restore, generic command, argv, alternate reader or selected route is
 accepted. Values and hashes alone are not authentication or readiness evidence.
 
 `deployment_outage_authority.py` is a dormant, fixed native corroboration adapter.
-Its exact original body includes the complete outer packet digest, immutable
-pushed packet URL, original designs/deviations and outage/recovery details. It
+Its exact original body includes the complete outer packet digest, an independent
+immutable Outer Packet URL, a distinct Inner Release URL, original designs/
+deviations and outage/recovery details. The outer URL is authenticated native-card
+context outside the operation digest, avoiding a self-referential Git commit.
+It is constrained to the fixed Product repo, full commit and exact canonical packet
+path. A URL alone is not publication evidence: the owning producer must read the
+actual committed outer bytes and recompute this digest before posting; that
+operational producer integration remains held. It
 uses the unchanged checked native core, original system-owned card, actual sender
 key/current allowed membership, yes-only native answers and exact CLI readback.
 Both source-role and policy sweeps remain required. An inner-only approval or a
@@ -48,10 +54,16 @@ semantic source role currently pins this exact adapter, not an unimplemented
 protected receiver factory. The distinct OUTAGE title and opening explicitly disclose and accept that a
 queued but undelivered Marmot reply is not a received revocation. Digest lines
 use the existing computed public digest grammar, preserving all 256 bits through
-the real redactor; the group line hashes the exact group bytes rather than
-exposing an identifier. Aggregate title/body budgets use actual
+the real redactor; the group line hashes the exact group bytes rather than exposing an identifier.
+This is a correlation value, not a claim that a human can reconstruct or verify
+the group ID from the hash. Native membership/source-epoch checks remain required. Aggregate title/body budgets use actual
 `fit(redact(context))` with the admind 3500-character/40-line bounds and refuse
-any context changed by redaction rather than approving altered text. Native
+any context changed by redaction rather than approving altered text. The fixed H
+configuration is resolved through actual admind settings with fixed environment,
+read before and after resolution; explicit `redact_with_dirs` uses its complete
+login-directory forms without depending on initialized global state. The same
+resolved endpoint chunk bound and actual question renderer must produce exactly
+one untruncated part, including header/answer metadata. Native
 single-card readback is still mandatory; complete transport sizing remains an
 actual endpoint qualification requirement.
 
@@ -65,9 +77,11 @@ commands consume a unique nonce and retain their exact payload. Cancelling an
 unknown operation never marks a target reusable. These methods consume trusted
 factory inputs; they do not authenticate caller-created commands or observations.
 A typed `failed-no-effect` receipt can release the active target only when this
-journal proves in one transaction that it is still ordinal zero/ready and has
-never issued any effect. Its one-use execution/approval/nonce history is retained.
-Any issued, completed or recovery-held job refuses this path. A post-issued
+journal proves in one transaction that it is still ordinal zero in ready or recovery-hold and has never issued any
+effect, including cancellation received before the first intent. Its one-use execution/approval/nonce history is retained.
+Any issued or completed job refuses this path, including recovery-held issued
+jobs. An unchanged-index status open takes no schema write lock; only a legacy
+index or missing initial index is transactionally rechecked and migrated. A post-issued
 installer refusal cannot be inferred from a caller exit code: it remains uncertain
 until a separately qualified effect/no-effect or cessation producer supplies proof.
 The operational producer of cessation/newest-state observations and its bounded
@@ -81,7 +95,11 @@ built-in review requested changes; the retained report is
 findings 1–7 without claiming clearance or adding a review of its own. Findings
 8–9 remain visible bounded duplication cleanup.
 
-Focused repair tests: 84 passed, with bytecode-disable environment unset.
+The second actual HIGH review requested narrow changes on `3f83729`; its
+report/receipt are retained under `2026-10-30-deployment-step2-code/r2`. This
+substantive repair does not claim clearance.
+
+Focused repair tests: 92 passed, with bytecode-disable environment unset.
 They include actual anchored filesystem staging, target lock exclusion, retained
 tamper refusal, wrong UID refusal before any socket read, durable journal restart,
 uncertain-step non-replay, exact completion, post-cancel acknowledgement without
@@ -106,8 +124,11 @@ pass. There is no Step 2 `.venv`; Pyright's explicit interpreter resolves msgspe
 and reports zero errors despite noting that the configured local venv is absent.
 `ripwire --quality-delta` against the frozen Step 2 source exits 2: ten rows,
 three major findings (a small test-pattern clone, approval-body repair churn and
-journal size). Seven new-symbol rows identify pytest/thread entry points as
-unused. No metric was acknowledged away. The earlier foundation's capture
+journal size). That measurement described the first repair; the second repair
+measurement exits 2 with 20 rows: 11 major short-horizon repair-churn findings,
+two minor findings (ambient churn and journal size 208 to 217 lines), and seven
+new pytest fixture/test entry points reported as dead code. The focused suite
+executes those tests. No metric was acknowledged away. The earlier foundation's capture
 clones remain visible in the actual R1 findings; this repair does not introduce
 an arbitrary policy/reader callback to remove them.
 
@@ -119,6 +140,28 @@ release additionally requires source-specific positive cessation and newest-stat
 reconciliation. The finite deterministic host runner, actual target mapping,
 protected interpreter/stdlib/imported dependency closure and narrowly configured
 root helper are not installed. No public execution path is added here.
+
+## Compatibility and root contract
+
+The Step 1 card format changed intentionally: digest display, group correlation
+and explicit rendering checks differ. Previously posted Step 1 bodies and their
+adapter source pins do not silently migrate: they hold and require a new exact
+ask/packet with current source pins. No old yes is reinterpreted. The private outer
+packet now requires root-helper, root-profile and sudo SHA256 roles; earlier private
+fixture shapes without those fields refuse. This is not an external wire-version
+compatibility claim. The generic shared `of_bytes` display helper was removed;
+these cards construct display values only from their typed canonical operation
+digests or the source-computed group correlation hash.
+
+Root corroboration checks the fixed helper, fixed profile and sudo bytes plus
+root ownership and non-writable ancestor chains in both source sweeps. The
+installer argv requires the protected target mapping rather than validating a
+target against itself. The future root helper must independently read its own
+protected exact permit/profile, match all packet/role/target/source/UID pins and
+one-use state, and check the installer copy in the same root-private lifetime
+before execution. Executor-store contents or a caller packet digest alone are
+never root admission. The helper is not yet implemented/installed here, so its
+absence causes real source corroboration to hold; no host execution is opened.
 
 ## Proposed deployment write set (not authorization)
 

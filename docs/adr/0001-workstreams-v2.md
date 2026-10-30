@@ -497,6 +497,13 @@ failed-no-effect terminal receipt releases a target only when the journal proves
 it never issued a step; issued and recovery-held targets remain excluded. Build
 ingress has a total monotonic deadline, and installer composition names only a
 fixed root helper and exact packet digest, never a root shell delegation.
+Root-helper/profile/sudo roles are pinned and root must independently check its
+protected exact permit, source/target/UID and one-use state. The outer publication
+URL is separate immutable native-card context; the producer must verify the actual
+committed packet bytes. Current rendering uses resolved pinned login forms and
+actual endpoint chunks. Old Step 1 cards/pins hold rather than being reinterpreted.
+A cancelled ordinal-zero capsule may release only with durable proof no intent
+was ever issued.
 The actual protected receiver/semantic factory, qualified independent route,
 source-specific cessation/newest-state producer and host runner remain required;
 the source primitives neither manufacture those facts nor open host execution.
