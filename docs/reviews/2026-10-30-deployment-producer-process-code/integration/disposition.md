@@ -1,0 +1,3 @@
+# Source integration
+
+Merged main a05363054e9f204fc67e3733dfaafffcd3326c65 into the reviewed producer branch. Resolved publication conflict by keeping exactly the third-reviewed explicit Host source; kept main's actual prior custody review disposition. All five third-reviewed producer/card/publication source and test files match d474dcf9b1cc12c25a4e2bef5769feb6760f9bab byte for byte. No new code was introduced by this integration. 88 process/publication/card/cessation/root-helper tests passed in 13.38 seconds; all commit hooks passed. Third-review clearance is retained; no repeat review solely to validate the review.
