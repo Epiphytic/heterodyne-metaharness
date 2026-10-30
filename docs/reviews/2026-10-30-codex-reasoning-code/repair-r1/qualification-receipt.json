@@ -1,0 +1,52 @@
+{
+  "source_commit": "2f4dc9b9c2ae95dac9ac72c21279ebb8ff5804d8",
+  "source_tree": "9561818c2e40a449225c30bf1cb6c75c5e800f7c",
+  "frozen_round1_head": "df968b3798b8bfb42747ac9307ef2e5d279c148e",
+  "original_base": "67ce2df8acdb00e6a698f90bccc450bc32137a63",
+  "review_round1": "CHANGES REQUESTED, actual builtin HIGH; not reset",
+  "files": {
+    "docs/configuration.md": "ecb54351db314dddd2ec1f7de8970427c3341286d07a198506648bcd3d971958",
+    "src/heterodyne/agents/base.py": "ef87afdb73a7dd73d99b8666da63fc435854d1ea317fee90d49d193ab66fe323",
+    "src/heterodyne/agents/claude_code.py": "e972023c46e7eb5beb8e9450d0ee9784fefcff61a5b0ae44da0bfb01cd595895",
+    "src/heterodyne/agents/codex.py": "b2034fcbc374ca83e7dd141a594bd08abddd811a76d22c579660238aa61766ba",
+    "src/heterodyne/config/layers.py": "a5baaa68e5af465463cddc24199d05ffefcdc00bf5b63e43aed057ecc627ecce",
+    "src/heterodyne/config/profile_args.py": "e86427b99fd43b2112c8a0696e0852e6a1ecd794833fb7ab182c39d0a0150ada",
+    "src/heterodyne/sandbox/runtime.py": "82359107c74416fe242f2b94da62d4e82abef2690e2d3219ec69d6c3398934a6",
+    "tests/test_codex_reasoning_profile.py": "1f2ecb60f038afbf64d26942a6c65473050f1e1a5716848833a2b2ff07e842ba",
+    "tests/test_sandbox_runtime.py": "0733b8382a4eb4129435e703f225cf7f9b0624c3f4a3d071d646f44c5dc7b7a5"
+  },
+  "logs": {
+    "focused.log": "75de72cda1ffecdfab4b8b83295bdcb33195f8f8222e5d75686a378d806dfa90",
+    "runtime-suite.log": "bd20ea1dda3a630f52139968b9c0720e1f6c21c834dc7d6e72f0809e9e771e19",
+    "accounts.log": "f6a548c03746801fa303850cba835e1e8b18f69c84dbb237a3270ac847edf66f",
+    "pyright.log": "63e86002981999ce2b8a7f15e5d7f7bfee7f5a111c8eba70fabd628dcba2f827",
+    "quality-parent-delta.txt": "1ceccdf3389de6a75f9859f03a6a0555d9951863c4b6628daef8f9632c9f9bc3"
+  },
+  "raw_capture_sha256": {
+    "focused.log": "75de72cda1ffecdfab4b8b83295bdcb33195f8f8222e5d75686a378d806dfa90",
+    "runtime-suite.log": "bd20ea1dda3a630f52139968b9c0720e1f6c21c834dc7d6e72f0809e9e771e19",
+    "accounts.log": "f6a548c03746801fa303850cba835e1e8b18f69c84dbb237a3270ac847edf66f",
+    "pyright.log": "694e6f9ed8801af52bf8202d282b2d01e8d87a67e723f5d328738148d70c16c5",
+    "quality-parent-delta.txt": "1ceccdf3389de6a75f9859f03a6a0555d9951863c4b6628daef8f9632c9f9bc3"
+  },
+  "results": {
+    "focused": "312 passed in 6.45s",
+    "accounts": "103 passed in 0.32s",
+    "runtime_suite": "274 passed in 472.90s",
+    "ruff": "all five changed Python files exit0",
+    "pyright": "all five changed Python files exit0;0errors0warnings",
+    "quality_delta": "incremental actual frozen parent exit0 three minor findings; cumulative prior exit2 retained",
+    "commit_hooks": "PASS",
+    "diff_check": "PASS"
+  },
+  "commands": {
+    "focused": "PYTHONPATH=src $TEST_ENV/bin/python -m pytest tests/test_codex_reasoning_profile.py tests/test_agents_adapters.py tests/test_agents_content.py tests/test_config.py -q",
+    "accounts": "PYTHONPATH=src $TEST_ENV/bin/python -m pytest tests/test_config_accounts.py tests/test_wsd_accounts.py -q",
+    "runtime": "PYTHONPATH=src $TEST_ENV/bin/python -m pytest tests/test_sandbox_runtime.py -q",
+    "ruff": "$TEST_ENV/bin/ruff check src/heterodyne/config/layers.py src/heterodyne/config/profile_args.py src/heterodyne/sandbox/runtime.py tests/test_codex_reasoning_profile.py tests/test_sandbox_runtime.py",
+    "pyright": "$TEST_ENV/bin/pyright --pythonpath $TEST_ENV/bin/python src/heterodyne/config/layers.py src/heterodyne/config/profile_args.py src/heterodyne/sandbox/runtime.py tests/test_codex_reasoning_profile.py tests/test_sandbox_runtime.py",
+    "quality": "ripwire src/heterodyne --quality-delta"
+  },
+  "actual_native_reasoning_resume_qualified": false,
+  "actual_openshell_isolation_qualified": false
+}

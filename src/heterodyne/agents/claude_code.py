@@ -190,7 +190,8 @@ class ClaudeCode:
             os.close(conf)
 
     def prepare_install_home(self, layout: SessionLayout, worktree: Path,
-                             install: Path) -> tuple[exec_dirs.Cleared, ...]:
+                             install: Path, *,
+                             profile: Mapping[str, Any] | None = None) -> tuple[exec_dirs.Cleared, ...]:
         """The defaults go into the run directory's settings file (run_files), not the home."""
         self._prepare_home(layout, worktree)
         return exec_dirs.prepare(layout.home, self.empty_read_only)

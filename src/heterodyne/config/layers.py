@@ -153,6 +153,11 @@ def check_profiles(merged: Mapping[str, Any]) -> None:
         profile = as_table(value)
         if profile is None:
             raise ConfigError(f"profiles.{show(name, False)} must be a table")
+        unknown = set(profile) - {"adapter", "model", "args", "reasoning_effort", "accounts", "failover"}
+        if unknown:
+            hint = "; use reasoning_effort instead of effort" if "effort" in unknown else ""
+            raise ConfigError(f"profiles.{show(name, False)}: unsupported profile keys "
+                              f"{show(sorted(unknown))}{hint}")
         model = profile.get("model")
         if model is not None and not isinstance(model, str):
             raise ConfigError(f"profiles.{show(name, False)}.model must be a string, "
@@ -162,6 +167,7 @@ def check_profiles(merged: Mapping[str, Any]) -> None:
             raise ConfigError(f"profiles.{show(name, False)}: adapter {show(adapter)} "
                               f"is not one of {sorted(known)}")
         profile_args.check(adapter, profile.get("args", []), f"profiles.{show(name, False)}.args")
+        profile_args.reasoning_effort(profile, adapter, f"profiles.{show(name, False)}")
 
 
 def as_table(value: Any) -> Mapping[str, Any] | None:

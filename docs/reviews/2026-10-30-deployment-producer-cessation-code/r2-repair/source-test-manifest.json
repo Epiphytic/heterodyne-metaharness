@@ -1,0 +1,87 @@
+{
+  "schema": "source-only-qualification.v1",
+  "base": "6ac40e353c85346e3c23c943057a964d7057b458",
+  "source_sha256": {
+    "src/heterodyne/actions/deployment_authority.py": "c3b74f8ea0f9dbe77c58829024809d09f32c73a50c44a7dc10da20d444299a26",
+    "src/heterodyne/actions/deployment_cessation.py": "0cac614745715e84e1d5961c46036e0fc6bd268c3a27eed135f5569bc7605873",
+    "src/heterodyne/actions/deployment_outage_authority.py": "c9f481eefca589c6af5a11452a30e1154ac5f603ceeb46bfa54b9a8d88d1582f",
+    "src/heterodyne/actions/deployment_publication.py": "3946b5e5696cf6ec5b71c13a76657605f90657e42d361cc47f745e9ab555843a",
+    "tests/test_deployment_outage.py": "7fa2b7f42cd23c11c19d2f25d2a71d5b1a03ac10fce56b65c65d60787e953858",
+    "tests/test_deployment_publication.py": "3f4426c853c3275f6b12c8fe9ff3f539f5e29d4b5dd5a4934f9066f488299c11",
+    "tests/test_deployment_cessation.py": "1a6d99f8bdb6cb97f03fe58f1b4fb666629e1610253b3761de8e961822efcfcb"
+  },
+  "source_unchanged": true,
+  "environment": {
+    "PYTHONPATH": "src:tests",
+    "PYTHONDONTWRITEBYTECODE": "unset"
+  },
+  "checks": [
+    {
+      "name": "focused-tests",
+      "argv_template": [
+        "${HOST_HOME}/repos/heterodyne-deployment-step1-20261029/.venv/bin/python",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/test_deployment_step1.py",
+        "tests/test_deployment_outage.py",
+        "tests/test_deployment_host_store.py",
+        "tests/test_deployment_outage_journal.py",
+        "tests/test_deployment_publication.py",
+        "tests/test_deployment_card.py",
+        "tests/test_deployment_cessation.py"
+      ],
+      "raw_argv_sha256": "382b8bb0454142885bb9fc986f06a8de216f1c12f08770dcb5a311b05c879f88",
+      "exit": 0,
+      "log_sha256": "e6bd9d0d908bc8a56c34d4a2b2cadaffcf75265d27fc9e2e7f2afbeeb0aef671",
+      "raw_log_sha256": "e6bd9d0d908bc8a56c34d4a2b2cadaffcf75265d27fc9e2e7f2afbeeb0aef671"
+    },
+    {
+      "name": "ruff",
+      "argv_template": [
+        "${HOST_HOME}/repos/heterodyne-deployment-step1-20261029/.venv/bin/ruff",
+        "check",
+        "src/heterodyne/actions/deployment_authority.py",
+        "src/heterodyne/actions/deployment_cessation.py",
+        "src/heterodyne/actions/deployment_outage_authority.py",
+        "src/heterodyne/actions/deployment_publication.py",
+        "tests/test_deployment_outage.py",
+        "tests/test_deployment_publication.py",
+        "tests/test_deployment_cessation.py"
+      ],
+      "raw_argv_sha256": "b1718198e1d9a04efd4f1cc0a414785a2e0c18bfea8a550e8c20bf3298714b37",
+      "exit": 0,
+      "log_sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18",
+      "raw_log_sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
+    },
+    {
+      "name": "pyright",
+      "argv_template": [
+        "${HOST_HOME}/repos/heterodyne-deployment-step1-20261029/.venv/bin/pyright",
+        "--pythonpath",
+        "${HOST_HOME}/repos/heterodyne-deployment-step1-20261029/.venv/bin/python",
+        "src/heterodyne/actions/deployment_authority.py",
+        "src/heterodyne/actions/deployment_cessation.py",
+        "src/heterodyne/actions/deployment_outage_authority.py",
+        "src/heterodyne/actions/deployment_publication.py"
+      ],
+      "raw_argv_sha256": "0d6ad43d3cf30c7179ebc0ab9b8250e1a3b9d4ee07a68c98124284ddf920da77",
+      "exit": 0,
+      "log_sha256": "c509e4d2653170232a4fddeb7caf80d9c405f1624cb9acf80d257bfc946db7f0",
+      "raw_log_sha256": "478cd642d3dd415fc4f35b7594e016b013c8638f507d77301b97e81fc91874fe"
+    },
+    {
+      "name": "quality-delta",
+      "argv_template": [
+        "ripwire",
+        ".",
+        "--quality-delta"
+      ],
+      "raw_argv_sha256": "617b1d965fbf79079b0f4a3e4f2ad51864f82601b06f6a439a973ef53e30125a",
+      "exit": 2,
+      "log_sha256": "70c8430bb32d8e28b109ab1b0eb8cbdf79f3183badfffff226b0823027644e08",
+      "raw_log_sha256": "70c8430bb32d8e28b109ab1b0eb8cbdf79f3183badfffff226b0823027644e08"
+    }
+  ],
+  "limits": "Actual namespace root/subordinate UID SQLite filesystem and loopback TLS mechanics; synthetic cessation/native context; Linux namespace plus historical cgroup prerequisites; no production custody/approval/deployment claim."
+}

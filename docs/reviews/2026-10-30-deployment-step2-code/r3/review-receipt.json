@@ -1,0 +1,62 @@
+{
+  "reviewed_head": "76c07c09a0e1b807c21acf76e753e8aa41f97284",
+  "base": "eef8c8fee6bffdfebe92d71137a7f1ffe9bd4c2e",
+  "review_round": 3,
+  "requested_effort": "medium",
+  "started_at": "2026-10-30T06:13:32.254491+00:00",
+  "argv_template_note": "Public template only; literal host home prefixes replaced with ${HOST_HOME}. Exact original argv/start/result retained privately by controller.",
+  "argv_template": [
+    "${HOST_HOME}/.nvm/versions/node/v22.22.0/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+    "-p",
+    "--settings",
+    "{\"disableAllHooks\":true}",
+    "--model",
+    "opus",
+    "--effort",
+    "medium",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--dangerously-skip-permissions",
+    "--tools",
+    "Read,Bash,Skill,Agent,ReportFindings",
+    "--strict-mcp-config",
+    "--mcp-config",
+    "{\"mcpServers\":{}}",
+    "--add-dir",
+    "${HOST_HOME}/repos/heterodyne-deployment-step2-r2-repair-20261030",
+    "--add-dir",
+    "${HOST_HOME}/repos/heterodyne-deployment-step2-r2-repair-20261030",
+    "--",
+    "Invoke actual built-in Skill code-review MEDIUM round THREE. Are there any critical flaws with this, or is this good enough to implement as a PoC? Review PR143 ${HOST_HOME}/repos/heterodyne-deployment-step2-r2-repair-20261030 76c07c09a0e1b807c21acf76e753e8aa41f97284 versus eef8c8fee6bffdfebe92d71137a7f1ffe9bd4c2e. Preserve actual R1/R2 HIGH reports and history; read both actual findings and resolution/qualification. Repaired explicit actual fixed-profile login dirs via redact_with_dirs and real chunk settings/render, independent pinned outer Packet URL distinct InnerRelease (owned publication verification remains runtime prerequisite), ordinal0 cancelled-never-issued causal target release with one-use identities retained, readonly current-index journal opens, helper/profile/sudo roles pinned plus root contract/custody sweeps and protected target mapping. Shared generic arbitrary-byte display helper removed; old Step1 cards/pins incompatibility disclosed.92focusedPASS2.76s bytecodeenvunset,Ruff/Pyright0errors/installchecker/hooksPASS,qualityexit2disclosed. Concrete fixed helper implementation and protected producer/custody are being implemented separately; public opener staysHOLD. Review truthful dormant source/actual critical flaws, no invented future runtime demand. Readonly noedit commit services liveSQL queue GitHubcomments asks. Actual verdict and critical findings file/line. Are there any critical flaws with this, or is this good enough to implement as a PoC? {\"docs/adr/0001-workstreams-v2.md\": \"dc6132e96c4f4d0c829c3393efd3dcc32d1fac01cc3cffb7a44b68fe3a1dcbb7\", \"docs/reviews/2026-10-30-deployment-step2-code/r1/actual-review.md\": \"8e728495c4413a195aaec8516d07b559883c30440fb63cd8c1bb25ff3afe283d\", \"docs/reviews/2026-10-30-deployment-step2-code/r1/review-receipt.json\": \"f6a6bcd6308657d6fa6ef36640a8eabd257680c54cbce6db70a325310d972eaf\", \"docs/reviews/2026-10-30-deployment-step2-code/r2/actual-review.md\": \"326068bcb284faf03adda2409e6ba1fe4fb0a61a64abcb7af72eb78d2e899717\", \"docs/reviews/2026-10-30-deployment-step2-code/r2/review-receipt.json\": \"1949103669b67975e21b1e2700db3ce3c67e27ef73133c52c7883f309412bc49\", \"docs/reviews/2026-10-30-deployment-step2-source-qualification.md\": \"e23dbba5a03a4ac87c4d07ee938129fb3c2c602b83292d622c7dd2722fa40c34\", \"src/heterodyne/actions/deployment_authority.py\": \"dec85ec9f8b50dc18ef304e4a2c16fae9cce82e631bb2ebc945e7687ec09fbbd\", \"src/heterodyne/actions/deployment_host_store.py\": \"87266b50704cc4305e42292a8b981c25636a7116adecbb7a0ca22a3d4b7aa8b5\", \"src/heterodyne/actions/deployment_outage.py\": \"140c26b3e3e96ca3f6a2e7b43f76cffe1476899b30ad07e361a5b6900d406bf1\", \"src/heterodyne/actions/deployment_outage_authority.py\": \"55887f2544bb99f7bb9772ed02638eafcbe0a3e94e08deccda358fa5c774756b\", \"src/heterodyne/actions/deployment_outage_journal.py\": \"8d2974cd4ebefaea149ae9a1f0f90c613b93dc472fbe8cf154d8b0951b4ec278\", \"tests/test_deployment_host_store.py\": \"3dbdc62d3809025f2470eb307c6db5b3640531feab97b05d725a2cb45079b369\", \"tests/test_deployment_outage.py\": \"eae7255607571eb7088b9f424650f0379a3252fbd36a74a2e8cf6bd1c56778e6\", \"tests/test_deployment_outage_journal.py\": \"9cd91329932a2dd83cfc0a87a69f500ee80415a320061d7d1a70cbdf73cd4887\", \"tests/test_deployment_step1.py\": \"7b1353c937b68227f1be0c34c0e469a56c56a7966699d86098e11e97f7f4fdcc\"}"
+  ],
+  "raw_argv_sha256": "b3fe2e7bda4cd56c0615113ddfade2292c1f2bd6d9783cad8b9711bbcc5396f4",
+  "raw_argv_hash_encoding": "UTF-8 json.dumps(original argv, ensure_ascii=False, separators=(comma,colon))",
+  "raw_start_sha256": "1eca6dad50e72ff93fef6563c88db49836fa47bf6bdb19ecd878250fb147b24b",
+  "raw_result_sha256": "bbe67c1910a3bcd70f511b29ebd684ae3fd8e0863e9bb5262b020f1f9cae76a6",
+  "actual_report_sha256": "ccc764b61d892308509a4983d1e1de466c57f017d3d0e362862a3bc423b0c648",
+  "exit": 0,
+  "source_unchanged": true,
+  "native_source_unchanged": true,
+  "events": 59,
+  "model_usage": [
+    {
+      "claude-opus-5-5": {
+        "inputTokens": 42,
+        "outputTokens": 18763,
+        "cacheReadInputTokens": 1060713,
+        "cacheCreationInputTokens": 97652,
+        "webSearchRequests": 0,
+        "costUSD": 1.1460936,
+        "contextWindow": 1000000,
+        "maxOutputTokens": 128000,
+        "thinkingTokens": 10837,
+        "canonicalModel": "claude-opus-5-5",
+        "provider": "firstParty",
+        "costBasis": "list"
+      }
+    }
+  ],
+  "actual_verdict": "Round 3 verdict: this is good enough to implement as a dormant PoC.",
+  "verdict_source": "Exact actual terminal report opening; no critical flaws at reviewed head. Medium and low findings remain as reported; source unchanged during review."
+}

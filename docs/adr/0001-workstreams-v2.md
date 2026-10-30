@@ -179,7 +179,7 @@ Role and profile settings follow the single precedence order in §15: built-in d
 [profiles.gpt-sol]
 adapter = "codex"
 model   = "gpt-6-sol"
-effort  = "medium"          # adapter maps this to its own flag
+reasoning_effort = "medium" # typed Codex setting; native continuation requires qualification
 args    = []                # extra CLI args, passed verbatim
 
 [profiles.claude-opus]

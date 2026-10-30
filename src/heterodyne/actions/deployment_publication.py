@@ -15,11 +15,13 @@ import ssl
 import stat
 import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import BinaryIO
 
 from heterodyne.actions.codec import MAX_BYTES, InvalidAction, encode_record
 from heterodyne.actions.deployment import Target
 from heterodyne.actions.deployment_authority import _PACKET
+from heterodyne.actions.deployment_host_store import _private_root
 from heterodyne.actions.deployment_outage import decode_packet, packet_digest
 from heterodyne.harness.fetch import HttpsResponse
 from heterodyne.harness.resources import store_core
@@ -27,6 +29,7 @@ from heterodyne.harness.resources import store_core
 _HOST = "raw.githubusercontent.com"
 _PREFIX = "/Epiphytic/heterodyne-metaharness/"
 _CA = "/etc/ssl/certs/ca-certificates.crt"
+_SCRATCH = Path("/run/heterodyne-deploy-publication")
 
 
 @dataclass(frozen=True)
@@ -43,7 +46,11 @@ def _retain(fd: int, limit: int) -> BinaryIO:
     """Private immutable-for-this-call copy; no caller's mutable seek state reused."""
     if not stat.S_ISREG(os.fstat(fd).st_mode):
         raise InvalidAction("publication-object-regular-required")
-    result = tempfile.TemporaryFile()
+    directory = _private_root(_SCRATCH)
+    try:
+        result = tempfile.TemporaryFile(dir=f"/proc/self/fd/{directory}")
+    finally:
+        os.close(directory)
     offset = 0
     try:
         while data := os.pread(fd, min(1024 * 1024, limit + 1 - offset), offset):
@@ -52,12 +59,25 @@ def _retain(fd: int, limit: int) -> BinaryIO:
                 raise InvalidAction("publication-object-bound")
             result.write(data)
         result.flush()
-        os.fsync(result.fileno())
         result.seek(0)
         return result
     except BaseException:
         result.close()
         raise
+
+
+def _tls(connection: http.client.HTTPConnection, response: HttpsResponse, context: ssl.SSLContext) -> None:
+    """Bind before handshake so the total watchdog can interrupt TLS trickles."""
+    connection.connect()
+    if connection.sock is None:
+        raise InvalidAction("publication-tcp-unavailable")
+    response.bind(connection.sock)
+    wrapped = context.wrap_socket(connection.sock, server_hostname=_HOST, do_handshake_on_connect=False)
+    connection.sock = wrapped
+    # wrap_socket transfers the fd. If the deadline expired in that transfer,
+    # bind immediately shuts down the new owner before handshake can block.
+    response.bind(wrapped)
+    wrapped.do_handshake()
 
 
 def _https(commit: str, path: str) -> bytes:
@@ -68,11 +88,10 @@ def _https(commit: str, path: str) -> bytes:
     """
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     context.load_verify_locations(cafile=_CA)
-    connection = http.client.HTTPSConnection(_HOST, timeout=10, context=context)
+    connection = http.client.HTTPConnection(_HOST, 443, timeout=10)
     response = HttpsResponse(connection, "https://" + _HOST + _PREFIX + commit + "/" + path, 10)
     try:
-        connection.connect()
-        response.bind(connection.sock)
+        _tls(connection, response, context)
         connection.request("GET", _PREFIX + commit + "/" + path, headers={"Accept-Encoding": "identity"})
         response.attach(connection.getresponse())
         if response.status != 200 or response.header("Content-Encoding") not in {None, "identity"}:
@@ -88,8 +107,11 @@ def _https(commit: str, path: str) -> bytes:
 def _verify(  # pyright: ignore[reportUnusedFunction] - owning protected receiver integration only
     original: bytes, targets: tuple[Target, ...], url: str, archive_fd: int, commit_fd: int,
 ) -> _PublishedPacket:
-    """Original request and exact served, regular Git member must be the same packet.
+    """Original request and served regular Git member must decode to the same packet.
 
+    Hosted/Git bytes must use the exact canonical encoding. The original request
+    may use a different JSON encoding; its bytes/hash remain separately retained
+    by the producer and are never claimed byte-identical to the hosted artifact.
     Local complete Git proof establishes commit/tree/mode. The separate fixed
     HTTPS read establishes hosted bytes at the exact immutable URL. This is not
     deployment consent, a receiver credential, or a public runtime opener.
@@ -117,7 +139,7 @@ def _verify(  # pyright: ignore[reportUnusedFunction] - owning protected receive
                     raise InvalidAction("publication-packet-absent")
                 retained = stream.read(MAX_BYTES + 1)
         canonical = encode_record(packet)
-        if retained != canonical or decode_packet(retained, targets) != packet:
+        if retained != canonical:
             raise InvalidAction("publication-canonical-packet-mismatch")
         served = _https(commit, path)
         if served != retained:
@@ -125,7 +147,8 @@ def _verify(  # pyright: ignore[reportUnusedFunction] - owning protected receive
         return _PublishedPacket(
             url, commit, path, served, hashlib.sha256(served).hexdigest(), packet_digest(packet),
         )
-    except (OSError, ValueError, KeyError, http.client.HTTPException, store_core.Refused) as exc:
+    except (OSError, ValueError, KeyError, http.client.HTTPException,
+            store_core.Refused, *store_core._TAR_ERRORS) as exc:
         if isinstance(exc, InvalidAction):
             raise
         raise InvalidAction("publication-readback-unavailable") from exc

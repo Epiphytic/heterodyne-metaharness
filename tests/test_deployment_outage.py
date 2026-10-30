@@ -271,3 +271,24 @@ def test_root_helper_contract_pins_are_required_and_closed(field):
 def test_outer_publication_commit_must_differ_from_inner_release():
     with pytest.raises(InvalidAction, match="outer-packet-publication-url"):
         outage_authority.approval_body(packet(), URL, H)
+
+
+def test_whole_outage_preparation_and_binding_never_require_unposted_inner_card(tmp_path, monkeypatch):
+    _, native, response = native_fixture(tmp_path)
+    original = authority._check_card
+    checked = []
+    def outer_only(title, body, ask_id):
+        checked.append(title)
+        if title == authority.APPROVAL_TITLE:
+            raise InvalidAction("unposted-inner-renderer-refusal")
+        return original(title, body, ask_id)
+    monkeypatch.setattr(authority, "_check_card", outer_only)
+    p = packet()
+    native["ask"]["title"] = outage_authority.APPROVAL_TITLE
+    response["ask"]["summary"]["title"] = outage_authority.APPROVAL_TITLE
+    native["ask"]["body"] = outage_authority.approval_body(p, OUTER_URL, H)
+    authority._core()._validate(p, native, response, {"bel": "d" * 64}, outage_authority._bindings)
+    assert checked == [outage_authority.APPROVAL_TITLE] * 2
+    native["ask"]["card_parts"] = 2
+    with pytest.raises(authority._core().AuthorityHold, match="exact release"):
+        authority._core()._validate(p, native, response, {"bel": "d" * 64}, outage_authority._bindings)

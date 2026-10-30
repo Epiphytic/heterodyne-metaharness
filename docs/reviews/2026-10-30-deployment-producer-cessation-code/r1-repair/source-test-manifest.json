@@ -1,0 +1,85 @@
+{
+  "schema": "source-only-qualification.v1",
+  "base": "c77dd91a84656f01d265d09344a2a21902e8f682",
+  "source_sha256": {
+    "src/heterodyne/actions/deployment_authority.py": "6b6d53c45d8b2c0a9b49c13b9b6ecfe914baa8df806e4550f28a20747ac1c05d",
+    "src/heterodyne/actions/deployment_card.py": "a08d87d9a33f3837dbc77b9888ed99849593a7f18155af7d8e273f2bc2ff037e",
+    "src/heterodyne/actions/deployment_cessation.py": "6ef0e043bc2a4a54b5923548e9c545f50e14b709496e50e47566534a8a5aa82c",
+    "src/heterodyne/actions/deployment_outage_authority.py": "c750940a21bb1cbe6cb23fed5b8295b91b4a0bcbb7ff3a1d514b67c9a23fbb6f",
+    "src/heterodyne/actions/deployment_publication.py": "759bff81c104d3c227ec2f476521f5188b8a5efb2e79b098767a221186511b3a",
+    "tests/test_deployment_card.py": "ce50864c66e89292d4b425cac686cf08b066181f6dee76465e654d43a874d3d2",
+    "tests/test_deployment_cessation.py": "d036298d8656a1213996dcee94fdf271b1715431eb53723f1a7673f4f2fcf90c",
+    "tests/test_deployment_publication.py": "ff25a13c800aaff188df53e9a96197b116282ed4adf164d49c7b1536fc50fbd5"
+  },
+  "source_unchanged": true,
+  "environment": {
+    "PYTHONPATH": "src:tests",
+    "PYTHONDONTWRITEBYTECODE": "unset"
+  },
+  "checks": [
+    {
+      "name": "focused-tests",
+      "argv_template": [
+        "${HOST_HOME}/repos/heterodyne-deployment-step1-20261029/.venv/bin/python",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/test_deployment_step1.py",
+        "tests/test_deployment_outage.py",
+        "tests/test_deployment_host_store.py",
+        "tests/test_deployment_outage_journal.py",
+        "tests/test_deployment_publication.py",
+        "tests/test_deployment_card.py",
+        "tests/test_deployment_cessation.py"
+      ],
+      "raw_argv_sha256": "025bf64edca65db20db0ccbd8d5cf26301fbbd0fb7a339f88a12ebdd7e6e3ed9",
+      "exit": 0,
+      "log_sha256": "11ed7f14db4a9e5d37665b0b77f9c1f8d8dfe0820d48990f3d2067cea29b7980"
+    },
+    {
+      "name": "ruff",
+      "argv_template": [
+        "${HOST_HOME}/repos/heterodyne-deployment-step1-20261029/.venv/bin/ruff",
+        "check",
+        "src/heterodyne/actions/deployment_authority.py",
+        "src/heterodyne/actions/deployment_card.py",
+        "src/heterodyne/actions/deployment_cessation.py",
+        "src/heterodyne/actions/deployment_outage_authority.py",
+        "src/heterodyne/actions/deployment_publication.py",
+        "tests/test_deployment_card.py",
+        "tests/test_deployment_cessation.py",
+        "tests/test_deployment_publication.py"
+      ],
+      "raw_argv_sha256": "185a02e4732b1ba42f13de518e45f7bb87343a52edc4a35c774e380168211625",
+      "exit": 0,
+      "log_sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
+    },
+    {
+      "name": "pyright",
+      "argv_template": [
+        "${HOST_HOME}/repos/heterodyne-deployment-step1-20261029/.venv/bin/pyright",
+        "--pythonpath",
+        "${HOST_HOME}/repos/heterodyne-deployment-step1-20261029/.venv/bin/python",
+        "src/heterodyne/actions/deployment_authority.py",
+        "src/heterodyne/actions/deployment_card.py",
+        "src/heterodyne/actions/deployment_cessation.py",
+        "src/heterodyne/actions/deployment_outage_authority.py",
+        "src/heterodyne/actions/deployment_publication.py"
+      ],
+      "raw_argv_sha256": "ad2aa38baa8223f0f7c598dee5ab03912bce7fcfa130a4431a812d65aea54a23",
+      "exit": 0,
+      "log_sha256": "01607ccf4942a9beee2de98bd23967554ec86c198b19a110fd83c34247e240f0"
+    },
+    {
+      "name": "quality-delta",
+      "argv_template": [
+        "ripwire",
+        ".",
+        "--quality-delta"
+      ],
+      "exit": 2,
+      "log_sha256": "6ab6291e6c4b24893529dc23b6b83c01d63ce4f258f39af35985fdcd273cede7"
+    }
+  ],
+  "limits": "Synthetic SQL/TLS/manager context; real cgroup fixture/process cleanup only; no production authority/custody/host deployment claim."
+}
