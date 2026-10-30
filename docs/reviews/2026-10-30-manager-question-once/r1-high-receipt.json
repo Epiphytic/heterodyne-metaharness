@@ -1,0 +1,70 @@
+{
+  "start": {
+    "started_at": "2026-10-30T18:51:34.530323+00:00",
+    "head": "ce60c5ed721cddb287c322ba1b31e590c902f306",
+    "base": "a3da7b0edcb59c485f13e00760d5210169ab470f",
+    "source_hashes": {
+      "docs/reviews/2026-10-30-manager-question-once/diff-check.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "docs/reviews/2026-10-30-manager-question-once/qualification.json": "dd2ac85651360500008ed18b4c0496a1a28dffe481809f90ffbad91fc895d0d5",
+      "docs/reviews/2026-10-30-manager-question-once/quality.log": "07aaa276414cd167b3e1418705b1194669a30196ff6f76ce94c8cea3c55e028b",
+      "docs/reviews/2026-10-30-manager-question-once/ruff.log": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18",
+      "docs/reviews/2026-10-30-manager-question-once/source-scope.md": "1b7f0cd53191a0eef9f53310c271b1c92693d94e3668dac69fea860396057313",
+      "docs/reviews/2026-10-30-manager-question-once/tests.log": "6f57638549dac81bc4767d0a4b0b6bacb03971450bf045d24dffbb29e4dc1dc9",
+      "src/heterodyne/admind/asks.py": "fd92feeaedc8ed8f6d60f7a433f8d9a5f9e4e16cdb36be3a3630c45e0a9f85c4",
+      "src/heterodyne/admind/daemon.py": "895bce3cab87d8548719b01f80cffce98bb46781eccdde7271908bf0b6fbc8eb",
+      "src/heterodyne/admind/store.py": "fc493feba64b39df2ea226a9635f6235aa1dd3a527fa602ca22c375237f41cf9",
+      "tests/test_admind_question_once.py": "56403e012ef2b8235ac3e6db088586fe5c21dd3560f44cdfd79506fe4b715ad0"
+    },
+    "kind": "actual-claude-builtin-code-review-r1-high",
+    "argv_sha256": "70094108fe4afdcfd0db4a307a04b0f0801e398737cf16bdbae301daf4090c78",
+    "invocation_display": [
+      "claude",
+      "-p",
+      "--settings",
+      "{\"disableAllHooks\":true}",
+      "--model",
+      "opus",
+      "--effort",
+      "high",
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--dangerously-skip-permissions",
+      "--tools",
+      "Read,Bash,Skill,Agent,ReportFindings",
+      "--strict-mcp-config",
+      "--mcp-config",
+      "{\"mcpServers\":{}}",
+      "--add-dir",
+      "<source-worktree>",
+      "--",
+      "<exact private prompt pinned to PR152>"
+    ],
+    "redaction": "Runner-specific paths and prompt shown by aliases; exact original argv retained in private handoff receipt. Display is not the exact invocation.",
+    "actual_skill": {
+      "skill": "code-review",
+      "args": "152"
+    }
+  },
+  "result": {
+    "exit_code": 0,
+    "elapsed_seconds": 213.47496956540272,
+    "head": "ce60c5ed721cddb287c322ba1b31e590c902f306",
+    "source_unchanged": true,
+    "source_hashes_after": {
+      "docs/reviews/2026-10-30-manager-question-once/diff-check.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "docs/reviews/2026-10-30-manager-question-once/qualification.json": "dd2ac85651360500008ed18b4c0496a1a28dffe481809f90ffbad91fc895d0d5",
+      "docs/reviews/2026-10-30-manager-question-once/quality.log": "07aaa276414cd167b3e1418705b1194669a30196ff6f76ce94c8cea3c55e028b",
+      "docs/reviews/2026-10-30-manager-question-once/ruff.log": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18",
+      "docs/reviews/2026-10-30-manager-question-once/source-scope.md": "1b7f0cd53191a0eef9f53310c271b1c92693d94e3668dac69fea860396057313",
+      "docs/reviews/2026-10-30-manager-question-once/tests.log": "6f57638549dac81bc4767d0a4b0b6bacb03971450bf045d24dffbb29e4dc1dc9",
+      "src/heterodyne/admind/asks.py": "fd92feeaedc8ed8f6d60f7a433f8d9a5f9e4e16cdb36be3a3630c45e0a9f85c4",
+      "src/heterodyne/admind/daemon.py": "895bce3cab87d8548719b01f80cffce98bb46781eccdde7271908bf0b6fbc8eb",
+      "src/heterodyne/admind/store.py": "fc493feba64b39df2ea226a9635f6235aa1dd3a527fa602ca22c375237f41cf9",
+      "tests/test_admind_question_once.py": "56403e012ef2b8235ac3e6db088586fe5c21dd3560f44cdfd79506fe4b715ad0"
+    },
+    "review_log": "r1-high.md"
+  },
+  "verdict": "APPROVED",
+  "scope": "source-only; no deployment or sandbox qualification"
+}

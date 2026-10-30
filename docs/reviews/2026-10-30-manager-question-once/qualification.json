@@ -1,0 +1,57 @@
+{
+  "base": "a3da7b0edcb59c485f13e00760d5210169ab470f",
+  "files": {
+    "src/heterodyne/admind/asks.py": "fd92feeaedc8ed8f6d60f7a433f8d9a5f9e4e16cdb36be3a3630c45e0a9f85c4",
+    "src/heterodyne/admind/daemon.py": "895bce3cab87d8548719b01f80cffce98bb46781eccdde7271908bf0b6fbc8eb",
+    "src/heterodyne/admind/store.py": "fc493feba64b39df2ea226a9635f6235aa1dd3a527fa602ca22c375237f41cf9",
+    "tests/test_admind_question_once.py": "56403e012ef2b8235ac3e6db088586fe5c21dd3560f44cdfd79506fe4b715ad0"
+  },
+  "PYTHONPATH": "src",
+  "exit_code": 0,
+  "elapsed_seconds": 23.064506789203733,
+  "source_unchanged": true,
+  "checks": [
+    {
+      "command": [
+        "ruff",
+        "check",
+        "src/heterodyne/admind/asks.py",
+        "src/heterodyne/admind/daemon.py",
+        "src/heterodyne/admind/store.py",
+        "tests/test_admind_question_once.py"
+      ],
+      "exit_code": 0,
+      "log": "ruff.log"
+    },
+    {
+      "command": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "exit_code": 0,
+      "log": "diff-check.log"
+    },
+    {
+      "command": [
+        "ripwire",
+        "src/heterodyne/admind",
+        "--quality-delta"
+      ],
+      "exit_code": 2,
+      "log": "quality.log"
+    }
+  ],
+  "command_display": [
+    "<qualified pytest runner>",
+    "-q",
+    "tests/test_admind_question_once.py",
+    "tests/test_admind_asks.py",
+    "tests/test_admind_store.py",
+    "tests/test_admind_management_presentation.py",
+    "tests/test_admind_management_r1.py",
+    "tests/test_admind_notices.py"
+  ],
+  "runner_sha256": "85560123aee899ef3a3c99af09c3640135102ae186b7c72c72fd220a6eead232",
+  "command_path_redaction": "Absolute host runner location omitted from portable source evidence; exact command retained in private controller qualification receipt."
+}
