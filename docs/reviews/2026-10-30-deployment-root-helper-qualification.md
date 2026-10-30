@@ -27,7 +27,8 @@ also checked at `/etc/heterodyne/deployment-install-profile.json` by the native
 authority adapter. The source primitive does not open that production path.
 
 The sudo gate checks real/effective root UID, exact `SUDO_UID`, and the actual
-immediate parent through a retained pidfd and `/proc` identity. The parent must
+immediate parent through `/proc` identity. A pidfd is opened and closed as a
+capability check; it is not retained and does not supply those identity reads. The parent must
 have kernel UIDs `(executor, 0, 0, 0)` and the same device/inode as the pinned
 root-owned non-writable `/usr/bin/sudo`, with stable PID/start time and ancestry.
 An environment variable alone cannot satisfy it. The actual host's sudo monitor
@@ -66,8 +67,9 @@ flock alone is not a crash-recovery authority.
 
 Tests execute a harmless pinned fixture script as root inside a disposable user
 and mount namespace. Two private tmpfs mounts isolate `/tmp` and `/run`; no host
-installer or service is changed. A distinct mapped UID receives actual kernel
-read/write/create denials on protected custody. Sudo admission is explicitly
+installer or service is changed. A distinct mapped UID receives three actual kernel
+read/write/create denials on protected custody and one separate Python UID-gate
+refusal. Sudo admission is explicitly
 synthetic in that mechanics test and independently tested read-only against the
 real host monitor. Tests cover fixed argv, malformed ordinal/deadline/digest/
 before-state rejection before issuance, tampered installer rejection, durable
@@ -84,7 +86,7 @@ stage and the bounded store/unit/release/config/service set described by the
 approved deployment design. None of those installation writes occurred here.
 
 Final source-bound qualification ran with inherited `PYTHONDONTWRITEBYTECODE`
-unset: 121 focused tests passed in 3.82 seconds; Ruff and strict source Pyright
+unset on the qualified host: 121 focused tests passed in 3.82 seconds; Ruff and strict source Pyright
 passed. The local worktree lacks its own `.venv`; checks explicitly use the
 existing Step1 test interpreter. The manifest records exact source SHA-256,
 public command templates and raw argv SHA-256, log hashes and unchanged source
@@ -100,3 +102,19 @@ stability predicate. The local predicate deliberately retains mode/UID/GID/link
 count/size/mtime/ctime while ignoring read-induced atime. No metric waiver,
 baseline reset or fabricated quality pass is applied. Full actual output is
 retained beside the test manifest for review.
+
+
+The actual first HIGH built-in review found no critical correctness or security
+flaws in this dormant helper; the complete report and exact execution receipt
+are retained under `deployment-root-helper-code/r1/`. The helper SHA pin checks
+the custody and bytes of the named file. It does not establish that this file or
+its interpreter/import closure is the actual running root process. That complete
+installed running closure remains an enrollment prerequisite, not fixture proof.
+
+The 121-test count is specific to the qualified host: the read-only real sudo
+probe requires noninteractive sudo for system Python, and namespace mechanics
+require user/mount namespaces plus subordinate UID mappings. These tests have
+no automatic capability skip and must not be advertised as universally portable.
+Remaining noncritical source findings (profile control-character validation,
+intermediate descriptor cleanup and early retry diagnostics) are retained in the
+actual review for follow-up. No runtime/source behavior changed after review.
