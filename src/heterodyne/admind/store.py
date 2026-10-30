@@ -87,6 +87,9 @@ CREATE TABLE IF NOT EXISTS posts (
     kind TEXT NOT NULL CHECK (kind IN ('verbatim', 'summary', 'batch')),
     turn_id INTEGER,
     batch_id INTEGER);
+CREATE TABLE IF NOT EXISTS ask_question_keys (
+    key TEXT PRIMARY KEY, request_sha256 TEXT NOT NULL, request_json TEXT NOT NULL,
+    ask_id TEXT NOT NULL UNIQUE);
 CREATE TABLE IF NOT EXISTS asks (
     ask_id TEXT PRIMARY KEY,
     kind TEXT NOT NULL CHECK (kind IN ('question', 'merge', 'approval')),
@@ -875,6 +878,22 @@ class Store:
         return None if r is None else _post(r)
 
     # --- asks (relay spec §5) ------------------------------------------------------------------
+    @_locked
+    def question_key(self, key: str) -> tuple[str, str, str] | None:
+        row = self.db.execute(
+            "SELECT request_sha256, request_json, ask_id FROM ask_question_keys WHERE key = ?", (key,)
+        ).fetchone()
+        return None if row is None else (str(row[0]), str(row[1]), str(row[2]))
+
+    @_locked
+    def bind_question(self, key: str, digest: str, content: str, ask_id: str) -> None:
+        # Joins the caller's BEGIN IMMEDIATE: ask, outbox and key commit together.
+        with self.transaction():
+            self.db.execute("INSERT INTO ask_question_keys VALUES (?, ?, ?, ?)",
+                            (key, digest, content, ask_id))
+            if self.question_key(key) != (digest, content, ask_id):
+                raise ValueError("question key readback mismatch")
+
     @_locked
     def insert_ask(self, row: AskRow, peer_pid: int | None) -> None:
         with self.transaction():
