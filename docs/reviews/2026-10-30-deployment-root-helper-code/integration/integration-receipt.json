@@ -1,0 +1,68 @@
+{
+  "schema": "reviewed-source-integration.v1",
+  "helper_reviewed_head": "517c9001b6d1ad5724a14fde08b09edd8e6e146d",
+  "producer_merge": "1334008977e8cf5dee9205f4d20a2456b7e0c1e8",
+  "integration_head": "3c9d19cdfc63ec8b418c055a99cf51194f2b7c8f",
+  "helper_bytes_equal_reviewed_source": true,
+  "producer_fix_bytes_equal_merged_source": true,
+  "source_sha256": {
+    "src/heterodyne/actions/deployment_root_helper.py": "6dee1206cd377f582a77a27db0b223e702fe5758426cb0e0af69a4ff27ff17f5",
+    "tests/test_deployment_root_helper.py": "dd07635b2582ed7c9e18d7be1187e18a08f3c5f1ff50a9144ba2f88fae3cf57a",
+    "src/heterodyne/actions/deployment_authority.py": "c3b74f8ea0f9dbe77c58829024809d09f32c73a50c44a7dc10da20d444299a26",
+    "src/heterodyne/actions/deployment_cessation.py": "0cac614745715e84e1d5961c46036e0fc6bd268c3a27eed135f5569bc7605873",
+    "src/heterodyne/actions/deployment_outage_authority.py": "c9f481eefca589c6af5a11452a30e1154ac5f603ceeb46bfa54b9a8d88d1582f",
+    "src/heterodyne/actions/deployment_publication.py": "3946b5e5696cf6ec5b71c13a76657605f90657e42d361cc47f745e9ab555843a",
+    "tests/test_deployment_cessation.py": "1a6d99f8bdb6cb97f03fe58f1b4fb666629e1610253b3761de8e961822efcfcb",
+    "tests/test_deployment_outage.py": "7fa2b7f42cd23c11c19d2f25d2a71d5b1a03ac10fce56b65c65d60787e953858",
+    "tests/test_deployment_publication.py": "3f4426c853c3275f6b12c8fe9ff3f539f5e29d4b5dd5a4934f9066f488299c11"
+  },
+  "source_unchanged": true,
+  "checks": [
+    {
+      "name": "focused-tests",
+      "argv_template": [
+        "${HOST_HOME}/repos/heterodyne-deployment-step1-20261029/.venv/bin/python",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/test_deployment_step1.py",
+        "tests/test_deployment_outage.py",
+        "tests/test_deployment_host_store.py",
+        "tests/test_deployment_outage_journal.py",
+        "tests/test_deployment_publication.py",
+        "tests/test_deployment_card.py",
+        "tests/test_deployment_cessation.py",
+        "tests/test_deployment_root_helper.py"
+      ],
+      "raw_argv_sha256": "ebedfffc4a070695e89b4b1bda68ae93ecec3f19d9f75d1549a415edd902f889",
+      "exit": 0,
+      "log_sha256": "7df85115a90111a8c95e88c4be5ff6f88e8f4d903e62d05f4f0fe26875af4f9f"
+    },
+    {
+      "name": "ruff",
+      "argv_template": [
+        "${HOST_HOME}/repos/heterodyne-deployment-step1-20261029/.venv/bin/ruff",
+        "check",
+        "src/heterodyne/actions/deployment_root_helper.py",
+        "tests/test_deployment_root_helper.py"
+      ],
+      "raw_argv_sha256": "0d22daabfcbe8b17201fced70e7fe8dd0ae27f44a5aa2e5c7acc86f8aba01028",
+      "exit": 0,
+      "log_sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
+    },
+    {
+      "name": "pyright",
+      "argv_template": [
+        "${HOST_HOME}/repos/heterodyne-deployment-step1-20261029/.venv/bin/pyright",
+        "--pythonpath",
+        "${HOST_HOME}/repos/heterodyne-deployment-step1-20261029/.venv/bin/python",
+        "src/heterodyne/actions/deployment_root_helper.py"
+      ],
+      "raw_argv_sha256": "a82c41bc56c37afa5b42468a4c1ef0d9b2e0ad2372f8cac67c8aa614b6cc58c7",
+      "exit": 0,
+      "log_sha256": "fcef99c96e89602976313496cd364805e8fc67f45e1d26265dde36e10a130b97"
+    }
+  ],
+  "review_disposition": "Actual helper first HIGH no critical flaws, retained r1 report/receipt; PR145 actual cumulative third MEDIUM PoC clearance retained unchanged. This is integration verification, no repeat code review.",
+  "limits": "Source-only; actual namespace mechanics with synthetic authority/permits; no live effect, installed helper or custody/deployment claim."
+}
