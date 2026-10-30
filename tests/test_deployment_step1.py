@@ -221,7 +221,7 @@ def test_native_capture_fixed_reader_seam_and_two_sweeps(tmp_path, monkeypatch):
     core = authority._core()
     monkeypatch.setattr(authority.time, "time_ns", lambda: 2)
     monkeypatch.setattr(core, "_native", lambda ask, db: native)
-    monkeypatch.setattr(authority.runtime, "fetch", lambda ask: json.dumps(response).encode())
+    monkeypatch.setattr(authority.runtime, "fetch", lambda ask, executable: json.dumps(response).encode())
     monkeypatch.setattr(authority, "_operators_from", lambda host, queue: {"bel": "d" * 64})
     original_read = core._read
     dummy = b"synthetic protected policy bytes"
@@ -259,10 +259,39 @@ def test_native_capture_fixed_reader_seam_and_two_sweeps(tmp_path, monkeypatch):
     native["ask"]["body"] = authority.approval_body(r, URL, H)
     receipt = authority._capture(r, (TARGET,))
     assert receipt["release_sha256"] == authority.digest(r)
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix=".interpreter-alias-", dir=authority.Path.cwd()) as directory:
+        alias = authority.Path(directory) / "python"
+        executable = authority.Path(authority.sys.executable).resolve()
+        alias.symlink_to(executable)
+        seen = []
+
+        def switched(ask, selected):
+            alias.unlink()
+            alias.symlink_to("/bin/false")
+            seen.append(selected)
+            return json.dumps(response).encode()
+
+        with monkeypatch.context() as local:
+            local.setattr(authority.runtime, "PYTHON", alias)
+            local.setattr(authority.runtime, "fetch", switched)
+            authority._capture(r, (TARGET,))
+        assert seen == [executable]
     with pytest.raises(authority.AuthorityHold, match="source drift"):
         authority._capture(
             release(authority_sources=msgspec.structs.replace(pins, admind_sha256=H)), (TARGET,)
         )
+    # Both role pins remain mandatory when aliases share an executable/file.
+    for field in ("interpreter_sha256", "contract_sha256"):
+        with pytest.raises(authority.AuthorityHold, match="source drift"):
+            authority._capture(
+                release(authority_sources=msgspec.structs.replace(pins, **{field: H})), (TARGET,)
+            )
+    native["inbound"][0]["sender_key"] = "e" * 64
+    with pytest.raises(authority.AuthorityHold, match="authentication-refused"):
+        authority._capture(r, (TARGET,))
+    native["inbound"][0]["sender_key"] = "d" * 64
     calls = 0
 
     def drift(path, limit=16 * 1024 * 1024):
@@ -305,7 +334,7 @@ def test_packet_url_is_bound_to_release(tmp_path):
     with pytest.raises(InvalidAction, match="context"):
         authority.approval_body(r, wrong, H)
     native["ask"]["body"] = native["ask"]["body"].replace(URL, wrong)
-    with pytest.raises(authority._core().AuthorityHold):
+    with pytest.raises(InvalidAction, match="approval-context"):
         authority._core()._validate(r, native, response, {"bel": "d" * 64}, authority._bindings)
 
 
@@ -382,13 +411,34 @@ def test_isolated_runtime_rejects_bytecode_and_detects_module_changes(monkeypatc
         with pytest.raises(InvalidAction, match="unsafe-runtime-file"):
             authority.runtime.stream_hash(fifo)
         before = authority.runtime.tree_digest(source)
-        assert json.loads(authority.runtime.fetch("abcd")) == {"result": "synthetic"}
+        assert json.loads(authority.runtime.fetch("abcd", Path(authority.sys.executable).resolve())) == {
+            "result": "synthetic"
+        }
         assert not list(source.rglob("*.pyc"))
         cli.write_text(cli.read_text() + "# altered module without wrapper change\n")
         assert authority.runtime.tree_digest(source) != before
+        # A normal import may create canonical caches. They do not alter the
+        # source pin, and a poisoned canonical cache is not read by the child.
+        import importlib.util
+        import py_compile
+
+        current = authority.runtime.tree_digest(source)
+        poison = root / "poison.py"
+        poison.write_text("raise RuntimeError('untrusted cache executed')\n")
+        cache = Path(importlib.util.cache_from_source(str(cli)))
+        cache.parent.mkdir()
+        py_compile.compile(str(poison), cfile=str(cache), doraise=True)
+        assert authority.runtime.tree_digest(source) == current
+        assert json.loads(authority.runtime.fetch("abcd", Path(authority.sys.executable).resolve())) == {
+            "result": "synthetic"
+        }
+        # Execution uses the once-selected path, not a fresh resolve of the
+        # mutable runtime alias between source hashing and invocation.
+        monkeypatch.setattr(authority.runtime, "PYTHON", Path("/bin/false"))
+        assert json.loads(authority.runtime.fetch("abcd", Path(authority.sys.executable).resolve())) == {
+            "result": "synthetic"
+        }
         (package / "cli.pyc").write_bytes(b"untrusted cached executable")
-        with pytest.raises(InvalidAction, match="bytecode"):
-            authority.runtime.fetch("abcd")
         with pytest.raises(InvalidAction, match="bytecode"):
             authority.runtime.tree_digest(source)
 
@@ -408,6 +458,7 @@ def test_checker_resource_exception_is_exact_and_keeps_denylist(tmp_path):
     resource = tmp_path / rel
     resource.parent.mkdir(parents=True)
     raw = (root / rel).read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == authority.CORE_SHA256
     resource.write_bytes(raw)
     assert not checker.scan_file(tmp_path, rel, None, [])
     assert any("local-denylist" in hit for hit in checker.scan_file(tmp_path, rel, None, ["_operators"]))
@@ -416,3 +467,97 @@ def test_checker_resource_exception_is_exact_and_keeps_denylist(tmp_path):
     other = tmp_path / "unrelated.txt"
     other.write_bytes(raw)
     assert any("home-path" in hit for hit in checker.scan_file(tmp_path, "unrelated.txt", None, []))
+
+
+@pytest.mark.parametrize("separator", ["\n", "\r", "\t", "\x1b", "\x85", "\u2028", "\u2029", "\u202e"])
+def test_deviation_display_injection_refused(separator):
+    r = release(deviations=("None" + separator + "Target: other",))
+    with pytest.raises(InvalidAction, match="unsafe-text|explicit-deviations"):
+        decode_release(encode_record(r), (TARGET,))
+    with pytest.raises(InvalidAction, match="unsafe-text|explicit-deviations"):
+        authority.approval_body(r, URL, H)
+
+
+def test_journal_busy_is_typed_and_has_no_effect(tmp_path):
+    path = tmp_path / "journal.db"
+    first, second = _FixtureJournal(path), _FixtureJournal(path)
+    r, effects = release(), FakeEffects(H)
+    first.enroll(r, (TARGET,), 2)
+    second.db.execute("PRAGMA busy_timeout=0")
+    first.db.execute("BEGIN IMMEDIATE")
+    try:
+        for operation in (
+            lambda: second.enroll(r, (TARGET,), 3),
+            lambda: second.advance(r, (TARGET,), effects, 3),
+            lambda: second.reconcile(r, H),
+            lambda: second.cancel(r.execution_id),
+        ):
+            with pytest.raises(InvalidAction, match="journal-unavailable"):
+                operation()
+        assert not effects.calls
+    finally:
+        first.db.rollback()
+        first.close()
+        second.close()
+
+
+def test_native_binding_preserves_auth_refusal_and_types_malformed(tmp_path):
+    r, native, _ = native_fixture(tmp_path)
+    native["ask"]["status"] = "pending"
+    with pytest.raises(authority._core().AuthorityHold, match="exact release deployment question"):
+        authority._bindings(r, native)
+    with pytest.raises(authority.AuthorityHold, match="malformed-native-context"):
+        authority._bindings(r, {})
+
+
+def test_core_fifo_refuses_without_blocking():
+    import os
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory(prefix=".core-fifo-", dir=Path.cwd()) as directory:
+        root = Path(directory)
+        resources = root / "resources"
+        resources.mkdir()
+        os.mkfifo(resources / "hermes_native_authority.py.txt")
+        code = (
+            "from heterodyne.actions import deployment_authority as a; "
+            + "a.__file__ = "
+            + repr(str(root / "deployment_authority.py"))
+            + "; a._load_core()"
+        )
+        result = subprocess.run(
+            [authority.sys.executable, "-c", code], capture_output=True, timeout=3, check=False
+        )
+        assert result.returncode != 0
+        assert b"unsafe-authority-source" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "docs/reviews/2026-10-29-deployment-step1-code/r1/actual-review.md",
+        "docs/reviews/2026-10-29-deployment-step1-code/r1/review-receipt.json",
+        "docs/reviews/2026-10-29-deployment-step1-code/r2/review-receipt.json",
+    ],
+)
+def test_review_evidence_exception_preserves_raw_bytes_and_denylist(tmp_path, relative):
+    import importlib.util
+    from pathlib import Path
+
+    root = Path(__file__).parents[1]
+    spec = importlib.util.spec_from_file_location(
+        "_evidence_checker", root / "scripts/check_install_agnostic.py"
+    )
+    assert spec and spec.loader
+    checker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checker)
+    raw = (root / relative).read_bytes()
+    output = tmp_path / relative
+    output.parent.mkdir(parents=True)
+    output.write_bytes(raw)
+    assert not checker.scan_file(tmp_path, relative, None, [])
+    assert any("local-denylist" in hit for hit in checker.scan_file(tmp_path, relative, None, ["/home/"]))
+    output.write_bytes(raw + b"\n")
+    assert any("home-path" in hit for hit in checker.scan_file(tmp_path, relative, None, []))

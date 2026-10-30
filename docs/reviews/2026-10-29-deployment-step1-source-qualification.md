@@ -43,7 +43,7 @@ Python 3.14 environment: its approximately 32 MiB interpreter exceeded the old
 16 MiB read bound. That original report and commit remain historical evidence;
 they did not qualify the actual worktree environment.
 
-After the round 1 repairs, 31 focused tests passed in 0.68 seconds using this
+After the round 1 repairs, 31 focused tests were reported in 0.68 seconds using this
 worktree's `.venv/bin/python` (uv Python 3.14.7, 32,159,664-byte executable). Source/interpreter hashing now
 streams through one checked descriptor with a 128 MiB per-file bound, a 512 MiB
 inventory bound and a finite file count. Focused Ruff and strict Pyright checks
@@ -66,15 +66,25 @@ worktree interpreter, checks policy parsing of captured bytes, and verifies the
 checker exception is limited to the exact unchanged resource and still enforces
 the local denylist. These tests establish no genuine operational approval.
 
-The complete CLI executable closure is now explicit: fixed release source tree,
-fixed site-packages dependency tree, resolved CLI interpreter, the console wrapper,
-current harness package tree and checked adapter/core files. Every tree is pinned
-in the release and swept before and after readback; existing bytecode or symlinks
-refuse. The fixed child uses `-I -S -B`, explicit source/package roots and a fresh
-private cache prefix, avoiding `.pth`, site startup, ambient Python paths and
-pre-existing stdlib cache reads. Platform stdlib custody remains part of host
-qualification. Ordinary editable/cached installations may correctly HOLD until a
-sealed runtime profile is separately qualified; this repair changes no host files.
+The bounded source inventory covers the fixed release source tree, fixed
+site-packages dependency tree, CLI interpreter, console wrapper (corroboration;
+the child invokes the source CLI), current harness package tree and checked
+adapter/core files. Every role is checked independently even when two roles name
+the same file. The child interpreter is resolved once before both sweeps, and the
+same resolved path is passed to invocation; its mutable alias is not resolved
+again. This is not a complete executable-closure or protected-custody claim:
+both interpreters' standard-library trees and the controller's already imported
+msgspec runtime remain deployment qualification requirements, not new pins in
+this internal schema. The parent process has already imported its Python modules;
+hashing source does not establish that in-memory modules came from those bytes.
+
+Canonical `__pycache__` entries with CPython cache filenames are checked but
+excluded from the source digest, so ordinary imports do not change the pin.
+Symlinks, legacy sourceless `.pyc`/`.pyo`, noncanonical cache contents and directory
+bounds still refuse. The fixed child uses `-I -S -B`, explicit source/package roots
+and a fresh private cache prefix, avoiding `.pth`, site startup, ambient Python
+paths and pre-existing canonical cache reads. The source inventories are checked
+before and after that invocation. These repairs change no host files.
 The core is loaded lazily: absent or unsafe source causes a controlled authority
 HOLD when used, rather than breaking unrelated imports. Root-owned and hardlinked
 regular resources are allowed only with the same checked descriptor/hash checks.
@@ -99,8 +109,7 @@ this private fixture or make its receipts into host authority.
 The first source commit used the controller-authorized narrow skip of the
 `install-agnostic` pre-commit hook; Ruff and secret detection remained enabled.
 Round 1 correctly found that this left all-tracked CI failing. The repaired
-adapter uses documented per-line `home-path` exceptions. The checker has one
-resource exception for **only** `home-path` at the exact resource path and exact
+adapter uses documented per-line `home-path` exceptions. The checker has a resource exception for **only** `home-path` at the exact resource path and exact
 unchanged SHA256 above; another byte, path or rule is not exempt, and local
 secret-denylist checking remains active. No original core byte or digest was
 changed to make the checker pass. Relocation still requires a reviewed fixed
@@ -116,3 +125,50 @@ The small local `_require` and digest regex remain local deployment validation;
 the shared public codec identity/alias patterns are reused. The source authority
 reader remains deliberately private and dormant. These are recorded trade-offs,
 not a claim that every quality metric is clean.
+
+## Round 2 findings and repair evidence
+
+The actual HIGH built-in review on `ca6a2ac` requested changes and reproduced
+both the normal-import cache refusal and role-pin overwrite. The earlier 31-pass
+claim therefore did not establish operation without the inherited
+`PYTHONDONTWRITEBYTECODE` setting. Actual round 1 and 2 reports, commands and
+reviewer receipts are retained under `2026-10-29-deployment-step1-code/r1` and
+`r2`; neither verdict is recast as approval.
+
+The repair's focused suite passes 42 tests with `PYTHONDONTWRITEBYTECODE`
+explicitly removed (0.86 seconds, same Python 3.14.7 interpreter). It exercises
+shared-path bad role pins, canonical poisoned cache bypass with a real child
+interpreter, an interpreter alias switched between sweeps, display-injection
+refusals, busy SQLite refusal before any fake effect, preservation of native
+authentication refusal versus unavailable infrastructure, and a real FIFO source
+which must refuse within a three-second child timeout. The source inventory now
+combines symlink/cache validation and hashing in one bounded walk. Both sweeps
+independently check the approved role pins; a redundant comparison of maps whose
+values must already match those pins was removed. The resource/checker test also
+requires the actual resource bytes to match the adapter core constant, keeping
+the exact portability exception and fixed loader pin synchronized.
+
+Deviation rendering now validates direct typed constructions before formatting;
+the shared codec already refuses the tested control and Unicode separator bytes.
+The additional printable-text check records the closed display contract.
+Source-specific custody, the independent outage/recovery route and actual
+protected native ingress remain unqualified. No host runner was activated, no
+SQLite state was edited outside disposable tests and no live approval was claimed.
+
+The round 2 repair's quality delta against `ca6a2ac` exits 2 with 24 rows:
+17 short-horizon churn rows caused by the successive reviewed repairs (12 major,
+5 minor), two major verbosity rows (the fixture journal grows 131 to 146 lines
+with explicit typed SQLite refusals; the causal capture fixture grows 60 to 89
+lines), and five new test/callback entry points reported as dead code. These are
+visible trade-offs, not a clean quality result. The error paths remain local to
+the existing journal; no transaction/policy framework or unrelated test fixtures
+were introduced to suppress the measurements.
+
+Preserving the actual round 1/2 reports and command receipts triggered the same
+home-path rule in three newly tracked evidence files. Their original bytes are
+retained unchanged; the checker now names each exact evidence path and SHA256
+for a home-path-only exception. No directory, mutable report, other rule or
+local denylist is exempt. Three additional causal tests exercise unchanged
+acceptance, altered-byte refusal and denylist refusal for those evidence files.
+The resulting focused suite has 45 passing cases with the bytecode environment
+setting removed. No pre-commit hook is skipped for this repair.

@@ -46,7 +46,7 @@ def _load_core():
     for parent in path.parents:
         if parent.is_symlink() or parent.stat().st_mode & 0o022:
             raise InvalidAction("unsafe-authority-source-chain")
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
     try:
         before = os.fstat(fd)
         if (
@@ -107,6 +107,9 @@ def _packet_url(release: Release) -> str:
 
 
 def approval_body(release: Release, packet_url: str, group: str) -> str:
+    # Rendering is also a boundary: reject unsafe direct typed constructions,
+    # even when this helper is called before the native capture validates them.
+    validate(release, (release.target,))
     if (
         packet_url != _packet_url(release)
         or not _PACKET.fullmatch(packet_url)
@@ -161,10 +164,12 @@ def _bindings_checked(release: Release, native: dict[str, Any]) -> list[str]:
 
 
 def _bindings(release: Release, native: dict[str, Any]) -> list[str]:
+    core = _core()
     try:
         return _bindings_checked(release, native)
+    except (core.AuthorityHold, InvalidAction):
+        raise
     except (KeyError, TypeError, ValueError) as exc:
-        _core()._hold("malformed native release context")
         raise AuthorityHold("malformed-native-context") from exc
 
 
@@ -179,29 +184,29 @@ def _operators_from(host: bytes, queue: bytes) -> dict[str, str]:
         return cast(dict[str, str], _core()._operators(*paths))
 
 
-def _sources(release: Release) -> dict[str, str]:
+def _sources(release: Release, executables: tuple[Path, Path]) -> dict[str, str]:
     here = Path(__file__).absolute().parent
     pins = release.authority_sources
     required = {
-        str(here / "deployment_authority.py"): pins.adapter_sha256,
-        str(here / "deployment.py"): pins.contract_sha256,
-        str(here / "codec.py"): pins.codec_sha256,
-        str(here / "contracts.py"): pins.records_sha256,
-        str(here / "resources/hermes_native_authority.py.txt"): pins.core_sha256,
-        ADMIND: pins.admind_sha256,
-        str(Path(sys.executable).resolve()): pins.interpreter_sha256,
-        str(here / "deployment_runtime.py"): pins.runtime_adapter_sha256,
-        str(runtime.PYTHON.resolve()): pins.admind_interpreter_sha256,
+        "adapter": (here / "deployment_authority.py", pins.adapter_sha256),
+        "contract": (here / "deployment.py", pins.contract_sha256),
+        "codec": (here / "codec.py", pins.codec_sha256),
+        "records": (here / "contracts.py", pins.records_sha256),
+        "core": (here / "resources/hermes_native_authority.py.txt", pins.core_sha256),
+        "admind-wrapper": (Path(ADMIND), pins.admind_sha256),
+        "interpreter": (executables[0], pins.interpreter_sha256),
+        "runtime-adapter": (here / "deployment_runtime.py", pins.runtime_adapter_sha256),
+        "admind-interpreter": (executables[1], pins.admind_interpreter_sha256),
     }
     if pins.core_sha256 != CORE_SHA256:
         raise AuthorityHold("native authority role pin differs")
-    observed = {name: runtime.stream_hash(Path(name)) for name in required}
+    observed = {role: runtime.stream_hash(path) for role, (path, _) in required.items()}
     inventories = {
         "admind-package": (runtime.tree_digest(runtime.SITE), pins.admind_package_sha256),
         "admind-source": (runtime.tree_digest(runtime.SOURCE), pins.admind_source_sha256),
         "harness-package": (runtime.tree_digest(here.parent), pins.harness_package_sha256),
     }
-    if any(observed[name] != expected for name, expected in required.items()) or any(
+    if any(observed[role] != expected for role, (_, expected) in required.items()) or any(
         actual != expected for actual, expected in inventories.values()
     ):
         raise AuthorityHold("approved release authority source drift")
@@ -215,13 +220,18 @@ def _capture_checked(release: Release, targets: tuple[Target, ...]) -> dict[str,
     if not re.fullmatch(r"[2-9a-hjkmnp-z]{4}", release.approval_id):
         raise AuthorityHold("native-ask-id")
     core = _core()
-    before = _sources(release)
+    # Resolve symlinks only once: the pinned child executable and the executed
+    # child executable must be the same path, even if its original alias changes.
+    executables = Path(sys.executable).resolve(strict=True), runtime.PYTHON.resolve(strict=True)
+    before = _sources(release, executables)
     policies = core._read(HOST_POLICY), core._read(QUEUE_POLICY)
     operators = _operators_from(*policies)
     native = core._native(release.approval_id, DB)
-    response = core._json(runtime.fetch(release.approval_id))
+    response = core._json(runtime.fetch(release.approval_id, executables[1]))
     core._validate(release, native, response, operators, _bindings)
-    if before != _sources(release) or policies != (core._read(HOST_POLICY), core._read(QUEUE_POLICY)):
+    # Each independent sweep checks every role against its approved pin.
+    _sources(release, executables)
+    if policies != (core._read(HOST_POLICY), core._read(QUEUE_POLICY)):
         raise AuthorityHold("release authority source or policy drift")
     if not release.not_before_ns <= time.time_ns() < release.deadline_ns:
         raise AuthorityHold("release approval expired during corroboration")
@@ -234,7 +244,9 @@ def _capture(  # pyright: ignore[reportUnusedFunction] - private dormant fixture
     """Private exact native readback; no host admission or injectable reader."""
     try:
         return _capture_checked(release, targets)
+    except InvalidAction:
+        raise
     except (OSError, ValueError, TypeError, KeyError, sqlite3.Error, subprocess.SubprocessError) as exc:
-        if isinstance(exc, AuthorityHold):
-            raise
+        if _loaded_core is not None and isinstance(exc, _loaded_core.AuthorityHold):
+            raise AuthorityHold("release-authentication-refused") from exc
         raise AuthorityHold("release-authority-unavailable: " + type(exc).__name__) from exc

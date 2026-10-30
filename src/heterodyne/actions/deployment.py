@@ -146,7 +146,7 @@ def validate(release: Release, targets: tuple[Target, ...]) -> None:
     _require(
         1 <= len(release.deviations) <= 16
         and len(set(release.deviations)) == len(release.deviations)
-        and all(v.strip() and len(v) <= 1024 for v in release.deviations),
+        and all(v.strip() and len(v) <= 1024 and v.isprintable() for v in release.deviations),
         "explicit-deviations",
     )
     _require(bool(re.fullmatch(r"[0-9a-f]{40}", release.packet_commit)), "packet-commit")
@@ -216,7 +216,10 @@ class _FixtureJournal:  # pyright: ignore[reportUnusedClass] - private fixture o
         self.db.close()
 
     def _begin(self) -> None:
-        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            self.db.execute("BEGIN IMMEDIATE")
+        except sqlite3.Error as exc:
+            raise InvalidAction("journal-unavailable") from exc
 
     def enroll(self, release: Release, targets: tuple[Target, ...], now_ns: int) -> None:
         validate(release, targets)
@@ -245,6 +248,9 @@ class _FixtureJournal:  # pyright: ignore[reportUnusedClass] - private fixture o
         except sqlite3.IntegrityError:
             self.db.rollback()
             raise InvalidAction("one-use-or-target-conflict") from None
+        except sqlite3.Error as exc:
+            self.db.rollback()
+            raise InvalidAction("journal-unavailable") from exc
         except BaseException:
             self.db.rollback()
             raise
@@ -282,6 +288,9 @@ class _FixtureJournal:  # pyright: ignore[reportUnusedClass] - private fixture o
                 (anticipated, release.execution_id),
             )
             self.db.commit()
+        except sqlite3.Error as exc:
+            self.db.rollback()
+            raise InvalidAction("journal-unavailable") from exc
         except BaseException:
             self.db.rollback()
             raise
@@ -310,13 +319,19 @@ class _FixtureJournal:  # pyright: ignore[reportUnusedClass] - private fixture o
                 (phase, ordinal + 1, observed, release.execution_id),
             )
             self.db.commit()
+        except sqlite3.Error as exc:
+            self.db.rollback()
+            raise InvalidAction("journal-unavailable") from exc
         except BaseException:
             self.db.rollback()
             raise
 
     def cancel(self, execution_id: str) -> None:
         # Fixture models a pre-authorized independent stop; no native operator route is installed.
-        changed = self.db.execute("UPDATE jobs SET cancelled=1 WHERE execution=?", (execution_id,))
+        try:
+            changed = self.db.execute("UPDATE jobs SET cancelled=1 WHERE execution=?", (execution_id,))
+        except sqlite3.Error as exc:
+            raise InvalidAction("journal-unavailable") from exc
         _require(changed.rowcount == 1, "unknown-execution")
 
 

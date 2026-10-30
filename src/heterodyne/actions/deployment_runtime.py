@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import re
 import stat
 import subprocess
 import tempfile
@@ -20,6 +21,7 @@ SITE = RELEASE / ".venv/lib/python3.12/site-packages"
 PYTHON = RELEASE / ".venv/bin/python"
 LIMIT = 128 * 1024 * 1024
 TREE_LIMIT = 512 * 1024 * 1024
+_CACHE = re.compile(r"[A-Za-z0-9_]+\.cpython-[0-9]{2,3}(?:\.opt-[0-2])?\.pyc")
 
 
 def stream_hash(path: Path, *, limit: int = LIMIT) -> str:
@@ -65,48 +67,53 @@ def _walk_error(error: OSError) -> None:
     raise error
 
 
-def refuse_bytecode(root: Path) -> None:
-    """No timestamp-valid or sourceless bytecode can substitute for pinned source."""
-    count = 0
-    for parent, dirs, names in os.walk(root, followlinks=False, onerror=_walk_error):
-        count += len(dirs) + len(names)
-        if count > 40000:
-            raise InvalidAction("runtime-package-bound")
-        if "__pycache__" in dirs or any(name.endswith((".pyc", ".pyo")) for name in names):
-            raise InvalidAction("runtime-bytecode-refused")
-        if any((Path(parent) / name).is_symlink() for name in (*dirs, *names)):
+def _checked_entries(parent: str, dirs: list[str], files: list[str]) -> None:
+    for name in (*dirs, *files):
+        if (Path(parent) / name).is_symlink():
             raise InvalidAction("runtime-symlink-refused")
+    if Path(parent).name == "__pycache__":
+        # Canonical cache entries cannot be imported as legacy sourceless modules.
+        # The child uses a fresh private prefix, so it never reads these caches.
+        if dirs or any(not _CACHE.fullmatch(name) for name in files):
+            raise InvalidAction("runtime-bytecode-refused")
+    elif any(name.endswith((".pyc", ".pyo")) for name in files):
+        raise InvalidAction("runtime-bytecode-refused")
 
 
 def tree_digest(root: Path) -> str:
-    """Complete fixed site inventory, including source and native dependencies."""
+    """Pinned source/native inventory; canonical caches are checked but never executed."""
     if not root.is_dir() or root.is_symlink():
         raise InvalidAction("runtime-package-missing")
-    refuse_bytecode(root)
     rows: list[tuple[str, str]] = []
-    total = 0
+    total = count = 0
     for parent, dirs, files in os.walk(root, followlinks=False, onerror=_walk_error):
+        count += len(dirs) + len(files)
+        if count > 40000:
+            raise InvalidAction("runtime-package-bound")
+        _checked_entries(parent, dirs, files)
         dirs.sort()
         for name in sorted(files):
             path = Path(parent) / name
             total += path.stat(follow_symlinks=False).st_size
             if len(rows) >= 20000 or total > TREE_LIMIT:
                 raise InvalidAction("runtime-package-bound")
-            rows.append((path.relative_to(root).as_posix(), stream_hash(path)))
+            observed = stream_hash(path)
+            if Path(parent).name != "__pycache__":
+                rows.append((path.relative_to(root).as_posix(), observed))
     if not rows:
         raise InvalidAction("runtime-package-empty")
     return hashlib.sha256(json.dumps(rows, separators=(",", ":")).encode()).hexdigest()
 
 
-def fetch(ask_id: str) -> bytes:
+def fetch(ask_id: str, executable: Path) -> bytes:
     """Source-only isolated CLI readback: no site startup, .pth or cached bytecode.
 
     A new private cache prefix hides all pre-existing interpreter/stdlib caches;
     -B prevents writes there. -S prevents .pth/sitecustomize execution. Only the
-    fixed, sealed source and site roots are added, and existing package bytecode refuses.
+    fixed, sealed source and site roots are added. The caller has inventoried both
+    trees, refusing legacy sourceless bytecode; canonical caches are ignored.
+    The executable is the exact resolved path captured once by the fixed reader.
     """
-    refuse_bytecode(SITE)
-    refuse_bytecode(SOURCE)
     code = (
         "import sys; sys.path.insert(0,"
         + repr(str(SITE))
@@ -118,7 +125,7 @@ def fetch(ask_id: str) -> bytes:
     with tempfile.TemporaryDirectory(prefix="heterodyne-native-read-") as cache:
         result = subprocess.run(
             [
-                str(PYTHON.resolve()),
+                str(executable),
                 "-I",
                 "-S",
                 "-B",

@@ -492,10 +492,12 @@ Step 1 refuses an outage mode rather than silently permitting a transport gap.
   the expected packet commit and canonical docs path in the fixed product repo;
   a different well-formed URL is refused. Two source/policy sweeps surround native
   readback; policy parsing consumes the captured first-sweep bytes. The runtime
-  closure includes actual source/dependency trees and resolved interpreters, not
-  just the CLI wrapper. Isolated source execution refuses existing package
-  bytecode and site startup. A receipt alone grants no host authority. The existing
-  checked H native core is reused byte-for-byte with a fixed source hash. This
+  inventory includes source/dependency trees and once-resolved interpreters,
+  beyond the CLI wrapper. Isolated source execution bypasses canonical package
+  caches and site startup. Canonical caches do not alter source pins; legacy
+  sourceless bytecode refuses. Standard-library and already-imported controller
+  runtime custody still need host qualification. A receipt alone grants no host
+  authority. The existing checked H native core is reused byte-for-byte with a fixed source hash. This
   exception supersedes the generic bead-only commit point below for deployment.
 - The operator reacts 👍 (approve), 👎 (deny) or ❤️ (always), or sends `/approve` or `/deny` as a reply, on either card.
 - `wsd` looks up the message→bead map, which is persisted and survives restart, and resolves by the targeted message, not in arrival order.
