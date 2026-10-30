@@ -1,0 +1,5 @@
+# Actual review disposition
+
+R2 genuinely APPROVED the manually inspected correct runtime diff, while its built-in skill misfired on the base root-helper. R3 used actual built-in `/code-review 150` on the runtime PR and cleared the PoC with no critical flaws. Both actual reports, source hashes, original argv hashes and model metadata are retained separately. No extra review solely to validate either result was performed.
+
+The confirmed nonblocking failed-launch provenance overwrite remains: launch writes the new install before a generation actually runs while carrying prior native thread identity; profile change plus install repin plus failed launch can misattribute the original install. This is an accepted PoC followup, not fixed or hidden. Low-to-medium was not independently network-qualified, generic model effort support remains unproven beyond the recorded model, two refusal test setup notes and adapter capability placement/duplicate verification remain disclosed. No production custody, live workstream takeover, deployment or complete authorization-flow claim follows from these source qualifications.

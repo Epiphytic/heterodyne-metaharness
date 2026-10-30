@@ -7,7 +7,14 @@
   "focused": "19 PASS71.33s",
   "ruff": "PASS",
   "strict_pyright": "PASS",
-  "full_runtime": "running on exact recorded source bytes; no PASS claimed",
+  "full_runtime": {
+    "source_head": "61065df8e888e10cc935b4847d3ca833fb51dacb",
+    "command": "PYTHONPATH=src:tests .venv/bin/pytest -q tests/test_sandbox_runtime.py",
+    "result": "PASS",
+    "tests": 290,
+    "elapsed_seconds": 933.59,
+    "source_hashes_unchanged": true
+  },
   "quality": "exit2, <quality-delta baseline=\"git-HEAD\" regressions=\"19\" minor=\"3\" acked=\"0\" preexisting-worse=\"12\" new-symbol=\"7\" gating=\"9\" at=\"201d4ff53+dirty\">",
   "limits": [
     "Actual network proof is recorded model only; runtime qualification is CLI adoption, not every model.",
