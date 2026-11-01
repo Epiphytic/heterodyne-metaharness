@@ -42,7 +42,8 @@ from heterodyne.harness.resources import store_core
 _UNIT = 'heterodyne-admind.service'
 _PROPERTIES = (
     'Id', 'LoadState', 'ActiveState', 'SubState', 'UnitFileState',
-    'NeedDaemonReload', 'Environment', 'MainPID', 'InvocationID',
+    'NeedDaemonReload', 'Environment', 'EnvironmentFiles', 'PassEnvironment', 'UnsetEnvironment',
+    'MainPID', 'InvocationID',
 )
 _SHA = re.compile(r'[0-9a-f]{64}')
 _RELEASE = re.compile(r'[0-9a-f]{40}|[0-9a-f]{64}')
@@ -76,7 +77,8 @@ def _profile(fd: int) -> _ObservationProfile:
         raise InvalidAction('deployment-observer-root-required')
     p = _decode(_read(fd, 8192), _ObservationProfile, max_bytes=8192)
     if (
-        not re.fullmatch(r'[a-z_][a-z0-9_-]{0,31}', p.service_user)
+        not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:-]{0,127}', p.target_id)
+        or not re.fullmatch(r'[a-z_][a-z0-9_-]{0,31}', p.service_user)
         or p.service_uid <= 0 or pwd.getpwnam(p.service_user).pw_uid != p.service_uid
         or any(not _SHA.fullmatch(pin) for pin in (
             p.runuser_sha256, p.env_sha256, p.systemctl_sha256,
@@ -103,11 +105,13 @@ def _parse_unit(raw: bytes) -> dict[str, str]:
     if (
         result['Id'] != _UNIT or result['LoadState'] != 'loaded'
         or result['NeedDaemonReload'] != 'no'
+        or any(result[key] for key in ('EnvironmentFiles', 'PassEnvironment', 'UnsetEnvironment'))
         or result['UnitFileState'] not in {'enabled', 'disabled'}
         or (result['ActiveState'], result['SubState']) not in {
             ('active', 'running'), ('inactive', 'dead'),
         }
-        or not re.fullmatch(r'0|[1-9][0-9]{0,19}', result['MainPID'])
+        or not re.fullmatch(r'0|[1-9][0-9]{0,9}', result['MainPID'])
+        or int(result['MainPID']) > 2**31 - 1
         or (result['ActiveState'] == 'inactive') != (result['MainPID'] == '0')
     ):
         raise InvalidAction('deployment-observer-unit-unsettled')
@@ -133,6 +137,11 @@ def _show(p: _ObservationProfile) -> dict[str, str]:
     runtime = Path('/run/user') / str(p.service_uid)
     endpoints = [runtime / 'systemd/private', runtime / 'bus']
     before = [_endpoint_state(path, p.service_uid) for path in endpoints]
+    # UID-authenticated session bus alone does not authenticate systemd's replies.
+    # Keep stale-private information diagnostic; never promote that fallback to
+    # a trusted observation without an independently qualified bus-owner path.
+    if before[0][3] != 'connected':
+        raise InvalidAction('deployment-observer-manager-unavailable')
     with contextlib.ExitStack() as stack:
         for path, pin in (
             (Path('/usr/sbin/runuser'), p.runuser_sha256),

@@ -28,6 +28,7 @@ def _unit(**changes: str) -> bytes:
     fields = {
         'Id': 'heterodyne-admind.service', 'LoadState': 'loaded', 'ActiveState': 'active',
         'SubState': 'running', 'UnitFileState': 'enabled', 'NeedDaemonReload': 'no',
+        'EnvironmentFiles': '', 'PassEnvironment': '', 'UnsetEnvironment': '',
         'Environment': 'HETERODYNE_RELEASE=' + 'a' * 40, 'MainPID': '123', 'InvocationID': 'b' * 32,
     }
     fields.update(changes)
@@ -43,7 +44,9 @@ def test_unit_exact_active_and_inactive() -> None:
 @pytest.mark.parametrize('changes', [
     {'Id': 'heterodyne-wsd.service'}, {'LoadState': 'not-found'}, {'ActiveState': 'failed'},
     {'SubState': 'exited'}, {'UnitFileState': 'masked'}, {'NeedDaemonReload': 'yes'},
-    {'MainPID': '0'}, {'MainPID': '-2'}, {'MainPID': '0004'},
+    {'MainPID': '0'}, {'MainPID': '-2'}, {'MainPID': '0004'}, {'MainPID': '2147483648'},
+    {'MainPID': '99999999999999999999'}, {'EnvironmentFiles': '/run/fixture-release.env'},
+    {'PassEnvironment': 'HETERODYNE_RELEASE'}, {'UnsetEnvironment': 'HETERODYNE_RELEASE'},
     {'ActiveState': 'inactive', 'SubState': 'dead', 'MainPID': '123'},
 ])
 def test_unsettled_unit_is_not_an_observation(changes: dict[str, str]) -> None:
@@ -171,9 +174,10 @@ with tempfile.TemporaryDirectory(dir='/tmp') as home:
  record=base/'record.json';record.write_text(json.dumps({'version':1,'release':release,'units':{}}))
  os.chown(record,uid,-1);record.chmod(0o600)
  database=base/'admind.db'
- db=sqlite3.connect(database);db.execute('CREATE TABLE outbox(status TEXT)')
+ db=sqlite3.connect(database);database.chmod(0o600)
+ db.execute('PRAGMA journal_mode=WAL');db.execute('CREATE TABLE outbox(status TEXT)')
  db.executemany('INSERT INTO outbox VALUES (?)',[('quarantined',),('pending',)])
- db.commit();db.close();database.chmod(0o600)
+ db.commit();assert Path(str(database)+'-wal').stat().st_size>0
  p={'schema':'heterodyne-deployment-observer-profile.v1','target_id':'test-admind',
  'service_user':'nobody','service_uid':uid,'runuser_sha256':'b'*64,'env_sha256':'c'*64,
  'systemctl_sha256':'d'*64,'releases':str(releases),'install_record':str(record),
@@ -194,8 +198,7 @@ with tempfile.TemporaryDirectory(dir='/tmp') as home:
   else:raise AssertionError('foreign writable file owner accepted')
   os.chown(tree/'file',0,-1)
   # Actual DB change affects both count and diagnostic copied-input digest.
-  db=sqlite3.connect(database);db.execute("UPDATE outbox SET status='quarantined'")
-  db.commit();db.close()
+  db.execute("UPDATE outbox SET status='quarantined'");db.commit()
   second=owner._observe(fd)
   assert second.observation.quarantine_count==2
   assert second.database_copy_sha256!=first.database_copy_sha256
@@ -209,7 +212,7 @@ with tempfile.TemporaryDirectory(dir='/tmp') as home:
   except InvalidAction as exc:assert str(exc)=='deployment-observer-release-mismatch'
   else:raise AssertionError('record/runtime disagreement accepted')
   print('actual-profile-tree-db-read-and-refusals-pass')
- finally:os.close(fd)
+ finally:os.close(fd);db.close()
 '''
     facility = subprocess.run(
         ['unshare', '--user', '--map-auto', '--map-root-user', '--mount', 'true'],
@@ -323,3 +326,17 @@ def test_tree_deadline_applies_without_file_content(tmp_path: Path, monkeypatch:
     monkeypatch.setattr(owner.time, 'monotonic', lambda: next(ticks))
     with pytest.raises(InvalidAction, match='tree-bound'):
         _digest(tmp_path)
+
+
+
+def test_stale_private_never_promotes_bus_uid_to_trusted_observation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from heterodyne.actions import deployment_host_observer as owner
+
+    monkeypatch.setattr(owner, '_endpoint_state', lambda path, uid: (
+        1, 2, uid, 'refused' if path.name == 'private' else 'connected',
+    ))
+    monkeypatch.setattr(owner, '_binary', lambda *_: pytest.fail('executed before manager authentication'))
+    with pytest.raises(InvalidAction, match='manager-unavailable'):
+        owner._show(_process_profile(os.getuid()))
