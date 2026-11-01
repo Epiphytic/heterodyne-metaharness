@@ -1,0 +1,24 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_____________ test_pure_profile_check_retained_fd_change_is_causal _____________
+
+inputs = (b'{\n  "schema": "heterodyne-protected-deployment.v1",\n  "release": {\n    "schema": "heterodyne-release.v1",\n    "...sion='revision1', service_user='service', release_id='release', unit_id='units', state_id='state'),)), 14, 11, 12, ...)
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x79fa92cb7f80>
+
+    def test_pure_profile_check_retained_fd_change_is_causal(inputs, monkeypatch):
+        original, _, _, profile_fd, *_ = inputs
+        real = checker._bound_operation
+        def change(raw, profile):
+            result = real(raw, profile)
+            before = os.fstat(profile_fd)
+            os.utime(profile_fd, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
+            assert os.fstat(profile_fd).st_mode == before.st_mode
+            return result
+        monkeypatch.setattr(checker, "_bound_operation", change)
+>       with pytest.raises(InvalidAction, match="^profile-check-descriptor-changed$"):
+E       Failed: DID NOT RAISE InvalidAction
+
+tests/test_deployment_profile_check.py:71: Failed
+=========================== short test summary info ============================
+FAILED tests/test_deployment_profile_check.py::test_pure_profile_check_retained_fd_change_is_causal
+1 failed, 13 deselected in 0.22s
