@@ -1,0 +1,21 @@
+{
+  "source_test_sha256": "1e618981984069a27fb52088d03bdf29d37bd649e5589a5ed5efdd41cb0473f8",
+  "source_modules_sha256": {
+    "deployment_admission_entry.py": "6cb886f0041f5993b063926bf4b661e23c2705838f97edf6c977dc1846844755",
+    "deployment_admission_journal.py": "e0e269e98d022f00862bf5490fe72afbea7245fd137c08736eab378a84a618e1",
+    "deployment_admission_peer.py": "7208033327126f823d845ab1037235f5eb0d3a60bfae75d32debb16a870c10e5",
+    "deployment_admission_binding.py": "6fbd9977d1cd0abe5aa52bad9ed90b6e226237fbe9b464940923a6477a857e8a"
+  },
+  "fixture_sha256": {
+    "consumed": "bd3b1102e988d5a509f0056d9a192e37a3f6c38488099ba351b2a30c69ac4ae4",
+    "process": "4412177f67ccaea1f39bee9e2eceee41db3d25d5380df4917bbd2d69ac86b5fb",
+    "producer": "683c77d2931fbd8f44283493451b050f534bc9969d7c0d303661cefea0e56819",
+    "packet": "d5934803d1195d6ef2a19254149dc6bdcfa0194606c100646cb2b099bdcdd121"
+  },
+  "started_ns": 1793570305427778561,
+  "finished_ns": 1793570305708420311,
+  "returncode": 0,
+  "stdout": "actual-mapped-root-entry-failed-no-effect-three-process-one-use-pass\n",
+  "stderr": "owned-deployment-admission-held\nowned-deployment-admission-held\n",
+  "scope": "actual native consumed bytes unchanged and actual clock; namespace-root copied Python parent ELF, original retained FDs, same-OFD flock, real credentialed seqpacket, durable SQLite reopen; test-only journal path/import closure, no installed custody or effect"
+}
