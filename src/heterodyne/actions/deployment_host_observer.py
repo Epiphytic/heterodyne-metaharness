@@ -14,11 +14,13 @@ import os
 import pwd
 import re
 import shlex
+import signal
 import sqlite3
 import stat
 import subprocess
 import tempfile
 import time
+from collections.abc import Generator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -198,9 +200,67 @@ def _record(p: _ObservationProfile) -> tuple[str, bytes]:
     return release, raw
 
 
-def _tree_digest(fd: int) -> str:
+@contextlib.contextmanager
+def _running_release(p: _ObservationProfile, unit: dict[str, str], release: str) -> Generator[None]:
+    """Bind the active process environment, not only configured unit Environment."""
+    if unit['ActiveState'] == 'inactive':
+        yield
+        return
+    pid = int(unit['MainPID'])
+    with contextlib.ExitStack() as stack:
+        pidfd = os.pidfd_open(pid)
+        stack.callback(os.close, pidfd)
+        process = os.open(f'/proc/{pid}', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        stack.callback(os.close, process)
+
+        def check() -> None:
+            signal.pidfd_send_signal(pidfd, 0)
+            values: dict[str, bytes] = {}
+            for name in ('status', 'environ'):
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=process)
+                try:
+                    values[name] = os.read(fd, 1024 * 1024 + 1)
+                finally:
+                    os.close(fd)
+                if len(values[name]) > 1024 * 1024:
+                    raise InvalidAction('deployment-observer-process-bound')
+            uids = [line.split()[1:] for line in values['status'].splitlines()
+                    if line.startswith(b'Uid:')]
+            selected = str(p.service_uid).encode()
+            marks = [part for part in values['environ'].split(b'\0')
+                     if part.startswith(b'HETERODYNE_RELEASE=')]
+            if uids != [[selected] * 4] or marks != [b'HETERODYNE_RELEASE=' + release.encode()]:
+                raise InvalidAction('deployment-observer-running-release-mismatch')
+            signal.pidfd_send_signal(pidfd, 0)
+
+        check()
+        yield
+        check()
+
+
+def _entry_owner(root: int, path: str, expected: store_core.Stat, uid: int) -> str:
+    """Check owner on the exact nofollow entry whose statx is being manifested."""
+    with contextlib.ExitStack() as stack:
+        parent = root
+        *directories, name = path.split('/')
+        for part in directories:
+            parent = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+            stack.callback(os.close, parent)
+        before = store_core.statx_at(parent, name)
+        info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        if (before != expected or store_core.statx_at(parent, name) != expected
+                or info.st_uid not in {0, uid}
+                or (expected.kind != 'link' and info.st_mode & 0o022)):
+            raise InvalidAction('deployment-observer-tree-custody')
+        return 'root' if info.st_uid == 0 else 'service'
+
+
+def _tree_digest(fd: int, service_uid: int) -> str:
     """Reuse the bounded statx/fd walker; hash content/mode/link facts, not inode/time."""
     root_before = store_core.statx_at(fd, '')
+    root_owner = os.fstat(fd).st_uid
+    if root_owner not in {0, service_uid} or root_before.mode & 0o022:
+        raise InvalidAction('deployment-observer-tree-custody')
     total = 0
     deadline = time.monotonic() + 30
 
@@ -219,19 +279,30 @@ def _tree_digest(fd: int) -> str:
     first: list[tuple[str, store_core.Stat, str | None]] = []
     with contextlib.closing(store_core._traverse(fd)) as entries:
         for path, info, target in entries:
+            if time.monotonic() > deadline:
+                raise InvalidAction('deployment-observer-tree-bound')
+            owner = _entry_owner(fd, path, info, service_uid)
             first.append((path, info, target))
             sha = store_core._hash_file(
                 fd, path, bounded_read, info.__eq__, store_core.WalkRefused,
             ) if info.kind == 'file' else None
             rows.append({'path': path, 'kind': info.kind, 'mode': info.mode,
-                         'size': info.size, 'sha256': sha, 'target': target})
+                         'size': info.size if info.kind == 'file' else 0,
+                         'owner': owner, 'sha256': sha, 'target': target})
     with contextlib.closing(store_core._traverse(fd)) as entries:
-        if list(entries) != first:
+        second: list[tuple[str, store_core.Stat, str | None]] = []
+        for path, info, target in entries:
+            if time.monotonic() > deadline:
+                raise InvalidAction('deployment-observer-tree-bound')
+            _entry_owner(fd, path, info, service_uid)
+            second.append((path, info, target))
+        if second != first:
             raise InvalidAction('deployment-observer-tree-changed')
     root_after = store_core.statx_at(fd, '')
     if root_before != root_after:
         raise InvalidAction('deployment-observer-tree-changed')
-    manifest = canonical({'root_mode': root_before.mode, 'entries': rows})
+    manifest = canonical({'root_mode': root_before.mode,
+                          'root_owner': 'root' if root_owner == 0 else 'service', 'entries': rows})
     return hashlib.sha256(_TREE_DOMAIN + manifest).hexdigest()
 
 
@@ -286,22 +357,23 @@ def _observe(profile_fd: int) -> _Readback:  # pyright: ignore[reportUnusedFunct
         releases = [e for e in environment if e.startswith('HETERODYNE_RELEASE=')]
         if releases != ['HETERODYNE_RELEASE=' + release]:
             raise InvalidAction('deployment-observer-release-mismatch')
-        tree = _source_directory(Path(p.releases) / release, p.service_uid)
-        try:
-            digest = _tree_digest(tree)
-            quarantines, database = _quarantine(p)
-            if _tree_digest(tree) != digest:
-                raise InvalidAction('deployment-observer-tree-changed')
-            current = _source_directory(Path(p.releases) / release, p.service_uid)
+        with _running_release(p, before, release):
+            tree = _source_directory(Path(p.releases) / release, p.service_uid)
             try:
-                if _stat_key(os.fstat(current)) != _stat_key(os.fstat(tree)):
-                    raise InvalidAction('deployment-observer-tree-replaced')
+                digest = _tree_digest(tree, p.service_uid)
+                quarantines, database = _quarantine(p)
+                if _tree_digest(tree, p.service_uid) != digest:
+                    raise InvalidAction('deployment-observer-tree-changed')
+                current = _source_directory(Path(p.releases) / release, p.service_uid)
+                try:
+                    if _stat_key(os.fstat(current)) != _stat_key(os.fstat(tree)):
+                        raise InvalidAction('deployment-observer-tree-replaced')
+                finally:
+                    os.close(current)
             finally:
-                os.close(current)
-        finally:
-            os.close(tree)
-        if _record(p) != (release, record) or _show(p) != before:
-            raise InvalidAction('deployment-observer-target-changed')
+                os.close(tree)
+            if _record(p) != (release, record) or _show(p) != before:
+                raise InvalidAction('deployment-observer-target-changed')
         observation = HostObservation(
             'heterodyne-deployment-observation.v1', p.target_id,
             'enabled' if before['UnitFileState'] == 'enabled' else 'disabled',

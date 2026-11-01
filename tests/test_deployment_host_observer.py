@@ -5,12 +5,22 @@ import hashlib
 import json
 import os
 import socket
+import subprocess
+import sys
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
 from heterodyne.actions.codec import InvalidAction
-from heterodyne.actions.deployment_host_observer import _endpoint_state, _parse_unit, _tree_digest
+from heterodyne.actions.deployment_host_observer import (
+    _endpoint_state,
+    _ObservationProfile,
+    _parse_unit,
+    _running_release,
+    _tree_digest,
+)
 from heterodyne.harness.resources import store_core
 
 
@@ -53,7 +63,7 @@ def test_unit_strict_shape(raw: bytes) -> None:
 def _digest(path: Path) -> str:
     fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        return _tree_digest(fd)
+        return _tree_digest(fd, os.getuid())
     finally:
         os.close(fd)
 
@@ -125,8 +135,9 @@ def test_tree_golden(tmp_path: Path) -> None:
     file = tmp_path / 'a'
     file.write_bytes(b'abc')
     file.chmod(0o600)
-    manifest = {'root_mode': 0o700, 'entries': [{
+    manifest = {'root_mode': 0o700, 'root_owner': 'root' if os.getuid() == 0 else 'service', 'entries': [{
         'path': 'a', 'kind': 'file', 'mode': 0o600, 'size': 3,
+        'owner': 'root' if os.getuid() == 0 else 'service',
         'sha256': hashlib.sha256(b'abc').hexdigest(), 'target': None,
     }]}
     raw = json.dumps(manifest, sort_keys=True, separators=(',', ':')).encode()
@@ -147,8 +158,8 @@ import contextlib, hashlib, json, os, pwd, sqlite3, tempfile
 from pathlib import Path
 from heterodyne.actions import deployment_host_observer as owner
 from heterodyne.actions.codec import InvalidAction
-os.system('mount --make-rprivate /')
 import subprocess
+subprocess.run(['mount','--make-rprivate','/'],check=True)
 subprocess.run(['mount','-t','tmpfs','-o','mode=755','tmpfs','/tmp'],check=True)
 with tempfile.TemporaryDirectory(dir='/tmp') as home:
  base=Path(home);base.chmod(0o700)
@@ -168,7 +179,7 @@ with tempfile.TemporaryDirectory(dir='/tmp') as home:
  'systemctl_sha256':'d'*64,'releases':str(releases),'install_record':str(record),
  'database':str(database),'scratch':str(base)}
  profile=base/'profile.json';profile.write_text(json.dumps(p));profile.chmod(0o400)
- unit={'Environment':'HETERODYNE_RELEASE='+release,'UnitFileState':'enabled','ActiveState':'active'}
+ unit={'Environment':'HETERODYNE_RELEASE='+release,'UnitFileState':'disabled','ActiveState':'inactive','MainPID':'0'}
  owner._show=lambda _:dict(unit) # manager trust is qualified separately, not by this mock
  fd=os.open(profile,os.O_RDONLY)
  try:
@@ -177,6 +188,11 @@ with tempfile.TemporaryDirectory(dir='/tmp') as home:
   assert first.observation.guard_verdict=='unchecked' and first.observation.quarantine_count==1
   assert hashlib.sha256(database.read_bytes()).hexdigest()==before
   assert owner._observe(fd)==first
+  os.chown(tree/'file',uid+1,-1)
+  try:owner._observe(fd)
+  except InvalidAction as exc:assert str(exc)=='deployment-observer-tree-custody'
+  else:raise AssertionError('foreign writable file owner accepted')
+  os.chown(tree/'file',0,-1)
   # Actual DB change affects both count and diagnostic copied-input digest.
   db=sqlite3.connect(database);db.execute("UPDATE outbox SET status='quarantined'")
   db.commit();db.close()
@@ -195,6 +211,12 @@ with tempfile.TemporaryDirectory(dir='/tmp') as home:
   print('actual-profile-tree-db-read-and-refusals-pass')
  finally:os.close(fd)
 '''
+    facility = subprocess.run(
+        ['unshare', '--user', '--map-auto', '--map-root-user', '--mount', 'true'],
+        capture_output=True, timeout=10, check=False,
+    )
+    if facility.returncode != 0:
+        pytest.skip('user/mount namespace facility unavailable: ' + facility.stderr.decode())
     result = subprocess.run(
         ['unshare', '--user', '--map-auto', '--map-root-user', '--mount', sys.executable, '-c', script],
         capture_output=True, timeout=30, check=False, env={**os.environ, 'PYTHONPATH': str(source)},
@@ -230,3 +252,74 @@ def test_private_endpoint_must_be_an_actual_owned_socket(tmp_path: Path) -> None
     private.write_bytes(b'not a socket')
     with pytest.raises((InvalidAction, OSError)):
         _endpoint_state(private, os.getuid())
+
+
+@contextmanager
+def _live_release(release: str) -> Generator[subprocess.Popen[bytes]]:
+    child = subprocess.Popen(
+        [sys.executable, '-c', "import sys; print('ready', flush=True); sys.stdin.buffer.read()"],
+        env={**os.environ, 'HETERODYNE_RELEASE': release},
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+    )
+    try:
+        assert child.stdout is not None and child.stdout.readline() == b'ready\n'
+        yield child
+    finally:
+        if child.stdin is not None:
+            child.stdin.close()
+        child.wait(timeout=5)
+        if child.stdout is not None:
+            child.stdout.close()
+
+
+def _process_profile(uid: int) -> _ObservationProfile:
+    # Only the actual selected UID is consumed by this process-binding seam.
+    return _ObservationProfile(
+        'heterodyne-deployment-observer-profile.v1', 'test', 'unused', uid,
+        'a' * 64, 'b' * 64, 'c' * 64, '/unused', '/unused', '/unused', '/unused',
+    )
+
+
+def test_actual_process_release_must_match_configured_release() -> None:
+    with _live_release('a' * 40) as child:
+        unit = {'ActiveState': 'active', 'MainPID': str(child.pid)}
+        with _running_release(_process_profile(os.getuid()), unit, 'a' * 40):
+            assert child.poll() is None
+        # A daemon-reloaded unit may advertise B while its original A still runs.
+        with pytest.raises(InvalidAction, match='running-release-mismatch'):
+            with _running_release(_process_profile(os.getuid()), unit, 'b' * 40):
+                pytest.fail('configured release substituted for actual running process')
+        with pytest.raises(InvalidAction, match='running-release-mismatch'):
+            with _running_release(_process_profile(os.getuid() + 1), unit, 'a' * 40):
+                pytest.fail('wrong process UID accepted')
+
+
+def test_original_process_must_remain_alive_through_observation() -> None:
+    with _live_release('a' * 40) as child:
+        unit = {'ActiveState': 'active', 'MainPID': str(child.pid)}
+        with pytest.raises(ProcessLookupError):
+            with _running_release(_process_profile(os.getuid()), unit, 'a' * 40):
+                child.terminate()
+                child.wait(timeout=5)
+
+
+def test_directory_history_size_does_not_change_digest(tmp_path: Path) -> None:
+    directory = tmp_path / 'directory'
+    directory.mkdir()
+    before = _digest(tmp_path)
+    # Actual allocation/history changes may survive after the same entries return.
+    for index in range(1000):
+        (directory / str(index)).touch()
+    for entry in directory.iterdir():
+        entry.unlink()
+    assert _digest(tmp_path) == before
+
+
+def test_tree_deadline_applies_without_file_content(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from heterodyne.actions import deployment_host_observer as owner
+
+    (tmp_path / 'empty-directory').mkdir()
+    ticks = iter([0.0, 31.0])
+    monkeypatch.setattr(owner.time, 'monotonic', lambda: next(ticks))
+    with pytest.raises(InvalidAction, match='tree-bound'):
+        _digest(tmp_path)
