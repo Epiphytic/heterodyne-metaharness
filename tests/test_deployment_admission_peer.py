@@ -34,7 +34,7 @@ nonce=os.memfd_create('private-native-nonce',os.MFD_ALLOW_SEALING|os.MFD_CLOEXEC
 os.write(nonce,b'n'*32);os.fchmod(nonce,0o400)
 fcntl.fcntl(nonce,fcntl.F_ADD_SEALS,p._SEALS)
 nonce_read=os.open('/proc/self/fd/'+str(nonce),os.O_RDONLY|os.O_CLOEXEC)
-base=p._Handoff('heterodyne-owned-deployment-admission.v1',(b'n'*32).hex(),'b'*64,'a'*64,'a'*64)
+base=p._Handoff('heterodyne-owned-deployment-admission.v1',(b'n'*32).hex(),(b'r'*32).hex(),'b'*64,'a'*64,'a'*64)
 for case in ('valid','maximum','bad-nonce','wrong-schema','oversize-meta',
              'oversize-raw','foreign-sender','rights','unsealed'):
     parent,child=socket.socketpair(socket.AF_UNIX,socket.SOCK_SEQPACKET)

@@ -147,7 +147,9 @@ def _correlate(  # pyright: ignore[reportUnusedFunction] - private composition, 
         {key: enrollment[key] for key in _ENROLLMENT_FIELDS}, separators=(",", ":"), ensure_ascii=False,
     ).encode("utf-8")
     if (
-        consumed.nonce_hex != channel.nonce.hex()
+        not _HASH.fullmatch(consumed.nonce_hex)
+        or consumed.nonce_hex != channel.handoff.receiver_nonce_hex
+        or consumed.nonce_hex == channel.nonce.hex()
         or consumed.startup_profile_sha256 != channel.handoff.process_profile_sha256
         or consumed.enrollment_sha256 != hashlib.sha256(enrollment_bytes).hexdigest()
         or consumed.journal_profile_sha256 != enrollment.get("source_profile_sha256")

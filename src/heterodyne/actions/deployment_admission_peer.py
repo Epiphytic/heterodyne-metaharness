@@ -42,6 +42,7 @@ class _ParentProfile(Record, frozen=True):
 class _Handoff(Record, frozen=True):
     schema: Literal["heterodyne-owned-deployment-admission.v1"]
     nonce_hex: str
+    receiver_nonce_hex: str
     process_profile_sha256: str
     packet_sha256: str
     producer_profile_sha256: str
@@ -140,6 +141,9 @@ class _ParentChannel:  # pyright: ignore[reportUnusedClass] - private fixed nati
             self.handoff = _decode(_record(self._conn, self._parent, 4096), _Handoff, max_bytes=4096)
             if (
                 self.handoff.nonce_hex != self.nonce.hex()
+                or len(self.handoff.receiver_nonce_hex) != 64
+                or any(c not in "0123456789abcdef" for c in self.handoff.receiver_nonce_hex)
+                or self.handoff.receiver_nonce_hex == self.handoff.nonce_hex
                 or self.handoff.packet_sha256 != self.profile.packet_sha256
                 or self.handoff.producer_profile_sha256 != self.profile.producer_profile_sha256
                 or len(self.handoff.process_profile_sha256) != 64
