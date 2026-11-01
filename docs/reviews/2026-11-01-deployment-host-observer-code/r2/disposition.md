@@ -6,4 +6,4 @@ Unit readback now requires empty EnvironmentFiles, PassEnvironment and UnsetEnvi
 
 Findings5–9 remain explicit finite PoC limitations: repeated tree reads and ancestor opens, command path execution rather than fexecve, duplicated cessation manager logic, and redundant diagnostic endpoint checks. No effects, online/stopped/held guard, or global authority constructor is added. No expected state is recorded as a measured PASS.
 
-Final repair checks:81 focused tests pass in1.51s; Ruff and Pyright pass. R3 uses the operator's exact medium PoC question and preserves both actual HIGH rounds.
+Final repair checks:81 focused tests pass in1.56s; Ruff and Pyright pass. R3 uses the operator's exact medium PoC question and preserves both actual HIGH rounds.
