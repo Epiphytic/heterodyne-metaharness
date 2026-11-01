@@ -1,0 +1,16 @@
+{
+  "qualification": "Synthetic codec golden only; online-pass is not a measured guard.",
+  "value": {
+    "schema": "heterodyne-deployment-observation.v1",
+    "target_id": "hermes",
+    "enabled": "enabled",
+    "active": "active",
+    "selected_release": "1111111111111111111111111111111111111111",
+    "guard_verdict": "online-pass",
+    "quarantine_count": 0,
+    "installed_tree_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+  },
+  "canonical_utf8": "{\"active\":\"active\",\"enabled\":\"enabled\",\"guard_verdict\":\"online-pass\",\"installed_tree_sha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"quarantine_count\":0,\"schema\":\"heterodyne-deployment-observation.v1\",\"selected_release\":\"1111111111111111111111111111111111111111\",\"target_id\":\"hermes\"}",
+  "domain_hex": "68657465726f64796e652d6465706c6f796d656e742d6f62736572766174696f6e2e763100",
+  "sha256": "93f34ea6b970cfd759da2d7267f8cebc0f0f9ac1ad766a425f5e8bec83b02b66"
+}

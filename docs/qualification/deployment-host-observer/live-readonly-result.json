@@ -1,0 +1,19 @@
+{
+  "status": "read-only-observed",
+  "observation": {
+    "schema": "heterodyne-deployment-observation.v1",
+    "target_id": "hermes-admind",
+    "enabled": "enabled",
+    "active": "active",
+    "selected_release": "94dca917caedb0601820104704ff6f35b81525e1",
+    "guard_verdict": "unchecked",
+    "quarantine_count": 4,
+    "installed_tree_sha256": "7e8b1639b70626f847b788c1c18f936fe9acc5458855523dcd137f735a852bb1"
+  },
+  "digest": "1c0f27e27bdf6df352ef0ad11b7ab6f005d0b046732d79432e0b2bc9545bceb5",
+  "database_copy_sha256": "24aaad298df873149ba80aaba3d919cdcfa4c5c026bd9f02df0b42a35cbcf97a",
+  "elapsed_seconds": 0.3914077961817384,
+  "guard_pass": false,
+  "effects": false,
+  "qualification": "actual root reads and actual user-manager endpoint; temporary selected root profile, not installed authority"
+}
