@@ -252,6 +252,17 @@ class _RootInstaller:  # pyright: ignore[reportUnusedClass] - private uninstalle
                 profile_again, packet_again = self._retained(requested)
                 if (profile_again, packet_again) != (profile, packet):
                     raise InvalidAction("root-helper-retained-drift")
+                # The admission owner publishes cancellation under target.lock.
+                # Any directory entry, including a dangling symlink, refuses.
+                # Check at the final issue boundary while holding that same lock.
+                try:
+                    os.stat(requested + ".cancelled", dir_fd=self.fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    cancelled = False
+                else:
+                    cancelled = True
+                if cancelled:
+                    raise InvalidAction("root-helper-cancelled")
                 self._issue(requested, packet.release.execution_id)
                 command = (
                     "/proc/self/fd/" + str(bash), "/proc/self/fd/" + str(script.fileno()),
