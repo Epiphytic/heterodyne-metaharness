@@ -27,6 +27,22 @@ from heterodyne.actions.deployment_root_helper import _read
 _ROOT = Path('/var/lib/heterodyne/deployment-owner')
 
 
+_SCHEMA = '''
+                CREATE TABLE IF NOT EXISTS admissions(
+                  packet TEXT PRIMARY KEY, execution TEXT NOT NULL UNIQUE,
+                  approval TEXT NOT NULL UNIQUE, nonce TEXT NOT NULL UNIQUE,
+                  use_key TEXT NOT NULL UNIQUE, target TEXT NOT NULL,
+                  original BLOB NOT NULL, consumed BLOB NOT NULL,
+                  phase TEXT NOT NULL CHECK(phase IN
+                    ('ready','issued','complete','cancelled','failed-no-effect')));
+                CREATE UNIQUE INDEX IF NOT EXISTS admission_active_target
+                  ON admissions(target) WHERE phase NOT IN ('complete','failed-no-effect');
+                CREATE TABLE IF NOT EXISTS admission_events(
+                  packet TEXT NOT NULL, ordinal INTEGER NOT NULL,
+                  phase TEXT NOT NULL CHECK(phase IN ('issued','completed')),
+                  observed TEXT NOT NULL, PRIMARY KEY(packet,ordinal,phase));
+            '''
+
 class _AdmissionJournal:  # pyright: ignore[reportUnusedClass] - private owner composition only
     """The sole root global admission domain, separate from UID898 diagnostics.
 
@@ -42,8 +58,8 @@ class _AdmissionJournal:  # pyright: ignore[reportUnusedClass] - private owner c
         self.db: sqlite3.Connection
         anchor = -1
         try:
-            anchor = os.open('admission.db', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
-                             0o600, dir_fd=self.fd)
+            flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+            anchor = os.open('admission.db', flags, 0o600, dir_fd=self.fd)
             before = os.fstat(anchor)
             if (
                 not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or before.st_gid != 0
@@ -51,27 +67,28 @@ class _AdmissionJournal:  # pyright: ignore[reportUnusedClass] - private owner c
             ):
                 raise InvalidAction('admission-journal-custody')
             self.db = sqlite3.connect(f'/proc/self/fd/{self.fd}/admission.db',
-                                      isolation_level=None, timeout=0)
+                                      isolation_level=None, timeout=5)
             after = os.stat('admission.db', dir_fd=self.fd, follow_symlinks=False)
             if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
                 raise InvalidAction('admission-journal-replaced')
             self.db.execute('PRAGMA journal_mode=DELETE')
             self.db.execute('PRAGMA synchronous=FULL')
-            self.db.executescript('''
-                CREATE TABLE IF NOT EXISTS admissions(
-                  packet TEXT PRIMARY KEY, execution TEXT NOT NULL UNIQUE,
-                  approval TEXT NOT NULL UNIQUE, nonce TEXT NOT NULL UNIQUE,
-                  use_key TEXT NOT NULL UNIQUE, target TEXT NOT NULL,
-                  original BLOB NOT NULL, consumed BLOB NOT NULL,
-                  phase TEXT NOT NULL CHECK(phase IN
-                    ('ready','issued','complete','cancelled','failed-no-effect')));
-                CREATE UNIQUE INDEX IF NOT EXISTS admission_active_target
-                  ON admissions(target) WHERE phase NOT IN ('complete','failed-no-effect');
-                CREATE TABLE IF NOT EXISTS admission_events(
-                  packet TEXT NOT NULL, ordinal INTEGER NOT NULL,
-                  phase TEXT NOT NULL CHECK(phase IN ('issued','completed')),
-                  observed TEXT NOT NULL, PRIMARY KEY(packet,ordinal,phase));
-            ''')
+            self.db.executescript(_SCHEMA)
+            # Compare the complete source-owned schema, including UNIQUE/CHECK
+            # constraints and partial target index; root path custody alone is
+            # not a schema version or migration receipt.
+            expected = sqlite3.connect(':memory:')
+            try:
+                expected.executescript(_SCHEMA)
+                query = ("SELECT type,name,sql FROM sqlite_master "
+                         "WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name")
+                def normalized(db: sqlite3.Connection) -> list[tuple[str, str, str]]:
+                    return [(kind, name, ' '.join(sql.split()))
+                            for kind, name, sql in db.execute(query)]
+                if normalized(self.db) != normalized(expected):
+                    raise InvalidAction('admission-journal-schema')
+            finally:
+                expected.close()
             os.fsync(anchor)
             os.fsync(self.fd)
         except BaseException:
@@ -122,19 +139,27 @@ class _AdmissionJournal:  # pyright: ignore[reportUnusedClass] - private owner c
             raise InvalidAction('admission-retained-profile-binding')
         producer = _profile_bytes(producer_raw)
         packet = decode_packet(original, producer.targets)
-        if not packet.outage.not_before_ns <= time.time_ns() < packet.outage.deadline_ns:
-            raise InvalidAction('admission-forward-window')
+        in_window = packet.outage.not_before_ns <= time.time_ns() < packet.outage.deadline_ns
         key = hashlib.sha256(encode_record(consumed.consumption_key)).hexdigest()
         digest = packet_digest(packet)
         channel.check()
         with self._transaction():
             self.db.execute(
-                "INSERT INTO admissions VALUES(?,?,?,?,?,?,?,?,'ready')",
+                "INSERT INTO admissions VALUES(?,?,?,?,?,?,?,?,?)",
                 (digest, packet.release.execution_id, packet.release.approval_id,
                  packet.release.nonce, key, packet.release.target.target_id,
-                 original, channel.consumed_raw),
+                 original, channel.consumed_raw, 'ready' if in_window else 'failed-no-effect'),
             )
+        # Native consent was consumed before handoff. Never roll its durable
+        # reservation back merely because the parent ceases after insertion.
+        try:
             channel.check()
+            if not in_window:
+                raise InvalidAction('admission-forward-window')
+        except InvalidAction:
+            if in_window:
+                self.fail_unissued(channel, digest)
+            raise
         return digest
 
     def fail_unissued(self, channel: _ParentChannel, packet: str) -> None:
@@ -145,7 +170,8 @@ class _AdmissionJournal:  # pyright: ignore[reportUnusedClass] - private owner c
         """
         if type(channel) is not _ParentChannel:
             raise InvalidAction('admission-owned-parent-required')
-        channel.check()
+        # Negative settlement needs no live parent: the authoritative journal
+        # itself proves no issued event exists. It never grants an effect.
         with self._transaction():
             changed = self.db.execute(
                 "UPDATE admissions SET phase='failed-no-effect' WHERE packet=? AND phase='ready' "
@@ -154,4 +180,3 @@ class _AdmissionJournal:  # pyright: ignore[reportUnusedClass] - private owner c
             ).rowcount
             if changed != 1:
                 raise InvalidAction('admission-never-issued-proof-unavailable')
-            channel.check()

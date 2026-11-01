@@ -40,6 +40,7 @@ def _entry() -> int:  # pyright: ignore[reportUnusedFunction] - fixed verified n
     channel: _ParentChannel | None = None
     journal: _AdmissionJournal | None = None
     admitted = False
+    packet: str | None = None
     try:
         channel = _ParentChannel()
         journal = _AdmissionJournal()
@@ -48,10 +49,15 @@ def _entry() -> int:  # pyright: ignore[reportUnusedFunction] - fixed verified n
         journal.fail_unissued(channel, packet)
         _reply(channel, 'failed-no-effect')
         return 0
-    except (InvalidAction, OSError, ValueError, sqlite3.Error):
+    except (InvalidAction, OSError, ValueError, TypeError, KeyError, AttributeError, sqlite3.Error):
         # A lost reply, duplicate consumption, or uncertain durable commit can
         # never be retried as a fresh approval. Parent independently retains HOLD.
         if channel is not None and admitted:
+            try:
+                if journal is not None and packet is not None:
+                    journal.fail_unissued(channel, packet)
+            except (InvalidAction, OSError, sqlite3.Error):
+                pass
             try:
                 _reply(channel, 'unknown')
             except (InvalidAction, OSError):

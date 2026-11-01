@@ -7,3 +7,5 @@ Actual qualification: unchanged genuine native MLS Consumed82401bytes, original3
 Focused entry/peer/binding23tests passed1.51seconds; prior journal storage2tests passed0.63seconds. Ruff/Pyright pass. Quality exit2 retained: transaction context manager resembles existing outage ledger implementation, and real root test bootstrap overlaps existing mapped-root fixtures. Consolidating distinct principal/authority domains inside this finite slice would broaden the change. No baseline reset hides added complexity/duplication debt.
 
 Combined owner, entry, peer and binding regression checks: 25 passed in 1.74 seconds. Ruff and Pyright passed. No effect permission was issued.
+
+R1 repair validation: 27 focused tests passed in 2.32 seconds, including a real transient SQLite writer, weakened-schema refusal, distinct nonce domains, post-commit parent failure and expired-then-restored-clock replay refusal. Ruff and Pyright pass. Repair quality exits 2; four gating findings are retained in r1/repair-quality-delta.txt. Initial quality and genuine native qualification remain historical, with their original source hashes. See r1/disposition.md.

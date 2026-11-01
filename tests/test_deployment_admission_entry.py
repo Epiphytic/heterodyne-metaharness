@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 import msgspec
+import pytest
 from test_deployment_admission_binding import correlated, inputs, published  # noqa: F401
 
 from heterodyne.actions import deployment_admission_binding as binding
@@ -28,6 +29,17 @@ consumed=json.loads(raw['consumed']);producer=json.loads(raw['producer'])
 packet=json.loads(raw['packet'])
 if 'synthetic_clock' in raw:
  journal.time.time_ns=lambda:int(raw['synthetic_clock'])
+if 'late_parent_loss' in raw:
+ original_check=peer._ParentChannel.check
+ def fail_after_commit(self):
+  original_check(self)
+  dbpath=journal._ROOT/'admission.db'
+  if dbpath.exists():
+   db=sqlite3.connect(dbpath)
+   try:exists=db.execute('SELECT count(*) FROM admissions').fetchone()[0]
+   finally:db.close()
+   if exists:raise entry.InvalidAction('admission-parent-ceased')
+ peer._ParentChannel.check=fail_after_commit
 root=Path('/tmp/admission-entry-probe');root.mkdir(mode=0o700)
 journal._ROOT=root/'journal';journal._ROOT.mkdir(mode=0o700)
 binary='/tmp/admission-parent-python'
@@ -43,11 +55,13 @@ for name in ('parent','process','producer','packet'):
  fds[name]=os.open(path,os.O_RDONLY|os.O_CLOEXEC)
 lease=os.open(root/'launch.lock',os.O_CREAT|os.O_EXCL|os.O_RDWR,0o600)
 fcntl.flock(lease,fcntl.LOCK_EX|fcntl.LOCK_NB)
-nonce=os.memfd_create('native-consume-nonce',os.MFD_ALLOW_SEALING|os.MFD_CLOEXEC)
-os.write(nonce,bytes.fromhex(consumed['nonce_hex']));os.fchmod(nonce,0o400)
+admission_nonce=os.urandom(32)
+assert admission_nonce.hex()!=consumed['nonce_hex']
+nonce=os.memfd_create('admission-only-nonce',os.MFD_ALLOW_SEALING|os.MFD_CLOEXEC)
+os.write(nonce,admission_nonce);os.fchmod(nonce,0o400)
 fcntl.fcntl(nonce,fcntl.F_ADD_SEALS,peer._SEALS)
 nonce_read=os.open('/proc/self/fd/'+str(nonce),os.O_RDONLY|os.O_CLOEXEC)
-handoff=peer._Handoff('heterodyne-owned-deployment-admission.v1',consumed['nonce_hex'],
+handoff=peer._Handoff('heterodyne-owned-deployment-admission.v1',admission_nonce.hex(),
  hashlib.sha256(raw['process']).hexdigest(),producer['packet_sha256'],
  hashlib.sha256(raw['producer']).hexdigest())
 # Every invocation is a new process/channel over the SAME retained launch OFD.
@@ -74,10 +88,11 @@ for attempt in range(3):
  except ConnectionResetError:reply=b''
  parent.close()
  _,status=os.waitpid(pid,0)
- assert os.waitstatus_to_exitcode(status)==(0 if attempt==0 else 2),(attempt,status)
- if attempt==0:
+ expected_success=attempt==0 and 'late_parent_loss' not in raw and 'expired' not in raw
+ assert os.waitstatus_to_exitcode(status)==(0 if expected_success else 2),(attempt,status)
+ if expected_success:
   assert json.loads(reply)=={'schema':'heterodyne-owned-deployment-admission-result.v1',
-    'nonce_hex':consumed['nonce_hex'],'status':'failed-no-effect'},reply
+    'nonce_hex':admission_nonce.hex(),'status':'failed-no-effect'},reply
  else:assert reply==b'',(attempt,reply)
  # Independent SQLite reopen after child cessation: no effect issue/completion.
  db=sqlite3.connect(journal._ROOT/'admission.db')
@@ -86,6 +101,8 @@ for attempt in range(3):
  assert db.execute('SELECT count(*) FROM admission_events').fetchone()==(0,)
  assert db.execute('PRAGMA integrity_check').fetchone()==('ok',)
  db.close()
+ if 'expired' in raw:
+  journal.time.time_ns=lambda:packet['outage']['not_before_ns']+1
  other=os.open(root/'launch.lock',os.O_RDWR)
  try:
   try:fcntl.flock(other,fcntl.LOCK_EX|fcntl.LOCK_NB)
@@ -117,12 +134,18 @@ def qualify_payload(payload: dict[str, bytes]) -> subprocess.CompletedProcess:
     )
 
 
-def test_mapped_root_no_effect_entry_retains_one_use_after_child_restart(correlated):  # noqa: F811
+@pytest.mark.parametrize('mode', ('normal', 'late_parent_loss', 'expired'))
+def test_mapped_root_no_effect_entry_retains_one_use_after_child_restart(correlated, mode):  # noqa: F811
     _, consumed = correlated
-    result = qualify_payload(dict(
+    payload = dict(
         consumed=msgspec.json.encode(consumed), process=binding._read(7, 65536),
         producer=binding._read(13, 32768), packet=binding._read(18, 32768),
         synthetic_clock=str(json.loads(binding._read(18, 32768))['outage']['not_before_ns'] + 1).encode(),
-    ))
+    )
+    if mode != 'normal':
+        payload[mode] = b'causal fault injection, not authority'
+    if mode == 'expired':
+        payload['synthetic_clock'] = str(json.loads(payload['packet'])['outage']['deadline_ns']).encode()
+    result = qualify_payload(payload)
     assert result.returncode == 0, result.stdout + result.stderr
     assert 'three-process-one-use-pass' in result.stdout

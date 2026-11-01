@@ -47,6 +47,15 @@ for index in range(6):
 journal.close()
 journal=m._AdmissionJournal()
 assert journal.db.execute('SELECT packet,phase FROM admissions').fetchall()==[('p','ready')]
+# A transient real competing writer must not discard an already-consumed handoff.
+import threading
+held=sqlite3.connect(root/'admission.db',check_same_thread=False)
+held.execute('BEGIN IMMEDIATE')
+timer=threading.Timer(.1,held.commit);timer.start()
+with journal._transaction():
+    assert journal.db.execute('SELECT count(*) FROM admissions').fetchone()==(1,)
+timer.join();held.close()
+
 # A settled genuinely no-effect job may release the target while retaining ALL
 # its unique approval/execution/nonce/use identifiers across reopen.
 with journal._transaction():
@@ -55,6 +64,16 @@ with journal._transaction():
                        ('p2','e2','a2','n2','u2','target',b'o',b'c'))
 assert journal.db.execute('SELECT COUNT(*) FROM admissions').fetchone()==(2,)
 journal.close()
+# An authentic file with a weakened partial index is not an authentic schema.
+db=sqlite3.connect(root/'admission.db')
+db.execute('DROP INDEX admission_active_target')
+db.execute("CREATE UNIQUE INDEX admission_active_target ON admissions(target) WHERE phase='ready'")
+db.close()
+try:
+    m._AdmissionJournal()
+    raise AssertionError('weakened schema accepted')
+except InvalidAction as e:
+    assert str(e)=='admission-journal-schema'
 (root/'admission.db').chmod(0o640)
 try:
     m._AdmissionJournal()
