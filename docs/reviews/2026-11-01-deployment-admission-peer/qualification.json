@@ -1,0 +1,16 @@
+{
+  "base": "94dca917caedb0601820104704ff6f35b81525e1",
+  "python": "3.12.3",
+  "tests": {
+    "command": ".venv/bin/pytest -q tests/test_deployment_admission_peer.py tests/test_deployment_admission_binding.py tests/test_deployment_producer_process.py",
+    "passed": 70,
+    "seconds": 13.08
+  },
+  "ruff": "passed",
+  "pyright": "0 errors",
+  "quality_exit": 2,
+  "native_consent_qualified": false,
+  "admission_journal_implemented": false,
+  "permits_published": false,
+  "installed_runtime_qualified": false
+}
