@@ -268,6 +268,16 @@ class _RootInstaller:  # pyright: ignore[reportUnusedClass] - private uninstalle
                 ).returncode
 
     def _issue(self, requested: str, execution: str) -> None:
+        # Caller holds target.lock, shared with the root cancellation publisher.
+        # Existing UNKNOWN takes precedence even when subsequently cancelled.
+        for suffix, reason in ((".issued", "already-issued-unknown"), (".cancelled", "cancelled")):
+            try:
+                os.stat(requested + suffix, dir_fd=self.fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            except OSError:
+                raise InvalidAction("root-helper-issue-check") from None
+            raise InvalidAction("root-helper-" + reason)
         try:
             fd = os.open(requested + ".issued", os.O_WRONLY | os.O_CREAT | os.O_EXCL
                          | os.O_NOFOLLOW | os.O_CLOEXEC, 0o400, dir_fd=self.fd)

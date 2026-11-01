@@ -112,6 +112,33 @@ except InvalidAction as e: assert "installer-drift" in str(e)
 else: raise AssertionError("tampered installer accepted")
 assert not (store / (key + ".issued")).exists() and not marker.exists()
 put("installer-" + sha(script), script)
+# Root cancellation is checked under the target lock immediately before issue.
+# The marker contents and object type confer no forward authority.
+cancelled = store / (key + ".cancelled")
+for kind in ("regular", "directory", "dangling-symlink"):
+    if kind == "regular": put(key + ".cancelled", b"cancel")
+    elif kind == "directory": cancelled.mkdir()
+    else: cancelled.symlink_to("missing-cancel-object")
+    try: root.run(key)
+    except InvalidAction as e: assert "root-helper-cancelled" in str(e)
+    else: raise AssertionError("cancelled installer issued")
+    assert not (store / (key + ".issued")).exists() and not marker.exists()
+    if kind == "directory": cancelled.rmdir()
+    else: cancelled.unlink()  # fixture-only RESET; runtime never deletes cancellation
+# A cancellation published after initial retained validation still blocks issue.
+checks = 0
+def cancel_during_preflight(uid, pin):
+    global checks
+    checks += 1
+    if checks == 2: put(key + ".cancelled", b"late cancellation")
+h._sudo_parent = cancel_during_preflight
+try: root.run(key)
+except InvalidAction as e: assert "root-helper-cancelled" in str(e)
+else: raise AssertionError("late cancellation ignored")
+assert checks == 2 and not (store / (key + ".issued")).exists() and not marker.exists()
+cancelled.unlink()  # fixture-only RESET
+h._sudo_parent = lambda uid, pin: None
+put("b" * 64 + ".cancelled", b"different packet")
 # Installer bytes are retained by private fd, fixed argv, completely scrubbed env.
 assert root.run(key) == 7
 args = marker.read_text().splitlines()
@@ -121,10 +148,12 @@ assert args == ["--no-wsd", "--no-verity", "--service-user", TARGET.service_user
 issued = json.loads((store / (key + ".issued")).read_bytes())
 assert issued["outcome"] == "unknown" and issued["packet_sha256"] == key
 marker.unlink()
+put(key + ".cancelled", b"cancel after issue; outcome remains unknown")
 try: root.run(key)
 except InvalidAction as e: assert "already-issued-unknown" in str(e)
 else: raise AssertionError("uncertain effect reissued")
 assert not marker.exists()
+cancelled.unlink()  # fixture-only RESET after UNKNOWN precedence test
 # Post-intent process-launch exceptions are equally retained UNKNOWN.
 (store / (key + ".issued")).unlink()  # root-only fixture RESET, never runtime recovery
 original_run = h.subprocess.run

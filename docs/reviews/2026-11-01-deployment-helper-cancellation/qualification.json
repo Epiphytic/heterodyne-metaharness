@@ -1,0 +1,23 @@
+{
+  "base": "94dca917caedb0601820104704ff6f35b81525e1",
+  "focused_tests": {
+    "command": ".venv/bin/python -m pytest tests/test_deployment_root_helper.py tests/test_deployment_outage.py tests/test_deployment_step1.py -q",
+    "exit": 0,
+    "passed": 83,
+    "seconds": 1.95,
+    "python": "3.14.7",
+    "scope": "real disposable user/mount namespace with fixture permits; actual read-only host sudo provenance, no host deployment effect"
+  },
+  "ruff": {
+    "exit": 0
+  },
+  "quality_exit": 2,
+  "design": "https://github.com/Epiphytic/hermes-maintenance/blob/564bac2/docs/designs/2026-11-01-consumed-deployment-root-admission.md",
+  "not_deployed": true,
+  "repair_tests": {
+    "passed": 83,
+    "seconds": 2.02,
+    "exit": 0
+  },
+  "repair_quality_exit": 2
+}
