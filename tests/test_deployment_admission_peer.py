@@ -12,6 +12,8 @@ from heterodyne.actions.codec import InvalidAction
 
 
 def test_nonroot_refuses_before_reading_inherited_fds():
+    if os.geteuid() == 0:
+        pytest.skip("nonroot guard requires actual unprivileged process")
     with pytest.raises(InvalidAction, match="admission-root-required"):
         peer._ParentChannel()
 
@@ -41,7 +43,9 @@ for case in ('valid','maximum','bad-nonce','wrong-schema','oversize-meta',
     holders=[fcntl.fcntl(fd,fcntl.F_DUPFD_CLOEXEC,64) for fd in (profile_fd,child.fileno(),lease,nonce_read)]
     if case=='unsealed':
         fresh=os.memfd_create('unsealed',os.MFD_ALLOW_SEALING);os.write(fresh,b'n'*32)
-        os.close(holders[3]);holders[3]=fcntl.fcntl(fresh,fcntl.F_DUPFD_CLOEXEC,64);os.close(fresh)
+        unsealed_read=os.open('/proc/self/fd/'+str(fresh),os.O_RDONLY)
+        os.close(holders[3]);holders[3]=fcntl.fcntl(unsealed_read,fcntl.F_DUPFD_CLOEXEC,64)
+        os.close(unsealed_read);os.close(fresh)
     pid=os.fork()
     if pid==0:
         parent.close()

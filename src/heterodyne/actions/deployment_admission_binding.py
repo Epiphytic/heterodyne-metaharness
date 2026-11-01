@@ -18,8 +18,8 @@ from heterodyne.actions.contracts import Record
 from heterodyne.actions.deployment_admission_peer import _ParentChannel
 from heterodyne.actions.deployment_card import _derive
 from heterodyne.actions.deployment_outage import decode_packet
-from heterodyne.actions.deployment_producer_process import _bound_operation, _profile
-from heterodyne.actions.deployment_root_helper import _read
+from heterodyne.actions.deployment_producer_process import _bound_operation, _profile_bytes
+from heterodyne.actions.deployment_root_helper import _HASH, _read
 
 
 class _UseKey(Record, frozen=True):
@@ -105,7 +105,7 @@ def _correlate(  # pyright: ignore[reportUnusedFunction] - private composition, 
         or hashlib.sha256(producer_raw).hexdigest() != channel.profile.producer_profile_sha256
     ):
         raise InvalidAction("admission-retained-profile-binding")
-    producer = _profile(13)
+    producer = _profile_bytes(producer_raw)
     canonical = _bound_operation(original, producer)
     if (
         producer.packet_sha256 != channel.profile.packet_sha256
@@ -127,6 +127,9 @@ def _correlate(  # pyright: ignore[reportUnusedFunction] - private composition, 
         raise InvalidAction("admission-enrollment-fields")
     if (
         enrollment.get("schema") != "heterodyne-receiver-enrollment.v3"
+        or enrollment.get("group") != producer.group_hex
+        or any(type(enrollment[key]) is not str or not str(enrollment[key]).isascii()
+               for key in _ENROLLMENT_FIELDS if key != "operators")
         or enrollment.get("installation_index_sha256") != channel.profile.installation_index_sha256
         or enrollment.get("installation_source_sha256") != channel.profile.installation_source_sha256
     ):
@@ -155,23 +158,33 @@ def _correlate(  # pyright: ignore[reportUnusedFunction] - private composition, 
         or consumed.original != expected_original
     ):
         raise InvalidAction("admission-consumed-original-or-source")
+    # Receipt.sequence is the authenticated candidate sequence; the card key
+    # uses the ordered journal sequence. Native consumption verifies ordering;
+    # comparing these independent counters would reject valid native consent.
     key, receipt = consumed.consumption_key, consumed.receipt
     operators = enrollment.get("operators")
     if not isinstance(operators, list):
         raise InvalidAction("admission-enrollment-operators")
     allowed = cast(list[object], operators)
+    if not 1 <= len(allowed) <= 64 or any(type(op) is not str or not _HASH.fullmatch(op) for op in allowed):
+        raise InvalidAction("admission-enrollment-operators")
+    # Native SemanticFactory::policy serializes (GroupId, Vec<MemberId>).
+    # This is the semantic operator policy, DISTINCT from the MLS capability
+    # template digest. Preserve enrolled order exactly, never compare the two.
+    semantic_policy = hashlib.sha256(msgspec.json.encode([
+        list(bytes.fromhex(producer.group_hex)), [list(bytes.fromhex(str(op))) for op in allowed],
+    ])).hexdigest()
     if (
         key.ask_id != expected.ask_id or key.original_operation_sha256 != expected.operation_original_sha256
         or not 0 < key.card_complete_sequence < 2**64
         or len(key.header_sha256) != 64 or any(c not in "0123456789abcdef" for c in key.header_sha256)
-        or not 0 < receipt.sequence < 2**64 or receipt.sequence <= key.card_complete_sequence
+        or not 0 < receipt.sequence < 2**64
         or receipt.ask_id != expected.ask_id or receipt.operation_sha256 != expected.operation_original_sha256
         or receipt.packet_sha256 != expected.packet_sha256
         or receipt.request_sha256 != hashlib.sha256(expected.request_original).hexdigest()
         or receipt.cards_sha256 != hashlib.sha256(msgspec.json.encode([expected.card])).hexdigest()
         or any(type(n) is not int or not 0 <= n <= 255 for n in receipt.operator)
-        or len(receipt.policy_sha256) != 64
-        or any(c not in "0123456789abcdef" for c in receipt.policy_sha256)
+        or receipt.policy_sha256 != semantic_policy
         or len(receipt.operator) != 32
         or bytes(receipt.operator).hex() not in allowed
     ):

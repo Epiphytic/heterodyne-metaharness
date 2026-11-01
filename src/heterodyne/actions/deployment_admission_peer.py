@@ -122,7 +122,12 @@ class _ParentChannel:  # pyright: ignore[reportUnusedClass] - private fixed nati
             # The source-qualified parent retains the SAME OFD lock continuously.
             # Never write, unlock or acquire a replacement lock in this child.
             self._lease = _stat_key(lease)
-            self._conn = socket.socket(fileno=os.dup(4))
+            duplicate = os.dup(4)
+            try:
+                self._conn = socket.socket(fileno=duplicate)
+            except OSError as exc:
+                os.close(duplicate)
+                raise InvalidAction("admission-channel-type") from exc
             self._stack.callback(self._conn.close)
             if (
                 self._conn.family != socket.AF_UNIX
@@ -149,11 +154,16 @@ class _ParentChannel:  # pyright: ignore[reportUnusedClass] - private fixed nati
 
     def check(self) -> None:
         """Parent must still own this exact live process relationship and ELF."""
-        if os.getppid() != self._parent or select.select([self._pidfd], [], [], 0)[0]:
+        readiness = select.poll()
+        readiness.register(self._pidfd, select.POLLIN)
+        if os.getppid() != self._parent or readiness.poll(0):
             raise InvalidAction("admission-parent-ceased")
         if _stat_key(os.fstat(5)) != self._lease:
             raise InvalidAction("admission-launch-lease-changed")
-        observed = Path(f"/proc/{self._parent}/exe").stat()
+        try:
+            observed = Path(f"/proc/{self._parent}/exe").stat()
+        except OSError as exc:
+            raise InvalidAction("admission-parent-ceased") from exc
         pinned = os.fstat(self._binary)
         if (observed.st_dev, observed.st_ino) != (pinned.st_dev, pinned.st_ino):
             raise InvalidAction("admission-parent-executable")

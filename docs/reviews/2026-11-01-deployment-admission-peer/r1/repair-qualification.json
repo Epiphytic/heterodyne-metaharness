@@ -1,0 +1,16 @@
+{
+  "passed": 74,
+  "seconds": 12.25,
+  "ruff": "passed",
+  "pyright_errors": 0,
+  "quality_exit": 2,
+  "native_fixture_correlation": {
+    "passed": true,
+    "raw_bytes": 82401,
+    "raw_sha256": "bd3b1102e988d5a509f0056d9a192e37a3f6c38488099ba351b2a30c69ac4ae4",
+    "original_bytes": 32768,
+    "process_projection": "fixture-only before native session",
+    "production_custody": false,
+    "admission_authority": false
+  }
+}

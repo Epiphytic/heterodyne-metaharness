@@ -53,12 +53,13 @@ def correlated(inputs, monkeypatch):  # noqa: F811 - imported pytest fixture inj
                              original_operation_sha256=h(original)),
         receipt=dict(sequence=4, ask_id=expected.ask_id, operation_sha256=h(original),
                      packet_sha256=producer.packet_sha256, request_sha256=h(expected.request_original),
-                     cards_sha256=h(msgspec.json.encode([expected.card])), policy_sha256='d'*64,
+                     cards_sha256=h(msgspec.json.encode([expected.card])),
+                     policy_sha256=h(msgspec.json.encode([list(bytes.fromhex(producer.group_hex)),
+                                                         [list(bytes.fromhex('c'*64))]])),
                      operator=list(bytes.fromhex('c'*64)), decision='Approve',
                      authenticated_candidate={'fixture': 'not authenticated consent'}),
     )
     monkeypatch.setattr(binding, '_read', lambda fd, bound: {7: process, 13: producer_raw, 18: original}[fd])
-    monkeypatch.setattr(binding, '_profile', lambda fd: producer)
     return channel, value
 
 
@@ -75,7 +76,8 @@ def test_synthetic_binding_matches_independent_retained_originals(correlated):
     ('original', 'operation', '00'), ('original', 'original_request', '00'),
     ('original', 'card_chunks', ['different']), ('original', 'expected_group', [0]*16),
     ('receipt', 'decision', 'Deny'), ('receipt', 'operator', [0]*32),
-    ('receipt', 'sequence', 3), ('receipt', 'cards_sha256', '0'*64),
+    ('receipt', 'sequence', 0), ('receipt', 'cards_sha256', '0'*64),
+    ('receipt', 'policy_sha256', '0'*64),
     ('consumption_key', 'card_complete_sequence', 0),
     ('consumption_key', 'original_operation_sha256', '0'*64),
 ])
@@ -96,3 +98,43 @@ def test_live_parent_must_remain_available_during_correlation(correlated):
     channel.check = ceased
     with pytest.raises(InvalidAction, match='admission-parent-ceased'):
         binding._correlate(channel)
+
+
+def test_enrollment_group_is_independently_bound(correlated, monkeypatch):
+    channel, value = correlated
+    previous = binding._read
+    def changed(fd, bound):
+        raw = previous(fd, bound)
+        if fd == 7:
+            obj = json.loads(raw)
+            obj['enrollment']['group'] = '0'*32
+            raw = msgspec.json.encode(obj)
+            channel.handoff.process_profile_sha256 = hashlib.sha256(raw).hexdigest()
+        return raw
+    monkeypatch.setattr(binding, '_read', changed)
+    channel.consumed_raw = msgspec.json.encode(value)
+    with pytest.raises(InvalidAction, match='admission-enrollment-installation'):
+        binding._correlate(channel)
+
+
+def test_profile_used_is_exactly_the_single_hashed_read(correlated, monkeypatch):
+    channel, value = correlated
+    previous = binding._read
+    reads = []
+    def once(fd, bound):
+        if fd == 13:
+            reads.append(fd)
+            assert len(reads) == 1
+        return previous(fd, bound)
+    monkeypatch.setattr(binding, '_read', once)
+    channel.consumed_raw = msgspec.json.encode(value)
+    binding._correlate(channel)
+    assert reads == [13]
+
+
+def test_native_candidate_sequence_is_independent_of_card_journal(correlated):
+    channel, value = correlated
+    value['receipt']['sequence'] = 1
+    value['consumption_key']['card_complete_sequence'] = 6
+    channel.consumed_raw = msgspec.json.encode(value)
+    assert binding._correlate(channel).receipt.sequence == 1
