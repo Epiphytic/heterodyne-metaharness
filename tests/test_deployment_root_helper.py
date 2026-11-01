@@ -138,6 +138,7 @@ else: raise AssertionError("late cancellation ignored")
 assert checks == 2 and not (store / (key + ".issued")).exists() and not marker.exists()
 cancelled.unlink()  # fixture-only RESET
 h._sudo_parent = lambda uid, pin: None
+put("b" * 64 + ".cancelled", b"different packet")
 # Installer bytes are retained by private fd, fixed argv, completely scrubbed env.
 assert root.run(key) == 7
 args = marker.read_text().splitlines()
@@ -147,10 +148,12 @@ assert args == ["--no-wsd", "--no-verity", "--service-user", TARGET.service_user
 issued = json.loads((store / (key + ".issued")).read_bytes())
 assert issued["outcome"] == "unknown" and issued["packet_sha256"] == key
 marker.unlink()
+put(key + ".cancelled", b"cancel after issue; outcome remains unknown")
 try: root.run(key)
 except InvalidAction as e: assert "already-issued-unknown" in str(e)
 else: raise AssertionError("uncertain effect reissued")
 assert not marker.exists()
+cancelled.unlink()  # fixture-only RESET after UNKNOWN precedence test
 # Post-intent process-launch exceptions are equally retained UNKNOWN.
 (store / (key + ".issued")).unlink()  # root-only fixture RESET, never runtime recovery
 original_run = h.subprocess.run

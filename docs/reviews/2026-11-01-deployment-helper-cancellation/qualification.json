@@ -13,5 +13,11 @@
   },
   "quality_exit": 2,
   "design": "https://github.com/Epiphytic/hermes-maintenance/blob/564bac2/docs/designs/2026-11-01-consumed-deployment-root-admission.md",
-  "not_deployed": true
+  "not_deployed": true,
+  "repair_tests": {
+    "passed": 83,
+    "seconds": 2.02,
+    "exit": 0
+  },
+  "repair_quality_exit": 2
 }
