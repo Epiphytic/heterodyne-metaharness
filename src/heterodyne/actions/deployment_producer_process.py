@@ -85,6 +85,11 @@ def _profile(fd: int) -> _Profile:
     raw = os.pread(fd, MAX_BYTES + 1, 0)
     if len(raw) > MAX_BYTES or len(raw) != before[6] or _identity(fd) != before:
         raise InvalidAction("producer-profile-changed-or-bound")
+    return _profile_bytes(raw)
+
+
+def _profile_bytes(raw: bytes) -> _Profile:
+    """Validate exactly the retained bytes; no second descriptor read."""
     value = _decode(raw, _Profile)
     for digest in (value.operation_original_sha256, value.packet_sha256):
         if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
