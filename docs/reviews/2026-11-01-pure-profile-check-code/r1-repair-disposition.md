@@ -1,0 +1,5 @@
+# Repaired descriptor regression test
+
+Production source bytes remain exactly c48de0a/14787bc. The test now changes mtime by an exact1second while preserving accepted0400 custody, then asserts exactly profile-check-descriptor-changed. Removing only the final equality guard fails this test (DID NOT RAISE); restored production passes. All affected producer/checker tests66PASS. Exact final guard test1PASS/13deselected. No larger test run was repeated after restoring the unchanged production bytes. Changed-test Ruff PASS. Quality exit2 flags the test helper complexity and no improved-quality claim is made.
+
+The no-effect guards are runtime regression sentinels for future calls, not proof of import isolation or absence of import-time resource opens. Static source trace supports the current no-card/no-network runtime claim; owning installed interpreter/import/environment qualification remains separate. Low-level fixture remapping is not an admitted launcher. The initial actual first HIGH report and ranked built-in findings are preserved; no verdict is rewritten.

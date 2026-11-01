@@ -63,10 +63,12 @@ def test_pure_profile_check_retained_fd_change_is_causal(inputs, monkeypatch):
     real = checker._bound_operation
     def change(raw, profile):
         result = real(raw, profile)
-        os.fchmod(profile_fd, 0o600)
+        before = os.fstat(profile_fd)
+        os.utime(profile_fd, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
+        assert os.fstat(profile_fd).st_mode == before.st_mode
         return result
     monkeypatch.setattr(checker, "_bound_operation", change)
-    with pytest.raises(InvalidAction, match="descriptor-custody|descriptor-changed"):
+    with pytest.raises(InvalidAction, match="^profile-check-descriptor-changed$"):
         checker._profile_check(original, profile_fd)
 
 
