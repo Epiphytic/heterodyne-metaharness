@@ -1,0 +1,27 @@
+{
+  "exit": 0,
+  "elapsed_seconds": 199.7068979786709,
+  "source_unchanged": true,
+  "head": "73a0da385bf121ed6e3d649e3f4ef37fcf37eec6",
+  "events": 49,
+  "cli_model": "opus",
+  "cli_effort": "medium",
+  "actual_skill": {
+    "skill": "code-review",
+    "args": "medium 158"
+  },
+  "reported_model": "claude-opus-5-5",
+  "report_sha256": "7dbfc259e923cbaebe3fec2dc5ee80f2a0be600a23d9fc05542d9b03c582a012",
+  "private_raw_artifacts_retained": true,
+  "original_artifact_sha256": {
+    "-start.json": "3067c79e19d0e17ae23357a3c2848c3a2d4fe463344caaa0f1806b55d80fe012",
+    "-stream.jsonl": "c3f11fde99c59fd4fc0941267abff7514f2b8d30d4d5bba52d051e222e446c8a",
+    "-result.json": "8cf98fbaf242717006f07452bbdb4246b559e1ca02ac64bd11971baf13ef436b"
+  },
+  "source_hashes": {
+    "src/heterodyne/actions/deployment_host_observer.py": "8c787b1da463459b540f4fe1de33bcb37ff5b6cc6142d60a9483c6141ad3bd12",
+    "src/heterodyne/actions/deployment_observation.py": "5ebf5d4841e9edf9000f4471b5675c15a5a2e697f4b2d5f953c6b7f99da3bbd6",
+    "tests/test_deployment_host_observer.py": "8523109fd62fbcadb1222f60053f24a5cc32e3b95b58f4edba68bf2dac378974",
+    "tests/test_deployment_observation.py": "5df1b81e09e14f46e89f5390d7622e4d9e44b0cedf477434bf22a316cf80bd88"
+  }
+}
