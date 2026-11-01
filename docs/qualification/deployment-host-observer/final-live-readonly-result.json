@@ -1,0 +1,1 @@
+{"status": "held", "error_type": "InvalidAction", "diagnostic": "deployment-observer-manager-unavailable", "cause_type": "NoneType", "cause_diagnostic": "None", "elapsed_seconds": 0.0015378543175756931, "effects": false}

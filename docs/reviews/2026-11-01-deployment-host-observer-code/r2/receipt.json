@@ -1,0 +1,31 @@
+{
+  "exit": 0,
+  "elapsed_seconds": 291.5441717747599,
+  "source_unchanged": true,
+  "head": "cadc8265f05682752681b24966a4fd7bb9b8770e",
+  "events": 74,
+  "report_sha256": "26bd4565e3a00ea90b6b4f89a422d3c693ee741aa3b2c67e0375a8870db14e86",
+  "cli_model": "opus",
+  "cli_effort": "high",
+  "actual_skill": {
+    "skill": "code-review",
+    "args": "high 158"
+  },
+  "reported_model": "claude-opus-5-5",
+  "original_start_sha256": "3f15c70dd9baafac14a132155e7494aec3fa901896efe54fe1cdcdd06e4d67c9",
+  "source_hashes": {
+    "docs/qualification/deployment-host-observer/README.md": "e9997aa621bcbc5a300ff5c18781dc9b9d37042f36eef9ff5d23e047764dfa65",
+    "docs/qualification/deployment-host-observer/deployment-observation-rust-golden-20261101.json": "8635f3f849a8296c16f59da0a548dcd5727262ca6005c375cb9166ae499051f0",
+    "docs/qualification/deployment-host-observer/live-readonly-result.json": "c3fa47c7640e75eaf97b17ff59ef10ec19bb60f86566c87f544a63ba36124514",
+    "docs/reviews/2026-11-01-deployment-host-observer-code/r1/actual-review.md": "e2abbb3ccbb1f5cb618e59cc1d3eb20b15d543b9c165683e03efee6851fadce2",
+    "docs/reviews/2026-11-01-deployment-host-observer-code/r1/disposition.md": "ac6c45d674531d3baccb8588f92aacfedd512be7fe7ee6cbfcb8760eae02040c",
+    "docs/reviews/2026-11-01-deployment-host-observer-code/r1/receipt.json": "afae638978d7e1a1f467ca497136509b98b4848017659938eb3bcb001ac100d2",
+    "src/heterodyne/actions/deployment_host_observer.py": "5457f8f2db559655bd4794740e168f626189a43627fc308e9f7c4c0f4bae03ac",
+    "src/heterodyne/actions/deployment_observation.py": "5ebf5d4841e9edf9000f4471b5675c15a5a2e697f4b2d5f953c6b7f99da3bbd6",
+    "tests/fixtures/deployment-observation/v1.json": "c5547a2bb3575ed42b51788ec95e7c28538a8eac758bccdeda167c00add301ae",
+    "tests/fixtures/deployment-observation/verify.rs": "6a6a90d835af84d2ecc7b16b85c6464cab3ce04a9521790776b663dc58b985fb",
+    "tests/test_deployment_host_observer.py": "ff6af751157af913731ae10807ae8c10e5d60a9c92c7e1642322f9bba03983b7",
+    "tests/test_deployment_observation.py": "5df1b81e09e14f46e89f5390d7622e4d9e44b0cedf477434bf22a316cf80bd88"
+  },
+  "private_raw_artifacts_retained": true
+}

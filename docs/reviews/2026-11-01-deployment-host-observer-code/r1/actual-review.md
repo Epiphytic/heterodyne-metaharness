@@ -1,0 +1,25 @@
+I ran the built-in `code-review` skill at HIGH on PR 158. It found 10 issues; none are blockers given the scope you set (a private, read-only component with no authority behind it). The top three mean the recorded observation can describe a state the host isn't actually in.
+
+**Run details.** I confirmed HEAD is `253f02aa9889b6bac3b4399b065755cda349a617`, the working tree is clean, PR 158's head is the same commit, and the three source/test hashes I checked match yours. The skill ran as a forked execution, which inherits the parent model, Opus 5.5 (`claude-opus-5-5`), but I can't independently confirm which model the fork used. The skill reported findings only and did no verify pass. Afterwards I read the code myself to check four of them (1, 2, 3 and 9 below). The rest are as the skill reported them. Nothing was edited, commented, committed, deployed, live-probed or queued, and I ran no tests or builds.
+
+**Correctness:**
+1. **The release comes from the unit's configured `Environment`, not from the process actually running** (`deployment_host_observer.py:285`). *Checked.* Suppose the installer rewrites the unit, updates the install record and runs daemon-reload, but doesn't restart admind. Then `NeedDaemonReload=no`, the Environment and the record both name the new release, and the old process is still running. The observer reports active on the new release with the new tree digest. Nothing ties the release to the running process (for example `/proc/<MainPID>/environ` or when it started).
+2. **The tree digest includes directory sizes** (`:226`). *Checked:* `rows` hash `info.size` for every kind of entry, and that value is the raw statx size. Directory sizes depend on the filesystem (ext4 vs btrfs/xfs/tmpfs) and on history: an ext4 directory stays larger after files are added and removed. So identical content can hash differently, which undercuts the "deterministic" claim.
+3. **File and directory owners inside the release tree are neither checked nor hashed** (`:220`). *Checked:* only the release root's ownership is verified. `store_core.Stat` has no uid, and `_traverse` refuses only bad types, hard links, mount crossings and depth/count limits. A file owned by some other user produces the same digest, and that user can rewrite it after the observation.
+4. **The open descriptors for the pinned binaries don't control what actually runs** (`:140`). The commands still run `/usr/sbin/runuser` etc. by path. If a binary is swapped out between the first hash check and the exec, then put back before the second check, both checks pass. Running through `/proc/self/fd/N` or `fexecve` would close that gap. As written, holding the descriptors suggests a guarantee that isn't there. The pin list is also copied twice.
+
+**Duplication and maintenance:**
+5. `_show`/`_parse_unit` nearly duplicate `deployment_cessation._AdmindInvocation._show`. The new allowance for a stale private socket exists only in the copy, so the cessation code still fails hard on the same stale socket that you document as normal on the live host.
+6. `_tree_digest` reimplements `store_core` walk plus `entries_of` using private internals (`_traverse`, `_hash_file`) just to skip the external-link check. An option on the existing walker would keep future hardening in one place.
+
+**Efficiency and bounds:**
+7. `_observe` reads the whole tree's content twice (up to 2 GiB and 30 s per pass), and the two `_show` calls hash the three binaries 12 times in total. Comparing each entry's (dev, ino, ctime) before and after the DB copy would catch the same changes.
+8. The 30 s deadline is only checked inside `bounded_read`. Walking a tree that is mostly directories, symlinks or empty files has no time limit (`:211`).
+
+**Dead code:**
+9. In the refused-connection branch (`:122`), the `exc.errno != ECONNREFUSED` test can never be true, and the socket/uid recheck can't fail. *Checked:* `_manager_endpoint` (`deployment_cessation.py:93-95`) runs the same check before connecting and raises `cessation-manager-socket`. So `deployment-observer-private-endpoint` can't be reached, and `test_private_endpoint_must_be_an_actual_owned_socket` passes because of the earlier check, not the new one.
+
+**Tests:**
+10. The mapped-root test (`tests/test_deployment_host_observer.py:199`) needs unprivileged user and mount namespaces plus `/etc/subuid` ranges, and has no skip. It will fail for environment reasons on AppArmor-restricted Ubuntu 24.04, in CI containers, or for users without subuid entries. Its `os.system('mount --make-rprivate /')` ignores failure, so a tmpfs mount could leak outside the namespace.
+
+The gaps you already disclosed (external venv links not followed, observations not globally atomic, the guard left unchecked, the ripwire clone flags) weren't raised again. The skill didn't ask for any restructuring just to satisfy the clone heuristic: findings 5 and 6 are about security-critical logic drifting between copies, not clone counts. I'd fix 1–3 before treating the observation's release and tree digest as meaningful.

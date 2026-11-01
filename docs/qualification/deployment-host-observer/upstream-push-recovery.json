@@ -1,0 +1,32 @@
+{
+  "incident": "explicit short source ref push followed configured upstream destination main",
+  "initial_command": [
+    "git",
+    "push",
+    "-u",
+    "origin",
+    "codex/deployment-host-effects-20261101"
+  ],
+  "actual_result": "33ccba5..4cd144f codex/deployment-host-effects-20261101 -> main",
+  "configuration": {
+    "push.default": "upstream",
+    "branch.merge.before": "refs/heads/main"
+  },
+  "unreviewed_source_commit": "4cd144f6115834de480d8c1a12e470da4812c78f",
+  "correction": "normal git revert4cd144f in isolated recovery worktree, explicit HEAD:refs/heads/main",
+  "revert_commit": "e49a2ab",
+  "preincident_commit": "33ccba5cc0fc9a7ec1c2099858c78b95db4e5d96",
+  "preincident_and_restored_tree": "1f357a38e9e7f2c3956a955d92921f5d3d7a885a",
+  "exact_tree_comparison_exit": 0,
+  "review_branch_head": "253f02aa9889b6bac3b4399b065755cda349a617",
+  "review_branch_publish": [
+    "git",
+    "push",
+    "-u",
+    "origin",
+    "HEAD:refs/heads/codex/deployment-host-effects-20261101"
+  ],
+  "deployment_performed": false,
+  "source_review_clearance_at_incident": false,
+  "disposition": "Controller notified immediately, main restored before review; preserve original incident and revert history. Future pushes explicit full destination ref."
+}
