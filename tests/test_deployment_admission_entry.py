@@ -29,7 +29,8 @@ consumed=json.loads(raw['consumed']);producer=json.loads(raw['producer'])
 packet=json.loads(raw['packet'])
 if 'synthetic_clock' in raw:
  journal.time.time_ns=lambda:int(raw['synthetic_clock'])
-if 'late_parent_loss' in raw:
+if 'late_parent_loss' in raw or 'late_oserror' in raw:
+
  original_check=peer._ParentChannel.check
  def fail_after_commit(self):
   original_check(self)
@@ -38,7 +39,9 @@ if 'late_parent_loss' in raw:
    db=sqlite3.connect(dbpath)
    try:exists=db.execute('SELECT count(*) FROM admissions').fetchone()[0]
    finally:db.close()
-   if exists:raise entry.InvalidAction('admission-parent-ceased')
+   if exists and attempt==0:
+    if 'late_oserror' in raw:raise OSError('causal-postcommit-pidfd-fault')
+    raise entry.InvalidAction('admission-parent-ceased')
  peer._ParentChannel.check=fail_after_commit
 root=Path('/tmp/admission-entry-probe');root.mkdir(mode=0o700)
 journal._ROOT=root/'journal';journal._ROOT.mkdir(mode=0o700)
@@ -61,7 +64,7 @@ nonce=os.memfd_create('admission-only-nonce',os.MFD_ALLOW_SEALING|os.MFD_CLOEXEC
 os.write(nonce,admission_nonce);os.fchmod(nonce,0o400)
 fcntl.fcntl(nonce,fcntl.F_ADD_SEALS,peer._SEALS)
 nonce_read=os.open('/proc/self/fd/'+str(nonce),os.O_RDONLY|os.O_CLOEXEC)
-handoff=peer._Handoff('heterodyne-owned-deployment-admission.v1',admission_nonce.hex(),
+handoff=peer._Handoff('heterodyne-owned-deployment-admission.v1',admission_nonce.hex(),consumed['nonce_hex'],
  hashlib.sha256(raw['process']).hexdigest(),producer['packet_sha256'],
  hashlib.sha256(raw['producer']).hexdigest())
 # Every invocation is a new process/channel over the SAME retained launch OFD.
@@ -88,7 +91,8 @@ for attempt in range(3):
  except ConnectionResetError:reply=b''
  parent.close()
  _,status=os.waitpid(pid,0)
- expected_success=attempt==0 and 'late_parent_loss' not in raw and 'expired' not in raw
+ expected_success=attempt==0 and not any(k in raw for k in
+  ('late_parent_loss','expired','late_oserror'))
  assert os.waitstatus_to_exitcode(status)==(0 if expected_success else 2),(attempt,status)
  if expected_success:
   assert json.loads(reply)=={'schema':'heterodyne-owned-deployment-admission-result.v1',
@@ -134,7 +138,7 @@ def qualify_payload(payload: dict[str, bytes]) -> subprocess.CompletedProcess:
     )
 
 
-@pytest.mark.parametrize('mode', ('normal', 'late_parent_loss', 'expired'))
+@pytest.mark.parametrize('mode', ('normal', 'late_parent_loss', 'late_oserror', 'expired'))
 def test_mapped_root_no_effect_entry_retains_one_use_after_child_restart(correlated, mode):  # noqa: F811
     _, consumed = correlated
     payload = dict(

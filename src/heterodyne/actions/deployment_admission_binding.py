@@ -148,6 +148,7 @@ def _correlate(  # pyright: ignore[reportUnusedFunction] - private composition, 
     ).encode("utf-8")
     if (
         not _HASH.fullmatch(consumed.nonce_hex)
+        or consumed.nonce_hex != channel.handoff.receiver_nonce_hex
         or consumed.nonce_hex == channel.nonce.hex()
         or consumed.startup_profile_sha256 != channel.handoff.process_profile_sha256
         or consumed.enrollment_sha256 != hashlib.sha256(enrollment_bytes).hexdigest()

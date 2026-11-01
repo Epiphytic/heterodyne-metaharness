@@ -71,9 +71,9 @@ class _AdmissionJournal:  # pyright: ignore[reportUnusedClass] - private owner c
             after = os.stat('admission.db', dir_fd=self.fd, follow_symlinks=False)
             if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
                 raise InvalidAction('admission-journal-replaced')
-            self.db.execute('PRAGMA journal_mode=DELETE')
-            self.db.execute('PRAGMA synchronous=FULL')
-            self.db.executescript(_SCHEMA)
+            # Refuse foreign schema before any schema or journal-mode write.
+            if not self.db.execute('SELECT 1 FROM sqlite_master LIMIT 1').fetchone():
+                self.db.executescript(_SCHEMA)
             # Compare the complete source-owned schema, including UNIQUE/CHECK
             # constraints and partial target index; root path custody alone is
             # not a schema version or migration receipt.
@@ -81,7 +81,7 @@ class _AdmissionJournal:  # pyright: ignore[reportUnusedClass] - private owner c
             try:
                 expected.executescript(_SCHEMA)
                 query = ("SELECT type,name,sql FROM sqlite_master "
-                         "WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name")
+                         "WHERE substr(name,1,7) != 'sqlite_' ORDER BY type,name")
                 def normalized(db: sqlite3.Connection) -> list[tuple[str, str, str]]:
                     return [(kind, name, ' '.join(sql.split()))
                             for kind, name, sql in db.execute(query)]
@@ -89,6 +89,8 @@ class _AdmissionJournal:  # pyright: ignore[reportUnusedClass] - private owner c
                     raise InvalidAction('admission-journal-schema')
             finally:
                 expected.close()
+            self.db.execute('PRAGMA journal_mode=DELETE')
+            self.db.execute('PRAGMA synchronous=FULL')
             os.fsync(anchor)
             os.fsync(self.fd)
         except BaseException:
@@ -154,9 +156,9 @@ class _AdmissionJournal:  # pyright: ignore[reportUnusedClass] - private owner c
         # reservation back merely because the parent ceases after insertion.
         try:
             channel.check()
-            if not in_window:
+            if not packet.outage.not_before_ns <= time.time_ns() < packet.outage.deadline_ns:
                 raise InvalidAction('admission-forward-window')
-        except InvalidAction:
+        except (InvalidAction, OSError):
             if in_window:
                 self.fail_unissued(channel, digest)
             raise
@@ -180,3 +182,21 @@ class _AdmissionJournal:  # pyright: ignore[reportUnusedClass] - private owner c
             ).rowcount
             if changed != 1:
                 raise InvalidAction('admission-never-issued-proof-unavailable')
+
+    def recover_never_issued(self) -> tuple[str, ...]:
+        """Root operator recovery: release only SQL-proven never-issued holds.
+
+        No channel, receipt-file, target selector or replacement authority. The
+        root global journal is authoritative for its own absent issued events.
+        A concurrent issuer must check the ready phase in its write transaction;
+        any already-issued/ambiguous effect stays held. Never resets use keys.
+        """
+        with self._transaction():
+            rows = self.db.execute(
+                "SELECT packet FROM admissions WHERE phase='ready' AND NOT EXISTS "
+                "(SELECT 1 FROM admission_events WHERE admission_events.packet=admissions.packet)",
+            ).fetchall()
+            self.db.executemany(
+                "UPDATE admissions SET phase='failed-no-effect' WHERE packet=? AND phase='ready'", rows,
+            )
+        return tuple(row[0] for row in rows)

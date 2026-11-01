@@ -38,7 +38,7 @@ def correlated(inputs, monkeypatch):  # noqa: F811 - imported pytest fixture inj
                                     original, producer.targets).semantic_factory_source_sha256,
                                 packet_sha256=producer.packet_sha256,
                                 producer_profile_sha256=h(producer_raw)),
-        handoff=SimpleNamespace(process_profile_sha256=h(process)),
+        handoff=SimpleNamespace(process_profile_sha256=h(process), receiver_nonce_hex=(b'b'*32).hex()),
     )
     value = dict(
         schema='heterodyne-owned-consumed.v3', nonce_hex=(b'b'*32).hex(),
@@ -71,7 +71,8 @@ def test_synthetic_binding_matches_independent_retained_originals(correlated):
 
 
 @pytest.mark.parametrize('section,field,replacement', [
-    (None, 'nonce_hex', (b'n'*32).hex()), (None, 'enrollment_sha256', '0'*64),
+    (None, 'nonce_hex', (b'n'*32).hex()), (None, 'nonce_hex', (b'x'*32).hex()),
+    (None, 'enrollment_sha256', '0'*64),
     (None, 'journal_profile_sha256', '0'*64), (None, 'capability_policy_sha256', '0'*64),
     ('original', 'operation', '00'), ('original', 'original_request', '00'),
     ('original', 'card_chunks', ['different']), ('original', 'expected_group', [0]*16),
