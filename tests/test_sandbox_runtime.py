@@ -2746,15 +2746,17 @@ def test_owned_resume_preflight_preserves_running_generation(
     def unexpected(*args: Any, **kwargs: Any) -> Any:
         pytest.fail("preflight must not end, launch, settle, rebind or restore sessions")
 
-    with monkeypatch.context() as patch:
-        for name in ("_end", "launch", "_settle_wip", "_rebind", "_restore_creates"):
-            patch.setattr(rig.runtime, name, unexpected)
-        rig.runtime.preflight_resume(replace(spec, generation=2, resume=True,
-                                             native_id=first.native_id), prior)
-    assert rig.runtime.layout(prior.key).record.read_bytes() == retained
-    assert gitwip.git(rig.worktree, "rev-parse", "HEAD") == git_before
-    assert rig.tmux.has_session(prior.tmux_session) and not rig.tmux.pane_dead(prior.tmux_session)
-    rig.runtime.close_manager_control()
+    try:
+        with monkeypatch.context() as patch:
+            for name in ("_end", "launch", "_settle_wip", "_rebind", "_restore_creates"):
+                patch.setattr(rig.runtime, name, unexpected)
+            rig.runtime.preflight_resume(replace(spec, generation=2, resume=True,
+                                                 native_id=first.native_id), prior)
+        assert rig.runtime.layout(prior.key).record.read_bytes() == retained
+        assert gitwip.git(rig.worktree, "rev-parse", "HEAD") == git_before
+        assert rig.tmux.has_session(prior.tmux_session) and not rig.tmux.pane_dead(prior.tmux_session)
+    finally:
+        rig.runtime.close_manager_control()
 
 
 def test_resume_preflight_does_not_acquire_missing_owner(rig: RuntimeRig) -> None:
@@ -2769,7 +2771,9 @@ def test_resume_preflight_does_not_acquire_missing_owner(rig: RuntimeRig) -> Non
 @pytest.mark.parametrize("field,value", [("generation", 1), ("generation", 3),
     ("native_id", "00000000-0000-4000-8000-000000000000"), ("profile", "p-two"),
     ("ws", "another"), ("bead", "btq-other"), ("role", "reviewer"),
-    ("install_digest", "0" * 64), ("resume", False), ("handoff", True)])
+    ("install_digest", "0" * 64), ("resume", False), ("handoff", True),
+    ("repo", Path("/another/repo")), ("worktree", Path("/another/tree")),
+    ("install", "another-install"), ("session_key", "00000000-0000-4000-8000-000000000000")])
 def test_resume_preflight_refuses_changed_identity(
         rig: RuntimeRig, field: str, value: Any) -> None:
     spec = launch_spec(rig, "p-one")
@@ -2778,7 +2782,8 @@ def test_resume_preflight_refuses_changed_identity(
     rig.runtime.own_manager_control()
     try:
         proposed = replace(replace(spec, generation=2, resume=True), **{field: value})
-        with pytest.raises(LaunchFailed, match="exact retained next-generation identity"):
+        with pytest.raises((LaunchFailed, RuntimeUnavailable),
+                           match="exact retained next-generation identity|retained resume record changed"):
             rig.runtime.preflight_resume(proposed, prior)
         assert record(rig, spec.session_key) == prior
     finally:
@@ -2805,7 +2810,10 @@ def test_resume_preflight_reports_holds_without_cleanup(rig: RuntimeRig, problem
     retained = layout.record.read_bytes()
     rig.runtime.own_manager_control()
     try:
-        with pytest.raises((LaunchFailed, RuntimeUnavailable)):
+        reason = {"unlanded": "commits were not landed", "wip": "WIP commit is still owed",
+                  "stopping": "exact retained next-generation identity",
+                  "missing-state": "resumable state can't be found", "expired-login": LOGIN_STALE}[problem]
+        with pytest.raises((LaunchFailed, RuntimeUnavailable), match=reason):
             rig.runtime.preflight_resume(replace(spec, generation=2, resume=True), expected)
         assert layout.record.read_bytes() == retained
         assert rig.tmux.has_session(prior.tmux_session)
@@ -2892,8 +2900,45 @@ def test_resume_preflight_refuses_closed_owner(rig: RuntimeRig) -> None:
     assert owner is not None
     owner.close()
     try:
-        with pytest.raises(RuntimeError, match="owner is unavailable"):
+        with pytest.raises(RuntimeUnavailable, match="owner is unavailable"):
             rig.runtime.preflight_resume(replace(spec, generation=2, resume=True), expected)
         assert record(rig, expected.key) == expected
     finally:
+        rig.runtime.close_manager_control()
+
+
+@pytest.mark.parametrize("problem,reason", [
+    ("generation-limit", "generation must be from 1 to"),
+    ("legacy-ledger", "retained create-ledger migration"),
+    ("owner-fstat", "manager owner is unavailable"),
+])
+def test_resume_preflight_refuses_unqualified_retained_state(
+        rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch, problem: str, reason: str) -> None:
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    prior = record(rig, spec.session_key)
+    expected = prior
+    if problem == "generation-limit":
+        expected = msgspec.structs.replace(prior, generation=9999)
+    elif problem == "legacy-ledger":
+        expected = msgspec.structs.replace(prior, create_ledger=False)
+    write_record(rig.runtime.layout(prior.key), expected)
+    retained = rig.runtime.layout(prior.key).record.read_bytes()
+    rig.runtime.own_manager_control()
+
+    def unavailable(*args: Any, **kwargs: Any) -> None:
+        raise OSError("test owner descriptor unavailable")
+
+    try:
+        if problem == "owner-fstat":
+            owner = rig.runtime.manager_owner
+            assert owner is not None
+            monkeypatch.setattr(type(owner), "check", unavailable)
+        with pytest.raises((LaunchFailed, RuntimeUnavailable), match=reason):
+            rig.runtime.preflight_resume(replace(spec, generation=expected.generation + 1,
+                                                resume=True), expected)
+        assert rig.runtime.layout(prior.key).record.read_bytes() == retained
+    finally:
+        monkeypatch.undo()
+        write_record(rig.runtime.layout(prior.key), prior)
         rig.runtime.close_manager_control()

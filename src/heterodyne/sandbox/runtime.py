@@ -684,11 +684,20 @@ class SandboxRuntime:
         owner = self.manager_owner
         if owner is None:
             raise RuntimeUnavailable("resume preflight requires the actual manager owner")
-        owner.check()
+        try:
+            owner.check()
+        except (RuntimeError, OSError):
+            raise RuntimeUnavailable("resume preflight manager owner is unavailable") from None
         layout = self.layout(spec.session_key)
         if read_record(layout) != expected:
             raise RuntimeUnavailable("the retained resume record changed")
         resume_preflight.validate_identity(spec, expected)
+        try:
+            sandbox_name(spec.session_key, spec.generation)
+        except SpecRefused as exc:
+            raise LaunchFailed(str(exc)) from None
+        if not expected.create_ledger:
+            raise RuntimeUnavailable("resume preflight requires retained create-ledger migration")
         self._held(ws=expected.ws, key=expected.key)
         if expected.unlanded:
             raise self._unlanded(expected)
@@ -711,7 +720,10 @@ class SandboxRuntime:
         self._cli(adapter, spec)
         protected, _ = self._logins(adapter, spec.account)
         self._pinned(adapter, spec, protected.chosen_files)
-        owner.check()
+        try:
+            owner.check()
+        except (RuntimeError, OSError):
+            raise RuntimeUnavailable("resume preflight manager owner is unavailable") from None
         if self.manager_owner is not owner or read_record(layout) != expected:
             raise RuntimeUnavailable("the retained resume record or owner changed during preflight")
 

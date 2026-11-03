@@ -15,13 +15,11 @@ if TYPE_CHECKING:
 
 
 def validate_identity(spec: LaunchSpec, rec: "SessionRecord") -> None:
-    from heterodyne.sandbox.runtime import Phase
-
     recorded = (rec.key, rec.ws, rec.bead, rec.role, rec.profile, rec.native_id,
                 rec.worktree, rec.repo, rec.install_name, rec.install_digest)
     requested = (spec.session_key, spec.ws, spec.bead, spec.role, spec.profile, spec.native_id,
                  str(spec.worktree), str(spec.repo), spec.install, spec.install_digest)
     if (requested != recorded or not all(recorded) or not rec.ran or rec.started_at <= 0
             or spec.generation != rec.generation + 1 or not spec.resume or spec.handoff
-            or rec.phase not in (Phase.RUNNING, Phase.ENDED)):
+            or rec.phase not in ("running", "ended")):
         raise LaunchFailed("resume preflight requires the exact retained next-generation identity")

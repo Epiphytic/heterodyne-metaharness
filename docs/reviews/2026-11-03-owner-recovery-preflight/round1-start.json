@@ -1,0 +1,30 @@
+{
+  "command": [
+    "claude",
+    "-p",
+    "--settings",
+    "{\"disableAllHooks\":true}",
+    "--model",
+    "opus",
+    "--effort",
+    "high",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--dangerously-skip-permissions",
+    "--tools",
+    "Read,Bash,Skill",
+    "--strict-mcp-config",
+    "--mcp-config",
+    "{\"mcpServers\":{}}",
+    "--",
+    "/code-review FULL first code review, Claude Opus HIGH reasoning. Use the built-in /code-review recipe. Exact Product worktree ${OPERATOR_HOME}/repos/heterodyne-exact-session-reconcile-20261103 frozen head 88dd69a9ab4067df208e7a6fac0edd3290435f25 against baseline d600e5df3a4e645ce52838841486dbc243f80102. Read full diff and qualification docs/reviews/2026-11-03-owner-recovery-preflight/qualification.md. This is a bounded Product preflight prerequisite under already approved owner-deadline recovery design daf3, not complete recovery or deployment. New public preflight_resume requires actual already-held manager owner, full retained snapshot, exact original conversation and next generation/install/path identity; verifies resolve/WIP/unlanded/branch holds, real linked worktree, native state, compatible reasoning, install integrity and credential freshness. Branch helper settle_wip=False refuses other-key WIP without settling; ordinary launch default unchanged. This method does NOT authorize ending, establish executor death or private-tip ancestry, or implement native admission/installer; Hermes separately must enforce those before recovery. Not yet wired into a production lifecycle route. Nine prior private-access pyright errors are genuinely repaired, no ignore: orchestration stays within runtime and pure identity helper is extracted. Qualification43 selected runtime tests pass, ruff/pyright pass. Ripwire one preexisting class verbosity gate disclosed (1441 to1484), not green; test entry points/dead-code and setup clone alerts also disclosed. Assess actual source correctness, security, compatibility, tests and gate semantics; give explicit source clearance or concrete blocking severity and rationale. Read-only independent review: no source edits/commits/asks/DB/config/service/deployment/restarts or actual managed tmux actions. Safe isolated tests use PYTHONPATH=src ${OPERATOR_HOME}/repos/heterodyne-metaharness-v2/.venv/bin/python -m pytest tests/test_sandbox_runtime.py -k 'resume_preflight or typed_reasoning or reasoning_resume or medium_resume or unqualified_resume or branch' -q; these use guarded test tmux and fake backend. Actual full new review count for THIS slice is round1, independent of preserved paired Dolt config rounds1/2 which already cleared. No second design review or review validation; stop after your actual full review. State actual exposed model and reasoning, preserve advisories separately from blockers."
+  ],
+  "cwd": "${OPERATOR_HOME}/repos/heterodyne-exact-session-reconcile-20261103",
+  "head": "88dd69a9ab4067df208e7a6fac0edd3290435f25",
+  "base": "d600e5df3a4e645ce52838841486dbc243f80102",
+  "round": 1,
+  "reasoning": "high",
+  "started_at": "2026-11-03T19:52:58.377788+00:00",
+  "publication_note": "Published copy replaces host-specific home prefix with ${OPERATOR_HOME}; exact unmodified launch receipt remains in controller durable handoff directory."
+}
