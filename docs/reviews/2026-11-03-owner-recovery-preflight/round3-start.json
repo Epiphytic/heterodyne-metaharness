@@ -1,0 +1,33 @@
+{
+  "command": [
+    "claude",
+    "-p",
+    "--settings",
+    "{\"disableAllHooks\": true, \"effortLevel\": \"medium\"}",
+    "--model",
+    "opus",
+    "--effort",
+    "medium",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--dangerously-skip-permissions",
+    "--tools",
+    "Read,Bash,Skill",
+    "--strict-mcp-config",
+    "--mcp-config",
+    "{\"mcpServers\": {}}",
+    "--",
+    "/code-review medium Are there any critical flaws with this, or is this good enough to implement as a PoC? Actual third code round for the retained-resume preflight history, not reset and not review validation. Review substantive required repairs only at frozen dd20794 in ${OPERATOR_HOME}/repos/heterodyne-exact-session-reconcile-20261103 against merged baseline551bda13683208a1ea1e8a9c79bff8f74dbbe9b3. Existing source was cleared in configured fullHIGHround2 with no blockers, but findings1/3 required repairs before production wiring. Now ENDED records reuse existing public readonly observe_session and compare returned snapshot; normal ended positive and independent remaining-pane/sandbox refusal tests are committed. No production caller is wired. Read docs/reviews/2026-11-03-owner-recovery-preflight/prewiring-repair.md and actual round2 disposition/report for existing scope, genuine verdicts and limits. Three new testsPASS,ruff/pyrightPASS,qualitydeltaPASSforrepair; earlierclassdebtstillretained. Process-local CLAUDE_CODE_EFFORT_LEVELmedium and CLI/settingsmedium; report exposed model/effort honestly. Actual built-in recipe required. Give explicit PoC source clearance or critical flaws; separate noncritical advisories. No edits/commits/DB/config/services/asks/restarts/live-managed-tmux effects. Safe isolated tests: PYTHONPATH=src ${OPERATOR_HOME}/repos/heterodyne-metaharness-v2/.venv/bin/python -m pytest tests/test_sandbox_runtime.py -k 'resume_preflight_qualifies_normally_ended or resume_preflight_refuses_ended_live' -q. Preserve original owners/UNKNOWN and distinct independent death/native/account/model/installer gates. Stop after your actual review."
+  ],
+  "cwd": "${OPERATOR_HOME}/repos/heterodyne-exact-session-reconcile-20261103",
+  "head": "dd20794",
+  "base": "551bda13683208a1ea1e8a9c79bff8f74dbbe9b3",
+  "round": 3,
+  "reasoning_requested": "medium",
+  "process_effort_environment": {
+    "CLAUDE_CODE_EFFORT_LEVEL": "medium"
+  },
+  "started_at": "2026-11-03T20:09:04.516284+00:00",
+  "publication_note": "Host home prefix substituted in this published copy; exact raw launch receipt remains in controller durable handoff."
+}
