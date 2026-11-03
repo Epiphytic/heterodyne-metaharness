@@ -36,7 +36,7 @@ from heterodyne.harness import selection
 from heterodyne.harness import verify as hv
 from heterodyne.harness.selection import InstallPin
 from heterodyne.harness.store import Store
-from heterodyne.sandbox import creates, sessiongit
+from heterodyne.sandbox import creates, resume_preflight, sessiongit
 from heterodyne.sandbox.backend import Backend, BackendError, BackendUnavailable, ExecResult, Watch
 from heterodyne.sandbox.reaper import LINGER_SECONDS
 from heterodyne.sandbox.selftest import ProbeContext, SelfTest, SelfTestFailed
@@ -674,6 +674,46 @@ class SandboxRuntime:
                         and (prev.install_name, prev.install_digest) == (installed.name, installed.digest)):
                     return
             raise LaunchFailed("typed Codex reasoning on native resume is not qualified")
+
+    def preflight_resume(self, spec: LaunchSpec, expected: SessionRecord) -> None:
+        """Observe retained Product resume gates; never end, settle WIP or launch.
+
+        This is not admission or end permission. Hermes separately verifies role authority,
+        deadline evidence, private-tip ancestry and recovery fences. Launch rechecks its gates.
+        """
+        owner = self.manager_owner
+        if owner is None:
+            raise RuntimeUnavailable("resume preflight requires the actual manager owner")
+        owner.check()
+        layout = self.layout(spec.session_key)
+        if read_record(layout) != expected:
+            raise RuntimeUnavailable("the retained resume record changed")
+        resume_preflight.validate_identity(spec, expected)
+        self._held(ws=expected.ws, key=expected.key)
+        if expected.unlanded:
+            raise self._unlanded(expected)
+        if expected.wip_mark:
+            raise LaunchFailed("the last generation's lifetime WIP commit is still owed")
+        self._claim_branch(spec, settle_wip=False)
+        try:
+            pinned = gitwip.pin(Path(expected.repo), Path(expected.worktree), f"btq/{expected.bead}")
+        except gitwip.GitFailed as exc:
+            raise LaunchFailed(str(exc)) from None
+        if pinned.git_dir == pinned.common:
+            raise LaunchFailed("resume preflight requires a linked task worktree")
+        adapter = self.c.adapters.get(expected.adapter)
+        if adapter is None or self.c.accounts.adapter(spec.profile) != expected.adapter:
+            raise LaunchFailed("the retained resume adapter changed")
+        self._check_reasoning_resume(adapter, layout, expected, spec)
+        resumed, native = self._resume(adapter, layout, expected, spec)
+        if not resumed or native != expected.native_id:
+            raise LaunchFailed("the original native conversation is not resumable")
+        self._cli(adapter, spec)
+        protected, _ = self._logins(adapter, spec.account)
+        self._pinned(adapter, spec, protected.chosen_files)
+        owner.check()
+        if self.manager_owner is not owner or read_record(layout) != expected:
+            raise RuntimeUnavailable("the retained resume record or owner changed during preflight")
 
     def stop(self, session_key: str) -> None:
         layout = self.layout(session_key)
@@ -1395,12 +1435,13 @@ class SandboxRuntime:
         """A session that ran is past its deadline: whatever ends it now ends it for its lifetime."""
         return rec.started_at > 0 and self.c.clock() >= rec.deadline
 
-    def _claim_branch(self, spec: LaunchSpec) -> None:
+    def _claim_branch(self, spec: LaunchSpec, *, settle_wip: bool = True) -> None:
         """Refuse a launch while another key's record of this bead holds the branch ``btq/<bead>``.
 
         A record holds it while it is not ENDED (it still owes its land or lifetime WIP, D13), is unlanded,
         or owes a WIP that can't be settled now. Every record is checked before anything is settled, so a
-        refusal moves nothing. This relies on wsd serializing launches per workstream (the Parker's entry
+        refusal moves nothing. With settle_wip=False, any owed WIP refuses without settlement.
+        This relies on wsd serializing launches per workstream (the Parker's entry
         lock); it is not a cross-process lock, and two concurrent direct callers could both pass.
         """
         others = [r for r in self._records() if r.key != spec.session_key and r.bead == spec.bead
@@ -1409,6 +1450,8 @@ class SandboxRuntime:
             raise LaunchFailed(BRANCH_TAKEN)
         for other in others:
             if other.wip_mark:
+                if not settle_wip:
+                    raise LaunchFailed(BRANCH_TAKEN)
                 with contextlib.suppress(OSError):          # D13: the WIP it owes lands before anyone else's
                     other = self._settle_wip(self.layout(other.key), other)
                 if other.wip_mark:
