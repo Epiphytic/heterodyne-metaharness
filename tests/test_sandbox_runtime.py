@@ -2986,3 +2986,175 @@ def test_resume_preflight_refuses_unqualified_retained_state(
         monkeypatch.undo()
         write_record(rig.runtime.layout(prior.key), prior)
         rig.runtime.close_manager_control()
+
+
+def test_reconcile_live_and_missing_owner_preserve_original(rig: RuntimeRig) -> None:
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    original = record(rig, spec.session_key)
+    with pytest.raises(RuntimeUnavailable, match="actual manager owner"):
+        rig.runtime.reconcile_session(original)
+    rig.runtime.own_manager_control()
+    try:
+        assert rig.runtime.reconcile_session(original) == "LIVE"
+        assert record(rig, original.key) == original
+        assert not list(rig.runtime.layout(original.key).root.glob("deadline-recovery*"))
+    finally:
+        rig.runtime.close_manager_control()
+
+
+@pytest.mark.parametrize("interruption", ["none", "cleanup", "wip", "receipt-only", "pane-lost"])
+def test_reconcile_deadline_retains_evidence_and_retries_same_operation(
+        rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch, interruption: str) -> None:
+    from heterodyne.sandbox import recovery_evidence
+
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    original = record(rig, spec.session_key)
+    rig.clock.advance(original.deadline - rig.clock())
+    layout = rig.runtime.layout(original.key)
+    assert reaper.mark_live(layout.record, layout.reaped(original.generation), original.sandbox,
+                            original.generation, rig.backend.names, lambda: True, rig.clock)
+    marker = layout.reaped(original.generation).read_bytes()
+    # End only the test executor, retaining its pane as the real deadline reaper does.
+    _, pid = rig.tmux.pane_info(original.tmux_session)
+    os.kill(pid, 9)
+    wait_for(lambda: rig.tmux.pane_dead(original.tmux_session))
+    rig.runtime.own_manager_control()
+    try:
+        if interruption != "none":
+            with monkeypatch.context() as patch:
+                if interruption == "cleanup":
+                    patch.setattr(rig.runtime, "_teardown", lambda *a, **kw: False)
+                elif interruption == "wip":
+                    def failed_wip(*args: Any, **kwargs: Any) -> None:
+                        raise gitwip.GitFailed("injected lifetime WIP failure")
+                    patch.setattr(gitwip, "wip_commit", failed_wip)
+                else:
+                    def failed_phase(*args: Any, **kwargs: Any) -> None:
+                        raise OSError("injected crash after durable evidence")
+                    patch.setattr(rig.runtime, "_phase", failed_phase)
+                with pytest.raises(RuntimeUnavailable):
+                    rig.runtime.reconcile_session(original)
+            interrupted = record(rig, original.key)
+            if interruption == "cleanup":
+                assert interrupted.phase is Phase.STOPPING
+                assert interrupted.wip_mark and interrupted.end_cause == EndCause.LIFETIME
+            elif interruption == "wip":
+                assert interrupted.phase is Phase.ENDED and interrupted.wip_mark
+                assert interrupted.error == WIP_FAILED
+            else:
+                assert interrupted == original
+            if interruption == "pane-lost":
+                rig.tmux.kill(original.tmux_session)
+            # The exact retained receipt, not re-creating a consumed marker, supports continuation.
+            layout.reaped(original.generation).unlink(missing_ok=True)
+        assert rig.runtime.reconcile_session(original) == "ENDED"
+        ended = record(rig, original.key)
+        assert ended.phase is Phase.ENDED and ended.end_cause == EndCause.LIFETIME
+        assert not ended.wip_mark and not ended.unlanded
+        path = layout.root / f"deadline-recovery-r{original.generation}.json"
+        evidence = recovery_evidence.receipt(path.read_bytes(), original, rig.clock())
+        assert bytes.fromhex(evidence.marker) == marker
+        assert "|1|" in evidence.pane
+        assert not layout.reaped(original.generation).exists()
+        assert rig.runtime.reconcile_session(original) == "ENDED"
+        assert record(rig, original.key) == ended
+    finally:
+        rig.runtime.close_manager_control()
+
+
+@pytest.mark.parametrize("fault", ["missing", "wrong-generation", "wrong-sandbox", "extra-key",
+                                 "early", "oversized", "symlink"])
+def test_reconcile_rejects_unproven_death_without_teardown(rig: RuntimeRig, fault: str) -> None:
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    original = record(rig, spec.session_key)
+    rig.clock.advance(original.deadline - rig.clock())
+    layout = rig.runtime.layout(original.key)
+    marker = layout.reaped(original.generation)
+    data = {"sandbox": original.sandbox, "generation": original.generation,
+            "at": original.deadline}
+    if fault == "wrong-generation":
+        data["generation"] = original.generation + 1
+    if fault == "wrong-sandbox":
+        data["sandbox"] = original.sandbox + "wrong"
+    if fault == "extra-key":
+        data["extra"] = "unexpected"
+    if fault == "early":
+        data["at"] = original.deadline - 1
+    if fault == "symlink":
+        target = layout.root / "fake-marker"
+        target.write_text(json.dumps(data))
+        marker.symlink_to(target)
+    elif fault != "missing":
+        marker.write_text("x" * 4097 if fault == "oversized" else json.dumps(data))
+    _, pid = rig.tmux.pane_info(original.tmux_session)
+    os.kill(pid, 9)
+    wait_for(lambda: rig.tmux.pane_dead(original.tmux_session))
+    rig.runtime.own_manager_control()
+    try:
+        with pytest.raises(RuntimeUnavailable):
+            rig.runtime.reconcile_session(original)
+        assert record(rig, original.key) == original
+        assert original.sandbox in rig.backend.names()
+        assert rig.tmux.has_session(original.tmux_session)
+        assert not list(layout.root.glob("deadline-recovery*"))
+    finally:
+        marker.unlink(missing_ok=True)
+        rig.runtime.close_manager_control()
+
+
+@pytest.mark.parametrize("guard", ["resolve", "sibling", "identity", "owner-lost"])
+def test_reconcile_guards_hold_before_receipt_or_teardown(
+        rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch, guard: str) -> None:
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    original = record(rig, spec.session_key)
+    expected = original
+    rig.runtime.own_manager_control()
+    try:
+        if guard == "resolve":
+            def held(**kwargs: Any) -> None:
+                raise RuntimeUnavailable("retained resolve intent")
+            monkeypatch.setattr(rig.runtime, "_held", held)
+        elif guard == "sibling":
+            other = msgspec.structs.replace(original, key="00000000-0000-4000-8000-000000000001")
+            write_record(rig.runtime.layout(other.key), other)
+        elif guard == "identity":
+            expected = msgspec.structs.replace(original, generation=original.generation + 1)
+        else:
+            def lost() -> set[str]:
+                rig.runtime.close_manager_control()
+                return rig.backend.names()
+            monkeypatch.setattr(rig.runtime, "_names", lost)
+        with pytest.raises(RuntimeUnavailable):
+            rig.runtime.reconcile_session(expected)
+        assert record(rig, original.key) == original
+        assert original.sandbox in rig.backend.names()
+        assert rig.tmux.has_session(original.tmux_session)
+        assert not list(rig.runtime.layout(original.key).root.glob("deadline-recovery*"))
+    finally:
+        rig.runtime.close_manager_control()
+
+
+def test_reconcile_never_ends_live_pane_when_backend_is_missing(
+        rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch) -> None:
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    original = record(rig, spec.session_key)
+    rig.clock.advance(original.deadline - rig.clock())
+    layout = rig.runtime.layout(original.key)
+    assert reaper.mark_live(layout.record, layout.reaped(original.generation), original.sandbox,
+                            original.generation, rig.backend.names, lambda: True, rig.clock)
+    rig.runtime.own_manager_control()
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(rig.runtime, "_names", set)
+            with pytest.raises(RuntimeUnavailable, match="dead-pane evidence"):
+                rig.runtime.reconcile_session(original)
+        assert record(rig, original.key) == original
+        assert not rig.tmux.pane_dead(original.tmux_session)
+        assert not list(layout.root.glob("deadline-recovery*"))
+    finally:
+        rig.runtime.close_manager_control()

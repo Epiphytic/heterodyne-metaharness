@@ -1,0 +1,9 @@
+# Second full review and bounded source clearance
+
+Frozen source: 3a90c0a46cc7f471eaf85574f711f8bf015f7776; baseline 7caddc295080c3ed89add7d89efdcd1bdc466d0f. Actual second full HIGH built-in /code-review completed 2026-11-03T21:25:25Z, exit 0, 75 events. Exposed model claude-opus-5-5; HIGH configured in CLI, settings and environment, recipe HIGH reported; internal effort not exposed. The reviewer consumed the built-in recipe and reports executing its eight angles directly, without a separate nested Skill call. No second validation review is claimed.
+
+Actual verdict: clearance for the bounded source, no blockers at this head. Nine advisories remain in the unabridged report. In particular Hermes wiring MUST serialize reconciliation against Product expire/stop/sessions and requalify native authority before effects. This source has no deployed caller and does not establish that serialization. The retained-dead-reaper cleanup gap, receipt-tail retention, additional negative test combinations, diagnostics and refactoring advisories remain explicit limitations, not represented as fixed.
+
+Author verification on this exact source: all 342 sandbox runtime tests passed in 173.70 seconds; 18 targeted reconciliation cases passed; Ruff passed; Pyright zero errors/warnings. Reviewer independently ran 18 cases successfully. Ripwire quality delta reports runtime size/complexity/churn and a private end-parameter addition; it is not reported green. Raw evidence stays in the durable hourly handoff directory. Published metadata only normalizes operator home paths.
+
+No live deployment, native enrollment, task owner change, pending input delivery, or original UNKNOWN replay occurred. Separate exact-artifact deployment approval and live gates remain required. Previous preflight review history is unchanged. No third review is needed for the cleared bounded source.
