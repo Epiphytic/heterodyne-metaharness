@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import uuid
 from pathlib import Path
 from unittest.mock import patch
@@ -214,8 +215,9 @@ def test_cross_process_observer_does_not_rebind_or_unlink_owner_socket(tmp_path,
 from types import SimpleNamespace
 from heterodyne.sandbox.runtime import SandboxRuntime
 from heterodyne.session.server import SessionServer
-import sys
+import sys, threading
 r=SandboxRuntime.__new__(SandboxRuntime)
+r.lifecycle_lock=threading.RLock()
 r.c=SimpleNamespace(sessions=Path(sys.argv[1]),
  tmux=SimpleNamespace(has_session=lambda _:True,pane_dead=lambda _:False))
 r.backend=SimpleNamespace(names=lambda:{'fixture-sandbox'})
@@ -239,6 +241,7 @@ def test_actual_runtime_server_only_enables_manager_journal(tmp_path, owner, rol
 
     from heterodyne.sandbox.runtime import Phase, SandboxRuntime, SessionRecord
     runtime = SandboxRuntime.__new__(SandboxRuntime)
+    runtime.lifecycle_lock = threading.RLock()
     runtime.c = SimpleNamespace(sessions=tmp_path/'sessions')
     runtime.manager_owner = owner
     rec = SessionRecord(key=role, ws='build', bead='btq-'+role, role=role, profile='codex',
@@ -318,6 +321,7 @@ def test_runtime_owner_release_waits_for_all_handlers(tmp_path):
 
     from heterodyne.sandbox.runtime import SandboxRuntime
     runtime = SandboxRuntime.__new__(SandboxRuntime)
+    runtime.lifecycle_lock = threading.RLock()
     runtime.c = SimpleNamespace(sessions=tmp_path/'sessions')
     runtime.manager_owner = None
     runtime.servers = {}
@@ -426,6 +430,7 @@ def test_closed_manager_owner_does_not_break_worker_socket_and_manager_error_is_
 
     from heterodyne.sandbox.runtime import Phase, RuntimeUnavailable, SandboxRuntime, SessionRecord
     runtime = SandboxRuntime.__new__(SandboxRuntime)
+    runtime.lifecycle_lock = threading.RLock()
     runtime.c = SimpleNamespace(sessions=tmp_path/'sessions')
     runtime.manager_owner = owner
     owner.close()
@@ -457,6 +462,7 @@ def test_reacquired_owner_can_rebind_previously_closed_socket(tmp_path):
 
     from heterodyne.sandbox.runtime import SandboxRuntime
     runtime = SandboxRuntime.__new__(SandboxRuntime)
+    runtime.lifecycle_lock = threading.RLock()
     runtime.c = SimpleNamespace(sessions=tmp_path/'sessions')
     runtime.manager_owner = None
     runtime.servers = {'closed': Mock(active=0)}
@@ -482,6 +488,7 @@ def test_ended_observer_translates_uncertain_tmux_failure(tmp_path):
         write_record,
     )
     runtime = SandboxRuntime.__new__(SandboxRuntime)
+    runtime.lifecycle_lock = threading.RLock()
     runtime.c = SimpleNamespace(sessions=tmp_path/'sessions',tmux=Mock())
     runtime.backend = SimpleNamespace(names=lambda: set())
     rec = SessionRecord(key='ended',ws='build',bead='btq-x',role='worker',profile='codex',
@@ -551,6 +558,7 @@ def test_shutdown_busy_server_removed_from_rebind_cache_but_owner_retained(tmp_p
 
     from heterodyne.sandbox.runtime import RuntimeUnavailable, SandboxRuntime
     runtime = SandboxRuntime.__new__(SandboxRuntime)
+    runtime.lifecycle_lock = threading.RLock()
     runtime.c = SimpleNamespace(sessions=tmp_path/'sessions')
     runtime.manager_owner = None
     runtime.servers = {}
