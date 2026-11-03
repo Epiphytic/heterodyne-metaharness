@@ -1,0 +1,11 @@
+# Round two disposition: bounded source cleared
+
+Actual built-in /code-review high completed2026-11-03T20:05:02.185569Z, exit0,49 stream events, claude-opus-5-5. Frozen head20ce906f4ec6cb071949d06cddc0e0577853ecd8 against d600e5df3a4e645ce52838841486dbc243f80102. Explicit verdict: bounded source CLEARED, no blockers, two required fixes before any production wiring. Actual first review and its effort discrepancy remain preserved; no round reset or validation-only third review.
+
+Effort provenance: CLI --effort high and process-local CLAUDE_CODE_EFFORT_LEVEL=high; reviewer independently observed the environment HIGH and parent command. Its internal effective setting is not exposed and is not fabricated. Global effort setting was observed medium and not changed. Review is accepted as the configured full HIGH invocation with this exposure limit retained. No extra review solely to validate this result.
+
+Reviewer independently ran50selectedtestsPASS(75.87s) and three temporary probes, removed probes and verified clean tree. It confirmed typed owner refusals, bounds/migration holds, helper cycle removal, finally cleanup and readonly branch refusal. Its full ten findings remain verbatim in round2-report.md (report contains duplicated assistant/result text from actual stream, intentionally retained).
+
+No production caller is wired. Mandatory before wiring, carried into the immediately following exact-session recovery integration: (1) ENDED records must independently refuse any live sandbox/pane, without calling broad sessions(ws); (3) commit a normal ended-generation positive test. Accepted bounded-source advisories2/4-10 concern distinct RUNNING death proof, external retained account/model pins, create-ledger qualification, duplicate medium verification, disclosed integrity taints/alerts, mismatch diagnostics, owner-check duplication, and parameter-specific test messages. The integration must preserve these distinct gates; bounded clearance is not end/launch permission.
+
+Source merge is authorized under standing operator policy. No deployment approval, native transition, executor recovery or actual admin Codex execution acceptance is claimed. Original owners/WIP and UNKNOWN effects remain untouched.

@@ -1,0 +1,33 @@
+{
+  "command": [
+    "claude",
+    "-p",
+    "--settings",
+    "{\"disableAllHooks\":true,\"effortLevel\":\"high\"}",
+    "--model",
+    "opus",
+    "--effort",
+    "high",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--dangerously-skip-permissions",
+    "--tools",
+    "Read,Bash,Skill",
+    "--strict-mcp-config",
+    "--mcp-config",
+    "{\"mcpServers\":{}}",
+    "--",
+    "/code-review high FULL second code review of repaired Product retained-resume preflight. Use the actual built-in recipe at high effort. Frozen head20ce906 in ${OPERATOR_HOME}/repos/heterodyne-exact-session-reconcile-20261103 against baseline d600e5df3a4e645ce52838841486dbc243f80102. Read full cumulative source diff and docs/reviews/2026-11-03-owner-recovery-preflight/qualification.md and round1-disposition.md. The first review explicitly cleared bounded source with ten advisories, but reported LOW despite --effort high; its actual report/count is preserved and not accepted as mandatory HIGH. This is substantive full round TWO after actual source repairs, not a validation-only replay. Environment CLAUDE_CODE_EFFORT_LEVEL=high and settings effortLevel=high plus --effort high are explicitly configured for this process, not global policy. Report actual exposed effective effort and model honestly; if not exposed say so rather than guessing. Do not claim effort based solely on prompt. Repairs include typed owner failures, sandbox generation validation, readonly legacy create-ledger hold, no helper import cycle, finally owner cleanup, actual refusal reasons and additional identity/bounds/owner failure tests. Fifty selected runtime tests pass; pyright0errors0warnings andRuffPASS. Actual ripwire maintenance regressions are disclosed, not green. This is preliminary readonly Product qualification, not complete recovery: no production caller wired, no native approval admission/death proof/private-tip ancestry/installer, RUNNING allowed for observation only, failed-before-running generation intentionally excluded. Account/model are not stored in SessionRecord and must be independently checked against retained Hermes launch/profile/account/model pins before end. Existing install integrity may retain alerts/taints and credential lock is temporary/no refresh. Assess correctness/security/compatibility/tests and give explicit bounded-source clearance or concrete blockers, with advisories separately. No source modifications/commits/DB/config/services/asks/deployment/live-managed-tmux actions. Safe isolated tests use PYTHONPATH=src ${OPERATOR_HOME}/repos/heterodyne-metaharness-v2/.venv/bin/python -m pytest tests/test_sandbox_runtime.py -k 'resume_preflight or typed_reasoning or reasoning_resume or medium_resume or unqualified_resume or branch' -q. This is actual code round2, separate from pairedDolt rounds and settleddesign daf3; do not reset history or request a design review. Stop after actual full review."
+  ],
+  "cwd": "${OPERATOR_HOME}/repos/heterodyne-exact-session-reconcile-20261103",
+  "head": "20ce906",
+  "base": "d600e5df3a4e645ce52838841486dbc243f80102",
+  "round": 2,
+  "reasoning_requested": "high",
+  "process_effort_environment": {
+    "CLAUDE_CODE_EFFORT_LEVEL": "high"
+  },
+  "started_at": "2026-11-03T20:00:17.313937+00:00",
+  "publication_note": "Published copy replaces host home prefix; unmodified launch receipt remains in controller durable handoff directory."
+}
