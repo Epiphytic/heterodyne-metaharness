@@ -1,0 +1,9 @@
+# Actual round THREE and critical repair
+
+Actual Opus review exit0/51events, exposedclaude-opus-5-5. CLI,settings,environment MEDIUM with exact operator PoC question; reviewer internal effort unexposed and ambient recipe reported a historical high rubric. Preserve that uncertainty; no actual unexposed setting claim. Review blocked on five manager-control tests constructing SandboxRuntime via __new__ without its new lifecycle lock. Production concurrency design cleared for PoC, other advisories retained.
+
+Repair initializes the RLock in all seven skeletal runtime fixtures, including actual cross-process observer script. No lazy unlocked production fallback: all normally initialized runtimes still require their initialized lock. Original348 runtime tests passed188.67s; now testing manager control and wider suite. Followup review uses the same MEDIUM exact PoC question under operator-authorized critical repair path, not a budget reset or a new permission request.
+
+Advisories remain: global lock blocks other lanes during bounded launch/poll/walk operations; original reapers remain independent deadline backstop. An expiry that wins before a retained receipt conservatively holds. Hermes must reconcile through its actual single owning runtime, not create another owner. No deployment/live recovery claimed.
+
+Repair qualification: all56 manager-control tests pass1.66s, Ruff passes. Full repository suite was attempted (-n4, maxfail15); collection stops with16errors9.26s because this environment fcntl lacks F_SEAL_WRITE (deployment_admission_peer.py import). The unchanged baseline b82e01d has the identical _SEALS import; both current interpreters expose the same missing fcntl constants. This is not an all-suite pass or a complete baseline suite comparison. The actual logs are retained durably. No compatibility/trust fallback added.

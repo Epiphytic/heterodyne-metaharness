@@ -8,6 +8,7 @@ RuntimeUnavailable or LaunchUncertain, never assumed absent."""
 import contextlib
 import dataclasses
 import errno
+import functools
 import json
 import logging
 import os
@@ -22,7 +23,7 @@ from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Concatenate
 
 import msgspec
 
@@ -313,11 +314,27 @@ class RuntimeConfig:
     adapters: Mapping[str, Adapter] = field(default_factory=lambda: ADAPTERS)
 
 
+def _lifecycle[**P, R](
+        method: Callable[Concatenate["SandboxRuntime", P], R],
+) -> Callable[Concatenate["SandboxRuntime", P], R]:
+    """Serialize public lifecycle operations, including their check-through-write interval.
+
+    The manager's process owner remains mandatory; this lock only coordinates its threads.
+    Session hook callbacks take queue_lock alone, so closing their server cannot invert this lock.
+    """
+    @functools.wraps(method)
+    def wrapper(self: "SandboxRuntime", *args: P.args, **kwargs: P.kwargs) -> R:
+        with self.lifecycle_lock:
+            return method(self, *args, **kwargs)
+    return wrapper
+
+
 class SandboxRuntime:
     def __init__(self, config: RuntimeConfig, backend: Backend, selftest: SelfTest) -> None:
         self.c = config
         self.backend = backend
         self.selftest = selftest
+        self.lifecycle_lock = threading.RLock()
         self._closing_manager_servers: list[SessionServer] = []
         self.manager_owner: ControlOwner | None = None
         self.servers: dict[str, SessionServer] = {}      # key -> its running generation's socket
@@ -334,6 +351,7 @@ class SandboxRuntime:
         self.walked: dict[tuple[str, str], int] = {}      # (adapter, install) -> when its last walk passed
         self.walk_lock = threading.Lock()                  # one taint walk at a time: expire's and the ends'
 
+    @_lifecycle
     def own_manager_control(self) -> None:
         """Acquire actual install-wide daemon ownership before qualified lifecycle work."""
         if any(server.active for server in getattr(self, "_closing_manager_servers", [])):
@@ -342,6 +360,7 @@ class SandboxRuntime:
             self.manager_owner = ControlOwner(self.c.sessions.parent / "hermes-manager-owner")
         self.manager_owner.check()
 
+    @_lifecycle
     def close_manager_control(self) -> None:
         if self.manager_owner is not None:
             closing = list(self.servers.values())
@@ -502,6 +521,7 @@ class SandboxRuntime:
         except (*TMUX_ERRORS, OSError, BackendError, BackendUnavailable):
             raise RuntimeUnavailable("create protection can't be confirmed") from None
 
+    @_lifecycle
     def settle_sandbox(self, ws: str, sid: str, generation: int) -> str:
         """Host operator accepts the remaining late-create risk after linger and an absent listing."""
         if not SHORT_ID.fullmatch(sid) or generation <= 0:
@@ -535,6 +555,7 @@ class SandboxRuntime:
     def available(self) -> bool:
         return self.backend.available()
 
+    @_lifecycle
     def observe_session(self, key: str) -> SessionRecord | None:
         """Non-owning observation: no restore, socket rebind, cleanup or journal write."""
         layout = self.layout(key)
@@ -557,6 +578,7 @@ class SandboxRuntime:
             raise RuntimeUnavailable("the session changed during observation")
         return rec
 
+    @_lifecycle
     def reconcile_session(self, expected: SessionRecord) -> str:
         """Exact owner-only deadline ending: LIVE, ENDED, or a RuntimeUnavailable hold.
 
@@ -660,6 +682,7 @@ class SandboxRuntime:
             raise RuntimeUnavailable("the recovery changed during completion observation")
         return "ENDED"
 
+    @_lifecycle
     def sessions(self, ws: str) -> list[Session]:
         self._restore_creates(ws=ws)
         try:
@@ -691,6 +714,7 @@ class SandboxRuntime:
                 raise self._unlanded(rec)
         return listed
 
+    @_lifecycle
     def launch(self, spec: LaunchSpec) -> Started:
         adapter = self.c.adapters.get(self.c.accounts.adapter(spec.profile) or "")
         if adapter is None:
@@ -778,6 +802,7 @@ class SandboxRuntime:
                     return
             raise LaunchFailed("typed Codex reasoning on native resume is not qualified")
 
+    @_lifecycle
     def preflight_resume(self, spec: LaunchSpec, expected: SessionRecord) -> None:
         """Observe retained Product resume gates; never end, settle WIP or launch.
 
@@ -832,6 +857,7 @@ class SandboxRuntime:
         if self.manager_owner is not owner or read_record(layout) != expected:
             raise RuntimeUnavailable("the retained resume record or owner changed during preflight")
 
+    @_lifecycle
     def stop(self, session_key: str) -> None:
         layout = self.layout(session_key)
         rec = read_record(layout)
@@ -846,6 +872,7 @@ class SandboxRuntime:
         if rec is not None and rec.unlanded:
             raise self._unlanded(rec)            # ended, but its caller must not commit over it
 
+    @_lifecycle
     def expire(self, ws: str, now: int) -> None:
         """D13: `_end(..., lifetime=True)` makes the stop durable, lands the generation's commits and then
         the WIP; this only decides when, and replays what a crash left owed. An unlanded session's mark
@@ -882,6 +909,7 @@ class SandboxRuntime:
         if failed:
             raise RuntimeUnavailable(failed[0])
 
+    @_lifecycle
     def signals(self, ws: str) -> list[Signal]:
         """E8: what the workstream's sessions reported since the last call, oldest first, then its notices
         (B1: taints, cleared exec dirs), each once. Each running session's usage read is run first when it
@@ -896,6 +924,7 @@ class SandboxRuntime:
         with self.queue_lock:
             return [*self.queued.pop(ws, []), *self.notices.pop(ws, {}).values()]
 
+    @_lifecycle
     def ended(self, session_key: str) -> Ended | None:
         """g08sd: the latest generation's end, from its record (`_end_of`)."""
         rec = read_record(self.layout(session_key))
@@ -1716,6 +1745,7 @@ class SandboxRuntime:
         except (gitwip.GitFailed, OSError):
             raise ResolveFailed("the snapshot store can't be made") from None
 
+    @_lifecycle
     def unlanded(self, ws: str) -> list[UnlandedView]:
         views: list[UnlandedView] = []
         for rec in self._records():
@@ -1747,6 +1777,7 @@ class SandboxRuntime:
                                    fast_forward=cmp.behind == 0,
                                    subjects=tuple(printable(raw) for raw in cmp.subjects))
 
+    @_lifecycle
     def resolve_unlanded(self, ws: str, sid: str, generation: int, action: Action,
                          tip: str | None) -> Resolution:
         if not SHORT_ID.fullmatch(sid):
@@ -1905,6 +1936,7 @@ class SandboxRuntime:
         return Resolution(intent.ws, intent.bead, sid, gen, intent.action, intent.tip, intent.ref, intent.key,
                           _intent_end(intent))
 
+    @_lifecycle
     def finish_resolution(self, ws: str, sid: str, generation: int) -> None:
         intent = self._read_intent(sid, generation)
         if intent is None:
