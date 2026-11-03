@@ -1,0 +1,32 @@
+{
+  "command": [
+    "claude",
+    "-p",
+    "--settings",
+    "{\"disableAllHooks\": true, \"effortLevel\": \"medium\"}",
+    "--model",
+    "opus",
+    "--effort",
+    "medium",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--dangerously-skip-permissions",
+    "--tools",
+    "Read,Bash,Skill",
+    "--strict-mcp-config",
+    "--mcp-config",
+    "{\"mcpServers\":{}}",
+    "--",
+    "/code-review Are there any critical flaws with this, or is this good enough to implement as a PoC? Operator-authorized critical repair followup after round THREE, MEDIUM reasoning; preserve review counts. Historical built-in high-angle rubric does not supersede this user PoC scope. Review frozen Product head 4facc5ab04ddbe6432ed6df81280462f5091bc00 against merged baseline b82e01d6a42ef7b9268297cde9ebe096baac1cda in ${OPERATOR_HOME}/repos/heterodyne-exact-session-reconcile-20261103. Use built-in /code-review. Preserve two actual HIGH reviews in docs/reviews/2026-11-03-exact-deadline-reconciliation; no review count reset. This implements round2 concurrency advisory before wiring: typed lifecycle decorator and shared RLock serialize public checks through writes, owner release, expiry, stop, launch, restoration and resolution; report-only hook callback does not take lifecycle lock. Read serialization-qualification.md. 24 targeted tests and all348 runtime tests pass; critical B1 fixture repair now all56 manager-control tests pass. Read serialization-round3-report/disposition: seven skeletal __new__ fixtures initialize RLock, no production fallback. Full suite attempted stops16 collection errors due environment fcntl.F_SEAL_WRITE missing, identical import in unchanged baseline, no all-suite green. Source/runtime tests Pyright0; manager-control skeletal fixture baseline diagnostics being compared separately. Quality delta class-size/decorator similarity disclosed. Find critical correctness/deadlock/missed-writer/compatibility issues, explicit source clearance or critical blockers, advisories separate. No deployment, no native authority granted and no recovery IPC/installer wired yet. Do not edit source, commit, touch live tmux/DB/service/config, ask approvals, spawn an author, or validate this review. Safe isolated test: PYTHONPATH=src ${OPERATOR_HOME}/repos/heterodyne-metaharness-v2/.venv/bin/python -m pytest tests/test_sandbox_runtime.py -k deadline_reconciliation_serializes -q. CLI/settings/env request medium; report actual exposed model and unexposed internal effort honestly."
+  ],
+  "cwd": "${OPERATOR_HOME}/repos/heterodyne-exact-session-reconcile-20261103",
+  "head": "4facc5ab04ddbe6432ed6df81280462f5091bc00",
+  "base": "b82e01d6a42ef7b9268297cde9ebe096baac1cda",
+  "round": 3,
+  "reasoning_requested": "medium",
+  "process_effort_environment": {
+    "CLAUDE_CODE_EFFORT_LEVEL": "medium"
+  },
+  "started_at": "2026-11-03T22:03:12.660269+00:00"
+}
