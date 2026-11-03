@@ -2768,6 +2768,50 @@ def test_resume_preflight_does_not_acquire_missing_owner(rig: RuntimeRig) -> Non
     assert rig.runtime.manager_owner is None and record(rig, spec.session_key) == prior
 
 
+def test_resume_preflight_qualifies_normally_ended_generation(rig: RuntimeRig) -> None:
+    spec = launch_spec(rig, "p-one")
+    first = rig.runtime.launch(spec)
+    rig.runtime.stop(spec.session_key)
+    expected = record(rig, spec.session_key)
+    assert expected.phase is Phase.ENDED
+    retained = rig.runtime.layout(expected.key).record.read_bytes()
+    head = gitwip.git(rig.worktree, "rev-parse", "HEAD")
+    rig.runtime.own_manager_control()
+    try:
+        rig.runtime.preflight_resume(replace(spec, generation=2, resume=True,
+                                             native_id=first.native_id), expected)
+        assert rig.runtime.layout(expected.key).record.read_bytes() == retained
+        assert gitwip.git(rig.worktree, "rev-parse", "HEAD") == head
+        assert not rig.tmux.has_session(expected.tmux_session)
+    finally:
+        rig.runtime.close_manager_control()
+
+
+@pytest.mark.parametrize("live_resource", ["pane", "sandbox"])
+def test_resume_preflight_refuses_ended_live_resources(
+        rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch, live_resource: str) -> None:
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    prior = record(rig, spec.session_key)
+    expected = msgspec.structs.replace(prior, phase=Phase.ENDED)
+    layout = rig.runtime.layout(prior.key)
+    write_record(layout, expected)
+    retained = layout.record.read_bytes()
+    if live_resource == "pane":
+        monkeypatch.setattr(rig.runtime, "_names", set)
+    else:
+        rig.tmux.kill(prior.tmux_session)
+    rig.runtime.own_manager_control()
+    try:
+        with pytest.raises(RuntimeUnavailable, match="ended session still has live resources"):
+            rig.runtime.preflight_resume(replace(spec, generation=2, resume=True), expected)
+        assert layout.record.read_bytes() == retained
+    finally:
+        monkeypatch.undo()
+        write_record(layout, prior)
+        rig.runtime.close_manager_control()
+
+
 @pytest.mark.parametrize("field,value", [("generation", 1), ("generation", 3),
     ("native_id", "00000000-0000-4000-8000-000000000000"), ("profile", "p-two"),
     ("ws", "another"), ("bead", "btq-other"), ("role", "reviewer"),

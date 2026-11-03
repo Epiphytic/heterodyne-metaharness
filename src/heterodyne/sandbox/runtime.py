@@ -698,6 +698,8 @@ class SandboxRuntime:
             raise LaunchFailed(str(exc)) from None
         if not expected.create_ledger:
             raise RuntimeUnavailable("resume preflight requires retained create-ledger migration")
+        if expected.phase is Phase.ENDED and self.observe_session(expected.key) != expected:
+            raise RuntimeUnavailable("the ended resume record changed during observation")
         self._held(ws=expected.ws, key=expected.key)
         if expected.unlanded:
             raise self._unlanded(expected)
