@@ -1,0 +1,88 @@
+{
+  "observed_at": "2026-11-03T07:58:39.028063+00:00",
+  "method": "installed codex app-server generate-json-schema; no model turn or live service mutation",
+  "binary_version": "0.166.0",
+  "schema_root": "<LOCAL_SCHEMA_OUTPUT>",
+  "schemas": {
+    "ThreadStartParams": {
+      "path": "v2/ThreadStartParams.json",
+      "sha256": "e9c6d3cc18d049bfbc0249add3808fb8e5a27e1a0b5a423767aafbc3859a9428",
+      "fields": [
+        "approvalPolicy",
+        "approvalsReviewer",
+        "baseInstructions",
+        "config",
+        "cwd",
+        "developerInstructions",
+        "ephemeral",
+        "model",
+        "modelProvider",
+        "personality",
+        "sandbox",
+        "serviceName",
+        "serviceTier",
+        "sessionStartSource",
+        "threadSource"
+      ]
+    },
+    "ThreadStartResponse": {
+      "path": "v2/ThreadStartResponse.json",
+      "sha256": "c655daa1616548f6b3b0960acee9dcfefa8aba5965ec4fc636c84ee840a8626a",
+      "fields": [
+        "approvalPolicy",
+        "approvalsReviewer",
+        "cwd",
+        "disabledPluginIds",
+        "instructionSources",
+        "model",
+        "modelProvider",
+        "reasoningEffort",
+        "sandbox",
+        "serviceTier",
+        "thread"
+      ]
+    },
+    "TurnStartParams": {
+      "path": "v2/TurnStartParams.json",
+      "sha256": "49e53282f327c25e7b39d97afacd038ef10ad5c4fb0431608b354d3a7bf6bcea",
+      "fields": [
+        "approvalPolicy",
+        "approvalsReviewer",
+        "clientUserMessageId",
+        "cwd",
+        "disabledPluginIds",
+        "effort",
+        "input",
+        "model",
+        "outputSchema",
+        "parentTurnId",
+        "personality",
+        "rootTurnId",
+        "sandboxPolicy",
+        "serviceTier",
+        "serviceTierForTurn",
+        "summary",
+        "threadId",
+        "toolOutput",
+        "turnTrigger"
+      ]
+    },
+    "TurnStartResponse": {
+      "path": "v2/TurnStartResponse.json",
+      "sha256": "85da8d16c86432da14440504ae1e76d13527058920d4ed81632dd50c3fbd054d",
+      "fields": [
+        "turn"
+      ]
+    },
+    "TurnCompletedNotification": {
+      "path": "v2/TurnCompletedNotification.json",
+      "sha256": "e9a5e3bcddaeee04afc60abafbbdcb5b0a531b5578db573fcacdd1477565bd0a",
+      "fields": [
+        "threadId",
+        "turn"
+      ]
+    }
+  },
+  "publication_note": "Host-specific paths normalized to role placeholders for install-agnostic repository policy. Original exact metadata retained in durable controller handoff.",
+  "original_metadata_sha256": "0daf79455303b88442619b5a2fd3d758a83ee5c438ae2921d0a96416833d7c6b"
+}

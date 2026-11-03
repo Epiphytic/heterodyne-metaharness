@@ -1,0 +1,32 @@
+{
+  "command": [
+    "claude",
+    "-p",
+    "--settings",
+    "{ \"disableAllHooks\": true }",
+    "--model",
+    "opus",
+    "--effort",
+    "high",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--dangerously-skip-permissions",
+    "--tools",
+    "Read,Bash",
+    "--strict-mcp-config",
+    "--mcp-config",
+    "{ \"mcpServers\": {} }",
+    "--add-dir",
+    "<CONTROLLER_HANDOFF>",
+    "--",
+    "Perform exactly ONE independent Claude Opus HIGH design review of frozen commit ee3cb01 docs/designs/2026-11-03-host-admin-codex-migration.md against current source in this worktree at Product dcb6df07 main. Read <CONTROLLER_HANDOFF>/admin-codex-yolo-directive-20261103.md for explicit operator choice. No subagents, second review/validation, edits, service/database/queue mutations, config changes or live model calls. Inspect actual source seams for feasible minimal host admind Codex app-server integration, issued-before-effect migration, native thread/turn policy and prompt/reply correlation, separate Claude summarizer, preservation of unknown in-flight inputs and fixed operator yolo choice. Do not demand repeated operator model/permission choice. Distinguish concrete critical design flaws from PoC advisories, give actionable source-grounded corrections. Author incorporates once then seeks separate human design approval; no code/deployment clearance. Existing owner-deadline and host bridge designs are preserved separate work."
+  ],
+  "cwd": "<AUTHOR_WORKTREE>",
+  "design_commit": "ee3cb01",
+  "reasoning": "high",
+  "review_count": 1,
+  "started_at": "2026-11-03T07:57:47.217640+00:00",
+  "publication_note": "Host-specific paths normalized to role placeholders for install-agnostic repository policy. Original exact metadata retained in durable controller handoff.",
+  "original_metadata_sha256": "906da88f92b66a118e3021c2985e5fdf2cefff97410a8364cb04e1747994cebf"
+}
