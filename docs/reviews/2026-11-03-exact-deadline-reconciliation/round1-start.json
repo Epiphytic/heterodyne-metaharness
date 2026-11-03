@@ -1,0 +1,32 @@
+{
+  "command": [
+    "claude",
+    "-p",
+    "--settings",
+    "{\"disableAllHooks\": true, \"effortLevel\": \"high\"}",
+    "--model",
+    "opus",
+    "--effort",
+    "high",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--dangerously-skip-permissions",
+    "--tools",
+    "Read,Bash,Skill",
+    "--strict-mcp-config",
+    "--mcp-config",
+    "{\"mcpServers\": {}}",
+    "--",
+    "/code-review high FULL first independent code review of the NEW exact Product deadline reconciliation operation. Actual built-in /code-review required. Frozen head c4e420f against baseline 7caddc295080c3ed89add7d89efdcd1bdc466d0f in ${OPERATOR_HOME}/repos/heterodyne-exact-session-reconcile-20261103. Read the cumulative diff and docs/reviews/2026-11-03-exact-deadline-reconciliation/qualification.md, plus the approved owner design in ${OPERATOR_HOME}/repos/hermes-dolt-connection-20261103/docs/designs/2026-11-03-owner-deadline-recovery.md. Review correctness/security/exact identity, owner checks, marker/dead-pane evidence, durable receipt before end effects, crash continuation, WIP/private-Git/late-create gates, tests and compatibility. Give explicit bounded-source clearance or concrete blockers, separating noncritical advisories. This is a new implementation slice, first full HIGH code review. Prior PR160/161 preflight three-round history remains real and must not be reset or presented as coverage of this code. All normal full reviews use configured high; report actual exposed model/effort honestly, unexposed internal effort is unexposed. High is set by CLI, settings and environment, not merely this prompt. No source edits/commits, native DB/config/service/approval operations, live tmux, deployment or second author. Safe isolated tests: PYTHONPATH=src ${OPERATOR_HOME}/repos/heterodyne-metaharness-v2/.venv/bin/python -m pytest tests/test_sandbox_runtime.py -k 'reconcile_' -q. Ten cases passed before final stricter identity validation; full 334 runtime suite currently running independently. Static pyright/ruff checks are being retained. Ripwire class verbosity and duplicate-shaped tmux observations are disclosed, not green. This API intentionally is not wired to a live caller; Hermes must first qualify native admission/profile/account/model/ancestry and retain ending/send fences. Full installer/postlaunch enrollment/admin migration remains separate engineering/deployment work, not claimed complete. No new design review needed: daf3 exact design approved and merged. Stop after one actual full review, not a review-validation rerun."
+  ],
+  "cwd": "${OPERATOR_HOME}/repos/heterodyne-exact-session-reconcile-20261103",
+  "head": "c4e420f",
+  "base": "7caddc295080c3ed89add7d89efdcd1bdc466d0f",
+  "round": 1,
+  "reasoning_requested": "high",
+  "process_effort_environment": {
+    "CLAUDE_CODE_EFFORT_LEVEL": "high"
+  },
+  "started_at": "2026-11-03T21:12:08.723522+00:00"
+}

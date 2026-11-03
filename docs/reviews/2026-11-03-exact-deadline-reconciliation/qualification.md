@@ -11,3 +11,7 @@ Hermes caller wiring remains separate work: durable ending and launch fences, re
 Ten isolated runtime integration cases passed on the initial implementation, including LIVE/missing-owner, successful retained-evidence ending, receipt-only crash, partial cleanup, WIP failure and malformed marker holds. Full runtime tests and final static checks are running for the frozen candidate; their actual results will be appended. No live managed executor was touched by tests.
 
 Ripwire quality-delta is explicitly not green: it flags increased verbosity in the existing SandboxRuntime class and structural similarity between the two closed tmux pane observations; the new orchestration is 93 lines with cognitive complexity 40. Evidence decoding is a separate pure module. These are disclosed maintenance concerns for the real reviewer, not silently suppressed or hidden by moving private orchestration outside the runtime. Pytest callbacks marked dead by static analysis are actually exercised.
+
+## Actual first qualification and repaired candidate
+
+The full initial runtime suite completed: **334 passed in 168.99 seconds**, four isolated pytest workers. After incorporating the first real review, the repaired candidate passed **18 targeted reconciliation cases in 25.41 seconds**, Ruff, and Pyright with zero errors/warnings. The first report and explicit disposition are preserved alongside this document. The repaired full suite and second full HIGH review are next; neither result is inferred from the initial run. The source remains undeployed.

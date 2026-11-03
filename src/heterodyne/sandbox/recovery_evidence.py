@@ -5,13 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 import stat
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import msgspec
 
+from heterodyne.tmux import DEAD_PANE
 from heterodyne.wsd.runtime import RuntimeUnavailable
 
 if TYPE_CHECKING:
@@ -73,7 +73,7 @@ def receipt(data: bytes, expected: SessionRecord, now: int) -> Evidence:
     if (evidence.original != msgspec.json.encode(expected).decode()
             or len(marker) > MARKER_LIMIT or hashlib.sha256(marker).hexdigest() != evidence.marker_sha256
             or len(evidence.tail.encode()) > TAIL_LIMIT
-            or not re.fullmatch(r"%[0-9]+\|[0-9]+\|1\|[0-9]*\|[0-9]*", evidence.pane)):
+            or not DEAD_PANE.fullmatch(evidence.pane)):
         raise RuntimeUnavailable("the retained recovery receipt differs from this operation")
     validate_marker(marker, expected, now)
     return evidence
@@ -85,3 +85,13 @@ def same_generation(current: SessionRecord, original: SessionRecord) -> bool:
                                   stop_reason=original.stop_reason, wip_mark=original.wip_mark,
                                   unlanded=original.unlanded, end_cause=original.end_cause,
                                   ended_at=original.ended_at) == original
+
+
+def build(expected: SessionRecord, marker: bytes, pane: str, tail: str) -> bytes:
+    bounded_tail = tail.encode()[-TAIL_LIMIT:].decode("utf-8", "ignore")
+    evidence = Evidence(msgspec.json.encode(expected).decode(), marker.hex(),
+                        hashlib.sha256(marker).hexdigest(), pane, bounded_tail)
+    raw = msgspec.json.encode(evidence)
+    if len(raw) > RECEIPT_LIMIT:
+        raise RuntimeUnavailable("recovery receipt exceeds its bound")
+    return raw

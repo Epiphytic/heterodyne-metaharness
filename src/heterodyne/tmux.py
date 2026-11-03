@@ -19,6 +19,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 LAUNCHER_FAILED = "tmux server could not be started through the launcher"
+DEAD_PANE = re.compile(r"%[0-9]+\|[0-9]+\|1\|[0-9]*\|[0-9]*")
 NO_SESSION = "tmux reported a start through the launcher, but no session exists"
 
 
@@ -170,7 +171,7 @@ class Tmux:
         proc = self._run("display-message", "-p", "-t", f"={name}:",
                          "#{pane_id}|#{pane_pid}|#{pane_dead}|#{pane_dead_status}|#{pane_dead_signal}")
         evidence = proc.stdout.decode("utf-8", "replace").strip()
-        if not re.fullmatch(r"%[0-9]+\|[0-9]+\|1\|[0-9]*\|[0-9]*", evidence):
+        if not DEAD_PANE.fullmatch(evidence):
             raise TmuxError("the retained pane is not explicitly dead")
         return evidence
 

@@ -8,7 +8,6 @@ RuntimeUnavailable or LaunchUncertain, never assumed absent."""
 import contextlib
 import dataclasses
 import errno
-import hashlib
 import json
 import logging
 import os
@@ -565,6 +564,12 @@ class SandboxRuntime:
         This never launches, drains inputs, acquires an owner, or restores a workstream.
         Retrying uses the SAME original record, including after a partial end.
         """
+        try:
+            return self._reconcile_session(expected)
+        except (OSError, LaunchFailed) as exc:
+            raise RuntimeUnavailable("exact deadline reconciliation is held: " + type(exc).__name__) from None
+
+    def _reconcile_session(self, expected: SessionRecord) -> str:
         owner = self.manager_owner
         if owner is None:
             raise RuntimeUnavailable("reconciliation requires the actual manager owner")
@@ -587,6 +592,12 @@ class SandboxRuntime:
                 or expected.end_cause or expected.stop_reason
                 or not recovery_evidence.same_generation(current, expected)):
             raise RuntimeUnavailable("the exact original recovery identity is unavailable")
+        self._held(ws=expected.ws, key=expected.key)
+        # This descriptor is used only for the existing readonly branch-holder query.
+        self._claim_branch(LaunchSpec(expected.ws, expected.bead, expected.role, expected.profile,
+                                      expected.key, "", Path(expected.worktree), resume=True,
+                                      repo=Path(expected.repo)),
+                           settle_wip=False)
         path = layout.root / f"deadline-recovery-r{expected.generation}.json"
         retained = recovery_evidence.read_bounded(path, recovery_evidence.RECEIPT_LIMIT)
         if retained is None:
@@ -594,6 +605,9 @@ class SandboxRuntime:
                 raise RuntimeUnavailable("the original recovery record changed without a receipt")
             names = self._names()
             if self._alive(current, names):
+                check_owner()
+                if read_record(layout) != current:
+                    raise RuntimeUnavailable("the live recovery record changed")
                 return "LIVE"
             marker = recovery_evidence.read_bounded(layout.reaped(expected.generation),
                                                     recovery_evidence.MARKER_LIMIT)
@@ -602,21 +616,16 @@ class SandboxRuntime:
             recovery_evidence.validate_marker(marker, expected, self.c.clock())
             try:
                 pane = self.c.tmux.dead_pane_evidence(expected.tmux_session)
-                tail = self.c.tmux.capture(expected.tmux_session, 40).encode()[-recovery_evidence.TAIL_LIMIT:]
+                tail = self.c.tmux.capture(expected.tmux_session, 40)
             except TMUX_ERRORS:
                 raise RuntimeUnavailable("explicit dead-pane evidence is unavailable") from None
-            evidence = recovery_evidence.Evidence(msgspec.json.encode(expected).decode(), marker.hex(),
-                                                  hashlib.sha256(marker).hexdigest(), pane,
-                                                  tail.decode("utf-8", "ignore"))
-            retained = msgspec.json.encode(evidence)
-            if len(retained) > recovery_evidence.RECEIPT_LIMIT:
-                raise RuntimeUnavailable("recovery receipt exceeds its bound")
+            retained = recovery_evidence.build(expected, marker, pane, tail)
             # Check the owner and exact snapshot before the first durable operation write.
             check_owner()
-            if self.manager_owner is not owner or read_record(layout) != expected:
+            if read_record(layout) != expected:
                 raise RuntimeUnavailable("the recovery owner or snapshot changed")
             write_private(path, retained.decode())
-        recovery_evidence.receipt(retained, expected, self.c.clock())
+        evidence = recovery_evidence.receipt(retained, expected, self.c.clock())
         if current.phase not in (Phase.RUNNING, Phase.STOPPING, Phase.ENDED):
             raise RuntimeUnavailable("the retained recovery is transitional")
         if current.phase is not Phase.RUNNING and (current.stop_reason != "lifetime"
@@ -624,22 +633,21 @@ class SandboxRuntime:
             raise RuntimeUnavailable("the retained end is not this deadline operation")
         if current.phase is Phase.RUNNING:
             try:
-                self.c.tmux.dead_pane_evidence(current.tmux_session)
+                if current.tmux_session in self.c.tmux.session_names():
+                    if self.c.tmux.dead_pane_evidence(current.tmux_session) != evidence.pane:
+                        raise RuntimeUnavailable("the retained dead executor pane was replaced")
             except TMUX_ERRORS:
                 raise RuntimeUnavailable("the original executor is no longer explicitly dead") from None
         check_owner()
-        if self.manager_owner is not owner or read_record(layout) != current:
+        if read_record(layout) != current:
             raise RuntimeUnavailable("the recovery owner or record changed before ending")
         if current.phase is Phase.ENDED:
             if self._running(short_id(expected.key)):
                 raise RuntimeUnavailable("the ended generation still has resources")
             self._settle_wip(layout, current)
         else:
-            if current.phase is Phase.RUNNING:
-                current = self._phase(layout, current, phase=Phase.STOPPING, stop_reason="lifetime",
-                                      end_cause=EndCause.LIFETIME,
-                                      wip_mark=f"lifetime:{current.key}:{current.generation}")
-            if not self._end(current, interrupt=False, lifetime=True, cause=EndCause.LIFETIME):
+            if not self._end(current, interrupt=False, lifetime=True, cause=EndCause.LIFETIME,
+                             deadline_evidence=evidence):
                 raise RuntimeUnavailable("deadline cleanup is incomplete; retain the same operation")
         ended = read_record(layout)
         if (ended is None or not recovery_evidence.same_generation(ended, expected)
@@ -648,7 +656,7 @@ class SandboxRuntime:
                 or ended.error == WIP_FAILED or self._running(short_id(expected.key))):
             raise RuntimeUnavailable("deadline ending still owes cleanup or Git preservation")
         check_owner()
-        if self.manager_owner is not owner or read_record(layout) != ended:
+        if read_record(layout) != ended:
             raise RuntimeUnavailable("the recovery changed during completion observation")
         return "ENDED"
 
@@ -1378,7 +1386,8 @@ class SandboxRuntime:
         self.servers[rec.key] = server
 
     def _end(self, rec: SessionRecord, *, interrupt: bool, lifetime: bool = False,
-             cause: EndCause = EndCause.DIED) -> bool:
+             cause: EndCause = EndCause.DIED,
+             deadline_evidence: recovery_evidence.Evidence | None = None) -> bool:
         """End the session: interrupt it if asked, kill its pane, delete every sandbox of its key. True
         (recorded `ended`) only once the pane is gone and the backend no longer lists any of them.
 
@@ -1397,7 +1406,9 @@ class SandboxRuntime:
             mark = rec.wip_mark or f"lifetime:{rec.key}:{rec.generation}"
             owed = {"stop_reason": "lifetime", "wip_mark": mark}
         if not rec.end_cause:
-            owed["end_cause"] = self._cause(rec, cause)
+            # Only reconcile_session supplies the already validated exact deadline receipt.
+            owed["end_cause"] = (EndCause.LIFETIME if deadline_evidence is not None
+                                 else self._cause(rec, cause))
         try:
             rec = self._phase(layout, rec, phase=Phase.STOPPING, **owed)
             journaled = True
