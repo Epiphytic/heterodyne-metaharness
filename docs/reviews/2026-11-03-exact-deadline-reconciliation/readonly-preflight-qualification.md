@@ -7,3 +7,5 @@ Actual built-in Claude Opus authorized repair review requested MEDIUM with the e
 Author27targeted tests passed; independent reviewer21selected tests passed. Production/runtime-test Ruff and Pyright0. Full runtime candidate suite still running at evidence publication; no completed full-suite claim. Temporary fake backend/tmux fixtures only, no actual managed-host recovery/enrollment qualification.
 
 No deployed artifact, service restart, task/owner change, pending input consumption, original UNKNOWN replay, or design/deployment approval implied.
+
+Final exact exported candidate runtime suite:351passed in577.57s. Exported production source exactly matches e005d87; the committed test differs only by the Ruff line wrap. Raw full-suite log retained in controller handoff. This is temporary-fixture coverage, not a live managed-host execution claim.
