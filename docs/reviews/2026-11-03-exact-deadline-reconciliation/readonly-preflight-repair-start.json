@@ -1,0 +1,29 @@
+{
+  "command": [
+    "claude",
+    "-p",
+    "--settings",
+    "{\"disableAllHooks\":true,\"effortLevel\":\"medium\"}",
+    "--model",
+    "opus",
+    "--effort",
+    "medium",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--dangerously-skip-permissions",
+    "--tools",
+    "Read,Bash,Skill",
+    "--strict-mcp-config",
+    "--mcp-config",
+    "{\"mcpServers\":{}}",
+    "--",
+    "/code-review Are there any critical flaws with this, or is this good enough to implement as a PoC? Authorized MEDIUM critical-repair continuation, preserving actual Product reconciliation first2HIGH/third/repaired clearance history in PR162/163, no count reset or design review. Frozen e005d87faee8c07458b076e3bb01b8946a154954 against21ede041e927e7fe60cade52e8c6f2911b1de059 in ${OPERATOR_HOME}/repos/heterodyne-exact-session-reconcile-20261103. Use builtin /code-review. This fixes genuine Hermes reviewer liveness findings before any recovery fence: exposes owner-only preflight_reconcile_session using the same exact deadline-proof path in read-only mode, returns LIVE/READY without receipt/ending writes; actual ending still independently rechecks. Review side effects/read-only paths/owner checks/partial receipt handling and tests. Temporary exported candidate27targetedPASS; full runtime suite running on exact same source. No live/native/service/config effects, no edits, commit or messages. State real critical blockers or explicit source PoC clearance, preserve advisories. Correct .venv/bin/python -m pytest temporary fixtures only."
+  ],
+  "cwd": "${OPERATOR_HOME}/repos/heterodyne-exact-session-reconcile-20261103",
+  "head": "e005d87faee8c07458b076e3bb01b8946a154954",
+  "base": "21ede041e927e7fe60cade52e8c6f2911b1de059",
+  "round": "authorized-critical-repair-followup",
+  "reasoning_requested": "medium",
+  "started_at": "2026-11-03T23:25:48.281067+00:00"
+}

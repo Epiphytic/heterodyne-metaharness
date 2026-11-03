@@ -591,7 +591,19 @@ class SandboxRuntime:
         except (OSError, LaunchFailed) as exc:
             raise RuntimeUnavailable("exact deadline reconciliation is held: " + type(exc).__name__) from None
 
-    def _reconcile_session(self, expected: SessionRecord) -> str:
+    @_lifecycle
+    def preflight_reconcile_session(self, expected: SessionRecord) -> str:
+        """Read-only exact deadline proof: LIVE or READY; no receipt or ending write.
+
+        READY qualifies only this observation. The caller must fence and still
+        invoke reconcile_session with the same original under fresh admission.
+        """
+        try:
+            return self._reconcile_session(expected, preflight=True)
+        except (OSError, LaunchFailed) as exc:
+            raise RuntimeUnavailable("exact deadline preflight is held: " + type(exc).__name__) from None
+
+    def _reconcile_session(self, expected: SessionRecord, *, preflight: bool = False) -> str:
         owner = self.manager_owner
         if owner is None:
             raise RuntimeUnavailable("reconciliation requires the actual manager owner")
@@ -646,7 +658,8 @@ class SandboxRuntime:
             check_owner()
             if read_record(layout) != expected:
                 raise RuntimeUnavailable("the recovery owner or snapshot changed")
-            write_private(path, retained.decode())
+            if not preflight:
+                write_private(path, retained.decode())
         evidence = recovery_evidence.receipt(retained, expected, self.c.clock())
         if current.phase not in (Phase.RUNNING, Phase.STOPPING, Phase.ENDED):
             raise RuntimeUnavailable("the retained recovery is transitional")
@@ -663,6 +676,8 @@ class SandboxRuntime:
         check_owner()
         if read_record(layout) != current:
             raise RuntimeUnavailable("the recovery owner or record changed before ending")
+        if preflight:
+            return "READY"
         if current.phase is Phase.ENDED:
             if self._running(short_id(expected.key)):
                 raise RuntimeUnavailable("the ended generation still has resources")

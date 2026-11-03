@@ -1,0 +1,11 @@
+# Read-only exact deadline preflight continuation
+
+Source e005d87faee8c07458b076e3bb01b8946a154954 against merged21ede041e927e7fe60cade52e8c6f2911b1de059. Approved owner recovery daf3; same author and original native ownership. Public owner-only preflight_reconcile_session reports LIVE/READY using the retained bounded marker/dead-pane proof and identity checks, under the existing lifecycle lock, without writing a proof receipt or ending/settling the generation. Actual reconcile_session independently repeats checks and retains proof before its normal end. READY is a point-in-time observation, never launch, steering or native authority.
+
+Actual built-in Claude Opus authorized repair review requested MEDIUM with the exact operator PoC question, preserving prior PR162/163 full HIGH and third/repair reports. Completed23:27:40Z exit0; explicit no-critical-blocker PoC clearance. All eight advisories retained verbatim: ENDED resource/WIP gap before READY, READY conflates fully ended, incomplete partial-receipt read-only tests, limited write guards, missing READY-to-ended integration/race coverage, shared boolean write-path fragility, repeated tail I/O and error wording. These are not silently represented as repaired; actual end still refuses resources/WIP and Hermes must retain uncertainty on refusal. Native and installer qualification remain mandatory. Ambient builtin review recipe may use its own internal HIGH subagent settings; only invocation reasoning is evidenced.
+
+Author27targeted tests passed; independent reviewer21selected tests passed. Production/runtime-test Ruff and Pyright0. Full runtime candidate suite still running at evidence publication; no completed full-suite claim. Temporary fake backend/tmux fixtures only, no actual managed-host recovery/enrollment qualification.
+
+No deployed artifact, service restart, task/owner change, pending input consumption, original UNKNOWN replay, or design/deployment approval implied.
+
+Final exact exported candidate runtime suite:351passed in577.57s. Exported production source exactly matches e005d87; the committed test differs only by the Ruff line wrap. Raw full-suite log retained in controller handoff. This is temporary-fixture coverage, not a live managed-host execution claim.

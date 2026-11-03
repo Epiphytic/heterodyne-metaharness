@@ -3231,3 +3231,41 @@ def test_reconcile_never_ends_live_pane_when_backend_is_missing(
         assert not list(layout.root.glob("deadline-recovery*"))
     finally:
         rig.runtime.close_manager_control()
+
+
+@pytest.mark.parametrize("state", ["live", "deadline", "missing-marker"])
+def test_recovery_preflight_is_readonly_before_fencing(
+        rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch, state: str) -> None:
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    original = record(rig, spec.session_key)
+    layout = rig.runtime.layout(original.key)
+    retained = layout.record.read_bytes()
+    if state != "live":
+        rig.clock.advance(original.deadline - rig.clock())
+        if state == "deadline":
+            assert reaper.mark_live(layout.record, layout.reaped(original.generation), original.sandbox,
+                                    original.generation, rig.backend.names, lambda: True, rig.clock)
+        _, pid = rig.tmux.pane_info(original.tmux_session)
+        os.kill(pid, 9)
+        wait_for(lambda: rig.tmux.pane_dead(original.tmux_session))
+    with pytest.raises(RuntimeUnavailable, match="actual manager owner"):
+        rig.runtime.preflight_reconcile_session(original)
+    rig.runtime.own_manager_control()
+    try:
+        def no_effect(*args: Any, **kwargs: Any) -> None:
+            raise AssertionError("readonly preflight attempted durable effect")
+        with monkeypatch.context() as patch:
+            patch.setattr(rig.runtime, "_end", no_effect)
+            patch.setattr("heterodyne.sandbox.runtime.write_private", no_effect)
+            if state == "missing-marker":
+                with pytest.raises(RuntimeUnavailable, match="authentic retained deadline marker"):
+                    rig.runtime.preflight_reconcile_session(original)
+            else:
+                expected_state = "LIVE" if state == "live" else "READY"
+                assert rig.runtime.preflight_reconcile_session(original) == expected_state
+        assert layout.record.read_bytes() == retained
+        assert not list(layout.root.glob("deadline-recovery*"))
+        assert original.sandbox in rig.backend.names()
+    finally:
+        rig.runtime.close_manager_control()
