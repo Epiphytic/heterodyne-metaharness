@@ -1,0 +1,32 @@
+{
+  "command": [
+    "claude",
+    "-p",
+    "--settings",
+    "{\"disableAllHooks\": true, \"effortLevel\": \"high\"}",
+    "--model",
+    "opus",
+    "--effort",
+    "high",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--dangerously-skip-permissions",
+    "--tools",
+    "Read,Bash,Skill",
+    "--strict-mcp-config",
+    "--mcp-config",
+    "{\"mcpServers\": {}}",
+    "--",
+    "/code-review high FULL second independent review of repaired exact Product deadline reconciliation. Actual built-in /code-review required. Frozen head 3a90c0a46cc7f471eaf85574f711f8bf015f7776 against baseline 7caddc295080c3ed89add7d89efdcd1bdc466d0f in ${OPERATOR_HOME}/repos/heterodyne-exact-session-reconcile-20261103. Read cumulative source diff, docs/reviews/2026-11-03-exact-deadline-reconciliation/qualification.md, round1-report.md and round1-disposition.md plus approved daf3 owner design. First HIGH full review exposed claude-opus-5-5, no critical safety blockers but one major typed-I/O issue and moderate findings. This round follows actual source fixes, not a validation-only replay. Full initial 334 runtime tests passed. Repaired 18 targeted tests passed, Ruff and Pyright zero errors/warnings; repaired full suite is running independently. Repairs: typed filesystem/branch HOLD wrapper, readonly resolve-intent and sibling branch/WIP guards, exact retained pane identity or positively observed absence after receipt-only crash, final LIVE owner/record readback, single normal _end STOPPING/WIP journal with private validated deadline-evidence parameter, shared pane format, separate evidence builder and expanded negative/crash tests. Review full correctness/security/compatibility and give explicit bounded-source clearance or concrete blockers, noncritical advisories separately. Keep conservative unreceipted-other-path ends/clock/schema holds rather than inventing death evidence. This API is not yet wired or deployed: Hermes remains responsible for native admission/profile/account/model/ancestry preflight, durable ending/send fences, paired native enrollment/root installer and live acceptance. No source edits/commits/DB/config/services/asks/live tmux/deployments/new author. Safe isolated tests: PYTHONPATH=src ${OPERATOR_HOME}/repos/heterodyne-metaharness-v2/.venv/bin/python -m pytest tests/test_sandbox_runtime.py -k 'reconcile_' -q. HIGH is configured in CLI, valid settings and environment. Report exposed model/actual internal effort honestly; do not infer unexposed effort. Prior Product PR160/161 three-round preflight history is retained and distinct; this is exact-reconciliation round TWO. No design rereview, approval reask, or review of the review. Stop after this actual full review."
+  ],
+  "cwd": "${OPERATOR_HOME}/repos/heterodyne-exact-session-reconcile-20261103",
+  "head": "3a90c0a46cc7f471eaf85574f711f8bf015f7776",
+  "base": "7caddc295080c3ed89add7d89efdcd1bdc466d0f",
+  "round": 2,
+  "reasoning_requested": "high",
+  "process_effort_environment": {
+    "CLAUDE_CODE_EFFORT_LEVEL": "high"
+  },
+  "started_at": "2026-11-03T21:20:00.793404+00:00"
+}
