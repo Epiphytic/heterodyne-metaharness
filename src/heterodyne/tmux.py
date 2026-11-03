@@ -165,6 +165,15 @@ class Tmux:
         proc = self._run("display-message", "-p", "-t", f"={name}:", "#{pane_dead}")
         return proc.stdout.decode().strip() != "0"
 
+    def dead_pane_evidence(self, name: str) -> str:
+        """Require a retained, explicitly dead pane; missing is not evidence of death."""
+        proc = self._run("display-message", "-p", "-t", f"={name}:",
+                         "#{pane_id}|#{pane_pid}|#{pane_dead}|#{pane_dead_status}|#{pane_dead_signal}")
+        evidence = proc.stdout.decode("utf-8", "replace").strip()
+        if not re.fullmatch(r"%[0-9]+\|[0-9]+\|1\|[0-9]*\|[0-9]*", evidence):
+            raise TmuxError("the retained pane is not explicitly dead")
+        return evidence
+
     def pane_info(self, name: str) -> tuple[str, int]:
         """The ID (`%N`) and process PID of the session's pane. Raises TmuxError if there is none."""
         proc = self._run("display-message", "-p", "-t", f"={name}:", "#{pane_id} #{pane_pid}")

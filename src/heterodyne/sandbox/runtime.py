@@ -8,6 +8,7 @@ RuntimeUnavailable or LaunchUncertain, never assumed absent."""
 import contextlib
 import dataclasses
 import errno
+import hashlib
 import json
 import logging
 import os
@@ -36,7 +37,7 @@ from heterodyne.harness import selection
 from heterodyne.harness import verify as hv
 from heterodyne.harness.selection import InstallPin
 from heterodyne.harness.store import Store
-from heterodyne.sandbox import creates, resume_preflight, sessiongit
+from heterodyne.sandbox import creates, recovery_evidence, resume_preflight, sessiongit
 from heterodyne.sandbox.backend import Backend, BackendError, BackendUnavailable, ExecResult, Watch
 from heterodyne.sandbox.reaper import LINGER_SECONDS
 from heterodyne.sandbox.selftest import ProbeContext, SelfTest, SelfTestFailed
@@ -556,6 +557,100 @@ class SandboxRuntime:
         if read_record(layout) != rec:
             raise RuntimeUnavailable("the session changed during observation")
         return rec
+
+    def reconcile_session(self, expected: SessionRecord) -> str:
+        """Exact owner-only deadline ending: LIVE, ENDED, or a RuntimeUnavailable hold.
+
+        Hermes must retain its ending fence and independently qualify resume before calling.
+        This never launches, drains inputs, acquires an owner, or restores a workstream.
+        Retrying uses the SAME original record, including after a partial end.
+        """
+        owner = self.manager_owner
+        if owner is None:
+            raise RuntimeUnavailable("reconciliation requires the actual manager owner")
+
+        def check_owner() -> None:
+            try:
+                owner.check()
+            except (RuntimeError, OSError):
+                raise RuntimeUnavailable("reconciliation manager owner is unavailable") from None
+            if self.manager_owner is not owner:
+                raise RuntimeUnavailable("reconciliation manager owner changed")
+
+        check_owner()
+        layout = self.layout(expected.key)
+        current = read_record(layout)
+        if (current is None or expected.phase is not Phase.RUNNING or not expected.create_ledger
+                or not expected.ran
+                or not expected.native_id or not expected.repo or not expected.worktree
+                or not expected.seeded or expected.unlanded or expected.wip_mark
+                or expected.end_cause or expected.stop_reason
+                or not recovery_evidence.same_generation(current, expected)):
+            raise RuntimeUnavailable("the exact original recovery identity is unavailable")
+        path = layout.root / f"deadline-recovery-r{expected.generation}.json"
+        retained = recovery_evidence.read_bounded(path, recovery_evidence.RECEIPT_LIMIT)
+        if retained is None:
+            if current != expected:
+                raise RuntimeUnavailable("the original recovery record changed without a receipt")
+            names = self._names()
+            if self._alive(current, names):
+                return "LIVE"
+            marker = recovery_evidence.read_bounded(layout.reaped(expected.generation),
+                                                    recovery_evidence.MARKER_LIMIT)
+            if marker is None:
+                raise RuntimeUnavailable("death has no authentic retained deadline marker")
+            recovery_evidence.validate_marker(marker, expected, self.c.clock())
+            try:
+                pane = self.c.tmux.dead_pane_evidence(expected.tmux_session)
+                tail = self.c.tmux.capture(expected.tmux_session, 40).encode()[-recovery_evidence.TAIL_LIMIT:]
+            except TMUX_ERRORS:
+                raise RuntimeUnavailable("explicit dead-pane evidence is unavailable") from None
+            evidence = recovery_evidence.Evidence(msgspec.json.encode(expected).decode(), marker.hex(),
+                                                  hashlib.sha256(marker).hexdigest(), pane,
+                                                  tail.decode("utf-8", "ignore"))
+            retained = msgspec.json.encode(evidence)
+            if len(retained) > recovery_evidence.RECEIPT_LIMIT:
+                raise RuntimeUnavailable("recovery receipt exceeds its bound")
+            # Check the owner and exact snapshot before the first durable operation write.
+            check_owner()
+            if self.manager_owner is not owner or read_record(layout) != expected:
+                raise RuntimeUnavailable("the recovery owner or snapshot changed")
+            write_private(path, retained.decode())
+        recovery_evidence.receipt(retained, expected, self.c.clock())
+        if current.phase not in (Phase.RUNNING, Phase.STOPPING, Phase.ENDED):
+            raise RuntimeUnavailable("the retained recovery is transitional")
+        if current.phase is not Phase.RUNNING and (current.stop_reason != "lifetime"
+                                                   or current.end_cause != EndCause.LIFETIME):
+            raise RuntimeUnavailable("the retained end is not this deadline operation")
+        if current.phase is Phase.RUNNING:
+            try:
+                self.c.tmux.dead_pane_evidence(current.tmux_session)
+            except TMUX_ERRORS:
+                raise RuntimeUnavailable("the original executor is no longer explicitly dead") from None
+        check_owner()
+        if self.manager_owner is not owner or read_record(layout) != current:
+            raise RuntimeUnavailable("the recovery owner or record changed before ending")
+        if current.phase is Phase.ENDED:
+            if self._running(short_id(expected.key)):
+                raise RuntimeUnavailable("the ended generation still has resources")
+            self._settle_wip(layout, current)
+        else:
+            if current.phase is Phase.RUNNING:
+                current = self._phase(layout, current, phase=Phase.STOPPING, stop_reason="lifetime",
+                                      end_cause=EndCause.LIFETIME,
+                                      wip_mark=f"lifetime:{current.key}:{current.generation}")
+            if not self._end(current, interrupt=False, lifetime=True, cause=EndCause.LIFETIME):
+                raise RuntimeUnavailable("deadline cleanup is incomplete; retain the same operation")
+        ended = read_record(layout)
+        if (ended is None or not recovery_evidence.same_generation(ended, expected)
+                or ended.phase is not Phase.ENDED or ended.stop_reason != "lifetime"
+                or ended.end_cause != EndCause.LIFETIME or ended.unlanded or ended.wip_mark
+                or ended.error == WIP_FAILED or self._running(short_id(expected.key))):
+            raise RuntimeUnavailable("deadline ending still owes cleanup or Git preservation")
+        check_owner()
+        if self.manager_owner is not owner or read_record(layout) != ended:
+            raise RuntimeUnavailable("the recovery changed during completion observation")
+        return "ENDED"
 
     def sessions(self, ws: str) -> list[Session]:
         self._restore_creates(ws=ws)
