@@ -8,8 +8,10 @@ import shutil
 import socket
 import stat
 import subprocess
+import threading
 import tomllib
 from collections.abc import Callable, Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -2999,6 +3001,77 @@ def test_reconcile_live_and_missing_owner_preserve_original(rig: RuntimeRig) -> 
         assert rig.runtime.reconcile_session(original) == "LIVE"
         assert record(rig, original.key) == original
         assert not list(rig.runtime.layout(original.key).root.glob("deadline-recovery*"))
+    finally:
+        rig.runtime.close_manager_control()
+
+
+@pytest.mark.parametrize("competing", ["expire", "stop", "sessions", "close-owner", "launch", "resolve"])
+def test_deadline_reconciliation_serializes_competing_lifecycle(
+        rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch, competing: str) -> None:
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    original = record(rig, spec.session_key)
+    rig.clock.advance(original.deadline - rig.clock())
+    layout = rig.runtime.layout(original.key)
+    assert reaper.mark_live(layout.record, layout.reaped(original.generation), original.sandbox,
+                            original.generation, rig.backend.names, lambda: True, rig.clock)
+    _, pid = rig.tmux.pane_info(original.tmux_session)
+    os.kill(pid, 9)
+    wait_for(lambda: rig.tmux.pane_dead(original.tmux_session))
+    rig.runtime.own_manager_control()
+    ending, release, contender_started = threading.Event(), threading.Event(), threading.Event()
+    end = rig.runtime._end
+    calls: list[str] = []
+
+    def paused_end(rec: SessionRecord, **kwargs: Any) -> bool:
+        calls.append(rec.key)
+        ending.set()
+        assert release.wait(10), "test did not release the retained deadline end"
+        return end(rec, **kwargs)
+
+    monkeypatch.setattr(rig.runtime, "_end", paused_end)
+
+    def compete() -> None:
+        contender_started.set()
+        try:
+            match competing:
+                case "expire":
+                    rig.runtime.expire(original.ws, rig.clock())
+                case "stop":
+                    rig.runtime.stop(original.key)
+                case "sessions":
+                    rig.runtime.sessions(original.ws)
+                case "close-owner":
+                    rig.runtime.close_manager_control()
+                case "launch":
+                    rig.runtime.launch(replace(spec, repo=None))  # validation also waits for the end
+                case "resolve":
+                    rig.runtime.resolve_unlanded(original.ws, short_id(original.key),
+                                                 original.generation, "land", None)
+        except (LaunchFailed, RuntimeUnavailable, ResolveRefused):
+            pass
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            reconciler = pool.submit(rig.runtime.reconcile_session, original)
+            try:
+                assert ending.wait(10)
+                contender = pool.submit(compete)
+                assert contender_started.wait(10)
+                # While the real end is paused, none may resolve, restore, launch or release its owner.
+                assert not contender.done()
+                assert not threading.Event().wait(0.05) and not contender.done()
+                assert record(rig, original.key) == original
+                assert rig.runtime.manager_owner is not None
+            finally:
+                release.set()
+            assert reconciler.result(timeout=10) == "ENDED"
+            contender.result(timeout=10)
+        ended = record(rig, original.key)
+        assert ended.phase is Phase.ENDED and ended.end_cause == EndCause.LIFETIME
+        assert not ended.wip_mark and not ended.unlanded
+        assert calls == [original.key]
+        assert layout.root.joinpath(f"deadline-recovery-r{original.generation}.json").is_file()
     finally:
         rig.runtime.close_manager_control()
 
