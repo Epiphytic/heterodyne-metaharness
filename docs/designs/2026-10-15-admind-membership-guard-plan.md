@@ -1,0 +1,83 @@
+# admind guard d4 implementation and recovery plan
+
+Prepared by Codex for guard brainstorm btq-mizzl. This plan elaborates the approved PoC design; it does not record human implementation/deployment approval. No code, services, configuration or live state were changed while preparing it.
+
+## Review evidence and scope
+
+Author=Codex; reviewer=Claude Opus; mode=cross-model. Three design rounds total, now complete:
+
+1. Frozen `tmp-docs/design-admind-guard-removals-d2.md` → `tmp-docs/review-guard-d2.md`: REVISE.
+2. `codex/design-admind-guard-removals-d3.md` → `codex/review-guard-d3.md`: REVISE, two remaining material findings.
+3. `codex/design-admind-guard-removals-d4.md` → `codex/review-guard-d4.md`: APPROVE, good enough for PoC; six nonblocking implementation details incorporated below. No fourth design review is requested.
+
+All paths above are relative to the controller handoff directory `handoff/2026-10-15/`. Preserve frozen bytes. Human approval must name d4 and this implementation plan, include the ADR amendment and add a native approval dependency before code implementation. The controller handles Beads; workers use their assigned isolated worktrees. Event/count changes never grant authority or latch admind. Confirmed keys intersected with fresh policy remain the sole operator authority.
+
+## Change sequence and exact boundaries
+
+1. **Store migration and provenance.** Change `src/heterodyne/admind/store.py`: `SCHEMA`, `Store.__init__`, `OutboxRow`, `_OUTBOX`/`_outbox`, `claim_inbound`, `enqueue`, `publish_details`, `next_pending`, `pending`, `resolve_thread`, `mark_sent`, and pending redaction/recovery queries that currently assume three statuses. Add durable provenance and group transitions through Store methods under its existing RLock/transaction wrapper. Do not expose raw identities in diagnostics.
+2. **Authority gates and ownership propagation.** Change `daemon.py`: `authorise`, `sender_current`, `authorised`, `may_post`, `remember_sender`, `on_message`, `on_reaction`, `post`, `post_parts`, `reply`, details staging/publication, ask command/answer/approval paths, command/paste side effects, summary/backstop generation, `recover` and `outbox_pass`. Locate remaining effects with a bounded Semble map before editing. Every call site must explicitly name system ownership or authenticated requester ownership; a default system owner is forbidden.
+3. **Membership observation and transitions.** Change `guard.py` verdicts; `daemon.py` `check_group`, `confirm_observing`, `on_event`, `change_membership`, `member_call`, `settle_membership`, `membership_refusal`, `rearm`, startup latch sites; `membership.py` settlement semantics. Add one serialized check path and one bounded event-notice state machine, using the existing group-check cadence and background-loop supervision.
+4. **Documentation.** Update ADR 0001 §3.4/§8/§11, original plan-2 D4, `docs/admind.md`, `docs/security-model.md`, guard/membership module descriptions. Include PoC limits, provenance migration and explicit rearm/add recovery.
+5. **Offline verification, code review and evidence.** Finish targeted tests, required checks, independent Claude Opus code review and native task evidence. The design review cap is exhausted; code review is the distinct mandatory implementation gate. Do not launch another design review disguised as a code review.
+
+Keep the Store, daemon and tests together in one guard implementation worktree to avoid competing edits to the same module. Other unrelated harness tasks can run in parallel.
+
+## Concrete durable schema
+
+Use the existing SQLite database, private directory/permissions and transaction discipline. Add a `guard_schema_revision` kv marker only after migration and validation commit.
+
+- `inbound.sender_key TEXT NULL`: exact authenticated key captured atomically when claiming a request, never derived from display name or body. Existing rows stay NULL unless an exact authoritative durable link proves the key.
+- Rebuild `outbox` inside one explicit transaction because its status CHECK is fixed. Preserve seq/key/reply_to/lane/text/status/attempts/message_id/thread_key exactly. Extend status allowlist to `pending`, `sent`, `failed`, `quarantined`, `suppressed`, `delayed`; add `ownership_kind` (`system`, `request`, `unknown`), `delivery_group` (canonical reply/snapshot root), `not_before` (nullable wall-clock deadline), and a fixed-code `hold_reason`. Use dedicated normalized table `outbox_owners(seq, sender_key)` for one or more request owners; require owners for request rows. NULL or unknown never implies system.
+- Store migration/quarantine evidence in a dedicated table keyed by seq: old status, migration revision, fixed reason and recovery disposition. Preserve originals, including sent/failed rows. Avoid duplicating sensitive payload in audit output; original payload stays in outbox.
+- One durable membership-notice state row (or versioned bounded kv record) stores first/last count, saturated kind counters/flags, current snapshot sequence, current unresolved delivery group, last-successful-send timestamp and accumulator version. Store the provisional-count flag separately alongside expected_members. These are observation data, never operator-key storage.
+
+Migration order: inspect schema; finish compatible historical nullable-column upgrades; within one transaction create replacement table, copy rows preserving seq and existing values, add ownership classification/provenance, atomically quarantine unresolved pending delivery groups, swap table, recreate `outbox_message_id` and any discovered indexes/triggers, preserve AUTOINCREMENT high-water mark including deleted historical seq, write revision and validate counts/uniqueness. Use individual execute statements within the transaction; do not let executescript implicitly commit the rebuild. Rollback restores old schema and rows on any error. Reopening performs no duplicate quarantine or queueing.
+
+Perform migration before `recover`, redaction, retry and background delivery; those paths must preserve provenance/group identities when replacing or re-chunking rows. Migration must never send messages. Check SQLite foreign-key references before rebuilding and preserve them; no ad hoc live SQL.
+
+**Ownership classification:** new rows always receive explicit ownership. For legacy system ask cards/automatic reminders/notices, validate the entire deterministic key grammar and matching durable ask/repeat/notice record; do not trust the first key prefix. Manually requested repeat/bump and !details are requester-bound even though they reference asks. Old inbound stores no authenticated key, so most legacy replies cannot recover provenance safely; quarantine them. No transcript/body/name inference.
+
+**Whole-reply groups:** establish canonical delivery_group across all chunks and their thread roots, summaries/backstop entries and staged publication. Use complete known key grammar plus persisted roots, not string-prefix coincidence. Quarantine/suppress/release all unsent chunks of one reply atomically. A continuation whose parent is quarantined/suppressed is itself held/suppressed before `resolve_thread`; never use the existing top-level fallback to bypass it. Already sent chunks remain sent and recorded. Releasing a group requires proven consistent ownership for all unsent members; unresolved groups stay quarantined.
+
+`next_pending` selects only pending rows. Delayed/quarantined/suppressed groups never cause head-of-line blocking. Due delayed groups re-enter pending atomically after revalidation; quarantine never auto-releases. Suppression is terminal and cannot call `send_failed` or recreate a revoked backstop.
+
+## Authority and notice mechanics
+
+Use the validated policy loader at potentially authorized ingress and immediately before each side effect, synchronously after any intervening await/lock. Optional optimization: reject sender absent from persisted confirmed set before parsing policy. Failure to read policy closes the gate; successful later parsing recovers. For the PoC, an unreadable policy may stop system notices/cards too, including when a sender-bound row is first: this explicit fail-closed temporary stall is accepted. It differs from permanent provenance quarantine or cadence delay, which must not block other rows.
+
+Persist sender ownership before accepting/dispatching requests; propagate through `reply`, details, summaries and batches. Multi-owner batch sends require all current owners, otherwise suppress or rebuild from eligible source turns with new stable identity. Recheck at each send and preserve idempotency keys; no unowned fallback output.
+
+Use **`membership-event:<sequence>`** only for observation snapshots. Existing **`membership:<change_id>`** local-operation result notices remain ordinary system notices and are never cadence-throttled. Serialize accumulator snapshot enqueue/send bookkeeping; require no unresolved snapshot and previous successful observation-notice send at least one cadence ago before enqueue. Accumulator changes and snapshot ownership transfer are atomic. If a snapshot becomes future-due after clock movement, put its group into delayed, skip it, and continue unrelated eligible rows. Persist successful send and last-send timestamp together after receipt; unknown receipt leaves one unresolved snapshot and relies on existing idempotent retry, never a second snapshot.
+
+`check_group` rejects stale subscription generation/epoch before count/state mutation. All count readers use the same lock without acquiring transition_lock in the opposite order. Document lock order before edits: membership transition owns transition/work/dispatch/send boundaries; count reads acquire the count lock only for a stable read/adoption and release before reacquiring any transition/send boundary. No recursive check_group under its own lock. Test current/reversed ordering and cancellation.
+
+`membership.settle` judges explicit wn-agent success/failure only; events/counts do not reverse a result. Unknown holds further membership mutations and releases changing for ordinary work. Keep startup-pending and unknown-authority migration latches, explicitly deferred from availability improvement. `rearm` accepts count >=1 instead of today's >=2; preserve event-race refusal. Keep `change_membership`'s `to <2` floor and last-confirmed-operator safeguard. Permit removal of an unconfirmed policy key; explicit success leaves confirmed set unchanged. Successful local mutation with no valid post-read uses a marked provisional count, replaced by next valid check.
+
+## Test map and completion evidence
+
+Extend located `tests/test_admind_r13_membership.py` (existing harness/fake, including `test_rearm_refusals`) and `tests/test_admind_cli.py`; add focused `tests/test_admind_guard_membership.py` and `tests/test_admind_guard_migration.py` for new state-machine/migration contracts. Reuse existing Store/daemon fixtures located with Semble rather than duplicate helpers.
+
+- Schema fixtures: historical CHECK constraint, old nullable upgrades, all old statuses, sequence holes/high-water mark, indexes, interrupted rebuild rollback and idempotent reopen. Sent/failed payload/id/thread preservation; no migration sends.
+- Legacy unknown first-row quarantine plus following reply/card/notice delivery; complete chunk-group quarantine/release and no top-level continuation escape; exact matching-record classification; false-prefix/manual-reminder cases quarantined.
+- Policy change/revocation after waits at every effect and between chunk sends; unreadable file then recovery; unknown owner never system; multi-owner summary/backstop suppression.
+- Successful add then delayed departure regression, each membership/admin event, equal-count swap, count 1, invalid count and transport recovery, exact confirmed-set equality.
+- Stale subscription response, reversed response order, changed epoch, concurrent mutation, no count-lock deadlock; RPC success/failure/unknown/cancel independent of event arithmetic; provisional count replacement.
+- Unknown successful add → rejected duplicate → rearm without grant → remove unconfirmed policy key → successful add; last-confirmed operator and nonpolicy remove refused.
+- Notice flood while blocked, unchanged-count/admin-only timer flush, cadence at actual delivery, restart and clock rollback; later replies/cards never wait for cadence; local result `membership:` notice bypasses observation cadence.
+- Remaining startup latches and rearm count 1/race conditions; no automatic init/rearm/identity change.
+
+Each d4 mutation maps to a test name in final evidence; demonstrate focused mutations rather than claim coverage from green tests alone. Run focused pytest for the changed tests, required offline suite/checks selected by repository CI and `uv run ruff check --no-cache` before push. Run pyright if required by the repository check map; record actual commands/counts, never predicted results. Claude Opus reviews concrete BASE..HEAD before close; evidence includes mandatory Code-Review line and dispositions. No tests performed by this planning task.
+
+## Deployment and recovery runbook (prepare, do not execute yet)
+
+At planning snapshot, read-only live DB totals were 641 sent and **1 pending** row, the pending family `asknote`; exact ownership was not established. These are observations, not projected migration results. Refresh immediately before deployment. Report total pending rows, provable system groups, provable requester groups, quarantined groups/rows and delayed groups; counts only. Never describe the one asknote as safe merely from its prefix.
+
+Prepare a deployment script with a single short invocation for the operator if operator execution is needed. It must verify reviewed revision/clean checkout and human authorization, preserve identity/group/run history, and use the project's deployment mechanism without editing the live symlink target directly. No policy/config edits or new group creation are needed. Existing restart permission covers restarting heterodyne-admind.service, not arbitrary host services or automatic rollout.
+
+1. Recheck real deployment path/entrypoint and all pinned hashes; stop if the reviewed migration is not the artifact being deployed. Preserve a private SQLite-consistent backup using SQLite backup API, with DB-derived data never printed; no encrypted stores or credentials accessed. Record row/status totals and pending group classification on a backup copy with the actual migration dry run before live rollout.
+2. Stage reviewed release and stop admind only for the bounded deployment/migration window. Back up stopped DB again, then run transactional migration and emit counts; verify original identities, confirmed set, asks/histories and row preservation. Unrecoverable provenance moves to quarantine, never sends. No other service restarts.
+3. Start heterodyne-admind.service, verify active and stable subscription/control readiness. **Report actual migration/quarantine counts before rearm.** Unexpected totals, failed migration or authority expansion stops recovery; do not clear the latch manually. A restart alone should retain the existing latch.
+4. Operator visually checks actual heterodyne-admin membership. On explicit recovery authority, invoke `admind rearm`; verify latch cleared, observed count adopted and confirmed∩policy did not expand. Preserve the startup/authority safeguard until this explicit step.
+5. On explicit go, invoke `admind operators add bel`. The policy already contains the existing bel identity; no replacement key or policy change is needed. Record explicit successful RPC response, membership observation and exact set preservation. A duplicate response alone grants nothing. For unknown add, clear unresolved hold via rearm only after operator verification, then policy-key remove and add as described by d4.
+6. Operator-directed marked live verification checks admin ingress, ask card delivery receipt, authenticated decision/reply correlation and idempotency. Never send an unmarked test. No automatic publication or duplicate outstanding approval asks.
+7. Rollback after any new writes needs an explicit reconciled plan: old daemon cannot safely consume new statuses/provenance, and restoring a pre-deploy DB can lose asks/decisions or replay external effects. Do not automatically restore the old snapshot after traffic. Keep service safely stopped if schema downgrade would violate ownership; escalate through the already authorized recovery channel. Before traffic and with no new effects, restore only the verified stopped backup under explicit rollback authority.
