@@ -130,14 +130,9 @@ def issue_allocation(value: Request) -> Request:
     return changed(value, create_issued=True, phase="allocation-unknown")
 
 
-def observe_allocation(
-    value: Request, ids: tuple[str, ...], *, lookup_ok: bool, elapsed_seconds: int
-) -> Request:
-    """Three bounded read-only lookups; zero, duplicates and failures never authorize another create."""
-    if value.phase != "allocation-unknown" or value.allocation_lookups >= 3:
+def _allocation_updates(value: Request, ids: tuple[str, ...], lookup_ok: bool) -> dict[str, object]:
+    if value.phase != "allocation-unknown":
         raise Refused("allocation-needs-authenticated-recovery")
-    if elapsed_seconds < (1, 5, 30)[value.allocation_lookups]:
-        raise Refused("allocation-lookup-not-due")
     if len(ids) > 8 or len(set(ids)) != len(ids) or any(not BEAD_ID.fullmatch(i) for i in ids):
         raise Refused("invalid-allocation-readback")
     if not lookup_ok and ids:
@@ -147,20 +142,56 @@ def observe_allocation(
         envelope = assemble_envelope(
             value.intent, value.origin, value.resolved, approval, value.request_revision, value.config
         )
-        return changed(
-            value,
-            allocation_lookups=value.allocation_lookups + 1,
+        return dict(
             shell_ids=ids,
             approval_id=approval,
             envelope=envelope,
             phase="allocated",
             denial_identity=denial_key(envelope, value.config),
         )
-    # Remember all observed shells: later cleanup cannot silently abandon a duplicate.
     shells = tuple(sorted(set(value.shell_ids) | set(ids)))
     if len(shells) > 8:
         raise Refused("allocation-shell-capacity")
-    return changed(value, allocation_lookups=value.allocation_lookups + 1, shell_ids=shells)
+    return dict(shell_ids=shells)
+
+
+def consume_allocation_lookup(value: Request, *, elapsed_seconds: int) -> Request:
+    """Owner persists this timed allowance BEFORE its single read-only lookup."""
+    if value.phase != "allocation-unknown" or value.allocation_lookups >= 3:
+        raise Refused("allocation-needs-authenticated-recovery")
+    if elapsed_seconds < (1, 5, 30)[value.allocation_lookups]:
+        raise Refused("allocation-lookup-not-due")
+    return changed(value, allocation_lookups=value.allocation_lookups + 1)
+
+
+def adopt_allocation_readback(value: Request, ids: tuple[str, ...], *, lookup_ok: bool) -> Request:
+    """Validate create acknowledgement or an already-consumed read; never spend/rewind allowance."""
+    return changed(value, **_allocation_updates(value, ids, lookup_ok))
+
+
+def observe_allocation(
+    value: Request, ids: tuple[str, ...], *, lookup_ok: bool, elapsed_seconds: int
+) -> Request:
+    """Legacy combined reducer retains its exact one-version transition contract."""
+    consumed = consume_allocation_lookup(value, elapsed_seconds=elapsed_seconds)
+    return changed(
+        value, allocation_lookups=consumed.allocation_lookups, **_allocation_updates(value, ids, lookup_ok)
+    )
+
+
+def cancel_unissued_allocation(value: Request) -> Request:
+    """Pure proved-no-call input; durable owner must corroborate its command receipt.
+
+    Keep create_issued/history intact: terminal cancellation never authorizes another create.
+    This is not proof of native absence and must never be used after uncertain issuance.
+    """
+    if (
+        value.phase not in {"allocation-intent", "allocation-unknown"}
+        or value.shell_ids
+        or value.allocation_lookups
+    ):
+        raise Refused("allocation-unissued-proof-incompatible")
+    return changed(value, phase="cancelled", cleanup_confirmed=True)
 
 
 # Exact ordered readback stages. A bool in a fake observation is not native ownership proof.
